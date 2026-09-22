@@ -1,0 +1,16 @@
+# Cargo build output.  This is the big one: `target/` reached 3.3 GB here, and
+# it is entirely reproducible from the sources -- never commit it.
+/target/
+
+# Python bytecode cache from tools/*.py.
+__pycache__/
+*.py[cod]
+
+# Cargo's own backup files.
+**/*.rs.bk
+
+# Editor / OS noise.
+.DS_Store
+.idea/
+.vscode/
+*.swp

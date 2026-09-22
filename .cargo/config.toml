@@ -1,0 +1,48 @@
+# Cross-compilation configuration.
+#
+# `aarch64-unknown-linux-musl` is the target used to *execute* the aarch64 code
+# path (via qemu-user), not just to type-check it.  It is chosen over
+# `aarch64-unknown-linux-gnu` deliberately:
+#
+#   * musl ships a self-contained `libc.a` and crt objects in the Rust
+#     toolchain's `lib/rustlib/aarch64-unknown-linux-musl/lib/self-contained/`,
+#     so no cross C toolchain (aarch64-linux-gnu-gcc) is needed to link.
+#   * `rust-lld` ships with the toolchain and handles the link, so the whole
+#     cross build works with nothing installed beyond `rustup target add`.
+#
+# The `-gnu` target, by contrast, needs a cross linker and sysroot that this
+# project does not depend on; `cargo check --target aarch64-unknown-linux-gnu`
+# still works for type-checking because it never links.
+#
+# Run the aarch64 test suite with `./verify.sh --aarch64-exec`
+# (or `--all` to include Kani as well).
+
+[target.aarch64-unknown-linux-musl]
+linker = "rust-lld"
+
+# The scalar-only fallback path.  On riscv64 no SIMD backend is compiled at all
+# (`x86_simd`/`aarch64_simd` are target-gated out), so this target exercises the
+# scalar `chacha20_block` and the scalar four-block Poly1305 batch — the
+# correctness reference every other backend is held to.  It also has no
+# `has_avx2()`-style runtime detection, so the dispatch is compile-time only.
+#
+# NOTE: `cargo check` works for this target, but **linking does not** with the
+# toolchain used here.  A minimal `fn main(){}` fails identically:
+#
+#     rust-lld: error: unable to find library -lc
+#
+# even though `libc.a` and the crt objects are present in
+# `lib/rustlib/riscv64gc-unknown-linux-musl/lib/self-contained/`, and neither
+# `-Clink-self-contained=yes` nor an explicit `-L` to that directory resolves it.
+# The aarch64 musl target links fine with the same `rust-lld` invocation, so
+# this is a limitation of the toolchain's riscv64 support, not of this project.
+#
+# Consequence, stated plainly: riscv64 gets type-checking only.  The scalar
+# fallback is therefore *not* executed here — but note that the scalar path is
+# not a separate implementation of the cipher: it is what every other target's
+# tests compare against (`scalar_keystream` in the test module), and under
+# `-Clink-self-contained`-free x86_64 it is exercised on every `cargo test`.
+# The `linker` key is kept so the failure mode is a link error rather than a
+# confusing "no linker found".
+[target.riscv64gc-unknown-linux-musl]
+linker = "rust-lld"

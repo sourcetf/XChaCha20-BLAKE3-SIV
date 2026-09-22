@@ -1,0 +1,60 @@
+[package]
+name = "xchacha20-poly1305-siv"
+version = "0.1.0"
+edition = "2021"
+authors = ["Security Team"]
+description = "XChaCha20-Poly1305-SIV: misuse-resistant, key-committing AEAD with a 24-byte nonce"
+license = "MIT OR Apache-2.0"
+keywords = ["cryptography", "aead", "xchacha20", "poly1305", "siv"]
+categories = ["cryptography", "no-std"]
+[dependencies]
+# subtle provides constant-time comparison
+subtle = { version = "2.6.1", default-features = false }
+
+# Optional OS randomness for `generate_key` / `generate_nonce`.  Off by default
+# so `no_std` users and users who supply their own entropy source pay nothing
+# (not even the dependency).  See the `random` module.
+getrandom = { version = "0.3", optional = true, default-features = false }
+
+# BLAKE3 supplies the context-commitment half of the tag (see
+# `context_commitment` in lib.rs).  `default-features = false` keeps it `no_std`.
+#
+# `pure` is **required for cross-compilation**: without it BLAKE3's build script
+# compiles C/assembly SIMD kernels (`blake3_neon.c`, `blake3_avx2_*.S`), which
+# needs a target C toolchain — `cargo check --target aarch64-unknown-linux-gnu`
+# fails with "failed to find tool aarch64-linux-gnu-gcc".  `pure` selects the
+# Rust-intrinsics backends instead, which the Rust compiler handles for any
+# target.  They are still vectorised (SSE2/SSE4.1/AVX2 on x86, NEON on aarch64),
+# so the throughput difference is small, and it also keeps the dependency
+# buildable by pure-Rust toolchains such as Kani.
+blake3 = { version = "1.8", default-features = false, features = ["pure"] }
+
+# NOTE: no `zeroize` dependency — volatile wipes are implemented in-crate
+# (`zeroize_array` / `zeroize_slice`) so the crate's own secrets do not depend on
+# a third party.  BLAKE3 is required only for collision resistance over the
+# associated data, which is not secret.
+
+[dev-dependencies]
+criterion = "0.5"
+
+[features]
+# Opt-in OS randomness for `generate_key` / `generate_nonce`.  Off by default:
+# `no_std` builds and users who already have an entropy source pay nothing.
+rng = ["dep:getrandom"]
+
+[[bench]]
+name = "bench"
+harness = false
+
+[lints.rust]
+# `kani` is the cfg Kani injects when building verification harnesses.
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(kani)"] }
+
+[profile.release]
+lto = true
+codegen-units = 1
+opt-level = 3
+strip = true
+
+[workspace]
+resolver = "2"
