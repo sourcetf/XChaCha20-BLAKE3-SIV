@@ -204,4 +204,10 @@ standard.txt         the two specification documents this is built from
 
 ## License
 
-MIT OR Apache-2.0 (see `Cargo.toml`).
+Licensed under either of
+
+- Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE))
+- MIT license ([LICENSE-MIT](LICENSE-MIT))
+
+at your option. This matches the `license = "MIT OR Apache-2.0"` field in
+`Cargo.toml`.
