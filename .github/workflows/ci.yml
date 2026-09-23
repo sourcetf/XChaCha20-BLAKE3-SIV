@@ -248,8 +248,15 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
 
+      # Each job gets a fresh runner, so the lint job's `cargo package` output is
+      # NOT available here. An earlier version of this job relied on that and
+      # produced a release with no attached artifact, because the shell glob
+      # `target/package/*.crate` silently expanded to nothing.
       - name: package the crate
-        run: cargo package
+        run: |
+          set -euo pipefail
+          cargo package
+          ls -l target/package/*.crate
 
       # The tag is the commit, as requested: an immutable, unambiguous pointer
       # at exactly the tree that passed CI. A *moving* tag such as `latest`
@@ -283,14 +290,24 @@ jobs:
           are not a gate for this release.
 
           > **Wire format.** This construction is bespoke and not byte-compatible
-          > with anything else. The tag construction and \`COMMITMENT_CONTEXT\`
-          > have already changed once; treat the format as unstable until 1.0.
-          > See README.md.
+          > with anything else: a keyed-BLAKE3 65-byte tag over the XChaCha20
+          > nonce extension. It has already changed once (v0.1 used Poly1305 with
+          > a 32-byte tag), so treat the format as unstable until 1.0. See
+          > README.md for the construction and its security level.
           EOF
+
+          # Expand the glob ourselves and refuse to publish an empty release:
+          # an unattached artifact is easy to miss and hard to notice later.
+          shopt -s nullglob
+          crates=(target/package/*.crate)
+          if [ "${#crates[@]}" -eq 0 ]; then
+            echo "::error::no .crate artifact found to attach"
+            exit 1
+          fi
 
           gh release create "$tag" \
             --target "$GITHUB_SHA" \
             --title "XChaCha20-BLAKE3-SIV ${short}" \
             --notes-file notes.md \
             --latest \
-            target/package/*.crate
+            "${crates[@]}"
