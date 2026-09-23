@@ -455,7 +455,6 @@ fn zeroize_slice(slice: &mut [u8]) {
     // Leading bytes up to the first naturally aligned position.  These MUST be
     // written: starting the loop at the aligned offset instead would silently
     // leave `align - 1` bytes of secret material un-wiped.
-    #[allow(clippy::manual_is_multiple_of)]
     while i < len && (ptr as usize).wrapping_add(i) % align != 0 {
         unsafe { core::ptr::write_volatile(ptr.add(i), 0) };
         i += 1;

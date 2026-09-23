@@ -111,13 +111,23 @@ jobs:
       - name: build and test at the declared MSRV
         run: cargo test --release --all-features
 
-      # If this job fails because a dependency raised its MSRV, the right fix is
-      # to bump `rust-version` to the smallest version that works -- and to
-      # update this `uses:` line to match.
-      - name: clippy at the MSRV
-        run: |
-          cargo clippy --version >/dev/null 2>&1 || rustup component add clippy
-          cargo clippy --all-targets --all-features -- -D warnings
+      # Deliberately NOT running clippy here. An MSRV is a statement about the
+      # language and library API surface, which is what building and testing
+      # checks. Clippy's lint set is version-specific -- 1.85 both flags things
+      # 1.98 accepts (e.g. `needless_range_loop` on loops that index two arrays
+      # with one counter) and rejects as `unknown_lints` attributes that 1.98
+      # understands (e.g. `clippy::manual_is_multiple_of`, which did not exist
+      # yet in 1.85). Making the source warning-free under both would pin it to
+      # the older clippy's opinions for no benefit.
+      #
+      # MSRV *compatibility* is still enforced, by the modern clippy in the
+      # `lint` job: `clippy::incompatible_msrv` reads `rust-version` from
+      # Cargo.toml and rejects any use of an API newer than it. That is the lint
+      # that caught the real defect this job was added alongside.
+      #
+      # If this job fails because a dependency raised its MSRV, the fix is to
+      # bump `rust-version` to the smallest version that works -- and to update
+      # the `uses:` line above to match.
 
   cross:
     name: cross-check ${{ matrix.target }}
