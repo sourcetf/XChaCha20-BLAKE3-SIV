@@ -89,6 +89,36 @@ jobs:
       - name: cargo test
         run: cargo test ${{ matrix.args }}
 
+  msrv:
+    name: minimum supported Rust version
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      # Pinned to the `rust-version` in Cargo.toml. Keep the two in step: the
+      # whole point of this job is that the declared MSRV is *enforced*, not
+      # merely stated. An unverified `rust-version` is a claim that can silently
+      # become false -- the code can start using a newer API and nothing notices
+      # until someone on an old toolchain tries to build it.
+      - uses: dtolnay/rust-toolchain@1.85.0
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: msrv
+
+      # `--all-features` so the `rng` feature's dependency chain is covered too:
+      # a transitive dependency can raise the real MSRV above this crate's own.
+      - name: build and test at the declared MSRV
+        run: cargo test --release --all-features
+
+      # If this job fails because a dependency raised its MSRV, the right fix is
+      # to bump `rust-version` to the smallest version that works -- and to
+      # update this `uses:` line to match.
+      - name: clippy at the MSRV
+        run: |
+          cargo clippy --version >/dev/null 2>&1 || rustup component add clippy
+          cargo clippy --all-targets --all-features -- -D warnings
+
   cross:
     name: cross-check ${{ matrix.target }}
     runs-on: ubuntu-latest
@@ -194,7 +224,7 @@ jobs:
     name: tag the commit and publish a release
     # Gate on every verification job: a release must not exist for a commit that
     # did not pass. `needs` also means a failure anywhere blocks this.
-    needs: [lint, test, cross, aarch64, differential]
+    needs: [lint, test, msrv, cross, aarch64, differential]
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     permissions:

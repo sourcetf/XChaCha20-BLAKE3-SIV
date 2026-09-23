@@ -28,7 +28,10 @@ fn hex_decode(s: &str) -> Vec<u8> {
     if s == "-" {
         return Vec::new();
     }
-    assert!(s.len().is_multiple_of(2), "odd-length hex: {s}");
+    // `% 2 == 0` rather than `is_multiple_of`: the latter is stable only since
+    // Rust 1.87, and Cargo.toml declares a 1.85 MSRV. Clippy's
+    // `manual_is_multiple_of` suggestion is MSRV-aware and does not fire here.
+    assert!(s.len() % 2 == 0, "odd-length hex: {s}");
     (0..s.len())
         .step_by(2)
         .map(|i| u8::from_str_radix(&s[i..i + 2], 16).expect("valid hex"))
