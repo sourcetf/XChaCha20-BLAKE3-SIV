@@ -85,6 +85,60 @@ produced ciphertext and tag.
   internally. That is what makes the known-answer vectors and the formal
   harnesses meaningful.
 
+## Security level
+
+**The 256-bit tag does not mean 256-bit security.** Read the numbers, not the
+tag size:
+
+| Property | Strength | Determined by |
+| --- | --- | --- |
+| Confidentiality (plaintext recovery) | 256-bit | the ChaCha20 key |
+| **Forgery resistance** | **≈103-bit**, degrading with message length | Poly1305's `r` (106 bits of entropy) |
+| **Key commitment** (CMT-1/CMTk) | **2^128** | birthday bound on the 256-bit tag |
+| **Context commitment** (CMT-3, added here) | **2^128** | birthday bound, resting on BLAKE3 |
+
+Both "weak" figures are the construction's documented design parameters, not
+implementation shortcomings. The c2sp.org specification this builds on states
+them itself: *"256-bit security against plaintext recovery and 103-bit security
+against forgery"*, and *"the 256-bit tag should provide 128-bit key-committing
+security (CMT-1/CMTk) due to the birthday bound"*.
+
+- **Forgery.** Poly1305's `r` has only 106 bits of entropy after clamping, so a
+  single forgery succeeds with probability ≲ `ℓ/2^106` where `ℓ` is the number of
+  16-byte blocks — about 2^-100 for a 1 KiB message, but only **2^-72 at the
+  2^38-byte maximum**. A longer tag would not help: the cap is the MAC, not the
+  tag. Extending the tag raises commitment, never forgery resistance.
+- **Commitment.** Commitment is a *collision* property, so an `n`-bit tag caps
+  it at `2^(n/2)`: 256 bits gives 2^128, and going beyond that would require a
+  longer tag, not a different construction. The CTX transform XORs a hash of the
+  context into the tag; an XOR does not add the two sides' strengths, it takes
+  the weaker, so the binding power here equals BLAKE3's differential collision
+  resistance.
+
+Three further consequences of the design, worth stating plainly:
+
+- **The commitment term is unkeyed and covers the AAD only.** It is
+  `BLAKE3.derive_key(COMMITMENT_CONTEXT, aad)`, a public function, and since the
+  tag is public anyone can strip the mask (`inner = tag XOR H(aad)`). Hashing
+  only the AAD is inherited from CTX; the key and nonce are bound indirectly
+  through the tag key. If you need commitment over the whole context — protocol
+  identifier, header, ciphertext — commit to it in the AAD explicitly.
+- **`tag[28..32]` does not influence the ciphertext.** Encryption consumes
+  `tag[0..16]` (encryption key) and `tag[16..28]` (encryption nonce) only. The
+  commitment therefore lives on the *tag*, which is transmitted and compared in
+  full. Treat "transmit the whole tag and compare all 32 bytes in constant time"
+  as an invariant: truncating it, or comparing a prefix, breaks the commitment.
+  `test_tag_tail_does_not_reach_the_ciphertext` pins the underlying fact.
+- **Nonce reuse reuses the one-time Poly1305 key** (`poly_key` depends only on
+  `(key, nonce)`), which is not how Poly1305 is meant to be used. No exploit
+  follows — the Poly1305 output is never exposed, only masked by a PRF under the
+  same tag key — but this is why misuse resistance must not be relied on as
+  margin. Use a counter (see below).
+
+**In short:** this is suitable for what it claims (≈103-bit forgery, 128-bit
+commitment). It is not suitable where you need more than 128-bit commitment or
+more than 103-bit forgery resistance.
+
 ## Nonces, and where randomness comes from
 
 The construction needs **no** internal randomness. The nonce is the caller's

@@ -50,7 +50,10 @@
 //!
 //! Key properties:
 //!
-//! - 256-bit tag (key-committing CMT-1/CMTk, and context-committing CMT-3)
+//! - 256-bit tag, key-committing (CMT-1/CMTk) and context-committing (CMT-3) at
+//!   **128-bit** strength.  Read the "Security level" section below before
+//!   relying on a number: the tag is 256 bits, but forgery resistance is
+//!   ≈103-bit and commitment is 2^128.
 //! - SIV mode: tag computed before encryption, nonce-misuse resistant
 //! - Constant-time operations: the tag is compared with `subtle::ConstantTimeEq`
 //!   and decryption is decrypt-then-verify (SIV requires the plaintext to
@@ -59,6 +62,36 @@
 //! - Zeroization of sensitive material, including the returned [`Plaintext`],
 //!   which wipes itself on drop
 //! - Typed errors via [`Error`]; no stringly-typed failures
+//!
+//! # Security level
+//!
+//! **The 256-bit tag does not mean 256-bit security.**  The numbers, and what
+//! each is bounded by:
+//!
+//! | Property | Strength | Determined by |
+//! | --- | --- | --- |
+//! | Confidentiality | 256-bit | the ChaCha20 key |
+//! | Forgery resistance | **≈103-bit**, degrading with length | Poly1305's `r` (106 bits of entropy) |
+//! | Key commitment (CMT-1/CMTk) | **2^128** | birthday bound on the 256-bit tag |
+//! | Context commitment (CMT-3) | **2^128** | birthday bound, resting on BLAKE3 |
+//!
+//! Both weaker figures are the construction's documented design parameters, not
+//! shortcomings of this implementation: the c2sp.org specification states them
+//! itself ("256-bit security against plaintext recovery and 103-bit security
+//! against forgery"; "the 256-bit tag should provide 128-bit key-committing
+//! security (CMT-1/CMTk) due to the birthday bound").
+//!
+//! * **Forgery** is capped by Poly1305: a single forgery succeeds with
+//!   probability `≲ ℓ/2^106` for `ℓ` 16-byte blocks — about `2^-100` for 1 KiB
+//!   but only `2^-72` at the `2^38`-byte maximum.  A longer tag does not help;
+//!   it raises commitment, never forgery resistance.
+//! * **Commitment** is a collision property, so an `n`-bit tag caps it at
+//!   `2^(n/2)`.  The CTX XOR takes the *weaker* of its two sides rather than
+//!   adding them, so the binding here equals BLAKE3's differential collision
+//!   resistance.
+//!
+//! Do not use this where more than 128-bit commitment or more than 103-bit
+//! forgery resistance is required.
 //!
 //! # Side channels
 //!
