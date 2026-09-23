@@ -3,7 +3,7 @@ set -euo pipefail
 
 cd "$(dirname "$0")"
 
-echo "=== XChaCha20-Poly1305-SIV 构建脚本 ==="
+echo "=== XChaCha20-BLAKE3-SIV 构建脚本 ==="
 
 # 默认 release 构建
 # 如需 debug 构建：./build.sh debug

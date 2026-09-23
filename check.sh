@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# One-command build + verification for XChaCha20-Poly1305-SIV.
+# One-command build + verification for XChaCha20-BLAKE3-SIV.
 #
 # Reach for this when you want the whole pipeline to just work: it provisions
 # the optional dependencies (cross targets, an aarch64 emulator), builds every
@@ -41,7 +41,7 @@ FAST=0
 
 usage() {
   cat <<'EOF'
-One-command build + verification for XChaCha20-Poly1305-SIV.
+One-command build + verification for XChaCha20-BLAKE3-SIV.
 
 Usage:
   ./check.sh                 provision, build, verify (fast stages only)
@@ -332,7 +332,7 @@ if [ "${#SUMMARY[@]}" -gt 0 ]; then
   for line in "${SUMMARY[@]}"; do printf '  - %s\n' "$line"; done
 fi
 
-HOST_ARTIFACT=target/release/libxchacha20_poly1305_siv.rlib
+HOST_ARTIFACT=target/release/libxchacha20_blake3_siv.rlib
 if [ -f "$HOST_ARTIFACT" ]; then
   printf 'artifact: %s\n' "$HOST_ARTIFACT"
 else

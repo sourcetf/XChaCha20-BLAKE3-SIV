@@ -34,9 +34,10 @@ SHARDS = [
     # The only harness that executes the full 20-round permutation. Measured in
     # the tens of minutes on a 16-core machine; a CI runner is far slower.
     ("permutation", ["hchacha20_"]),
-    ("poly1305", ["poly1305_"]),
+    # The MAC and the tag: what the keyed hash is fed, and what it returns.
+    ("tag", ["tag_", "every_tag_byte", "derive_enc_", "every_aad_"]),
     ("zeroize-and-limits", ["zeroize_", "check_lengths_", "max_msg_size_"]),
-    ("stream-and-commitment", ["chacha20_", "tag_", "commitment_"]),
+    ("stream", ["chacha20_"]),
 ]
 
 

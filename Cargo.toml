@@ -1,14 +1,14 @@
 [package]
-name = "xchacha20-poly1305-siv"
+name = "xchacha20-blake3-siv"
 version = "0.1.0"
 edition = "2021"
 authors = ["Security Team"]
-description = "XChaCha20-Poly1305-SIV: misuse-resistant, key-committing AEAD with a 24-byte nonce"
+description = "XChaCha20-BLAKE3-SIV: misuse-resistant, key- and context-committing AEAD with a 24-byte nonce and a 520-bit tag"
 license = "MIT OR Apache-2.0"
-repository = "https://github.com/sourcetf/XChaCha20-Poly1305-SIV"
+repository = "https://github.com/sourcetf/XChaCha20-BLAKE3-SIV"
 readme = "README.md"
 rust-version = "1.85"
-keywords = ["cryptography", "aead", "xchacha20", "poly1305", "siv"]
+keywords = ["cryptography", "aead", "xchacha20", "blake3", "siv"]
 categories = ["cryptography", "no-std"]
 [dependencies]
 # subtle provides constant-time comparison
@@ -30,17 +30,29 @@ getrandom = { version = "0.3", optional = true, default-features = false }
 # target.  They are still vectorised (SSE2/SSE4.1/AVX2 on x86, NEON on aarch64),
 # so the throughput difference is small, and it also keeps the dependency
 # buildable by pure-Rust toolchains such as Kani.
-blake3 = { version = "1.8", default-features = false, features = ["pure"] }
+blake3 = { version = "1.8", default-features = false, features = ["pure", "zeroize"] }
 
-# NOTE: no `zeroize` dependency — volatile wipes are implemented in-crate
-# (`zeroize_array` / `zeroize_slice`) so the crate's own secrets do not depend on
-# a third party.  BLAKE3 is required only for collision resistance over the
-# associated data, which is not secret.
+# `zeroize` (below) exists so BLAKE3's *internal* state can be wiped. The MAC key
+# lives inside `blake3::Hasher` (`key: CVWords`, plus the chunk state and CV
+# stack), and that memory is unreachable from this crate — enabling BLAKE3's
+# `zeroize` feature is the only way to clear it. It is not automatic on drop, so
+# `blake3_keyed_xof`/`derive_tag` call `.zeroize()` explicitly.
+#
+# This crate still implements its own volatile wipes (`zeroize_array` /
+# `zeroize_slice`) for the secrets it owns, and those do not go through this
+# dependency.
+zeroize = { version = "1", default-features = false, optional = true }
 
 [dev-dependencies]
 criterion = "0.5"
 
 [features]
+# The MAC key lives inside `blake3::Hasher`, which this crate cannot reach; the
+# dependency's own `zeroize` support is the only way to wipe it. Always on,
+# because the MAC always is.
+default = ["zeroize-blake3"]
+zeroize-blake3 = ["dep:zeroize"]
+
 # Opt-in OS randomness for `generate_key` / `generate_nonce`.  Off by default:
 # `no_std` builds and users who already have an entropy source pay nothing.
 rng = ["dep:getrandom"]

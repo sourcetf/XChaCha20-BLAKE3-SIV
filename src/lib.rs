@@ -1,47 +1,53 @@
-//! XChaCha20-Poly1305-SIV — Misuse-resistant, key- and context-committing AEAD
+//! XChaCha20-BLAKE3-SIV — Misuse-resistant, key- and context-committing AEAD
 //!
-//! A 24-byte-nonce (192-bit) AEAD obtained by lifting the c2sp.org
-//! ChaCha20-Poly1305-SIV construction onto the XChaCha20 nonce-extension
-//! mechanism (HChaCha20).  There is no published specification for this
-//! composition; it is a direct fusion of the two:
+//! A 24-byte-nonce (192-bit) AEAD that combines XChaCha20-style nonce extension
+//! with a **keyed BLAKE3** MAC.  There is no published specification for this
+//! construction; it is this crate's own composition of the two primitives.
 //!
-//! * Subkey derivation is XChaCha20-style: `HChaCha20(key, nonce[0..16])`
-//!   produces a subkey, which is then used with the remaining 8 nonce bytes.
-//!   Unlike XChaCha20, the first 4 bytes of the subkey-derivation block's
-//!   12-byte *nonce* hold a domain-separation constant ([`SUBKEY_DOMAIN`])
-//!   where XChaCha20 leaves NUL padding, so this scheme and
-//!   XChaCha20-Poly1305 never derive the same one-time Poly1305 key even under
-//!   cross-scheme nonce reuse.  (The counter stays 0.  Putting the constant in
-//!   the counter slot instead would be a different construction.)
-//! * The AEAD itself is the SIV construction from c2sp.org
-//!   ChaCha20-Poly1305-SIV (Poly1305 tag → tag-key-derived encryption key),
-//!   which supplies nonce-misuse resistance and key commitment.
+//! # The construction
 //!
-//! # Context commitment (beyond c2sp.org)
+//! ```text
+//! K (256-bit)   N (192-bit)   A (associated data)   M (message)
 //!
-//! The c2sp.org base construction is key-committing but **not**
-//! context-committing: its specification says so explicitly ("there is no
-//! context commitment (CMT-3)"), because CMT-3's adversary chooses the key and
-//! therefore knows Poly1305's `r`, making the Poly1305 tag solvable rather than
-//! collision resistant.
+//! 1. subkey   = HChaCha20(K, N[0..16])
+//!    material = ChaCha20_keystream(subkey, 0, "XSIV" || N[16..24])    64 B
+//!    mac_key  = material[0..32]      enc_seed = material[32..64]
 //!
-//! This crate closes that gap with the **CTX** transform (Chan and Rogaway,
-//! *On Committing Authenticated-Encryption*, ESORICS 2022): the tag is
-//! `c2sp_tag XOR BLAKE3.derive_key(COMMITMENT_CONTEXT, aad)`.  Costs one hash
-//! of the AAD — independent of the message length — and does not lengthen the
-//! tag.  Since the tag is transmitted in full and verified in full, the
-//! commitment holds over the tag itself: a collision requires a collision in
-//! the BLAKE3 term or in the c2sp.org tag, both 2^128 for a 256-bit tag.  See
-//! `derive_tag` for why the argument must run through the tag rather than the
-//! ciphertext.
+//! 2. tag = BLAKE3_keyed(mac_key,
+//!             "XSIV-TAG" || K || N || le64(|A|) || le64(|M|) || A || M)  65 B
 //!
-//! This is therefore **not** byte-compatible with c2sp.org
-//! ChaCha20-Poly1305-SIV.  The unmodified construction remains available
-//! internally as `encrypt16`/`decrypt16`, which is what the c2sp.org
-//! known-answer vectors are checked against.
+//! 3. km      = BLAKE3_keyed(enc_seed, "XSIV-ENC" || tag)               43 B
+//!    enc_key = km[0..32]             enc_nonce = km[32..44]
 //!
-//! The public API exposes **only the 24-byte-nonce** entry points.  Two
-//! flavours are available:
+//! 4. C = ChaCha20(enc_key, 0, enc_nonce, M)
+//! ```
+//!
+//! SIV: the tag is computed first, and the per-message encryption key and nonce
+//! are derived from it.  Decryption reverses steps 3 and 4, recomputes the tag
+//! from the recovered plaintext, and compares all 65 bytes in constant time.
+//!
+//! Three details are load-bearing rather than incidental:
+//!
+//! * **Domain separation in the subkey derivation.**  [`SUBKEY_DOMAIN`] sits in
+//!   the first 4 bytes of the derivation block's ChaCha20 *nonce* (counter 0),
+//!   where XChaCha20-Poly1305 leaves NUL padding.  Without it the same
+//!   `(key, nonce)` would derive identical material in both schemes, so a
+//!   protocol mixing them would be reusing keys across schemes.
+//! * **The key enters the tag input directly**, not only through the derived
+//!   `mac_key`.  Binding it only via `mac_key` would let an adversary search for
+//!   two keys colliding on that 256-bit value — a 2^128 effort — and bypass the
+//!   520-bit tag entirely.
+//! * **Both lengths are encoded and every field is fixed width.**  BLAKE3 is not
+//!   vulnerable to length extension (its finalisation is flagged, unlike
+//!   Merkle–Damgård constructions), but `A || M` alone would be ambiguous:
+//!   `("ab", "c")` and `("a", "bc")` would hash identically.
+//!
+//! This is **not** the c2sp.org ChaCha20-Poly1305-SIV construction: it does not
+//! use Poly1305, its tag is 65 bytes rather than 32, and it is not interoperable
+//! with anything.
+//!
+//! The public API exposes **only the 24-byte-nonce** entry points.  Two flavours
+//! are available:
 //!
 //! * Allocating: [`encrypt`] / [`decrypt`].
 //! * Detached, in-place: [`encrypt_in_place_detached`] /
@@ -50,48 +56,41 @@
 //!
 //! Key properties:
 //!
-//! - 256-bit tag, key-committing (CMT-1/CMTk) and context-committing (CMT-3) at
-//!   **128-bit** strength.  Read the "Security level" section below before
-//!   relying on a number: the tag is 256 bits, but forgery resistance is
-//!   ≈103-bit and commitment is 2^128.
+//! - 520-bit tag (65 bytes), key-committing (CMT-1/CMTk) and context-committing
+//!   (CMT-3) at **2^260**.  Read the "Security level" section below before
+//!   relying on a number.
 //! - SIV mode: tag computed before encryption, nonce-misuse resistant
 //! - Constant-time operations: the tag is compared with `subtle::ConstantTimeEq`
 //!   and decryption is decrypt-then-verify (SIV requires the plaintext to
 //!   recompute the tag, so verify-then-decrypt is not possible).  See the
 //!   "Side channels" section below for what has actually been checked.
 //! - Zeroization of sensitive material, including the returned [`Plaintext`],
-//!   which wipes itself on drop
+//!   which wipes itself on drop, and BLAKE3's internal state, which holds the
+//!   MAC key and is not cleared on drop.
 //! - Typed errors via [`Error`]; no stringly-typed failures
 //!
 //! # Security level
 //!
-//! **The 256-bit tag does not mean 256-bit security.**  The numbers, and what
-//! each is bounded by:
-//!
 //! | Property | Strength | Determined by |
 //! | --- | --- | --- |
 //! | Confidentiality | 256-bit | the ChaCha20 key |
-//! | Forgery resistance | **≈103-bit**, degrading with length | Poly1305's `r` (106 bits of entropy) |
-//! | Key commitment (CMT-1/CMTk) | **2^128** | birthday bound on the 256-bit tag |
-//! | Context commitment (CMT-3) | **2^128** | birthday bound, resting on BLAKE3 |
+//! | Forgery resistance | **256-bit** | BLAKE3 keyed mode as a PRF over a 256-bit key |
+//! | Key commitment (CMT-1/CMTk) | **2^260** | birthday bound on the 520-bit tag |
+//! | Context commitment (CMT-3) | **2^260** | birthday bound, resting on BLAKE3 |
 //!
-//! Both weaker figures are the construction's documented design parameters, not
-//! shortcomings of this implementation: the c2sp.org specification states them
-//! itself ("256-bit security against plaintext recovery and 103-bit security
-//! against forgery"; "the 256-bit tag should provide 128-bit key-committing
-//! security (CMT-1/CMTk) due to the birthday bound").
+//! **Forgery: 256 bits is the ceiling, not a choice.**  Forgery resistance is
+//! bounded by the key's entropy; with a 256-bit key it cannot exceed 256 bits,
+//! and a longer tag does not raise it (it raises commitment).
 //!
-//! * **Forgery** is capped by Poly1305: a single forgery succeeds with
-//!   probability `≲ ℓ/2^106` for `ℓ` 16-byte blocks — about `2^-100` for 1 KiB
-//!   but only `2^-72` at the `2^38`-byte maximum.  A longer tag does not help;
-//!   it raises commitment, never forgery resistance.
-//! * **Commitment** is a collision property, so an `n`-bit tag caps it at
-//!   `2^(n/2)`.  The CTX XOR takes the *weaker* of its two sides rather than
-//!   adding them, so the binding here equals BLAKE3's differential collision
-//!   resistance.
+//! **Commitment: the tag is 65 bytes because commitment must exceed 2^256.**
+//! Commitment is a *collision* property, so an `n`-bit tag caps it at `2^(n/2)`.
+//! A 64-byte tag would give exactly `2^256` — not more — so [`TAG_LEN`] is 65,
+//! the smallest byte-aligned size that strictly exceeds it.
 //!
-//! Do not use this where more than 128-bit commitment or more than 103-bit
-//! forgery resistance is required.
+//! These rest on BLAKE3 being a secure PRF and collision-resistant and on
+//! ChaCha20 being a secure stream cipher: standard, heavily analysed assumptions,
+//! but assumptions.  This particular composition has no public specification and
+//! has not been independently analysed.
 //!
 //! # Side channels
 //!
@@ -99,17 +98,16 @@
 //! secret-dependent memory indexing**.  Every secret-derived quantity is
 //! handled with straight-line arithmetic or `subtle` primitives:
 //!
-//! * Tag comparison — `subtle::ConstantTimeEq` over all 32 bytes.
+//! * Tag comparison — `subtle::ConstantTimeEq` over all [`TAG_LEN`] (65) bytes.
 //! * [`Plaintext`] equality — every `PartialEq` impl routes through
 //!   `ConstantTimeEq`, so comparing a decrypted secret against an expected
 //!   value does not leak its matching prefix.  A length mismatch is not
 //!   secret-dependent.
-//! * Poly1305's reduction in `Poly1305State::finalize` uses a mask select
-//!   (`shr`/`dec`/`and`/`or`) rather than a branch on the comparison result.
-//! * The 26-bit limb arithmetic (`process_block`, `poly1305_mul_wide`,
-//!   `poly1305_reduce_wide`, `Poly1305Powers::new`) is branch-free.
 //! * ChaCha20/HChaCha20 use only ARX operations — no tables, hence nothing to
 //!   index with a secret.
+//! * BLAKE3 is likewise ARX with no data-dependent lookups.  Its `pure` backend
+//!   selects a SIMD kernel at run time from CPU features, which is
+//!   data-independent: the dispatch depends on the CPU, not on any secret.
 //!
 //! Two caveats, stated plainly:
 //!
@@ -117,9 +115,9 @@
 //!    not a proof.**  Kani's harnesses cover *functional* correctness; they
 //!    cannot establish timing independence, because CBMC has no timing model.
 //!    The branch-freedom claims above are backed by inspecting the release
-//!    assembly of the Poly1305 and ChaCha20 entry points, where the only
-//!    conditional jumps are the loop bounds of the zeroization helpers
-//!    (alignment-dependent, not value-dependent).
+//!    assembly of the ChaCha20 entry points, where the only conditional jumps
+//!    are the loop bounds of the zeroization helpers (alignment-dependent, not
+//!    value-dependent).
 //!
 //! 2. **Cache-timing effects are not addressed.**  The SIMD backends
 //!    (`x86_simd`, `aarch64_simd`) are data-independent in the sense above, but
@@ -136,19 +134,21 @@
 //!
 //! Secret material is wiped with `write_volatile` through the internal
 //! `zeroize_array`/`zeroize_slice` helpers, which the compiler cannot elide.
+//! BLAKE3's own state holds the MAC key and cannot be reached from here, so its
+//! `zeroize` feature is enabled and the state is cleared explicitly.
 //!
 //! Test vectors:
-//! - XChaCha20 (24-byte nonce): draft-irtf-cfrg-xchacha-03 §2.2.1 / §A.2.1 / §A.3.1
-//! - ChaCha20-Poly1305-SIV (16-byte nonce, internal `encrypt16`/`decrypt16`):
-//!   <https://c2sp.org/chacha20-poly1305-siv>
-//! - XChaCha20-Poly1305-SIV (public API): generated by an independent reference
-//!   implementation derived from the RFC pseudocode; see the KAT tests.
+//! - XChaCha20 / HChaCha20: draft-irtf-cfrg-xchacha-03 §2.2.1 / §A.2.1 / §A.3.1
+//! - ChaCha20 block: RFC 8439 §2.3.2
+//! - keyed BLAKE3: BLAKE3's official `test_vectors.json`
+//! - XChaCha20-BLAKE3-SIV (public API): generated by the independent reference
+//!   implementation in `tools/ref_impl.py`, which self-checks against the three
+//!   sources above before emitting anything; see the KAT tests.
 //!
 //! References:
-//! - <https://c2sp.org/chacha20-poly1305-siv>
 //! - <https://datatracker.ietf.org/doc/draft-irtf-cfrg-xchacha/> (HChaCha20 / XChaCha20)
 //! - RFC 8439 (ChaCha20 and Poly1305)
-//! - Chan, Rogaway. *On Committing Authenticated-Encryption*. ESORICS 2022. (CTX)
+//! - <https://github.com/BLAKE3-team/BLAKE3> (the keyed mode used for the MAC)
 //!
 //! # Formal verification
 //!
@@ -175,59 +175,67 @@ extern crate alloc;
 use alloc::vec;
 use alloc::vec::Vec;
 use subtle::ConstantTimeEq;
+use zeroize::Zeroize;
 
 // ── Constants ────────────────────────────────────────────────────────
 
-/// Maximum message size: 2^38 bytes (256 GiB), per c2sp.org A_MAX/P_MAX.
+/// Maximum message size: 2^38 bytes (256 GiB), matching the c2sp.org A_MAX/P_MAX
+/// limit this crate inherited.  See `max_msg_size_fits_in_the_block_counter` for why
+/// it must not be raised: 2^38 is exactly 2^32 ChaCha20 blocks.
 const MAX_MSG_SIZE: u64 = 1u64 << 38;
 
 /// ChaCha20 block size (64 bytes).
 const CHACHA20_BLOCK: usize = 64;
 
-/// Poly1305 block size (16 bytes).
-const POLY1305_BLOCK_SIZE: usize = 16;
-
 /// Key length: 32 bytes (256 bits).
 pub const KEY_LEN: usize = 32;
 
-/// Tag length: 32 bytes (256 bits).  Key-committing.
-pub const TAG_LEN: usize = 32;
+/// Tag length: 65 bytes (520 bits).
+///
+/// Sized for **more than 256-bit commitment**, which the birthday bound forces:
+/// commitment is a collision property, so an `n`-bit tag caps it at `2^(n/2)`.
+/// A 64-byte (512-bit) tag would give exactly `2^256` and so would not be
+/// *greater* than 256 bits; 65 bytes gives `2^260`, the smallest byte-aligned
+/// value that strictly exceeds it.
+///
+/// This does **not** buy more forgery resistance: forgery is bounded by the
+/// 256-bit key, not by the tag length.
+pub const TAG_LEN: usize = 65;
 
 /// Nonce length: 24 bytes (192 bits, XChaCha20 extension).
 pub const NONCE_LEN: usize = 24;
 
-/// Domain-separation constant placed in the 4-byte ChaCha20 counter position of
-/// the subkey-derivation block.
+/// Domain-separation constant placed in the first 4 bytes of the 12-byte
+/// ChaCha20 **nonce** of the subkey-derivation block; the counter stays 0.
 ///
-/// XChaCha20-Poly1305 (and plain XChaCha20) derive their keystream with the
-/// 12-byte ChaCha20 nonce set to `0x00000000 || nonce[16..24]`.  If this crate
-/// did the same, then for the *same* `(key, nonce)` both schemes would derive
-/// the **same one-time Poly1305 key**, and a protocol that ever mixed the two
-/// would reuse that one-time key — which immediately leaks Poly1305's `r`/`s`
-/// and breaks authentication.
+/// Those are exactly the bytes XChaCha20 and XChaCha20-Poly1305 leave as NUL
+/// padding when they extend a nonce.  If this crate did the same, then for the
+/// same `(key, nonce)` it would derive **identical per-message key material** to
+/// XChaCha20-Poly1305, so a protocol that mixed the two schemes would be reusing
+/// keys across them.  A non-zero constant makes that collide only with
+/// negligible probability.
 ///
-/// Placing a non-zero constant in the first 4 bytes of the ChaCha20 nonce makes
-/// the two derivations collide only with negligible probability, so the schemes
-/// stay independent even under nonce reuse across them.
+/// (Note the placement is in the *nonce*, not the counter.  Putting it in the
+/// counter slot instead would be a different construction, and would not
+/// separate this scheme from XChaCha20-Poly1305, which leaves the counter at 0.)
 ///
-/// The value is ASCII "XSIV" (XChaCha20-SIV), chosen to be self-describing.
+/// The value is ASCII "XSIV", chosen to be self-describing.
 pub const SUBKEY_DOMAIN: [u8; 4] = *b"XSIV";
 
-/// BLAKE3 `derive_key` context string for the CTX commitment term.
+/// Domain separator for the **tag** computation.
 ///
-/// This string is **part of the wire format**: changing it changes every tag
-/// ever produced.  It is hardcoded and application-specific, which is what
-/// BLAKE3 requires of a `derive_key` context.
+/// Part of the wire format: changing it changes every tag ever produced.
 ///
-/// The commitment term is produced by `blake3::derive_key(COMMITMENT_CONTEXT,
-/// aad)` rather than by a bare `blake3::hash(aad)`.  Both are collision
-/// resistant, but the bare hash is a *fixed, public* function: any other
-/// protocol that XORs `BLAKE3(aad)` into a value of its own would be using the
-/// same function, so the two uses could cancel against each other.  BLAKE3's
-/// `derive_key` mode gives this use a domain of its own (the context key is
-/// folded into the root and the block is flagged `DERIVE_KEY_MATERIAL`), which
-/// is exactly what a commitment term embedded in a wire format needs.
-pub const COMMITMENT_CONTEXT: &str = "XChaCha20-Poly1305-SIV context commitment v1";
+/// Both domains are fixed width and mutually distinct.  A variable-length
+/// domain would reintroduce exactly the ambiguity the `u64` length fields in
+/// `derive_tag` exist to prevent.
+pub const DOM_TAG: [u8; 8] = *b"XSIV-TAG";
+
+/// Domain separator for deriving the per-message encryption key and nonce.
+///
+/// Part of the wire format.  Distinct from [`DOM_TAG`] so the two BLAKE3
+/// invocations cannot be confused for one another.
+pub const DOM_ENC: [u8; 8] = *b"XSIV-ENC";
 
 // ── Error type ────────────────────────────────────────────────────────
 
@@ -414,7 +422,7 @@ impl core::fmt::Debug for Plaintext {
 ///
 /// ```no_run
 /// # #[cfg(feature = "rng")] {
-/// use xchacha20_poly1305_siv::{encrypt, random};
+/// use xchacha20_blake3_siv::{encrypt, random};
 ///
 /// # fn main() -> Result<(), random::Error> {
 /// let key = random::generate_key()?;
@@ -525,124 +533,132 @@ fn zeroize_array<T>(value: &mut T) {
 
 // ── Public API ───────────────────────────────────────────────────────
 
-/// Derive the `(poly1305_key, tag_key)` pair for the 24-byte-nonce construction.
+/// Derive `(mac_key, enc_seed)` from a key and nonce.
 ///
-/// `subkey = HChaCha20(key, nonce[0..16])`, then one ChaCha20 block under
-/// `SUBKEY_DOMAIN || nonce[16..24]` yields 64 bytes:
-/// `[0..32]` is the Poly1305 key, `[32..64]` the tag/encryption-derivation key.
-fn derive_subkeys(key: &[u8; 32], nonce: &[u8; NONCE_LEN]) -> ([u8; 32], [u8; 32]) {
-    let mut hchacha_out = hchacha20(key, &nonce[0..16].try_into().unwrap());
+/// XChaCha20-style: `subkey = HChaCha20(key, nonce[0..16])`, then one ChaCha20
+/// keystream block under `SUBKEY_DOMAIN || nonce[16..24]` yields 64 bytes,
+/// split into the BLAKE3 MAC key and the encryption seed.
+fn derive_material(key: &[u8; 32], nonce: &[u8; NONCE_LEN]) -> ([u8; 32], [u8; 32]) {
+    let mut subkey = hchacha20(key, &nonce[0..16].try_into().unwrap());
     let mut subkey_nonce = [0u8; 12];
     subkey_nonce[0..4].copy_from_slice(&SUBKEY_DOMAIN);
     subkey_nonce[4..12].copy_from_slice(&nonce[16..24]);
 
-    let mut subkeys_buf = [0u8; 64];
-    chacha20_keystream_raw(&hchacha_out, 0, &subkey_nonce, &mut subkeys_buf);
+    let mut material = [0u8; 64];
+    chacha20_keystream_raw(&subkey, 0, &subkey_nonce, &mut material);
 
-    let poly1305_key: [u8; 32] = subkeys_buf[0..32].try_into().unwrap();
-    let tag_key: [u8; 32] = subkeys_buf[32..64].try_into().unwrap();
+    let mut mac_key = [0u8; 32];
+    mac_key.copy_from_slice(&material[0..32]);
+    let mut enc_seed = [0u8; 32];
+    enc_seed.copy_from_slice(&material[32..64]);
 
-    zeroize_array(&mut hchacha_out);
-    zeroize_array(&mut subkeys_buf);
-    (poly1305_key, tag_key)
+    zeroize_array(&mut subkey);
+    zeroize_array(&mut subkey_nonce);
+    zeroize_array(&mut material);
+    (mac_key, enc_seed)
 }
 
-/// Derive the 32-byte tag from the Poly1305 tag, the tag key, and the AAD.
+/// `out.len()` bytes of `BLAKE3_keyed(key, parts[0] || parts[1] || ...)`, in
+/// BLAKE3's XOF mode.
 ///
-/// Two halves, XORed together:
+/// This is the **single seam** through which every keyed-BLAKE3 use in the crate
+/// passes.  That matters for two reasons:
 ///
-/// 1. `ChaCha20(tag_key, LE32(p[0..4]), p[4..16], 64 zeros)[0..32]` — the
-///    c2sp.org CCP-SIV tag, which already commits to `(key, nonce)` because
-///    `tag_key` is derived from them and `p` covers `(aad, plaintext)`.
-/// 2. `BLAKE3.derive_key(COMMITMENT_CONTEXT, aad)` — the context-commitment half.
+/// * The formal harnesses stub exactly this function.  Two separate call sites
+///   reaching into `blake3` directly would leave one of them unmodelled, and a
+///   harness that stubs the wrong one silently proves nothing.
+/// * Kani cannot run the real BLAKE3: its CPU-feature detection lowers to inline
+///   assembly, which CBMC rejects.  Stubbing one seam removes all of it.
 ///
-/// # Why the XOR (the CTX transform)
-///
-/// The c2sp.org construction deliberately omits associated-data commitment: its
-/// own specification states "there is no context commitment (CMT-3)".  The
-/// reason is that CMT-3's adversary *chooses the key*, and therefore knows the
-/// Poly1305 `r`; the Poly1305 tag is then a polynomial evaluation the adversary
-/// can solve, so it commits to the AAD only up to a 2^64 birthday bound.
-///
-/// This is the CTX transform of Chan and Rogaway (*On Committing
-/// Authenticated-Encryption*, ESORICS 2022): XOR a hash of the context into the
-/// tag.  It costs one hash of the AAD — independent of the plaintext length —
-/// and does not lengthen the tag.
-///
-/// # How the commitment is argued (read this before touching the layout)
-///
-/// The tag is `inner(K, N, A, M) XOR H(A)`, where `inner` is the c2sp.org tag
-/// (a PRF under the key the adversary may know) and `H` is BLAKE3 in
-/// `derive_key` mode.  A CMT-3 adversary wins by producing two distinct
-/// contexts `(K, N, A, M) != (K', N', A', M')` whose tags are both accepted —
-/// that is, whose tags are **equal**, since `decrypt` compares all 32 bytes.
-/// Solving `inner XOR H(A) = inner' XOR H(A')` requires a collision in `H` or
-/// in `inner`; the `H` term is what forces the AAD to be committed, and `inner`
-/// supplies no barrier at all for a known key.  Both are 2^128 for a 256-bit
-/// tag.
-///
-/// **The argument runs through the tag, not through the ciphertext.**  It would
-/// be wrong to say "the ciphertext is a function of the tag, so equal
-/// ciphertext implies equal tag": encryption consumes only `tag[0..16]` (as
-/// `enc_key` material) and `tag[16..28]` (as the encryption nonce), so
-/// `tag[28..32]` does **not** influence the ciphertext at all, and two
-/// different tags can share one ciphertext.  That is harmless — the tag is
-/// transmitted (`ciphertext || tag` is the spec's combined encoding) and is
-/// verified in full — but it means any future refactor must keep the
-/// commitment on the transmitted-and-compared tag.  `tag_tail_does_not_reach_
-/// the_ciphertext` pins the property so a change to it is deliberate.
-///
-/// Hashing only the AAD is sufficient: the key and nonce are already committed
-/// through `tag_key`.
-fn derive_tag(tag_key: &[u8; 32], poly1305_tag: &[u8; 16], aad: &[u8]) -> [u8; TAG_LEN] {
-    let ctr = u32::from_le_bytes([
-        poly1305_tag[0],
-        poly1305_tag[1],
-        poly1305_tag[2],
-        poly1305_tag[3],
-    ]);
-    let nonce: [u8; 12] = poly1305_tag[4..16].try_into().unwrap();
-    let mut buf = [0u8; 64];
-    chacha20_keystream_raw(tag_key, ctr, &nonce, &mut buf);
-    let mut tag: [u8; TAG_LEN] = buf[0..TAG_LEN].try_into().unwrap();
-    zeroize_array(&mut buf);
-
-    // XOR, not assignment: the c2sp.org tag must remain the base value so that
-    // the two halves are independent and a collision needs to break one of them.
-    let commitment = context_commitment(aad);
-    for (t, c) in tag.iter_mut().zip(commitment.iter()) {
-        *t ^= *c;
+/// Taking a slice of parts rather than one concatenated buffer keeps the key out
+/// of a growable heap allocation: the callers pass fixed-size stack arrays.
+fn blake3_keyed_multi(key: &[u8; 32], parts: &[&[u8]], out: &mut [u8]) {
+    let mut hasher = blake3::Hasher::new_keyed(key);
+    for p in parts {
+        hasher.update(p);
     }
+    let mut reader = hasher.finalize_xof();
+    reader.fill(out);
+
+    // `blake3::Hasher` holds its key in `key: CVWords`, and this crate cannot
+    // reach that memory: wiping it needs the dependency's own `zeroize` support
+    // (enabled in Cargo.toml), and it is *not* automatic on drop.  The XOF
+    // reader carries key-derived output state, so it is wiped too.
+    //
+    // Under Kani this code is unreachable, because harnesses stub this whole
+    // function -- which also keeps `zeroize`'s own inline assembly out of the
+    // verification scope.
+    reader.zeroize();
+    hasher.zeroize();
+}
+
+/// Convenience wrapper for the single-part case.
+fn blake3_keyed_xof(key: &[u8; 32], data: &[u8], out: &mut [u8]) {
+    blake3_keyed_multi(key, &[data], out);
+}
+
+/// The 520-bit tag: one keyed BLAKE3 over the entire context.
+///
+/// `BLAKE3_keyed(mac_key, DOM_TAG || K || N || le64(|A|) || le64(|M|) || A || M)`
+///
+/// Two properties are load-bearing and easy to lose in a refactor:
+///
+/// * **The key is an input, not just the MAC key.** Feeding only the derived
+///   `mac_key` would let an adversary look for two keys colliding on that
+///   256-bit value — a 2^128 search — which would bypass the entire point of a
+///   520-bit tag. Putting `K` in the hash input binds the tag to the key
+///   directly.
+/// * **Lengths are encoded and every field is fixed width.** BLAKE3 is not
+///   vulnerable to length extension (its finalisation is flagged, unlike
+///   Merkle–Damgård constructions), but `A || M` alone would be ambiguous:
+///   `("ab", "c")` and `("a", "bc")` would hash identically. The two `u64`
+///   length fields remove that.
+///
+/// The hasher is fed incrementally rather than through one concatenated buffer,
+/// so the key never lands in a growable heap allocation.
+fn derive_tag(
+    mac_key: &[u8; 32],
+    key: &[u8; 32],
+    nonce: &[u8; NONCE_LEN],
+    aad: &[u8],
+    msg: &[u8],
+) -> [u8; TAG_LEN] {
+    // Fixed-width head: domain, key, nonce, and the two lengths.  Assembled on
+    // the stack so the key never enters a heap buffer, and so the whole thing is
+    // one slice the seam can absorb.
+    let mut head = [0u8; 8 + 32 + NONCE_LEN + 16];
+    head[0..8].copy_from_slice(&DOM_TAG);
+    head[8..40].copy_from_slice(key);
+    head[40..40 + NONCE_LEN].copy_from_slice(nonce);
+    head[40 + NONCE_LEN..48 + NONCE_LEN].copy_from_slice(&(aad.len() as u64).to_le_bytes());
+    head[48 + NONCE_LEN..56 + NONCE_LEN].copy_from_slice(&(msg.len() as u64).to_le_bytes());
+
+    let mut tag = [0u8; TAG_LEN];
+    blake3_keyed_multi(mac_key, &[&head, aad, msg], &mut tag);
     tag
 }
 
-/// The context-commitment term over the associated data.
+/// Per-message encryption key and nonce, derived from the **whole** tag.
 ///
-/// `blake3::derive_key(COMMITMENT_CONTEXT, aad)`, **not** `blake3::hash(aad)`.
-///
-/// Both are collision resistant, so either would make the tag commit to the AAD
-/// up to `2^128`.  The difference is domain separation: `BLAKE3(aad)` is one
-/// fixed public function, and a protocol that separately XORs `BLAKE3(aad)` into
-/// something else would be using the *same* value, so the two uses can cancel.
-/// `derive_key` keys the hash with [`COMMITMENT_CONTEXT`], giving this use of
-/// BLAKE3 a domain that no other protocol shares by accident.
-///
-/// Split out so the formal-verification harnesses can stub it cheaply and pin
-/// the fact that the tag depends on the *whole* AAD.
-fn context_commitment(aad: &[u8]) -> [u8; TAG_LEN] {
-    blake3::derive_key(COMMITMENT_CONTEXT, aad)
-}
+/// Consuming all `TAG_LEN` bytes is what makes the ciphertext commit to the full
+/// 520 bits: the ciphertext is a function of the tag, and the tag is transmitted
+/// and compared in full.
+fn derive_enc(enc_seed: &[u8; 32], tag: &[u8; TAG_LEN]) -> ([u8; 32], [u8; 12]) {
+    let mut input = [0u8; 8 + TAG_LEN];
+    input[0..8].copy_from_slice(&DOM_ENC);
+    input[8..].copy_from_slice(tag);
 
-/// Derive the encryption key from the tag and the tag key.
-/// `encKey = ChaCha20(tag_key, LE32(tag[0..4]), tag[4..16], 64 zeros)[32..64]`
-fn derive_enc_key(tag_key: &[u8; 32], tag: &[u8; TAG_LEN]) -> [u8; 32] {
-    let ctr = u32::from_le_bytes([tag[0], tag[1], tag[2], tag[3]]);
-    let nonce: [u8; 12] = tag[4..16].try_into().unwrap();
-    let mut buf = [0u8; 64];
-    chacha20_keystream_raw(tag_key, ctr, &nonce, &mut buf);
-    let enc_key: [u8; 32] = buf[32..64].try_into().unwrap();
-    zeroize_array(&mut buf);
-    enc_key
+    let mut material = [0u8; 44];
+    blake3_keyed_xof(enc_seed, &input, &mut material);
+
+    let mut enc_key = [0u8; 32];
+    enc_key.copy_from_slice(&material[0..32]);
+    let mut enc_nonce = [0u8; 12];
+    enc_nonce.copy_from_slice(&material[32..44]);
+
+    zeroize_array(&mut material);
+    zeroize_array(&mut input);
+    (enc_key, enc_nonce)
 }
 
 #[inline]
@@ -658,14 +674,8 @@ fn check_lengths(msg_len: usize, aad_len: usize) -> Result<(), Error> {
 
 /// Encrypt `plaintext` under `(key, nonce, aad)`, returning `(ciphertext, tag)`.
 ///
-/// The tag is 32 bytes, the nonce 24 bytes (XChaCha20 extension).  This is a SIV
-/// construction: the tag is computed first, then encryption uses the tag as
-/// additional key material.
-///
-/// Subkey derivation (XChaCha20-style, with domain separation):
-/// `subkey = HChaCha20(key, nonce[0..16])`, then
-/// `ChaCha20(subkey, 0, SUBKEY_DOMAIN || nonce[16..24], 64 bytes)` →
-/// `[0..32] = Poly1305 key`, `[32..64] = tag-derivation key`.
+/// SIV construction: the tag is computed first, and the per-message encryption
+/// key and nonce are derived from it.
 #[must_use = "the returned ciphertext and tag must be handled"]
 pub fn encrypt(
     key: &[u8; 32],
@@ -675,28 +685,21 @@ pub fn encrypt(
 ) -> Result<(Vec<u8>, [u8; TAG_LEN]), Error> {
     check_lengths(plaintext.len(), aad.len())?;
 
-    let (mut poly1305_key, mut tag_key) = derive_subkeys(key, nonce);
+    let (mut mac_key, mut enc_seed) = derive_material(key, nonce);
+    let tag = derive_tag(&mac_key, key, nonce, aad, plaintext);
+    let (mut enc_key, enc_nonce) = derive_enc(&enc_seed, &tag);
 
-    let mut poly1305_tag = poly1305(&poly1305_key, aad, plaintext);
-    let tag = derive_tag(&tag_key, &poly1305_tag, aad);
-    let mut enc_key = derive_enc_key(&tag_key, &tag);
-
-    let enc_data_nonce: [u8; 12] = tag[16..28].try_into().unwrap();
     let mut ciphertext = vec![0u8; plaintext.len()];
-    chacha20_keystream(&enc_key, 0, &enc_data_nonce, plaintext, &mut ciphertext);
+    chacha20_keystream(&enc_key, 0, &enc_nonce, plaintext, &mut ciphertext);
 
-    zeroize_array(&mut poly1305_key);
-    zeroize_array(&mut tag_key);
-    zeroize_array(&mut poly1305_tag);
+    zeroize_array(&mut mac_key);
+    zeroize_array(&mut enc_seed);
     zeroize_array(&mut enc_key);
 
     Ok((ciphertext, tag))
 }
 
-/// Encrypt `buffer` in place, returning the 32-byte tag (detached form).
-///
-/// On return `buffer` holds the ciphertext.  This avoids allocating a second
-/// buffer and is useful for protocols that store the tag separately.
+/// Encrypt `buffer` in place, returning the detached tag.
 #[must_use = "the returned tag must be handled"]
 pub fn encrypt_in_place_detached(
     key: &[u8; 32],
@@ -706,31 +709,24 @@ pub fn encrypt_in_place_detached(
 ) -> Result<[u8; TAG_LEN], Error> {
     check_lengths(buffer.len(), aad.len())?;
 
-    let (mut poly1305_key, mut tag_key) = derive_subkeys(key, nonce);
+    let (mut mac_key, mut enc_seed) = derive_material(key, nonce);
+    let tag = derive_tag(&mac_key, key, nonce, aad, buffer);
+    let (mut enc_key, enc_nonce) = derive_enc(&enc_seed, &tag);
 
-    let mut poly1305_tag = poly1305(&poly1305_key, aad, buffer);
-    let tag = derive_tag(&tag_key, &poly1305_tag, aad);
-    let mut enc_key = derive_enc_key(&tag_key, &tag);
+    chacha20_apply(&enc_key, 0, &enc_nonce, &Input::InPlace, buffer);
 
-    let enc_data_nonce: [u8; 12] = tag[16..28].try_into().unwrap();
-    // XOR in place: read the plaintext into the same buffer we write.  Goes
-    // through the same SIMD dispatch as the allocating API — calling
-    // `chacha20_block` directly here cost ~3x on large messages.
-    chacha20_apply(&enc_key, 0, &enc_data_nonce, &Input::InPlace, buffer);
-
-    zeroize_array(&mut poly1305_key);
-    zeroize_array(&mut tag_key);
-    zeroize_array(&mut poly1305_tag);
+    zeroize_array(&mut mac_key);
+    zeroize_array(&mut enc_seed);
     zeroize_array(&mut enc_key);
 
     Ok(tag)
 }
 
-/// Decrypt `ciphertext` under `(key, nonce, aad)`, verifying the 32-byte `tag`.
+/// Decrypt `ciphertext`, verifying the tag.
 ///
-/// Returns the plaintext in a [`Plaintext`] wrapper that zeroizes on drop.
-/// On authentication failure returns [`Error::AuthenticationFailed`] and never
-/// exposes the unverified plaintext.
+/// Returns the plaintext in a [`Plaintext`] that zeroizes on drop. On failure
+/// returns [`Error::AuthenticationFailed`] and never exposes the unverified
+/// plaintext.
 #[must_use = "the returned plaintext must be handled"]
 pub fn decrypt(
     key: &[u8; 32],
@@ -741,46 +737,33 @@ pub fn decrypt(
 ) -> Result<Plaintext, Error> {
     check_lengths(ciphertext.len(), aad.len())?;
 
-    let (mut poly1305_key, mut tag_key) = derive_subkeys(key, nonce);
-    let mut enc_key = derive_enc_key(&tag_key, tag);
+    let (mut mac_key, mut enc_seed) = derive_material(key, nonce);
+    let (mut enc_key, enc_nonce) = derive_enc(&enc_seed, tag);
 
-    let enc_data_nonce: [u8; 12] = tag[16..28].try_into().unwrap();
     let mut plaintext = vec![0u8; ciphertext.len()];
-    chacha20_keystream(&enc_key, 0, &enc_data_nonce, ciphertext, &mut plaintext);
+    chacha20_keystream(&enc_key, 0, &enc_nonce, ciphertext, &mut plaintext);
 
-    let mut poly1305_tag = poly1305(&poly1305_key, aad, &plaintext);
-    let mut computed_tag = derive_tag(&tag_key, &poly1305_tag, aad);
+    let mut computed_tag = derive_tag(&mac_key, key, nonce, aad, &plaintext);
+    let auth_ok = computed_tag.ct_eq(tag);
 
-    let mut tag_arr = [0u8; TAG_LEN];
-    tag_arr.copy_from_slice(tag);
-    let auth_ok = computed_tag.ct_eq(&tag_arr);
-
-    zeroize_array(&mut poly1305_key);
-    zeroize_array(&mut tag_key);
+    zeroize_array(&mut mac_key);
+    zeroize_array(&mut enc_seed);
     zeroize_array(&mut enc_key);
-    zeroize_array(&mut poly1305_tag);
-    zeroize_array(&mut tag_arr);
-    // `computed_tag` is a deterministic function of `tag_key` and the derived
-    // Poly1305 tag, i.e. it is as sensitive as the tag key itself.  It was
-    // previously left unwiped here while the test-only `decrypt16` did wipe its
-    // equivalent (`computed_tag_buf`), so this was a production-path regression
-    // against the crate's own invariant.
     zeroize_array(&mut computed_tag);
 
     if bool::from(auth_ok) {
         Ok(Plaintext(plaintext))
     } else {
-        // Wipe plaintext — per spec, MUST NOT expose unverified plaintext
+        // Per spec, MUST NOT expose unverified plaintext.
         zeroize_slice(&mut plaintext);
         Err(Error::AuthenticationFailed)
     }
 }
 
-/// Decrypt `buffer` in place, verifying the 32-byte `tag` (detached form).
+/// Decrypt `buffer` in place, verifying the detached tag.
 ///
-/// On success `buffer` holds the plaintext.  On failure the buffer is zeroized
-/// and [`Error::AuthenticationFailed`] is returned, so unverified plaintext is
-/// never left in place.
+/// On failure the buffer is zeroized, so unverified plaintext is never left in
+/// place. Note this destroys the caller's buffer on the failure path.
 pub fn decrypt_in_place_detached(
     key: &[u8; 32],
     nonce: &[u8; NONCE_LEN],
@@ -790,26 +773,17 @@ pub fn decrypt_in_place_detached(
 ) -> Result<(), Error> {
     check_lengths(buffer.len(), aad.len())?;
 
-    let (mut poly1305_key, mut tag_key) = derive_subkeys(key, nonce);
-    let mut enc_key = derive_enc_key(&tag_key, tag);
+    let (mut mac_key, mut enc_seed) = derive_material(key, nonce);
+    let (mut enc_key, enc_nonce) = derive_enc(&enc_seed, tag);
 
-    let enc_data_nonce: [u8; 12] = tag[16..28].try_into().unwrap();
-    chacha20_apply(&enc_key, 0, &enc_data_nonce, &Input::InPlace, buffer);
+    chacha20_apply(&enc_key, 0, &enc_nonce, &Input::InPlace, buffer);
 
-    let mut poly1305_tag = poly1305(&poly1305_key, aad, buffer);
-    let mut computed_tag = derive_tag(&tag_key, &poly1305_tag, aad);
+    let mut computed_tag = derive_tag(&mac_key, key, nonce, aad, buffer);
+    let auth_ok = computed_tag.ct_eq(tag);
 
-    let mut tag_arr = [0u8; TAG_LEN];
-    tag_arr.copy_from_slice(tag);
-    let auth_ok = computed_tag.ct_eq(&tag_arr);
-
-    zeroize_array(&mut poly1305_key);
-    zeroize_array(&mut tag_key);
+    zeroize_array(&mut mac_key);
+    zeroize_array(&mut enc_seed);
     zeroize_array(&mut enc_key);
-    zeroize_array(&mut poly1305_tag);
-    zeroize_array(&mut tag_arr);
-    // Same reasoning as in `decrypt`: `computed_tag` is key-derived material and
-    // must not be left in the frame on either the success or the failure path.
     zeroize_array(&mut computed_tag);
 
     if bool::from(auth_ok) {
@@ -817,164 +791,6 @@ pub fn decrypt_in_place_detached(
     } else {
         zeroize_slice(buffer);
         Err(Error::AuthenticationFailed)
-    }
-}
-
-/// Encrypt plaintext under (key, nonce, aad) with a 16-byte nonce.
-///
-/// **Internal only.**  This is the base c2sp.org ChaCha20-Poly1305-SIV
-/// construction (direct ChaCha20 subkey derivation, no HChaCha20).  It exists
-/// so the c2sp.org known-answer test vectors can be verified; it is NOT part
-/// of the public API, which is 24-byte-nonce only (see `encrypt`).
-///
-/// `subkeys = ChaCha20(key, ReadLE32(nonce[0..4]), nonce[4..16], allZeros)`
-#[cfg(test)]
-pub(crate) fn encrypt16(
-    key: &[u8; 32],
-    nonce: &[u8; 16],
-    aad: &[u8],
-    plaintext: &[u8],
-) -> Result<(Vec<u8>, [u8; TAG_LEN]), &'static str> {
-    if plaintext.len() as u64 > MAX_MSG_SIZE {
-        return Err("plaintext too long");
-    }
-    if aad.len() as u64 > MAX_MSG_SIZE {
-        return Err("AAD too long");
-    }
-
-    // Per c2sp.org: subkeys = ChaCha20(key, ReadLE32(nonce[0..4]), nonce[4..16], allZeros)
-    // nonce[0..4] → counter, nonce[4..16] → 12-byte nonce
-    let sub_ctr = u32::from_le_bytes([nonce[0], nonce[1], nonce[2], nonce[3]]);
-    let chacha_nonce: [u8; 12] = nonce[4..16].try_into().unwrap();
-
-    let mut subkeys_buf = chacha20_block(key, sub_ctr, &chacha_nonce);
-
-    let mut poly1305_key: [u8; 32] = [0; 32];
-    poly1305_key.copy_from_slice(&subkeys_buf[0..32]);
-    let mut tag_key: [u8; 32] = [0; 32];
-    tag_key.copy_from_slice(&subkeys_buf[32..64]);
-    zeroize_array(&mut subkeys_buf);
-
-    let mut poly1305_tag = poly1305(&poly1305_key, aad, plaintext);
-
-    let tag_ctr = u32::from_le_bytes([
-        poly1305_tag[0],
-        poly1305_tag[1],
-        poly1305_tag[2],
-        poly1305_tag[3],
-    ]);
-    let tag_nonce: [u8; 12] = poly1305_tag[4..16].try_into().unwrap();
-    let mut tag_buf = [0u8; 64];
-    chacha20_keystream_raw(&tag_key, tag_ctr, &tag_nonce, &mut tag_buf);
-    let tag: [u8; TAG_LEN] = tag_buf[0..TAG_LEN].try_into().unwrap();
-
-    let enc_ctr = u32::from_le_bytes([tag[0], tag[1], tag[2], tag[3]]);
-    let enc_nonce: [u8; 12] = tag[4..16].try_into().unwrap();
-    let mut enc_key_buf = [0u8; 64];
-    chacha20_keystream_raw(&tag_key, enc_ctr, &enc_nonce, &mut enc_key_buf);
-    let mut enc_key: [u8; 32] = [0; 32];
-    enc_key.copy_from_slice(&enc_key_buf[32..64]);
-
-    let enc_data_nonce: [u8; 12] = tag[16..28].try_into().unwrap();
-    let mut ciphertext = vec![0u8; plaintext.len()];
-    chacha20_keystream(&enc_key, 0, &enc_data_nonce, plaintext, &mut ciphertext);
-
-    zeroize_array(&mut poly1305_key);
-    zeroize_array(&mut tag_key);
-    zeroize_array(&mut tag_buf);
-    zeroize_array(&mut enc_key_buf);
-    zeroize_array(&mut enc_key);
-    zeroize_array(&mut poly1305_tag);
-
-    Ok((ciphertext, tag))
-}
-
-/// Decrypt ciphertext under (key, nonce, aad) with a 16-byte nonce.
-///
-/// **Internal only.**  Counterpart of `encrypt16`; kept solely to validate
-/// the c2sp.org ChaCha20-Poly1305-SIV KAT vectors.  Not part of the public API.
-#[cfg(test)]
-pub(crate) fn decrypt16(
-    key: &[u8; 32],
-    nonce: &[u8; 16],
-    aad: &[u8],
-    ciphertext: &[u8],
-    tag: &[u8; TAG_LEN],
-) -> Result<Vec<u8>, &'static str> {
-    if ciphertext.len() as u64 > MAX_MSG_SIZE {
-        return Err("ciphertext too long");
-    }
-    if aad.len() as u64 > MAX_MSG_SIZE {
-        return Err("AAD too long");
-    }
-
-    // Per c2sp.org: subkeys = ChaCha20(key, ReadLE32(nonce[0..4]), nonce[4..16], allZeros)
-    let sub_ctr = u32::from_le_bytes([nonce[0], nonce[1], nonce[2], nonce[3]]);
-    let chacha_nonce: [u8; 12] = nonce[4..16].try_into().unwrap();
-
-    // Generate ONE 64-byte ChaCha20 block (matching spec's "allZeros" input)
-    let mut subkeys_buf = chacha20_block(key, sub_ctr, &chacha_nonce);
-
-    let mut poly1305_key: [u8; 32] = [0; 32];
-    poly1305_key.copy_from_slice(&subkeys_buf[0..32]);
-    let mut tag_key: [u8; 32] = [0; 32];
-    tag_key.copy_from_slice(&subkeys_buf[32..64]);
-    zeroize_array(&mut subkeys_buf);
-
-    // Step 2: Derive encryption key
-    let enc_ctr = u32::from_le_bytes([tag[0], tag[1], tag[2], tag[3]]);
-    let enc_nonce: [u8; 12] = tag[4..16].try_into().unwrap();
-    let mut enc_key_buf = [0u8; 64];
-    chacha20_keystream_raw(&tag_key, enc_ctr, &enc_nonce, &mut enc_key_buf);
-    let mut enc_key: [u8; 32] = [0; 32];
-    enc_key.copy_from_slice(&enc_key_buf[32..64]);
-
-    // Decrypt ciphertext
-    let enc_data_nonce: [u8; 12] = tag[16..28].try_into().unwrap();
-    let mut plaintext = vec![0u8; ciphertext.len()];
-    chacha20_keystream(&enc_key, 0, &enc_data_nonce, ciphertext, &mut plaintext);
-
-    // Step 3: Compute Poly1305 tag over plaintext
-    let mut poly1305_tag = poly1305(&poly1305_key, aad, &plaintext);
-
-    // Step 4: Compute expected tag
-    let computed_ctr = u32::from_le_bytes([
-        poly1305_tag[0],
-        poly1305_tag[1],
-        poly1305_tag[2],
-        poly1305_tag[3],
-    ]);
-    let computed_nonce: [u8; 12] = poly1305_tag[4..16].try_into().unwrap();
-    let mut computed_tag_buf = [0u8; 64];
-    chacha20_keystream_raw(
-        &tag_key,
-        computed_ctr,
-        &computed_nonce,
-        &mut computed_tag_buf,
-    );
-    let computed_tag: [u8; TAG_LEN] = computed_tag_buf[0..TAG_LEN].try_into().unwrap();
-
-    // Step 5: Constant-time tag comparison
-    let mut tag_arr = [0u8; TAG_LEN];
-    tag_arr.copy_from_slice(tag);
-
-    let auth_ok = computed_tag.ct_eq(&tag_arr);
-
-    // Zeroize ALL intermediate secrets before branching on auth result
-    zeroize_array(&mut poly1305_key);
-    zeroize_array(&mut tag_key);
-    zeroize_array(&mut enc_key_buf);
-    zeroize_array(&mut enc_key);
-    zeroize_array(&mut poly1305_tag);
-    zeroize_array(&mut computed_tag_buf);
-    zeroize_array(&mut tag_arr);
-
-    if bool::from(auth_ok) {
-        Ok(plaintext)
-    } else {
-        // Wipe plaintext — per spec, MUST NOT expose unverified plaintext
-        zeroize_slice(&mut plaintext);
-        Err("Authentication failed")
     }
 }
 
@@ -1420,168 +1236,6 @@ mod x86_simd {
             (leaf7.ebx >> 5) & 1 == 1
         }
     }
-
-    /// Four-block Poly1305 batch (AVX2).
-    ///
-    /// Poly1305 is serial across blocks, so four blocks are instead expressed as
-    /// the polynomial `(h+m₀)·r⁴ + m₁·r³ + m₂·r² + m₃·r`; the four products are
-    /// then independent and run in four 64-bit lanes.  Limb `j` of the four
-    /// blocks is held in one `__m256i` (lane k = block k), so a lane-wise
-    /// multiply-accumulate covers all four blocks at once.  The result is the
-    /// five wide accumulators, identical to `poly1305_accumulate4_scalar`.
-    ///
-    /// The powers of `r` are broadcast once per *message* by
-    /// `poly1305_absorb_bulk`, not per four-block group.
-    #[target_feature(enable = "avx2")]
-    pub(super) unsafe fn poly1305_absorb_bulk(
-        h: &mut [u32; 5],
-        data: &[u8],
-        p: &super::Poly1305Powers,
-    ) {
-        // Limb values are < 2^27 and the pre-scaled `s` limbs < 2^29, so
-        // `_mm256_mul_epu32` (which multiplies the low 32 bits of each 64-bit
-        // lane) is exact.
-        let mut rr = [_mm256_setzero_si256(); 5];
-        let mut ss = [_mm256_setzero_si256(); 5];
-        for j in 0..5 {
-            rr[j] = _mm256_set_epi64x(
-                p.r[3][j] as i64,
-                p.r[2][j] as i64,
-                p.r[1][j] as i64,
-                p.r[0][j] as i64,
-            );
-            ss[j] = _mm256_set_epi64x(
-                p.s[3][j] as i64,
-                p.s[2][j] as i64,
-                p.s[1][j] as i64,
-                p.s[0][j] as i64,
-            );
-        }
-
-        for g in 0..data.len() / (4 * 16) {
-            let group = &data[g * 64..g * 64 + 64];
-            // v[k] = limbs of block k, with the running accumulator folded into
-            // lane 0 only (the other lanes start from zero).
-            let mut v = [[0u32; 5]; 4];
-            for (k, vk) in v.iter_mut().enumerate() {
-                let block: &[u8; 16] = group[k * 16..k * 16 + 16].try_into().unwrap();
-                *vk = super::poly1305_block_limbs(block, true);
-            }
-            for i in 0..5 {
-                v[0][i] = v[0][i].wrapping_add(h[i]);
-            }
-
-            let mut vv = [_mm256_setzero_si256(); 5];
-            for (j, vvj) in vv.iter_mut().enumerate() {
-                *vvj = _mm256_set_epi64x(
-                    v[3][j] as i64,
-                    v[2][j] as i64,
-                    v[1][j] as i64,
-                    v[0][j] as i64,
-                );
-            }
-
-            let mut acc = [0u64; 5];
-            for (i, a) in acc.iter_mut().enumerate() {
-                let mut sum = _mm256_setzero_si256();
-                for (j, vvj) in vv.iter().enumerate() {
-                    // Output limb i takes v[j] * r[(i-j) mod 5]; the wrap past
-                    // limb 4 folds in the 2^130 ≡ 5 factor via the pre-scaled `s`.
-                    let (idx, use_scaled) = if j <= i {
-                        (i - j, false)
-                    } else {
-                        (i + 5 - j, true)
-                    };
-                    let rv = if use_scaled { ss[idx] } else { rr[idx] };
-                    sum = _mm256_add_epi64(sum, _mm256_mul_epu32(*vvj, rv));
-                }
-                // Horizontal sum of the four 64-bit lanes.
-                let lo = _mm256_castsi256_si128(sum);
-                let hi = _mm256_extracti128_si256(sum, 1);
-                let pair = _mm_add_epi64(lo, hi);
-                let total = _mm_add_epi64(pair, _mm_srli_si128(pair, 8));
-                *a = _mm_cvtsi128_si64(total) as u64;
-            }
-
-            super::poly1305_reduce_wide(h, &acc);
-        }
-
-        // `rr`/`ss` are register copies of the secret powers of `r`; wipe them
-        // once per message.  (The message limbs in `vv` are not secret.)
-        super::zeroize_array(&mut rr);
-        super::zeroize_array(&mut ss);
-    }
-
-    /// Four-block Poly1305 batch (AVX2), single group.  Used by the tests that
-    /// compare each backend against the scalar reference in isolation.
-    #[cfg(test)]
-    #[target_feature(enable = "avx2")]
-    pub(super) unsafe fn poly1305_accumulate4(
-        h: &[u32; 5],
-        m: &[[u8; 16]; 4],
-        r: &[[u32; 5]; 4],
-        s: &[[u32; 5]; 4],
-    ) -> [u64; 5] {
-        // v[k] = limbs of block k, with the running accumulator folded into
-        // lane 0 only (the other lanes start from zero).
-        let mut v = [[0u32; 5]; 4];
-        for k in 0..4 {
-            v[k] = super::poly1305_block_limbs(&m[k], true);
-        }
-        for i in 0..5 {
-            v[0][i] = v[0][i].wrapping_add(h[i]);
-        }
-
-        // Broadcast limb j across the four blocks into 64-bit lanes.  Limb
-        // values are < 2^27, so `_mm256_mul_epu32` (which multiplies the low 32
-        // bits of each 64-bit lane) is exact.
-        let mut vv = [_mm256_setzero_si256(); 5];
-        let mut rr = [_mm256_setzero_si256(); 5];
-        let mut ss = [_mm256_setzero_si256(); 5];
-        for j in 0..5 {
-            vv[j] = _mm256_set_epi64x(
-                v[3][j] as i64,
-                v[2][j] as i64,
-                v[1][j] as i64,
-                v[0][j] as i64,
-            );
-            rr[j] = _mm256_set_epi64x(
-                r[3][j] as i64,
-                r[2][j] as i64,
-                r[1][j] as i64,
-                r[0][j] as i64,
-            );
-            ss[j] = _mm256_set_epi64x(
-                s[3][j] as i64,
-                s[2][j] as i64,
-                s[1][j] as i64,
-                s[0][j] as i64,
-            );
-        }
-
-        let mut out = [0u64; 5];
-        for (i, o) in out.iter_mut().enumerate() {
-            let mut acc = _mm256_setzero_si256();
-            for (j, vvj) in vv.iter().enumerate() {
-                // Output limb i takes v[j] * r[(i-j) mod 5]; the wrap past limb
-                // 4 folds in the 2^130 ≡ 5 factor via the pre-scaled `s`.
-                let (idx, use_scaled) = if j <= i {
-                    (i - j, false)
-                } else {
-                    (i + 5 - j, true)
-                };
-                let rv = if use_scaled { ss[idx] } else { rr[idx] };
-                acc = _mm256_add_epi64(acc, _mm256_mul_epu32(*vvj, rv));
-            }
-            // Horizontal sum of the four 64-bit lanes.
-            let lo = _mm256_castsi256_si128(acc);
-            let hi = _mm256_extracti128_si256(acc, 1);
-            let pair = _mm_add_epi64(lo, hi);
-            let total = _mm_add_epi64(pair, _mm_srli_si128(pair, 8));
-            *o = _mm_cvtsi128_si64(total) as u64;
-        }
-        out
-    }
 }
 
 #[cfg(all(target_arch = "aarch64", not(kani)))]
@@ -1683,160 +1337,6 @@ mod aarch64_simd {
             core::ptr::write_volatile(p.add(i), zero);
         }
         core::sync::atomic::compiler_fence(core::sync::atomic::Ordering::SeqCst);
-    }
-
-    /// Four-block Poly1305 batch (NEON).
-    ///
-    /// Same polynomial trick as the AVX2 kernel: four blocks become
-    /// `(h+m₀)·r⁴ + m₁·r³ + m₂·r² + m₃·r`, so the four products are independent
-    /// and fill four 64-bit lanes (two `uint64x2_t` registers).
-    ///
-    /// NEON has no 64-bit vector multiply on the AArch64 baseline, so the
-    /// products use `vmull_u32` (32x32 -> 64).  That is exact here because limbs
-    /// are < 2^27 and the pre-scaled `s` limbs are < 2^29.
-    ///
-    /// The powers of `r` are packed once per *message* by
-    /// `poly1305_absorb_bulk`, not per four-block group.
-    #[target_feature(enable = "neon")]
-    pub(super) unsafe fn poly1305_absorb_bulk(
-        h: &mut [u32; 5],
-        data: &[u8],
-        p: &super::Poly1305Powers,
-    ) {
-        // Pack lanes [0,1] and [2,3] into two 32-bit-lane registers per limb;
-        // `vmull_u32` widens each product to a 64-bit lane.
-        let mut rr_lo = [vdup_n_u32(0); 5];
-        let mut rr_hi = [vdup_n_u32(0); 5];
-        let mut ss_lo = [vdup_n_u32(0); 5];
-        let mut ss_hi = [vdup_n_u32(0); 5];
-        for j in 0..5 {
-            let rlanes: [u32; 4] = [p.r[0][j], p.r[1][j], p.r[2][j], p.r[3][j]];
-            let slanes: [u32; 4] = [p.s[0][j], p.s[1][j], p.s[2][j], p.s[3][j]];
-            rr_lo[j] = vld1_u32(rlanes.as_ptr());
-            rr_hi[j] = vld1_u32(rlanes.as_ptr().add(2));
-            ss_lo[j] = vld1_u32(slanes.as_ptr());
-            ss_hi[j] = vld1_u32(slanes.as_ptr().add(2));
-        }
-
-        for g in 0..data.len() / (4 * 16) {
-            let group = &data[g * 64..g * 64 + 64];
-            let mut v = [[0u32; 5]; 4];
-            for (k, vk) in v.iter_mut().enumerate() {
-                let block: &[u8; 16] = group[k * 16..k * 16 + 16].try_into().unwrap();
-                *vk = super::poly1305_block_limbs(block, true);
-            }
-            for i in 0..5 {
-                v[0][i] = v[0][i].wrapping_add(h[i]);
-            }
-
-            let mut vv_lo = [vdup_n_u32(0); 5];
-            let mut vv_hi = [vdup_n_u32(0); 5];
-            for j in 0..5 {
-                let vlanes: [u32; 4] = [v[0][j], v[1][j], v[2][j], v[3][j]];
-                vv_lo[j] = vld1_u32(vlanes.as_ptr());
-                vv_hi[j] = vld1_u32(vlanes.as_ptr().add(2));
-            }
-
-            let mut acc = [0u64; 5];
-            for (i, a) in acc.iter_mut().enumerate() {
-                let mut acc_lo = vdupq_n_u64(0);
-                let mut acc_hi = vdupq_n_u64(0);
-                for j in 0..5 {
-                    // Output limb i takes v[j] * r[(i-j) mod 5]; the wrap past
-                    // limb 4 folds in the 2^130 ≡ 5 factor via the pre-scaled `s`.
-                    let (idx, use_scaled) = if j <= i {
-                        (i - j, false)
-                    } else {
-                        (i + 5 - j, true)
-                    };
-                    let (rv_lo, rv_hi) = if use_scaled {
-                        (ss_lo[idx], ss_hi[idx])
-                    } else {
-                        (rr_lo[idx], rr_hi[idx])
-                    };
-                    acc_lo = vaddq_u64(acc_lo, vmull_u32(vv_lo[j], rv_lo));
-                    acc_hi = vaddq_u64(acc_hi, vmull_u32(vv_hi[j], rv_hi));
-                }
-                let total = vaddq_u64(acc_lo, acc_hi);
-                let mut lanes = [0u64; 2];
-                vst1q_u64(lanes.as_mut_ptr(), total);
-                *a = lanes[0].wrapping_add(lanes[1]);
-            }
-
-            super::poly1305_reduce_wide(h, &acc);
-        }
-
-        // `rr_lo`/`rr_hi`/`ss_lo`/`ss_hi` are register copies of the secret
-        // powers of `r`; wipe them once per message.  (The message limbs in
-        // `vv` are not secret.)
-        super::zeroize_array(&mut rr_lo);
-        super::zeroize_array(&mut rr_hi);
-        super::zeroize_array(&mut ss_lo);
-        super::zeroize_array(&mut ss_hi);
-    }
-
-    /// Four-block Poly1305 batch (NEON), single group.  Used by the tests that
-    /// compare each backend against the scalar reference in isolation.
-    #[cfg(test)]
-    #[target_feature(enable = "neon")]
-    pub(super) unsafe fn poly1305_accumulate4(
-        h: &[u32; 5],
-        m: &[[u8; 16]; 4],
-        r: &[[u32; 5]; 4],
-        s: &[[u32; 5]; 4],
-    ) -> [u64; 5] {
-        let mut v = [[0u32; 5]; 4];
-        for k in 0..4 {
-            v[k] = super::poly1305_block_limbs(&m[k], true);
-        }
-        for i in 0..5 {
-            v[0][i] = v[0][i].wrapping_add(h[i]);
-        }
-
-        let mut vv_lo = [vdup_n_u32(0); 5];
-        let mut vv_hi = [vdup_n_u32(0); 5];
-        let mut rr_lo = [vdup_n_u32(0); 5];
-        let mut rr_hi = [vdup_n_u32(0); 5];
-        let mut ss_lo = [vdup_n_u32(0); 5];
-        let mut ss_hi = [vdup_n_u32(0); 5];
-        for j in 0..5 {
-            let vlanes: [u32; 4] = [v[0][j], v[1][j], v[2][j], v[3][j]];
-            let rlanes: [u32; 4] = [r[0][j], r[1][j], r[2][j], r[3][j]];
-            let slanes: [u32; 4] = [s[0][j], s[1][j], s[2][j], s[3][j]];
-            vv_lo[j] = vld1_u32(vlanes.as_ptr());
-            vv_hi[j] = vld1_u32(vlanes.as_ptr().add(2));
-            rr_lo[j] = vld1_u32(rlanes.as_ptr());
-            rr_hi[j] = vld1_u32(rlanes.as_ptr().add(2));
-            ss_lo[j] = vld1_u32(slanes.as_ptr());
-            ss_hi[j] = vld1_u32(slanes.as_ptr().add(2));
-        }
-
-        let mut out = [0u64; 5];
-        for (i, o) in out.iter_mut().enumerate() {
-            let mut acc_lo = vdupq_n_u64(0);
-            let mut acc_hi = vdupq_n_u64(0);
-            for j in 0..5 {
-                // Output limb i takes v[j] * r[(i-j) mod 5]; the wrap past limb
-                // 4 folds in the 2^130 ≡ 5 factor via the pre-scaled `s`.
-                let (idx, use_scaled) = if j <= i {
-                    (i - j, false)
-                } else {
-                    (i + 5 - j, true)
-                };
-                let (rv_lo, rv_hi) = if use_scaled {
-                    (ss_lo[idx], ss_hi[idx])
-                } else {
-                    (rr_lo[idx], rr_hi[idx])
-                };
-                acc_lo = vaddq_u64(acc_lo, vmull_u32(vv_lo[j], rv_lo));
-                acc_hi = vaddq_u64(acc_hi, vmull_u32(vv_hi[j], rv_hi));
-            }
-            let total = vaddq_u64(acc_lo, acc_hi);
-            let mut lanes = [0u64; 2];
-            vst1q_u64(lanes.as_mut_ptr(), total);
-            *o = lanes[0].wrapping_add(lanes[1]);
-        }
-        out
     }
 }
 
@@ -2031,625 +1531,6 @@ fn hchacha20(key: &[u8; 32], nonce: &[u8; 16]) -> [u8; 32] {
     r
 }
 
-// ── Poly1305 ─────────────────────────────────────────────────────────
-
-/// Poly1305 one-time MAC.
-///
-/// Per RFC 8439 §2.8 (with the ciphertext replaced by the plaintext):
-/// MAC input = aad || pad16(aad) || plaintext || pad16(plaintext)
-///             || le64(aad length in bytes) || le64(plaintext length in bytes)
-/// where pad16 appends the minimum number of ZERO bytes to reach a 16-byte
-/// boundary. Since every component is zero-padded to a multiple of 16 bytes,
-/// the whole MAC input is always a multiple of 16 — every block is a FULL
-/// block and receives the 2^128 high bit (standard Poly1305 block handling).
-/// Returns a 16-byte tag.
-fn poly1305(key: &[u8; 32], aad: &[u8], plaintext: &[u8]) -> [u8; 16] {
-    let mut state = Poly1305State::new(key);
-
-    // AAD and plaintext, each zero-padded to a 16-byte boundary (pad16)
-    state.absorb_padded(aad);
-    state.absorb_padded(plaintext);
-
-    // Single 16-byte length block: le64(aad length in bytes) || le64(pt length in bytes)
-    // Per RFC 8439 AEAD pad16 semantics, the length block is a full 16-byte block
-    // and MUST be processed with hibit=1 (add 2^128), like all other blocks.
-    let mut len_block = [0u8; 16];
-    len_block[0..8].copy_from_slice(&(aad.len() as u64).to_le_bytes());
-    len_block[8..16].copy_from_slice(&(plaintext.len() as u64).to_le_bytes());
-    state.process_block(&len_block, true);
-
-    state.finalize(key)
-}
-
-/// Convert a 16-byte block into five 26-bit limbs.
-///
-/// `hibit` adds 2^128 (bit 24 of the fifth limb).  RFC 8439 requires it for
-/// every block this construction feeds to Poly1305, since all inputs are whole
-/// blocks after pad16 (including the length block).
-#[inline]
-fn poly1305_block_limbs(block: &[u8; 16], hibit: bool) -> [u32; 5] {
-    // RFC 8439 §2.8.1 block decomposition.  Each 26-bit number straddles byte
-    // boundaries; the overlapping reads must be assembled bit-by-bit, NOT via
-    // `u32::from_le_bytes(..) >> N`.
-    let mut b = [0u32; 5];
-
-    b[0] = u32::from_le_bytes([block[0], block[1], block[2], block[3]]) & 0x3ffffff;
-
-    b[1] = ((block[3] as u32) >> 2)
-        | ((block[4] as u32) << 6)
-        | ((block[5] as u32) << 14)
-        | ((block[6] as u32) << 22);
-    b[1] &= 0x3ffffff;
-
-    b[2] = ((block[6] as u32) >> 4)
-        | ((block[7] as u32) << 4)
-        | ((block[8] as u32) << 12)
-        | ((block[9] as u32) << 20);
-    b[2] &= 0x3ffffff;
-
-    b[3] = ((block[9] as u32) >> 6)
-        | ((block[10] as u32) << 2)
-        | ((block[11] as u32) << 10)
-        | ((block[12] as u32) << 18);
-    b[3] &= 0x3ffffff;
-
-    b[4] = ((block[12] as u32) >> 8)
-        | (block[13] as u32)
-        | ((block[14] as u32) << 8)
-        | ((block[15] as u32) << 16);
-    if hibit {
-        b[4] |= 1 << 24;
-    }
-    b
-}
-
-/// Multiply two 5-limb values modulo 2^130-5, returning the five *unreduced*
-/// 64-bit accumulators `d_i = Σ_j a[j]·b[(i-j) mod 5]`.
-///
-/// Limbs must be < 2^27 on entry so every `d_i` stays below 2^58 and cannot
-/// overflow; the `2^130 ≡ 5` fold is applied by using `5·b` for the wrapped
-/// terms.  This is the exact quantity both the scalar and the SIMD four-block
-/// kernels must agree on.
-#[inline]
-fn poly1305_mul_wide(a: &[u32; 5], b: &[u32; 5]) -> [u64; 5] {
-    // s_i = b_i * 5, encoding 2^130 ≡ 5 (mod 2^130-5).
-    let s1 = (b[1] as u64) * 5;
-    let s2 = (b[2] as u64) * 5;
-    let s3 = (b[3] as u64) * 5;
-    let s4 = (b[4] as u64) * 5;
-
-    let a0 = a[0] as u64;
-    let a1 = a[1] as u64;
-    let a2 = a[2] as u64;
-    let a3 = a[3] as u64;
-    let a4 = a[4] as u64;
-    let b0 = b[0] as u64;
-    let b1 = b[1] as u64;
-    let b2 = b[2] as u64;
-    let b3 = b[3] as u64;
-    let b4 = b[4] as u64;
-
-    [
-        a0 * b0 + a1 * s4 + a2 * s3 + a3 * s2 + a4 * s1,
-        a0 * b1 + a1 * b0 + a2 * s4 + a3 * s3 + a4 * s2,
-        a0 * b2 + a1 * b1 + a2 * b0 + a3 * s4 + a4 * s3,
-        a0 * b3 + a1 * b2 + a2 * b1 + a3 * b0 + a4 * s4,
-        a0 * b4 + a1 * b3 + a2 * b2 + a3 * b1 + a4 * b0,
-    ]
-}
-
-/// Multiply two 5-limb values modulo 2^130-5, returning five reduced limbs.
-///
-/// Limbs must be < 2^26 on entry.  Only used to precompute the powers of `r`;
-/// the same carry convention as `Poly1305State::process_block` is applied so the
-/// results stay in the representation the main loop expects.
-fn poly1305_mul(a: &[u32; 5], b: &[u32; 5]) -> [u32; 5] {
-    let d = poly1305_mul_wide(a, b);
-
-    let mut h = [0u32; 5];
-    let mut c = d[0] >> 26;
-    h[0] = (d[0] as u32) & 0x3ffffff;
-    let d1 = d[1] + c;
-    c = d1 >> 26;
-    h[1] = (d1 as u32) & 0x3ffffff;
-    let d2 = d[2] + c;
-    c = d2 >> 26;
-    h[2] = (d2 as u32) & 0x3ffffff;
-    let d3 = d[3] + c;
-    c = d3 >> 26;
-    h[3] = (d3 as u32) & 0x3ffffff;
-    let d4 = d[4] + c;
-    c = d4 >> 26;
-    h[4] = (d4 as u32) & 0x3ffffff;
-    h[0] = h[0].wrapping_add((c as u32) * 5);
-    c = (h[0] >> 26) as u64;
-    h[0] &= 0x3ffffff;
-    h[1] = h[1].wrapping_add(c as u32);
-    h
-}
-
-/// Powers of `r` for 4-way batched Poly1305.
-///
-/// Batch index `k` (0..4) is multiplied by `r^(4-k)`, i.e. `r[0] = r⁴`,
-/// `r[1] = r³`, `r[2] = r²`, `r[3] = r¹`.
-struct Poly1305Powers {
-    r: [[u32; 5]; 4],
-    /// `r[k]` with every limb multiplied by 5 (the 2^130 ≡ 5 reduction).
-    s: [[u32; 5]; 4],
-}
-
-impl Poly1305Powers {
-    fn new(r: &[u32; 5]) -> Self {
-        let r2 = poly1305_mul(r, r);
-        let r3 = poly1305_mul(&r2, r);
-        let r4 = poly1305_mul(&r2, &r2);
-
-        let rp = [r4, r3, r2, *r];
-        let mut sp = [[0u32; 5]; 4];
-        for k in 0..4 {
-            for i in 0..5 {
-                sp[k][i] = rp[k][i] * 5;
-            }
-        }
-        Self { r: rp, s: sp }
-    }
-}
-
-/// Zeroize the secret powers of `r` once the message is done.
-impl Drop for Poly1305Powers {
-    fn drop(&mut self) {
-        zeroize_array(&mut self.r);
-        zeroize_array(&mut self.s);
-    }
-}
-
-/// Reduce five wide accumulators back to the 26-bit limb representation.
-///
-/// Shared by the scalar and SIMD 4-block batches so both must produce identical
-/// limbs.  Accepts accumulators up to `< 2^62` (both kernels sum raw products
-/// rather than pre-reduced limbs), so the carry propagation is done in `u64` and
-/// the `2^130 ≡ 5` fold is applied twice.
-///
-/// # What this function does and does not guarantee
-///
-/// It guarantees the **residue**: the returned limbs represent a value
-/// congruent to `Σ acc[i]·2^(26i)` modulo `2^130 - 5`.
-///
-/// It does **not** guarantee a canonical limb representation.  Two accumulator
-/// vectors that are congruent modulo `2^130 - 5` can reduce to *different*
-/// limb vectors — for example `[0,0,0,0,0]` and `[P,0,0,0,0]` (with
-/// `P = 2^130-5`) both reduce to residue 0 but produce different limbs.  That is
-/// fine here because the only consumer is `finalize`, which reduces the residue
-/// modulo `2^130-5` again before adding the pad, so a non-canonical input still
-/// yields the correct tag.  It does mean the batched and serial paths legitimately
-/// hold different limb values for the same message; they agree on the final tag,
-/// which is what the tests pin (`test_poly1305_batch_matches_serial`).
-///
-/// The second fold pass is **load-bearing, not a no-op**: the accumulators reach
-/// roughly `2^58`, so a single pass can leave a carry in limb 4 that the second
-/// pass has to propagate.
-#[inline]
-fn poly1305_reduce_wide(h: &mut [u32; 5], acc: &[u64; 5]) {
-    const M: u64 = 0x3ffffff;
-    let mut r = [0u64; 5];
-
-    let mut c = acc[0] >> 26;
-    r[0] = acc[0] & M;
-    for i in 1..5 {
-        let t = acc[i] + c;
-        c = t >> 26;
-        r[i] = t & M;
-    }
-
-    // Fold the overflow out of the top limb: 2^130 ≡ 5 (mod 2^130-5).
-    let t0 = r[0] + c * 5;
-    c = t0 >> 26;
-    r[0] = t0 & M;
-    for ri in r.iter_mut().skip(1) {
-        let t = *ri + c;
-        c = t >> 26;
-        *ri = t & M;
-    }
-
-    // `c` is now 0 or 1; one last fold restores the invariant.  Limb 1 may end
-    // up exactly 2^26, which the rest of the code tolerates.
-    let t0 = r[0] + c * 5;
-    r[0] = t0 & M;
-    r[1] += t0 >> 26;
-
-    for (hi, ri) in h.iter_mut().zip(r.iter()) {
-        *hi = *ri as u32;
-    }
-}
-
-/// Scalar accumulation for the four-block batch: returns the five wide
-/// accumulators of `(h + m₀)·r⁴ + m₁·r³ + m₂·r² + m₃·r`.
-///
-/// This is both the correctness reference and the fallback for architectures
-/// without a SIMD backend.  The SIMD kernels must return identical values.
-fn poly1305_accumulate4_scalar(h: &[u32; 5], m: &[[u8; 16]; 4], r: &[[u32; 5]; 4]) -> [u64; 5] {
-    let mut v = [[0u32; 5]; 4];
-    for k in 0..4 {
-        v[k] = poly1305_block_limbs(&m[k], true);
-    }
-    // Only lane 0 carries the running accumulator; the others start from zero.
-    for i in 0..5 {
-        v[0][i] = v[0][i].wrapping_add(h[i]);
-    }
-
-    let mut acc = [0u64; 5];
-    for k in 0..4 {
-        let prod = poly1305_mul_wide(&v[k], &r[k]);
-        for i in 0..5 {
-            acc[i] += prod[i];
-        }
-    }
-    acc
-}
-
-/// Four-block Poly1305 batch, using SIMD where available.
-///
-/// Computes `h = (h + m₀)·r⁴ + m₁·r³ + m₂·r² + m₃·r  (mod 2^130-5)`.
-/// Poly1305 is inherently serial across blocks; expressing four blocks as a
-/// polynomial in `r` makes the four multiplications independent so they can run
-/// in parallel lanes.  Falls back to `poly1305_accumulate4_scalar`.
-#[cfg(test)]
-fn poly1305_batch4(h: &mut [u32; 5], m: &[[u8; 16]; 4], p: &Poly1305Powers) {
-    let acc = poly1305_accumulate4(h, m, &p.r, &p.s);
-    poly1305_reduce_wide(h, &acc);
-}
-
-/// Absorb `data` (a multiple of 64 bytes) in four-block groups, using the
-/// widest available kernel.  The powers of `r` are broadcast once for the whole
-/// call, so the per-group cost is the arithmetic alone.
-///
-/// # Why this asserts rather than `debug_assert!`s
-///
-/// Every kernel iterates `for g in 0..data.len() / (4 * POLY1305_BLOCK_SIZE)`,
-/// so a `data` length that is *not* a multiple of 64 leaves the trailing bytes
-/// unabsorbed.  With a `debug_assert_eq!` that truncation was silent in release
-/// builds: the MAC would cover less input than the caller passed, producing a
-/// self-consistent but **wrong tag** — the failure mode that no roundtrip test
-/// can detect, because encrypt and decrypt would both skip the same bytes.
-///
-/// The check is therefore a hard `assert!`.  It is an internal invariant (the
-/// only caller passes a length it computed as a multiple in
-/// `Poly1305State::absorb_padded`), so a violation means a bug in this crate,
-/// and failing loudly is strictly better than truncating the MAC input.
-fn poly1305_absorb_bulk(h: &mut [u32; 5], data: &[u8], p: &Poly1305Powers) {
-    assert_eq!(
-        data.len() % (4 * POLY1305_BLOCK_SIZE),
-        0,
-        "poly1305_absorb_bulk requires a whole number of four-block groups"
-    );
-
-    // SIMD kernels are compiled out under Kani: CBMC has no model for the
-    // intrinsics and would treat them as unconstrained, making the proofs
-    // vacuous.  The scalar loop below is the reference the kernels are tested
-    // against.
-    #[cfg(all(target_arch = "x86_64", not(kani)))]
-    {
-        if x86_simd::has_avx2() {
-            // SAFETY: AVX2 was confirmed available at runtime.
-            unsafe { x86_simd::poly1305_absorb_bulk(h, data, p) };
-            return;
-        }
-    }
-    #[cfg(all(target_arch = "aarch64", not(kani)))]
-    {
-        // SAFETY: NEON is part of the ARMv8-A baseline.
-        unsafe { aarch64_simd::poly1305_absorb_bulk(h, data, p) };
-        return;
-    }
-    #[allow(unreachable_code)]
-    for g in 0..data.len() / (4 * 16) {
-        let group = &data[g * 64..g * 64 + 64];
-        let mut m = [[0u8; 16]; 4];
-        for (k, blk) in m.iter_mut().enumerate() {
-            blk.copy_from_slice(&group[k * 16..k * 16 + 16]);
-        }
-        let acc = poly1305_accumulate4_scalar(h, &m, &p.r);
-        poly1305_reduce_wide(h, &acc);
-    }
-}
-
-/// Dispatch to the widest available 4-block Poly1305 kernel (single group).
-///
-/// `s` (the pre-scaled `5·r` limbs) is only consumed by the SIMD kernels; the
-/// scalar fallback derives them from `r` itself.  On a target with neither
-/// backend it is therefore unused, which is expected rather than a mistake, so
-/// the allowance is scoped to exactly that configuration instead of applying
-/// blanket-wide.
-#[cfg(test)]
-#[cfg_attr(
-    not(any(target_arch = "x86_64", target_arch = "aarch64")),
-    allow(unused_variables)
-)]
-fn poly1305_accumulate4(
-    h: &[u32; 5],
-    m: &[[u8; 16]; 4],
-    r: &[[u32; 5]; 4],
-    s: &[[u32; 5]; 4],
-) -> [u64; 5] {
-    #[cfg(target_arch = "x86_64")]
-    {
-        if x86_simd::has_avx2() {
-            // SAFETY: AVX2 was confirmed available at runtime.
-            return unsafe { x86_simd::poly1305_accumulate4(h, m, r, s) };
-        }
-    }
-    #[cfg(target_arch = "aarch64")]
-    {
-        // SAFETY: NEON is part of the ARMv8-A baseline.
-        return unsafe { aarch64_simd::poly1305_accumulate4(h, m, r, s) };
-    }
-    #[allow(unreachable_code)]
-    poly1305_accumulate4_scalar(h, m, r)
-}
-
-struct Poly1305State {
-    h: [u32; 5],
-    r: [u64; 5],
-    s: [u64; 4],
-}
-
-impl Poly1305State {
-    fn new(key: &[u8; 32]) -> Self {
-        // Parse Poly1305 key: first 16 bytes → r (clamped), next 16 bytes → s
-        let t0 = u32::from_le_bytes([key[0], key[1], key[2], key[3]]);
-        let t1 = u32::from_le_bytes([key[4], key[5], key[6], key[7]]);
-        let t2 = u32::from_le_bytes([key[8], key[9], key[10], key[11]]);
-        let t3 = u32::from_le_bytes([key[12], key[13], key[14], key[15]]);
-
-        let r0 = (t0 & 0x3ffffff) as u64;
-        let r1 = (((t0 >> 26) | (t1 << 6)) & 0x3ffff03) as u64;
-        let r2 = (((t1 >> 20) | (t2 << 12)) & 0x3ffc0ff) as u64;
-        let r3 = (((t2 >> 14) | (t3 << 18)) & 0x3f03fff) as u64;
-        let r4 = ((t3 >> 8) & 0x00fffff) as u64;
-
-        let s1 = r1 * 5;
-        let s2 = r2 * 5;
-        let s3 = r3 * 5;
-        let s4 = r4 * 5;
-
-        Self {
-            h: [0u32; 5],
-            r: [r0, r1, r2, r3, r4],
-            s: [s1, s2, s3, s4],
-        }
-    }
-
-    /// Absorb a byte slice, zero-padding it to a 16-byte boundary
-    /// (RFC 8439 pad16: append 0x00 bytes to reach a multiple of 16).
-    fn absorb_padded(&mut self, data: &[u8]) {
-        let mut i = 0;
-        let n = data.len();
-
-        // Four blocks at a time via the batched polynomial, so the SIMD kernels
-        // get independent multiplications to run in parallel lanes.  The powers
-        // of `r` are derived once for the whole run.
-        let bulk = n - (n % (4 * POLY1305_BLOCK_SIZE));
-        if bulk > 0 {
-            // `[u32; 5]` copy of the clamped `r`.  `self.r` is wiped in
-            // `finalize`, but that does not wipe *this* stack copy, and `r` is
-            // the Poly1305 MAC key.  `Poly1305Powers` wipes its own derived
-            // powers on drop; this covers the input they were derived from.
-            let mut r = [
-                self.r[0] as u32,
-                self.r[1] as u32,
-                self.r[2] as u32,
-                self.r[3] as u32,
-                self.r[4] as u32,
-            ];
-            let powers = Poly1305Powers::new(&r);
-            poly1305_absorb_bulk(&mut self.h, &data[..bulk], &powers);
-            // `powers` borrows nothing, so it is dead here; wipe `r` after it is
-            // last used.  The drop of `powers` (and its wipe) happens at the end
-            // of this block, which is fine — order between the two is irrelevant.
-            zeroize_array(&mut r);
-            i = bulk;
-        }
-
-        // Process full 16-byte blocks
-        while i + POLY1305_BLOCK_SIZE <= n {
-            let block: [u8; POLY1305_BLOCK_SIZE] =
-                data[i..i + POLY1305_BLOCK_SIZE].try_into().unwrap();
-            self.process_block(&block, true); // hibit=1 for data blocks
-            i += POLY1305_BLOCK_SIZE;
-        }
-
-        // Process remaining bytes as a partial block, padded with zeros
-        let rem = n - i;
-        if rem > 0 {
-            let mut block = [0u8; POLY1305_BLOCK_SIZE];
-            block[..rem].copy_from_slice(&data[i..n]);
-            // Pad remainder with zeros (0x00) — pad16 per RFC 8439
-            // block[rem..16] is already zero
-            self.process_block(&block, true); // hibit=1 for data blocks
-        }
-    }
-
-    /// Process a single 16-byte block.
-    ///
-    /// `hibit` controls whether bit 24 of the 5th number is set (the `2^128`
-    /// term of RFC 8439 §2.8.1 block decomposition).
-    ///
-    /// Every call site in this crate passes `true`, **including the length
-    /// block**: this construction's MAC input is `aad || pad16(aad) ||
-    /// plaintext || pad16(plaintext) || le64(len_aad) || le64(len_pt)`, and
-    /// every component is zero-padded to a 16-byte multiple, so the whole input
-    /// is a multiple of 16 and every block — length block included — is a full
-    /// block receiving `hibit`.  The parameter is kept because
-    /// `Poly1305State::process_block` is also the reference the Kani harness
-    /// `poly1305_hibit_adds_2_128` compares against.
-    ///
-    /// Regression guard: passing `false` for the length block was the bug that
-    /// made every KAT fail — it changes the tag for every message, so a
-    /// self-consistent encrypt/decrypt pair cannot detect it.
-    fn process_block(&mut self, block: &[u8; 16], hibit: bool) {
-        // RFC 8439 §2.8.1 block decomposition — matches reference implementation exactly.
-        // Each 26-bit number straddles byte boundaries; overlapping reads must be
-        // constructed bit-by-bit, NOT via u32::from_le_bytes(...) >> N.
-        let b0 = u32::from_le_bytes([block[0], block[1], block[2], block[3]]) & 0x3ffffff;
-
-        let mut b1: u32 = 0;
-        b1 |= (block[3] as u32) >> 2;
-        b1 |= (block[4] as u32) << 6;
-        b1 |= (block[5] as u32) << 14;
-        b1 |= (block[6] as u32) << 22;
-        b1 &= 0x3ffffff;
-
-        let mut b2: u32 = 0;
-        b2 |= (block[6] as u32) >> 4;
-        b2 |= (block[7] as u32) << 4;
-        b2 |= (block[8] as u32) << 12;
-        b2 |= (block[9] as u32) << 20;
-        b2 &= 0x3ffffff;
-
-        let mut b3: u32 = 0;
-        b3 |= (block[9] as u32) >> 6;
-        b3 |= (block[10] as u32) << 2;
-        b3 |= (block[11] as u32) << 10;
-        b3 |= (block[12] as u32) << 18;
-        b3 &= 0x3ffffff;
-
-        let mut b4: u32 = 0;
-        b4 |= (block[12] as u32) >> 8;
-        b4 |= block[13] as u32;
-        b4 |= (block[14] as u32) << 8;
-        b4 |= (block[15] as u32) << 16;
-        if hibit {
-            b4 |= 1 << 24;
-        }
-
-        self.h[0] = self.h[0].wrapping_add(b0);
-        self.h[1] = self.h[1].wrapping_add(b1);
-        self.h[2] = self.h[2].wrapping_add(b2);
-        self.h[3] = self.h[3].wrapping_add(b3);
-        self.h[4] = self.h[4].wrapping_add(b4);
-
-        let d0 = (self.h[0] as u64) * self.r[0]
-            + (self.h[1] as u64) * self.s[3]
-            + (self.h[2] as u64) * self.s[2]
-            + (self.h[3] as u64) * self.s[1]
-            + (self.h[4] as u64) * self.s[0];
-        let d1 = (self.h[0] as u64) * self.r[1]
-            + (self.h[1] as u64) * self.r[0]
-            + (self.h[2] as u64) * self.s[3]
-            + (self.h[3] as u64) * self.s[2]
-            + (self.h[4] as u64) * self.s[1];
-        let d2 = (self.h[0] as u64) * self.r[2]
-            + (self.h[1] as u64) * self.r[1]
-            + (self.h[2] as u64) * self.r[0]
-            + (self.h[3] as u64) * self.s[3]
-            + (self.h[4] as u64) * self.s[2];
-        let d3 = (self.h[0] as u64) * self.r[3]
-            + (self.h[1] as u64) * self.r[2]
-            + (self.h[2] as u64) * self.r[1]
-            + (self.h[3] as u64) * self.r[0]
-            + (self.h[4] as u64) * self.s[3];
-        let d4 = (self.h[0] as u64) * self.r[4]
-            + (self.h[1] as u64) * self.r[3]
-            + (self.h[2] as u64) * self.r[2]
-            + (self.h[3] as u64) * self.r[1]
-            + (self.h[4] as u64) * self.r[0];
-
-        let mut c: u64 = d0 >> 26;
-        self.h[0] = (d0 as u32) & 0x3ffffff;
-        let d1 = d1.wrapping_add(c);
-        c = d1 >> 26;
-        self.h[1] = (d1 as u32) & 0x3ffffff;
-        let d2 = d2.wrapping_add(c);
-        c = d2 >> 26;
-        self.h[2] = (d2 as u32) & 0x3ffffff;
-        let d3 = d3.wrapping_add(c);
-        c = d3 >> 26;
-        self.h[3] = (d3 as u32) & 0x3ffffff;
-        let d4 = d4.wrapping_add(c);
-        c = d4 >> 26;
-        self.h[4] = (d4 as u32) & 0x3ffffff;
-        self.h[0] = self.h[0].wrapping_add((c as u32) * 5);
-        c = (self.h[0] >> 26) as u64;
-        self.h[0] &= 0x3ffffff;
-        self.h[1] = self.h[1].wrapping_add(c as u32);
-    }
-
-    /// Finalize: reduction modulo 2^130-5, then add Poly1305 pad.
-    fn finalize(mut self, key: &[u8; 32]) -> [u8; 16] {
-        // Reduction modulo 2^130-5
-        let mut g = [0u32; 5];
-        g[0] = self.h[0].wrapping_add(5);
-        let mut c = g[0] >> 26;
-        g[0] &= 0x3ffffff;
-        g[1] = self.h[1].wrapping_add(c);
-        c = g[1] >> 26;
-        g[1] &= 0x3ffffff;
-        g[2] = self.h[2].wrapping_add(c);
-        c = g[2] >> 26;
-        g[2] &= 0x3ffffff;
-        g[3] = self.h[3].wrapping_add(c);
-        c = g[3] >> 26;
-        g[3] &= 0x3ffffff;
-        g[4] = self.h[4].wrapping_add(c).wrapping_sub(1u32 << 26);
-        let mask = (g[4] >> 31).wrapping_sub(1);
-        g[0] &= mask;
-        g[1] &= mask;
-        g[2] &= mask;
-        g[3] &= mask;
-        g[4] &= mask;
-        let nmask = !mask;
-        self.h[0] = (self.h[0] & nmask) | g[0];
-        self.h[1] = (self.h[1] & nmask) | g[1];
-        self.h[2] = (self.h[2] & nmask) | g[2];
-        self.h[3] = (self.h[3] & nmask) | g[3];
-        self.h[4] = (self.h[4] & nmask) | g[4];
-
-        // Convert to 128-bit value and add Poly1305 pad (key[16..32])
-        //
-        // Must be an *addition*, not a bitwise OR of shifted limbs: limb 1 is
-        // only guaranteed < 2^26 + 21 (see `process_block`), so `h[1] << 26`
-        // can overlap the bit range of `h[2] << 52`.  OR would silently drop
-        // that carry and produce a tag differing from the reference
-        // implementation by 2^52 for roughly 1 in 3.3e7 blocks.
-        //
-        // Both are `mut` so they can be wiped in place below.  A shadowing
-        // rebind (`let mut x = x; zeroize_array(&mut x)`) would wipe a *copy*
-        // and leave the original on the stack — the exact defect documented in
-        // `chacha20_block`.
-        let mut h_val: u128 = (self.h[0] as u128)
-            .wrapping_add((self.h[1] as u128) << 26)
-            .wrapping_add((self.h[2] as u128) << 52)
-            .wrapping_add((self.h[3] as u128) << 78)
-            .wrapping_add((self.h[4] as u128) << 104);
-
-        let mut s_val = u128::from_le_bytes(key[16..32].try_into().unwrap());
-
-        // Compute the tag first, then wipe every value it was derived from.
-        let tag = h_val.wrapping_add(s_val).to_le_bytes();
-
-        // 【侧信道防护】就地清零全部密钥派生中间值。
-        //
-        // `self.h` is the reduced accumulator, `self.r` the clamped MAC key,
-        // `self.s` its 5x multiples, and `g` the conditional-subtraction scratch
-        // (a copy of `h`).  `s_val` is the Poly1305 pad — raw key material — and
-        // `h_val` the recombined accumulator.
-        //
-        // Note the earlier form of this code (`let mut h = self.h;
-        // zeroize_array(&mut h); self.h = h;`) wiped `h` only by round-tripping
-        // it through a copy, and left the locals `h_val`, `s_val` and `g`
-        // unwiped entirely.  Wiping the fields in place is both simpler and
-        // correct; the locals are wiped above.
-        zeroize_array(&mut self.h);
-        zeroize_array(&mut self.r);
-        zeroize_array(&mut self.s);
-        zeroize_array(&mut g);
-        zeroize_array(&mut h_val);
-        zeroize_array(&mut s_val);
-
-        tag[..16].try_into().unwrap()
-    }
-}
-
 // ── Tests ─────────────────────────────────────────────────────────────
 
 #[cfg(kani)]
@@ -2682,132 +1563,6 @@ mod tests {
     }
 
     // ── KAT Test Vectors (c2sp.org ChaCha20-Poly1305-SIV, 16-byte nonce) ──
-
-    #[test]
-    fn test_vector_1_empty() {
-        // Test Vector 1: empty plaintext, empty AAD
-        let key = hex("1a1ea9537ef6e0587ac4d36d4c73e07b1526e18bf5bb008f63e4a49b2178a8d2");
-        let nonce = hex("530ee5e3dae7693017d28e5d7c6936ce");
-        let aad: Vec<u8> = vec![];
-        let plaintext: Vec<u8> = vec![];
-        let expected_ct: Vec<u8> = vec![];
-        let expected_tag = hex("85ebd6b3a2dbad07d4811283aaf9777acff58bdab40939a13237be73d3ddd73a");
-
-        let key_arr: [u8; 32] = key.try_into().unwrap();
-        let nonce_arr: [u8; 16] = nonce.try_into().unwrap();
-
-        let (ct, tag) = encrypt16(&key_arr, &nonce_arr, &aad, &plaintext).unwrap();
-        assert_eq!(tag.as_slice(), expected_tag.as_slice());
-        assert_eq!(ct, expected_ct);
-
-        let pt = decrypt16(&key_arr, &nonce_arr, &aad, &ct, &tag).unwrap();
-        assert_eq!(pt, plaintext);
-    }
-
-    #[test]
-    fn test_vector_2() {
-        // Test Vector 2: Ladue and Gentlemen passage
-        let key = hex("1a1ea9537ef6e0587ac4d36d4c73e07b1526e18bf5bb008f63e4a49b2178a8d2");
-        let nonce = hex("530ee5e3dae7693017d28e5d7c6936ce");
-        let aad: Vec<u8> = vec![];
-        let plaintext = hex("4c616469657320616e642047656e746c656d656e206f662074686520636c617373206f66202739393a204966204920636f756c64206f6666657220796f75206f6e6c79206f6e652074697020666f7220746865206675747572652c2073756e73637265656e20776f756c642062652069742e");
-        let expected_ct = hex("935fc3675f8b409d4441409418d92f7d7f52af0a00adc07176c998dbdfaa4d06524ea0769635e044a6aaf00327096437613bec8c76eea651dcaccc2fc66087bda224f38ab220208a9471a3e9eec612c2553d8179f1bd1bf7e884fa25336e5f19ef46bb3581245603969b1b11293ad5611608");
-        let expected_tag = hex("cb0ff82acbd025c9db100311c6628f41ad9ba81a960b8ccd7fdb19c51252e902");
-
-        let key_arr: [u8; 32] = key.try_into().unwrap();
-        let nonce_arr: [u8; 16] = nonce.try_into().unwrap();
-
-        let (ct, tag) = encrypt16(&key_arr, &nonce_arr, &aad, &plaintext).unwrap();
-        assert_eq!(tag.as_slice(), expected_tag.as_slice());
-        assert_eq!(ct, expected_ct);
-
-        let pt = decrypt16(&key_arr, &nonce_arr, &aad, &ct, &tag).unwrap();
-        assert_eq!(pt, plaintext);
-    }
-
-    #[test]
-    fn test_vector_3() {
-        // Test Vector 3: different nonce
-        let key = hex("1a1ea9537ef6e0587ac4d36d4c73e07b1526e18bf5bb008f63e4a49b2178a8d2");
-        let nonce = hex("85975d0ee263b966a551adab8325ebe3");
-        let aad: Vec<u8> = vec![];
-        let plaintext = hex("4c616469657320616e642047656e746c656d656e206f662074686520636c617373206f66202739393a204966204920636f756c64206f6666657220796f75206f6e6c79206f6e652074697020666f7220746865206675747572652c2073756e73637265656e20776f756c642062652069742e");
-        let expected_ct = hex("00abda8eb9d81e4bbfec468c33175102ca865a9e10bd1af861a205a996c9818993bd0f5957a0a163a1585bf469ca154802b300c78dd873c9a67111d7eeb3b9d3ee7e7ad37db8375ba30031afaaab163057418225f403b4cbdd0cd3dc4024b984462802ec7fb87bd91ff548a13db805695fa9");
-        let expected_tag = hex("4417acff4230861c1ee555cc839fe8b9ccb122fda85b3970d677dc71e8515276");
-
-        let key_arr: [u8; 32] = key.try_into().unwrap();
-        let nonce_arr: [u8; 16] = nonce.try_into().unwrap();
-
-        let (ct, tag) = encrypt16(&key_arr, &nonce_arr, &aad, &plaintext).unwrap();
-        assert_eq!(tag.as_slice(), expected_tag.as_slice());
-        assert_eq!(ct, expected_ct);
-
-        let pt = decrypt16(&key_arr, &nonce_arr, &aad, &ct, &tag).unwrap();
-        assert_eq!(pt, plaintext);
-    }
-
-    #[test]
-    fn test_vector_4() {
-        // Test Vector 4: different key
-        let key = hex("3ef4832df6f83cd761539792c7c34b90fde64ca02d31151fdf924bf2206e37cb");
-        let nonce = hex("530ee5e3dae7693017d28e5d7c6936ce");
-        let aad: Vec<u8> = vec![];
-        let plaintext = hex("4c616469657320616e642047656e746c656d656e206f662074686520636c617373206f66202739393a204966204920636f756c64206f6666657220796f75206f6e6c79206f6e652074697020666f7220746865206675747572652c2073756e73637265656e20776f756c642062652069742e");
-        let expected_ct = hex("b00fea62ad4a7d06b99ce816e2800bb51ac0a7ad39a216a1131eb23efd2771f824df9ea5773d68d26a83e04a00e81587cf68353157e5b1abd2a99d9d8c50557ae3c6dfcbad6ad1ccee167c24cb049cf11221ffe1f63231efedf89c3e31c549df66281722670ad82a5014b7fa3869f91a9ccc");
-        let expected_tag = hex("1d54d3476529356000f20919ac9de59d8ed4f39a62225bc689822916b748cab0");
-
-        let key_arr: [u8; 32] = key.try_into().unwrap();
-        let nonce_arr: [u8; 16] = nonce.try_into().unwrap();
-
-        let (ct, tag) = encrypt16(&key_arr, &nonce_arr, &aad, &plaintext).unwrap();
-        assert_eq!(tag.as_slice(), expected_tag.as_slice());
-        assert_eq!(ct, expected_ct);
-
-        let pt = decrypt16(&key_arr, &nonce_arr, &aad, &ct, &tag).unwrap();
-        assert_eq!(pt, plaintext);
-    }
-
-    #[test]
-    fn test_vector_5_with_aad() {
-        // Test Vector 5: with AAD
-        let key = hex("1a1ea9537ef6e0587ac4d36d4c73e07b1526e18bf5bb008f63e4a49b2178a8d2");
-        let nonce = hex("530ee5e3dae7693017d28e5d7c6936ce");
-        let aad = hex("50515253c0c1c2c3c4c5c6c7");
-        let plaintext = hex("4c616469657320616e642047656e746c656d656e206f662074686520636c617373206f66202739393a204966204920636f756c64206f6666657220796f75206f6e6c79206f6e652074697020666f7220746865206675747572652c2073756e73637265656e20776f756c642062652069742e");
-        let expected_ct = hex("65047ab0ada975747e1a1737abd6cb0aeb126b8e8f974c6dc0a45e091a4992ad1190080ab2acc2a5a62c9fff72466f7e054d2b4e9474f01d5b200cc6788e0e30351842fc058faee14fe97fe7cee8d0c84e64fa1b55c19e658468d6035376616182d6d09e3066e9318134e4e2bfadfd381256");
-        let expected_tag = hex("e85b5e838e89c84d2f544f40cd65bcccfe6f4438ed6325a06d301881ec2e90d2");
-
-        let key_arr: [u8; 32] = key.try_into().unwrap();
-        let nonce_arr: [u8; 16] = nonce.try_into().unwrap();
-
-        let (ct, tag) = encrypt16(&key_arr, &nonce_arr, &aad, &plaintext).unwrap();
-        assert_eq!(tag.as_slice(), expected_tag.as_slice());
-        assert_eq!(ct, expected_ct);
-
-        let pt = decrypt16(&key_arr, &nonce_arr, &aad, &ct, &tag).unwrap();
-        assert_eq!(pt, plaintext);
-    }
-
-    #[test]
-    fn test_vector_6_short() {
-        // Test Vector 6: short plaintext
-        let key = hex("1a1ea9537ef6e0587ac4d36d4c73e07b1526e18bf5bb008f63e4a49b2178a8d2");
-        let nonce = hex("530ee5e3dae7693017d28e5d7c6936ce");
-        let aad = hex("2891ec111a27c55b3a6757ff173ef9cfc02bb682bcee4aaa317715b0b7895a58");
-        let plaintext = hex("aeadc48d4a2ea7ee06f9f41a6fbcd651ac5df158860e14af1fb0ebbe0a04bab2");
-        let expected_ct = hex("10287f0d994ca8b920dcede7ce86a29a055ac8e1c0ca14fe651bb363a2af7e03");
-        let expected_tag = hex("9283515c1a67bf9234494025356684abae8325ad5a2f7ce275ac7fa49d88d735");
-
-        let key_arr: [u8; 32] = key.try_into().unwrap();
-        let nonce_arr: [u8; 16] = nonce.try_into().unwrap();
-
-        let (ct, tag) = encrypt16(&key_arr, &nonce_arr, &aad, &plaintext).unwrap();
-        assert_eq!(tag.as_slice(), expected_tag.as_slice());
-        assert_eq!(ct, expected_ct);
-
-        let pt = decrypt16(&key_arr, &nonce_arr, &aad, &ct, &tag).unwrap();
-        assert_eq!(pt, plaintext);
-    }
 
     // ── XChaCha20 KAT (draft-irtf-cfrg-xchacha-03, 24-byte nonce) ──
     // These pin the HChaCha20 nonce-suffix layout: the 4 NUL bytes come FIRST,
@@ -2851,7 +1606,7 @@ mod tests {
         assert_eq!(&buf[0..32], expected.as_slice());
     }
 
-    // ── XChaCha20-Poly1305-SIV KAT (24-byte nonce public API) ──
+    // ── XChaCha20-BLAKE3-SIV KAT (24-byte nonce public API) ──
     //
     // These lock the *fusion* construction: XChaCha20-style subkey derivation
     // (HChaCha20 + SUBKEY_DOMAIN || nonce[16..24]) feeding the c2sp.org CCP-SIV
@@ -2868,7 +1623,7 @@ mod tests {
     // this code.
 
     #[test]
-    fn test_xchacha20_poly1305_siv_kat_draft_key() {
+    fn test_xchacha20_blake3_siv_kat_draft_key() {
         let key: [u8; 32] = hex("808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f")
             .try_into()
             .unwrap();
@@ -2880,9 +1635,11 @@ mod tests {
             "4c616469657320616e642047656e746c656d656e206f662074686520636c617373206f66202739393a204966204920636f756c64206f6666657220796f75206f6e6c79206f6e652074697020666f7220746865206675747572652c2073756e73637265656e20776f756c642062652069742e",
         );
         let expected_ct = hex(
-            "dfa76facb54a5a3cc8f8a057e3f36a5f58959d61839d89e8a0d19b9a5a04a94473ed6695de07f533eabd19f30802394cfdb2b530b15d14d0a84371729bc49c05646711d2b9195c74e98fedc117a0c9f8a180625405f4723e533816421ada64e21f1853cacfb6046ec6a9314ca2aab38d29ee",
+            "39d8c2bc507e147e719d79975b5cf999f0313790d98f7b523f3f4d738116822b3b582ecf7b448d43b3074761cf5c6c2af92faabaf04c779c5f5fe8aa3d3b2a6588137488b453d3728452341483725c9ba1b5ee36d2cf9c743da4df8c4f6023852db6a85e82fcf58636d38768d88c881d56e5",
         );
-        let expected_tag = hex("ad52200aa3c45f46df1feff1476d7ca86441ae714a65587522db132b8aaef846");
+        let expected_tag = hex(
+            "6f463e1fb35a5c7727a73bc194a826a4607a7a885b6bdc4622a8a118e673f786800e0fbff12d3d6db861042eb88bda44ca69a9f222417ecea36525ebb9390bb2b6",
+        );
 
         let (ct, tag) = encrypt(&key, &nonce, &aad, &pt).unwrap();
         assert_eq!(ct, expected_ct);
@@ -2893,7 +1650,7 @@ mod tests {
     }
 
     #[test]
-    fn test_xchacha20_poly1305_siv_kat_c2sp_key() {
+    fn test_xchacha20_blake3_siv_kat_c2sp_key() {
         // c2sp.org key with a 24-byte nonce; exercises the empty-AAD path
         // (where the commitment term is BLAKE3("") rather than zero).
         let key: [u8; 32] = hex("1a1ea9537ef6e0587ac4d36d4c73e07b1526e18bf5bb008f63e4a49b2178a8d2")
@@ -2906,9 +1663,11 @@ mod tests {
             "4c616469657320616e642047656e746c656d656e206f662074686520636c617373206f66202739393a204966204920636f756c64206f6666657220796f75206f6e6c79206f6e652074697020666f7220746865206675747572652c2073756e73637265656e20776f756c642062652069742e",
         );
         let expected_ct = hex(
-            "f77735b432f46c7a47a96ac8c656548e188a08f56e466155e041dab0cdda4a44c68a62a81f0b9aa797e1102f1805b0226edc234a9f966015b26bd415e01fecdbe7ac2eb349d07ba4e64668be4beac7be0656c25411f3d8eda63e516fb62dded19a93c1ac6c9a7fbe640628a37343a46d13d5",
+            "cadc4425420cd2885a524aef50b5079dba67d38c37ca8aff461817e4de4470f1f228627f5e88733843d2658049ffb8b91b656cd7950ace606515e41fc60d7a943940d4798f053f97744d0146129e51a128e2f1fec012104f6ffb6dabcacb646f63d0c644a736a0984f991ad5ac3dae002288",
         );
-        let expected_tag = hex("b59ebd0b456b3ab9a8d920e0bf2a1544232bef202b29ad049e5a96c5138be941");
+        let expected_tag = hex(
+            "19a364fdd465b99a1d30ff89bd55099e2c8fb25b4e8dbdae87347e72ffc86eb3a28eb065c6ff101bc4218cd141a931ebceec3807b271e4466bc85ed5b35d1eec4a",
+        );
 
         let (ct, tag) = encrypt(&key, &nonce, &[], &pt).unwrap();
         assert_eq!(ct, expected_ct);
@@ -2919,7 +1678,7 @@ mod tests {
     }
 
     #[test]
-    fn test_xchacha20_poly1305_siv_kat_empty() {
+    fn test_xchacha20_blake3_siv_kat_empty() {
         // Empty plaintext + empty AAD: the tag alone authenticates.
         let key: [u8; 32] = hex("808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f")
             .try_into()
@@ -2927,115 +1686,13 @@ mod tests {
         let nonce: [u8; 24] = hex("404142434445464748494a4b4c4d4e4f5051525354555657")
             .try_into()
             .unwrap();
-        let expected_tag = hex("e4bbc5a4bad30698dd4e36745b54e23374ba2241eb07f154e263580d89ed9494");
+        let expected_tag = hex(
+            "1db104f0e59673b1426fc2febf34b719273295bc5d04f7accd04a1181aa5495af53f3924cc55cbf08d17d640ad8af582b49fa64eafb82856f927b3ff173f75996e",
+        );
 
         let (ct, tag) = encrypt(&key, &nonce, &[], &[]).unwrap();
         assert!(ct.is_empty());
         assert_eq!(tag.as_slice(), expected_tag.as_slice());
-    }
-
-    /// Context commitment (CMT-3): with `(key, nonce, plaintext)` held fixed,
-    /// changing *only* the associated data must change the tag **and** the
-    /// ciphertext.  The ciphertext matters too: the encryption key and the
-    /// encryption nonce both come from the tag, so if only the tag moved a
-    /// decrypting oracle would still see one ciphertext under two contexts.
-    ///
-    /// Note the direction that is *not* claimed: because encryption consumes
-    /// only `tag[0..28]`, two tags can share a ciphertext (see `derive_tag`).
-    /// The commitment is carried by the tag, which is transmitted and compared
-    /// in full.
-    ///
-    /// This is the property the c2sp.org base construction does not have (its
-    /// own specification says so), and the reason the CTX XOR over
-    /// `BLAKE3.derive_key(COMMITMENT_CONTEXT, aad)` is applied.
-    #[test]
-    fn test_context_commitment_aad_changes_tag_and_ciphertext() {
-        let key = [0x5Au8; 32];
-        let nonce = [0xA5u8; 24];
-        let pt = b"context commitment matters";
-
-        let (ct_a, tag_a) = encrypt(&key, &nonce, b"aad-A", pt).unwrap();
-        let (ct_b, tag_b) = encrypt(&key, &nonce, b"aad-B", pt).unwrap();
-
-        assert_ne!(tag_a, tag_b, "AAD must change the tag (CMT-3)");
-        assert_ne!(ct_a, ct_b, "AAD must change the ciphertext");
-
-        // Both must still round-trip under their own AAD...
-        assert_eq!(decrypt(&key, &nonce, b"aad-A", &ct_a, &tag_a).unwrap(), pt);
-        assert_eq!(decrypt(&key, &nonce, b"aad-B", &ct_b, &tag_b).unwrap(), pt);
-        // ...and neither may verify under the other's AAD.
-        assert!(decrypt(&key, &nonce, b"aad-B", &ct_a, &tag_a).is_err());
-        assert!(decrypt(&key, &nonce, b"aad-A", &ct_b, &tag_b).is_err());
-    }
-
-    /// The commitment must cover the *whole* AAD, including its length and any
-    /// trailing bytes: a truncation or an appended byte has to change the tag.
-    #[test]
-    fn test_context_commitment_covers_whole_aad() {
-        let key = [0x11u8; 32];
-        let nonce = [0x22u8; 24];
-        let pt = b"msg";
-
-        let (_, t_base) = encrypt(&key, &nonce, b"abcd", pt).unwrap();
-
-        // Truncated.
-        let (_, t_short) = encrypt(&key, &nonce, b"abc", pt).unwrap();
-        assert_ne!(t_base, t_short);
-
-        // Appended.
-        let (_, t_long) = encrypt(&key, &nonce, b"abcde", pt).unwrap();
-        assert_ne!(t_base, t_long);
-
-        // Different content, same length.
-        let (_, t_diff) = encrypt(&key, &nonce, b"abce", pt).unwrap();
-        assert_ne!(t_base, t_diff);
-
-        // Same bytes split differently across a longer AAD must not collide
-        // either (length encoding lives inside BLAKE3's padding).
-        let (_, t_pad) = encrypt(&key, &nonce, b"abcd\0", pt).unwrap();
-        assert_ne!(t_base, t_pad);
-    }
-
-    /// Domain separation: for the same (key, nonce), this scheme's one-time
-    /// Poly1305 key MUST differ from XChaCha20-Poly1305's, otherwise reusing a
-    /// nonce across the two schemes would reuse the Poly1305 one-time key and
-    /// break authentication.
-    #[test]
-    fn test_subkey_domain_separation_vs_xchacha20_poly1305() {
-        // draft-irtf-cfrg-xchacha-03 §A.3.1 key/IV.
-        let key: [u8; 32] = hex("808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f")
-            .try_into()
-            .unwrap();
-        let iv: [u8; 24] = hex("404142434445464748494a4b4c4d4e4f5051525354555657")
-            .try_into()
-            .unwrap();
-
-        let subkey = hchacha20(&key, &iv[0..16].try_into().unwrap());
-
-        // XChaCha20-Poly1305 layout: 0^4 || nonce[16..24].
-        let mut x_nonce = [0u8; 12];
-        x_nonce[4..12].copy_from_slice(&iv[16..24]);
-        let mut x_block = [0u8; 64];
-        chacha20_keystream_raw(&subkey, 0, &x_nonce, &mut x_block);
-
-        // This scheme's layout: SUBKEY_DOMAIN || nonce[16..24].
-        let mut s_nonce = [0u8; 12];
-        s_nonce[0..4].copy_from_slice(&SUBKEY_DOMAIN);
-        s_nonce[4..12].copy_from_slice(&iv[16..24]);
-        let mut s_block = [0u8; 64];
-        chacha20_keystream_raw(&subkey, 0, &s_nonce, &mut s_block);
-
-        // The published XChaCha20-Poly1305 Poly1305 key for this input.
-        assert_eq!(
-            &x_block[0..32],
-            hex("7b191f80f361f099094f6f4b8fb97df847cc6873a8f2b190dd73807183f907d5").as_slice(),
-            "XChaCha20-Poly1305 derivation anchor"
-        );
-        assert_ne!(
-            &s_block[0..32],
-            &x_block[0..32],
-            "Poly1305 one-time key must not collide with XChaCha20-Poly1305"
-        );
     }
 
     #[test]
@@ -3215,91 +1872,6 @@ mod tests {
         }
     }
 
-    /// The batched four-block Poly1305 path (SIMD or scalar) must produce the
-    /// exact same tag as the strictly serial single-block reference, for every
-    /// message length that crosses a 64-byte boundary.
-    #[test]
-    fn test_poly1305_batch_matches_serial() {
-        let key = [0x9Au8; 32];
-
-        // Lengths around the 4-block boundary plus longer runs.
-        let mut sizes: Vec<usize> = (0..=200).collect();
-        sizes.extend_from_slice(&[255, 256, 257, 511, 512, 513, 1023, 1024, 4096]);
-
-        for &size in &sizes {
-            let msg: Vec<u8> = (0..size).map(|i| ((i * 7 + 13) % 256) as u8).collect();
-
-            // Batched path (used by the AEAD).
-            let mut batched = Poly1305State::new(&key);
-            batched.absorb_padded(&msg);
-            let got = batched.finalize(&key);
-
-            // Serial reference: one block at a time, never entering the batch.
-            let mut serial = Poly1305State::new(&key);
-            let mut i = 0;
-            while i + POLY1305_BLOCK_SIZE <= size {
-                let block: [u8; POLY1305_BLOCK_SIZE] =
-                    msg[i..i + POLY1305_BLOCK_SIZE].try_into().unwrap();
-                serial.process_block(&block, true);
-                i += POLY1305_BLOCK_SIZE;
-            }
-            if i < size {
-                let mut block = [0u8; POLY1305_BLOCK_SIZE];
-                block[..size - i].copy_from_slice(&msg[i..]);
-                serial.process_block(&block, true);
-            }
-            let want = serial.finalize(&key);
-
-            assert_eq!(got, want, "Poly1305 batch mismatch at size {size}");
-        }
-    }
-
-    /// Explicitly compare the four-block kernels against the scalar batch, so a
-    /// broken SIMD backend cannot hide behind the dispatcher's fallback.
-    #[test]
-    fn test_poly1305_accumulate4_kernels_match_scalar() {
-        for seed in 0..16u8 {
-            let mut key = [0u8; 32];
-            for (i, b) in key.iter_mut().enumerate() {
-                *b = seed.wrapping_mul(37).wrapping_add(i as u8);
-            }
-            let state = Poly1305State::new(&key);
-            let r = [
-                state.r[0] as u32,
-                state.r[1] as u32,
-                state.r[2] as u32,
-                state.r[3] as u32,
-                state.r[4] as u32,
-            ];
-            let powers = Poly1305Powers::new(&r);
-
-            let mut m = [[0u8; 16]; 4];
-            for (k, block) in m.iter_mut().enumerate() {
-                for (i, b) in block.iter_mut().enumerate() {
-                    *b = seed.wrapping_add((k * 16 + i) as u8).wrapping_mul(3);
-                }
-            }
-
-            let h = [
-                0x0123_4567u32 & 0x3fff_ffff,
-                0x00ab_cdef,
-                0x1357,
-                0x2468,
-                0x1,
-            ];
-            let scalar = poly1305_accumulate4_scalar(&h, &m, &powers.r);
-            let dispatched = poly1305_accumulate4(&h, &m, &powers.r, &powers.s);
-            assert_eq!(scalar, dispatched, "kernel mismatch at seed {seed}");
-
-            // And the full reduction must agree too.
-            let mut hb = h;
-            let mut hs = h;
-            poly1305_reduce_wide(&mut hs, &scalar);
-            poly1305_batch4(&mut hb, &m, &powers);
-            assert_eq!(hs, hb, "reduced mismatch at seed {seed}");
-        }
-    }
-
     // ── Property-based tests (XChaCha20, 24-byte nonce) ──
     /// Zeroization must clear *every* byte, including the leading bytes of a
     /// buffer that is not `usize`-aligned.
@@ -3347,48 +1919,6 @@ mod tests {
             zeroize_slice(&mut buf);
             assert!(buf.iter().all(|&b| b == 0), "len {len} not fully wiped");
         }
-    }
-
-    /// The final limb→`u128` recombination must be an addition, not a bitwise
-    /// OR of shifted limbs.
-    ///
-    /// Regression guard: limb 1 is only bounded by `< 2^26 + 21` (the tail of
-    /// `process_block` is `h[1] += c`), so `h[1] << 26` can overlap `h[2] << 52`.
-    /// With OR the carry was silently dropped and the tag came out 2^52 too
-    /// small — a reachable divergence roughly every 3.3e7 blocks, and one that
-    /// self-consistent encrypt/decrypt could never detect.
-    #[test]
-    fn test_finalize_recombination_is_exact() {
-        // The concrete diverging state found by fuzzing: h[1] = 2^26 + 8.
-        let st = Poly1305State {
-            h: [937497, 67108872, 7261385, 43907646, 43426469],
-            r: [0; 5],
-            s: [0; 4],
-        };
-        assert!(st.h[1] >= (1 << 26), "precondition: limb 1 exceeds 2^26");
-
-        let h_val: u128 = (st.h[0] as u128)
-            .wrapping_add((st.h[1] as u128) << 26)
-            .wrapping_add((st.h[2] as u128) << 52)
-            .wrapping_add((st.h[3] as u128) << 78)
-            .wrapping_add((st.h[4] as u128) << 104);
-
-        // Ground truth: the limb sum reduced mod 2^128 (the tag takes the low
-        // 16 bytes, so anything at or above 2^128 is discarded).
-        let expect: u128 = (st.h[0] as u128)
-            .wrapping_add((st.h[1] as u128).wrapping_mul(1u128 << 26))
-            .wrapping_add((st.h[2] as u128).wrapping_mul(1u128 << 52))
-            .wrapping_add((st.h[3] as u128).wrapping_mul(1u128 << 78))
-            .wrapping_add((st.h[4] as u128).wrapping_mul(1u128 << 104));
-        assert_eq!(h_val, expect);
-
-        // And the OR form really does differ on this input.
-        let or_val: u128 = (st.h[0] as u128)
-            | ((st.h[1] as u128) << 26)
-            | ((st.h[2] as u128) << 52)
-            | ((st.h[3] as u128) << 78)
-            | ((st.h[4] as u128) << 104);
-        assert_ne!(or_val, expect, "this state must exercise the carry");
     }
 
     #[test]
@@ -3511,7 +2041,10 @@ mod tests {
         let nonce = [0u8; 24];
         let (_, tag) = encrypt(&key, &nonce, b"", b"").unwrap();
         assert_eq!(tag.len(), TAG_LEN);
-        assert_eq!(TAG_LEN, 32); // 256-bit tag
+        // 65 bytes = 520 bits. Sized so commitment exceeds 2^256: the birthday
+        // bound caps commitment at 2^(n/2) bits for an n-bit tag, and 64 bytes
+        // would give exactly 2^256 rather than more.
+        assert_eq!(TAG_LEN, 65);
     }
 
     #[test]
@@ -3570,28 +2103,10 @@ mod tests {
     }
 
     #[test]
-    fn test_decrypt16_does_not_leak_plaintext_on_failure() {
-        // Same guarantee as the 24-byte path: a failed authentication MUST
-        // return Err, never the (unverified) plaintext.
-        let key = [0x42u8; 32];
-        let nonce = [0u8; 16];
-        let plaintext = b"Secret message";
-        let wrong_key = [0x43u8; 32];
-
-        let (ct, tag) = encrypt16(&key, &nonce, b"", plaintext).unwrap();
-        assert!(decrypt16(&wrong_key, &nonce, b"", &ct, &tag).is_err());
-
-        // Tampered ciphertext must also fail.
-        let mut bad_ct = ct.clone();
-        bad_ct[0] ^= 0xFF;
-        assert!(decrypt16(&key, &nonce, b"", &bad_ct, &tag).is_err());
-    }
-
-    #[test]
     fn test_api_constants() {
         assert_eq!(NONCE_LEN, 24);
         assert_eq!(KEY_LEN, 32);
-        assert_eq!(TAG_LEN, 32);
+        assert_eq!(TAG_LEN, 65);
     }
 
     // ── Detached API ──
@@ -3842,199 +2357,6 @@ mod tests {
 
     // ── CTX commitment: mode and layout pins ──
 
-    /// The commitment term must be `BLAKE3.derive_key(COMMITMENT_CONTEXT, aad)`
-    /// and **not** a bare `BLAKE3(aad)`, and the context string must not change
-    /// silently.
-    ///
-    /// Both are 32-byte collision-resistant hashes, so swapping one for the
-    /// other keeps every roundtrip test passing while changing every tag ever
-    /// produced — a wire-format break that only an anchored vector can catch.
-    /// The expected value here was produced by `tools/ref_impl.py`.
-    #[test]
-    fn test_commitment_is_domain_separated_blake3() {
-        let aad = b"aad-A";
-        let got = context_commitment(aad);
-
-        let expected: [u8; 32] =
-            hex("c5718123028533d1b0221c94479cbed4b6fffb8a969e4a5c55d0744ff5c0c851")
-                .try_into()
-                .unwrap();
-        assert_eq!(got, expected, "commitment term changed");
-
-        // The bare hash of the same AAD must differ: if it did not, the
-        // derive_key domain separation is not in effect.
-        let bare = *blake3::hash(aad).as_bytes();
-        assert_ne!(got, bare, "commitment must not equal a bare BLAKE3(aad)");
-
-        // BLAKE3's published empty-input hash, to pin the bare-hash path too.
-        assert_eq!(
-            *blake3::hash(b"").as_bytes(),
-            <[u8; 32]>::try_from(
-                hex("af1349b9f5f9a1a6a0404dea36dcc9499bcb25c9adc112b7cc9a93cae41f3262").as_slice()
-            )
-            .unwrap(),
-            "blake3::hash anchor changed"
-        );
-    }
-
-    /// Pins the layout fact that makes the CMT-3 argument run through the tag
-    /// rather than the ciphertext: encryption consumes `tag[0..16]` (as
-    /// `enc_key` material) and `tag[16..28]` (as the encryption nonce), so
-    /// `tag[28..32]` does not influence the ciphertext.
-    ///
-    /// This is *not* a vulnerability — the tag is transmitted and compared in
-    /// full, so a forged tag is rejected — but it is the kind of thing a future
-    /// refactor could turn into one by, say, truncating the stored tag to 28
-    /// bytes or comparing only a prefix.  If someone changes the construction so
-    /// that the whole tag reaches the ciphertext, this test fails and the
-    /// documentation in `derive_tag` must be updated with it.
-    #[test]
-    fn test_tag_tail_does_not_reach_the_ciphertext() {
-        let tag_key = [0x33u8; 32];
-
-        let mut t1 = [0u8; TAG_LEN];
-        let mut t2 = [0u8; TAG_LEN];
-        t1[28..32].copy_from_slice(&[1, 2, 3, 4]);
-        t2[28..32].copy_from_slice(&[9, 9, 9, 9]);
-
-        // `enc_key` and the encryption nonce are functions of the tag prefix only.
-        assert_eq!(
-            derive_enc_key(&tag_key, &t1),
-            derive_enc_key(&tag_key, &t2),
-            "enc_key must depend only on tag[0..16]"
-        );
-        let n1: [u8; 12] = t1[16..28].try_into().unwrap();
-        let n2: [u8; 12] = t2[16..28].try_into().unwrap();
-        assert_eq!(n1, n2, "encryption nonce must depend only on tag[16..28]");
-
-        // End to end: two tags differing only in the tail decrypt the SAME
-        // ciphertext to the same plaintext when the tag check is bypassed — i.e.
-        // the ciphertext genuinely does not commit to the tail.  (Both fail
-        // authentication, because the tag is compared in full.)
-        let key = [0x44u8; 32];
-        let nonce = [0x55u8; 24];
-        let aad = b"tail";
-        let pt = b"tail test message";
-        let (ct, tag) = encrypt(&key, &nonce, aad, pt).unwrap();
-
-        let mut tail_flipped = tag;
-        tail_flipped[28] ^= 0xFF;
-        assert_ne!(tail_flipped, tag);
-        assert!(
-            decrypt(&key, &nonce, aad, &ct, &tail_flipped).is_err(),
-            "a tag with a flipped tail must be rejected"
-        );
-
-        // The in-place decryptor must also wipe on that rejection.
-        let mut buf = ct.clone();
-        assert!(decrypt_in_place_detached(&key, &nonce, aad, &mut buf, &tail_flipped).is_err());
-        assert!(
-            buf.iter().all(|&b| b == 0),
-            "buffer must be zeroized when the tag tail is wrong"
-        );
-
-        // And the genuine tag still round-trips.
-        assert_eq!(decrypt(&key, &nonce, aad, &ct, &tag).unwrap(), pt);
-    }
-
-    /// The `COMMITMENT_CONTEXT` string is part of the wire format: changing it
-    /// changes every tag.  Pin its exact value and its length so an edit cannot
-    /// pass unnoticed.
-    #[test]
-    fn test_commitment_context_is_pinned() {
-        assert_eq!(
-            COMMITMENT_CONTEXT,
-            "XChaCha20-Poly1305-SIV context commitment v1"
-        );
-        // BLAKE3's derive_key contexts must be hardcoded and application
-        // specific; the crate's value is deliberately self-describing.
-        assert_eq!(COMMITMENT_CONTEXT.len(), 44);
-    }
-
-    /// Domain separation of the *subkey derivation*: the constant goes in the
-    /// first 4 bytes of the ChaCha20 **nonce** (counter 0), not in the counter.
-    ///
-    /// The two readings produce different Poly1305 keys, so this pins the
-    /// layout the module documentation describes and the KATs encode.
-    #[test]
-    fn test_subkey_domain_occupies_nonce_not_counter() {
-        let key = [0x11u8; 32];
-        let nonce = [0x22u8; 24];
-
-        let (poly_key, _) = derive_subkeys(&key, &nonce);
-        let subkey = hchacha20(&key, &nonce[0..16].try_into().unwrap());
-
-        // The layout the code uses: domain in the nonce, counter 0.
-        let mut n = [0u8; 12];
-        n[0..4].copy_from_slice(&SUBKEY_DOMAIN);
-        n[4..12].copy_from_slice(&nonce[16..24]);
-        let mut buf = [0u8; 64];
-        chacha20_keystream_raw(&subkey, 0, &n, &mut buf);
-        assert_eq!(poly_key.as_slice(), &buf[0..32]);
-
-        // The documented-but-wrong reading (domain in the counter) must differ.
-        let mut n2 = [0u8; 12];
-        n2[4..12].copy_from_slice(&nonce[16..24]);
-        let mut buf2 = [0u8; 64];
-        chacha20_keystream_raw(&subkey, u32::from_le_bytes(SUBKEY_DOMAIN), &n2, &mut buf2);
-        assert_ne!(
-            poly_key.as_slice(),
-            &buf2[0..32],
-            "domain must live in the nonce, not the counter"
-        );
-    }
-
-    /// `poly1305_reduce_wide` guarantees the *residue*, not a canonical limb
-    /// vector: congruent accumulators may reduce to different limbs.  Pinning
-    /// that here stops someone from "simplifying" on the false assumption that
-    /// the representation is canonical.
-    #[test]
-    fn test_reduce_wide_is_residue_not_representation() {
-        // 0 and u64::MAX are both representable accumulators that the function
-        // accepts; they must not be assumed to produce identical limbs.
-        let mut a = [0u32; 5];
-        let mut b = [0u32; 5];
-        poly1305_reduce_wide(&mut a, &[0u64; 5]);
-        poly1305_reduce_wide(&mut b, &[u64::MAX, 0, 0, 0, 0]);
-        assert_ne!(
-            a, b,
-            "reduce_wide is not a canonicaliser; do not rely on it being one"
-        );
-
-        // What it *does* guarantee: the reduced limbs are small (each < 2^26+1).
-        for v in [a, b] {
-            assert!(v.iter().all(|&x| x <= (1 << 26) + 1), "{v:?}");
-        }
-    }
-
-    /// The scalar four-block batch is the *only* Poly1305 batch path on
-    /// non-x86/non-aarch64 targets, and it produces accumulators near 2^58 —
-    /// far above the `< 2^28` an earlier comment claimed.  That matters because
-    /// `poly1305_reduce_wide`'s second fold pass must therefore be load-bearing.
-    #[test]
-    fn test_scalar_batch_accumulators_are_wide() {
-        let key = [0x9Au8; 32];
-        let st = Poly1305State::new(&key);
-        let r = [
-            st.r[0] as u32,
-            st.r[1] as u32,
-            st.r[2] as u32,
-            st.r[3] as u32,
-            st.r[4] as u32,
-        ];
-        let m = [[0xFFu8; 16]; 4];
-        let acc = poly1305_accumulate4_scalar(&[0u32; 5], &m, &[r, r, r, r]);
-        let max = *acc.iter().max().unwrap();
-        assert!(
-            max > (1u64 << 28),
-            "accumulator {max} unexpectedly small; the doc's 2^28 claim would hold"
-        );
-        assert!(
-            max < (1u64 << 62),
-            "accumulator {max} exceeds the documented < 2^62 bound"
-        );
-    }
-
     // ── Randomness (rng feature) ──
 
     /// The OS-backed helpers must return usable values, and two consecutive
@@ -4099,54 +2421,212 @@ mod tests {
     // deliberately no `assert!(true)` placeholder test: one that cannot fail is
     // noise in the test list (and `clippy::assertions_on_constants` flags it).
 
-    /// `poly1305_absorb_bulk` must reject a `data` length that is not a whole
-    /// number of four-block groups, in **every** build profile.
-    ///
-    /// Regression guard: this used to be a `debug_assert!`, so a release build
-    /// would silently skip the trailing bytes and compute a MAC over a shorter
-    /// input than the caller supplied.  That yields a self-consistent but wrong
-    /// tag, which no roundtrip test can detect.  The assertion is now hard, and
-    /// this test pins that.
-    #[test]
-    #[should_panic(expected = "poly1305_absorb_bulk requires")]
-    fn test_absorb_bulk_rejects_partial_group() {
-        let key = [0x11u8; 32];
-        let st = Poly1305State::new(&key);
-        let r = [
-            st.r[0] as u32,
-            st.r[1] as u32,
-            st.r[2] as u32,
-            st.r[3] as u32,
-            st.r[4] as u32,
-        ];
-        let powers = Poly1305Powers::new(&r);
-        let mut h = [0u32; 5];
+    // ── New-construction properties ──
+    //
+    // These replace the deleted Poly1305/CTX tests. Each pins a property the
+    // new construction depends on and that a refactor could silently break.
 
-        // 130 is not a multiple of 64 (4 blocks x 16 bytes).
-        let data = vec![0u8; 130];
-        poly1305_absorb_bulk(&mut h, &data, &powers);
+    /// The key must reach the tag **directly**, not only through the derived
+    /// `mac_key`.
+    ///
+    /// If the tag were `BLAKE3_keyed(mac_key, ...)`, an adversary could look for
+    /// two keys colliding on that 256-bit value — a 2^128 search — and thereby
+    /// bypass the whole point of a 520-bit tag. Feeding `K` into the hash input
+    /// instead binds the tag to the key itself.
+    ///
+    /// A test cannot distinguish the two designs by output equality, so this
+    /// checks the *construction*: `derive_tag` must change when the key does,
+    /// for a fixed `mac_key`. (The complementary property — that the real
+    /// encryption path changes — is covered by every KAT.)
+    #[test]
+    fn test_tag_binds_the_key_directly() {
+        let mac_key = [0x5Au8; 32];
+        let nonce = [0x33u8; NONCE_LEN];
+        let aad = b"aad";
+        let msg = b"msg";
+
+        let k1 = [0x00u8; 32];
+        let mut k2 = [0x00u8; 32];
+        k2[0] = 1;
+
+        let t1 = derive_tag(&mac_key, &k1, &nonce, aad, msg);
+        let t2 = derive_tag(&mac_key, &k2, &nonce, aad, msg);
+        assert_ne!(t1, t2, "tag must depend on the key, not just the mac_key");
+
+        // And the nonce must reach it too.
+        let mut n2 = nonce;
+        n2[23] ^= 1;
+        assert_ne!(t1, derive_tag(&mac_key, &k1, &n2, aad, msg));
     }
 
-    /// The companion case: a whole number of groups must be accepted, so the
-    /// assertion above cannot be passing merely because the function always
-    /// panics.
+    /// The `K || N || len(A) || len(M) || A || M` encoding must be unambiguous.
+    ///
+    /// BLAKE3 is not vulnerable to length extension, but `A || M` on its own is
+    /// ambiguous: `("ab", "c")` and `("a", "bc")` concatenate identically. The
+    /// two `u64` length fields are what prevent that, and this pins them.
     #[test]
-    fn test_absorb_bulk_accepts_whole_groups() {
-        let key = [0x22u8; 32];
-        let st = Poly1305State::new(&key);
-        let r = [
-            st.r[0] as u32,
-            st.r[1] as u32,
-            st.r[2] as u32,
-            st.r[3] as u32,
-            st.r[4] as u32,
-        ];
-        let powers = Poly1305Powers::new(&r);
-        let mut h = [0u32; 5];
+    fn test_aad_message_split_is_unambiguous() {
+        let key = [0x11u8; 32];
+        let nonce = [0x22u8; NONCE_LEN];
 
-        for len in [0usize, 64, 128, 192] {
-            let data = vec![0xABu8; len];
-            poly1305_absorb_bulk(&mut h, &data, &powers);
+        let (ct_a, tag_a) = encrypt(&key, &nonce, b"ab", b"c").unwrap();
+        let (ct_b, tag_b) = encrypt(&key, &nonce, b"a", b"bc").unwrap();
+        assert_ne!(tag_a, tag_b, "A||M must not be ambiguous");
+        // Different tags imply different per-message keys, so the ciphertexts
+        // differ even though the plaintexts are equal in length.
+        assert_ne!(ct_a, ct_b);
+
+        // Trailing zeros must not be strippable either.
+        let (_, tag_c) = encrypt(&key, &nonce, b"ab\0", b"c").unwrap();
+        assert_ne!(tag_a, tag_c);
+        let (_, tag_d) = encrypt(&key, &nonce, b"ab", b"c\0").unwrap();
+        assert_ne!(tag_a, tag_d);
+
+        // Both must still round-trip under their own split.
+        assert_eq!(decrypt(&key, &nonce, b"ab", &ct_a, &tag_a).unwrap(), b"c");
+        assert_eq!(decrypt(&key, &nonce, b"a", &ct_b, &tag_b).unwrap(), b"bc");
+    }
+
+    /// Every one of the 65 tag bytes must influence the ciphertext.
+    ///
+    /// The ciphertext is derived from the tag, and the tag is what carries the
+    /// commitment. The previous construction consumed only `tag[0..28]`, leaving
+    /// `tag[28..32]` unable to affect the ciphertext at all; `derive_enc` now
+    /// takes the whole tag, so all 520 bits are committed to.
+    #[test]
+    fn test_every_tag_byte_reaches_the_ciphertext() {
+        let enc_seed = [0x77u8; 32];
+        let mut base = [0u8; TAG_LEN];
+        for (i, b) in base.iter_mut().enumerate() {
+            *b = i as u8;
+        }
+        let (key0, nonce0) = derive_enc(&enc_seed, &base);
+
+        for pos in 0..TAG_LEN {
+            let mut t = base;
+            t[pos] ^= 0x01;
+            let (k, n) = derive_enc(&enc_seed, &t);
+            assert!(
+                k != key0 || n != nonce0,
+                "tag byte {pos} does not reach the encryption key or nonce"
+            );
+        }
+    }
+
+    /// The keyed-BLAKE3 primitive must match BLAKE3's **official** test vectors.
+    ///
+    /// This is the external anchor for the new MAC. Without it the tag vectors
+    /// would only ever be checked against this crate's own reference
+    /// implementation, which proves nothing about either.
+    ///
+    /// Source: BLAKE3 `test_vectors/test_vectors.json` — the file's own key, and
+    /// inputs following its `paint_test_input` pattern (byte `i` is `i % 251`).
+    #[test]
+    fn test_blake3_keyed_matches_official_vectors() {
+        let key: [u8; 32] = *b"whats the Elvish word for friend";
+        let cases: [(usize, &str); 5] = [
+            (
+                0,
+                "92b2b75604ed3c761f9d6f62392c8a9227ad0ea3f09573e783f1498a4ed60d26",
+            ),
+            (
+                1,
+                "6d7878dfff2f485635d39013278ae14f1454b8c0a3a2d34bc1ab38228a80c95b",
+            ),
+            (
+                1024,
+                "75c46f6f3d9eb4f55ecaaee480db732e6c2105546f1e675003687c31719c7ba4",
+            ),
+            (
+                3072,
+                "044a0e7b172a312dc02a4c9a818c036ffa2776368d7f528268d2e6b5df191770",
+            ),
+            (
+                102400,
+                "1c35d1a5811083fd7119f5d5d1ba027b4d01c0c6c49fb6ff2cf75393ea5db4a7",
+            ),
+        ];
+
+        for (n, want) in cases {
+            let input: Vec<u8> = (0..n).map(|i| (i % 251) as u8).collect();
+            let got = blake3::keyed_hash(&key, &input);
+            assert_eq!(
+                got.to_hex().as_str(),
+                want,
+                "official BLAKE3 keyed vector, len {n}"
+            );
+        }
+
+        // And the XOF path used for the 65-byte tag must agree with the plain
+        // 32-byte digest on the first 32 bytes.
+        let input = b"xof consistency";
+        let mut xof = [0u8; 65];
+        blake3_keyed_xof(&key, input, &mut xof);
+        assert_eq!(&xof[0..32], blake3::keyed_hash(&key, input).as_bytes());
+    }
+
+    /// The domain separators are part of the wire format and must stay pinned,
+    /// fixed width, and distinct from each other.
+    #[test]
+    fn test_domain_separators_are_pinned() {
+        assert_eq!(DOM_TAG, *b"XSIV-TAG");
+        assert_eq!(DOM_ENC, *b"XSIV-ENC");
+        assert_eq!(DOM_TAG.len(), 8);
+        assert_eq!(DOM_ENC.len(), 8);
+        assert_ne!(DOM_TAG, DOM_ENC);
+    }
+
+    /// The subkey domain constant must occupy the first 4 bytes of the ChaCha20
+    /// **nonce** (counter 0), not the counter slot.
+    ///
+    /// The two readings produce different key material, and the KATs encode the
+    /// nonce layout, so this pins the layout the docs describe.
+    #[test]
+    fn test_subkey_domain_occupies_nonce_not_counter() {
+        let key = [0x11u8; 32];
+        let nonce = [0x22u8; NONCE_LEN];
+
+        let (mac_key, _) = derive_material(&key, &nonce);
+        let subkey = hchacha20(&key, &nonce[0..16].try_into().unwrap());
+
+        // The layout the code uses: domain in the nonce, counter 0.
+        let mut n = [0u8; 12];
+        n[0..4].copy_from_slice(&SUBKEY_DOMAIN);
+        n[4..12].copy_from_slice(&nonce[16..24]);
+        let mut buf = [0u8; 64];
+        chacha20_keystream_raw(&subkey, 0, &n, &mut buf);
+        assert_eq!(mac_key.as_slice(), &buf[0..32]);
+
+        // The documented-but-wrong reading (domain in the counter) must differ.
+        let mut n2 = [0u8; 12];
+        n2[4..12].copy_from_slice(&nonce[16..24]);
+        let mut buf2 = [0u8; 64];
+        chacha20_keystream_raw(&subkey, u32::from_le_bytes(SUBKEY_DOMAIN), &n2, &mut buf2);
+        assert_ne!(mac_key.as_slice(), &buf2[0..32]);
+    }
+
+    /// The MAC must cover the **whole** AAD and the **whole** message: flipping
+    /// any bit of either must change the tag.
+    #[test]
+    fn test_tag_covers_every_aad_and_message_byte() {
+        let key = [0x71u8; 32];
+        let nonce = [0x93u8; NONCE_LEN];
+        let aad: Vec<u8> = (0..200u32).map(|i| (i % 256) as u8).collect();
+        let msg: Vec<u8> = (0..300u32).map(|i| (i % 251) as u8).collect();
+
+        let (_, tag0) = encrypt(&key, &nonce, &aad, &msg).unwrap();
+
+        for pos in 0..aad.len() {
+            let mut a = aad.clone();
+            a[pos] ^= 1;
+            let (_, t) = encrypt(&key, &nonce, &a, &msg).unwrap();
+            assert_ne!(t, tag0, "AAD byte {pos} does not reach the tag");
+        }
+        for pos in 0..msg.len() {
+            let mut m = msg.clone();
+            m[pos] ^= 1;
+            let (_, t) = encrypt(&key, &nonce, &aad, &m).unwrap();
+            assert_ne!(t, tag0, "message byte {pos} does not reach the tag");
         }
     }
 }

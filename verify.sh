@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Full verification pipeline for XChaCha20-Poly1305-SIV.
+# Full verification pipeline for XChaCha20-BLAKE3-SIV.
 #
 # Runs, in order of increasing cost:
 #   1. reference-implementation self-checks (python) and fixture freshness
@@ -123,7 +123,7 @@ if [ "$RUN_AARCH64_EXEC" -eq 1 ]; then
   # config cannot silently fall back to executing aarch64 code natively.
   deps="target/aarch64-unknown-linux-musl/release/deps"
   ran=0
-  for bin in "$deps"/xchacha20_poly1305_siv-* "$deps"/differential_reference-*; do
+  for bin in "$deps"/xchacha20_blake3_siv-* "$deps"/differential_reference-*; do
     case "$bin" in *.d|*.rlib|*.rmeta) continue ;; esac
     [ -x "$bin" ] || continue
     echo "--- $(basename "$bin") ---"

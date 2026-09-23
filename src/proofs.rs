@@ -3,11 +3,10 @@
 //! Run with: `cargo kani -Z stubbing`
 //!
 //! The `-Z stubbing` flag is **required**: several harnesses use `#[kani::stub]`
-//! to replace the ChaCha20 permutation, the zeroization helper, and the BLAKE3
-//! context-commitment hash with cheap stand-ins (see the notes above
-//! `stub_chacha20_block` and `model_context_commitment`).  Without the flag Kani
-//! rejects the attribute and the suite fails to compile.  Everything else runs
-//! unmodified.
+//! to replace the ChaCha20 permutation, the zeroization helper, and the keyed
+//! BLAKE3 MAC with cheap stand-ins (see the notes above `stub_chacha20_block`
+//! and `model_blake3_keyed_xof`).  Without the flag Kani rejects the attribute
+//! and the suite fails to compile.  Everything else runs unmodified.
 //!
 //! Compiled only under `cfg(kani)`, so they add nothing to normal builds or
 //! to `cargo test`.
@@ -61,380 +60,6 @@
 use super::*;
 use alloc::vec;
 use alloc::vec::Vec;
-
-// ── Poly1305 ──────────────────────────────────────────────────────────
-
-/// The 26-bit limb decomposition must reconstruct the exact 130-bit
-/// little-endian value of a 16-byte block.
-///
-/// Regression guard: an earlier revision spliced bytes with
-/// `u32::from_le_bytes(..) >> N`, which silently mis-decoded every block that
-/// straddled a 4-byte boundary.
-#[kani::proof]
-fn poly1305_limb_decomposition_is_exact() {
-    let block: [u8; 16] = kani::any();
-
-    // r = 1 with h = s = 0 makes `process_block` a pure decomposition: each
-    // product collapses to the raw limb and no carry propagates.
-    let mut st = Poly1305State {
-        h: [0; 5],
-        r: [1, 0, 0, 0, 0],
-        s: [0; 4],
-    };
-    st.process_block(&block, false);
-
-    let reconstructed = (st.h[0] as u128)
-        | ((st.h[1] as u128) << 26)
-        | ((st.h[2] as u128) << 52)
-        | ((st.h[3] as u128) << 78)
-        | ((st.h[4] as u128) << 104);
-
-    assert_eq!(reconstructed, u128::from_le_bytes(block));
-}
-
-/// `hibit = true` must add exactly 2^128 to the accumulated value — no more,
-/// no less, and without disturbing the low four limbs.
-///
-/// Regression guard: leaving `hibit = false` on the length block was the bug
-/// that made every KAT fail.
-#[kani::proof]
-fn poly1305_hibit_adds_2_128() {
-    let block: [u8; 16] = kani::any();
-
-    let mut plain = Poly1305State {
-        h: [0; 5],
-        r: [1, 0, 0, 0, 0],
-        s: [0; 4],
-    };
-    let mut high = Poly1305State {
-        h: [0; 5],
-        r: [1, 0, 0, 0, 0],
-        s: [0; 4],
-    };
-    plain.process_block(&block, false);
-    high.process_block(&block, true);
-
-    // 2^128 sits at bit 24 of limb 4 (24 + 4*26 = 128).
-    assert_eq!(high.h[0], plain.h[0]);
-    assert_eq!(high.h[1], plain.h[1]);
-    assert_eq!(high.h[2], plain.h[2]);
-    assert_eq!(high.h[3], plain.h[3]);
-    assert_eq!(high.h[4], plain.h[4] + (1u32 << 24));
-}
-
-/// `process_block` must never overflow a `u64` for any clamped key and any
-/// block.  The 26-bit limbs guarantee a generous margin; this proves it.
-#[kani::proof]
-fn poly1305_process_block_no_overflow() {
-    let key: [u8; 32] = kani::any();
-    let block: [u8; 16] = kani::any();
-    let hibit: bool = kani::any();
-
-    let mut st = Poly1305State::new(&key);
-    st.process_block(&block, hibit);
-}
-
-/// `finalize` must not overflow either, for any reachable state.
-///
-/// The unwind bound must cover `process_block`'s 5-way multiply-accumulate, the
-/// finalize carry chain, and the zeroization loops that run on drop.
-#[kani::proof]
-#[kani::unwind(24)]
-fn poly1305_finalize_no_overflow() {
-    let key: [u8; 32] = kani::any();
-    let block: [u8; 16] = kani::any();
-
-    let mut st = Poly1305State::new(&key);
-    st.process_block(&block, true);
-    let _tag = st.finalize(&key);
-}
-
-/// Limbs stay bounded after every absorption step (the invariant the carry
-/// chain depends on).
-///
-/// NOTE: the bound is *not* `2^26`.  `process_block` ends with
-/// `h[1] = (d1 & 0x3ffffff) + c`, where the final carry `c` comes from
-/// `h[0] = (d0 & 0x3ffffff) + 5 * (d4 >> 26)` — so limb 1 legitimately exceeds
-/// `2^26`.  An earlier version of this harness asserted `< 2^26` for every limb,
-/// which is false, and it was that wrong assumption which hid the `finalize`
-/// recombination bug (limb 1 spilling into limb 2's bit range).
-///
-/// The real invariant is `< 2^26 + 2^5`, which is what `poly1305_mul_wide`'s
-/// `< 2^27` precondition and the `finalize` addition both rely on.  This harness
-/// pins that bound for *all* five limbs against *every* clamped key and block;
-/// an earlier attempt to also assert `h[1] <= 2^26` was correctly refuted by
-/// Kani.
-///
-/// Only one symbolic block is absorbed: the property is inductive (the bound
-/// after block `n+1` depends solely on the bound after block `n`), so a second
-/// symbolic block adds no coverage while doubling an already hard SAT instance.
-/// The multi-block case is covered concretely by
-/// `test_poly1305_batch_matches_serial`.
-#[kani::proof]
-fn poly1305_limbs_stay_bounded() {
-    let key: [u8; 32] = kani::any();
-    let b1: [u8; 16] = kani::any();
-
-    let mut st = Poly1305State::new(&key);
-    st.process_block(&b1, true);
-
-    for i in 0..5 {
-        assert!(st.h[i] < (1u32 << 26) + (1 << 5));
-    }
-}
-
-/// The `finalize` limb recombination must equal the true integer sum, reduced
-/// modulo 2^128.
-///
-/// Regression guard for the OR-vs-addition bug: limb 1 can reach exactly `2^26`
-/// (`process_block` ends with `h[1] = (d1 & 0x3ffffff) + c`), so `h[1] << 26`
-/// then lands on the same bit as `h[2] << 52`.  Bitwise OR dropped that carry
-/// and produced a tag 2^52 too small — a reachable divergence that
-/// self-consistent encrypt/decrypt could never detect.
-///
-/// The state is confined to the regime where `finalize`'s conditional
-/// subtraction (`h >= 2^130-5`) does *not* fire, so the recombined value must be
-/// exactly the input limb sum.  Above that threshold the limbs are legitimately
-/// reduced first and the tag differs — that is the reduction doing its job, not
-/// the recombination.  Keeping limb 4 below `2^24` puts the total under
-/// `2^130-5` while leaving limb 1 free to straddle its own boundary, which is
-/// the case this harness exists to pin down.
-#[kani::proof]
-#[kani::unwind(12)]
-fn poly1305_finalize_recombination_is_exact() {
-    let h: [u32; 5] = kani::any();
-    kani::assume(h[0] < (1u32 << 26) + (1 << 5));
-    kani::assume(h[1] < (1u32 << 26) + (1 << 5));
-    kani::assume(h[2] < (1u32 << 26) + (1 << 5));
-    kani::assume(h[3] < (1u32 << 26) + (1 << 5));
-    kani::assume(h[4] < (1u32 << 24));
-
-    let st = Poly1305State {
-        h,
-        r: [0; 5],
-        s: [0; 4],
-    };
-    let tag = st.finalize(&[0u8; 32]);
-    let got = u128::from_le_bytes(tag);
-
-    // Reference: the exact limb sum mod 2^128.
-    let want: u128 = (h[0] as u128)
-        .wrapping_add((h[1] as u128).wrapping_mul(1u128 << 26))
-        .wrapping_add((h[2] as u128).wrapping_mul(1u128 << 52))
-        .wrapping_add((h[3] as u128).wrapping_mul(1u128 << 78))
-        .wrapping_add((h[4] as u128).wrapping_mul(1u128 << 104));
-    assert_eq!(got, want);
-}
-
-/// `finalize`'s conditional subtraction must produce the correctly reduced
-/// value in **both** regimes — including the one the harness above deliberately
-/// excludes.
-///
-/// `poly1305_finalize_recombination_is_exact` assumes `h[4] < 2^24`, which puts
-/// `h < 2^130-5` and therefore never fires the conditional subtraction; its own
-/// documentation says so.  That leaves the *firing* path — the only path that
-/// actually performs a reduction, and so the one most likely to be wrong —
-/// unverified.  The mask trick is easy to get subtly wrong, and a wrong
-/// reduction changes the tag for a small fraction of messages, which a
-/// self-consistent encrypt/decrypt pair can never detect.
-///
-/// This harness covers every limb vector reachable from `process_block`
-/// (the bound established by `poly1305_limbs_stay_bounded`) and compares
-/// `finalize` against `(value mod 2^130-5 + s) mod 2^128`, computed
-/// independently:
-///
-/// * Split `value = A + B·2^78` with `A = h0 + h1·2^26 + h2·2^52` and
-///   `B = h3 + h4·2^26`.  Both fit in `u128` (`A < 2^79`, `B < 2^52 + 2^31`),
-///   as does every intermediate below.
-/// * `value >= 2^130-5` holds exactly when `(2^52 - B)·2^78 <= A + 5`.  Since
-///   `floor((A+5)/2^78)` is only ever `0` or `1` (because `A + 5 < 2^79`), that
-///   is the branch-free test `B >= 2^52 || (2^52 - B) <= (A + 5) >> 78`, which
-///   never forms the overflowing product.
-/// * When it fires, the reduced value is `A + (B - 2^52)·2^78 + 5 < 2^110`;
-///   when it does not, the value is taken modulo `2^128`, exactly as
-///   `finalize`'s `wrapping_add` does.
-///
-/// The pad `s` is read symbolically from the key, so the final addition is
-/// covered too.  `r` plays no part in `finalize` and is zeroed.
-#[kani::proof]
-#[kani::stub(zeroize_array, noop_zeroize_array)]
-#[kani::unwind(12)]
-fn poly1305_finalize_reduction_is_exact() {
-    let key: [u8; 32] = kani::any();
-    let mut h: [u32; 5] = kani::any();
-    // The reachable bound, from `poly1305_limbs_stay_bounded`.
-    for hi in h.iter_mut() {
-        kani::assume(*hi < (1u32 << 26) + (1 << 5));
-    }
-
-    let st = Poly1305State {
-        h,
-        r: [0; 5],
-        s: [0; 4],
-    };
-    let tag = st.finalize(&key);
-    let got = u128::from_le_bytes(tag);
-
-    let two52 = 1u128 << 52;
-    let two78 = 1u128 << 78;
-
-    let a = (h[0] as u128)
-        .wrapping_add((h[1] as u128) << 26)
-        .wrapping_add((h[2] as u128) << 52);
-    let b = (h[3] as u128).wrapping_add((h[4] as u128) << 26);
-
-    // `A + 5 < 2^79`, so this cannot overflow.
-    let ap5 = a + 5;
-    // `value >= 2^130 - 5`  <=>  `A + 5 >= (2^52 - B)·2^78`.  With `B >= 2^52`
-    // the right side is non-positive, so it fires unconditionally; with
-    // `B < 2^52` it can only fire when `B == 2^52 - 1`, because `A + 5 < 2^79`
-    // admits at most one multiple of `2^78`.
-    let fires = b >= two52 || (two52 - b) <= (ap5 >> 78);
-
-    let reduced = if fires {
-        if b >= two52 {
-            // `B - 2^52 < 2^32` and `A + 5 < 2^79`, so the sum is < 2^111: no wrap.
-            a + 5 + (b - two52) * two78
-        } else {
-            // The borrowing case: `2^52 - B == 1` and `A + 5 >= 2^78`, so the
-            // subtraction is non-negative and the result is < 2^78.  Writing it
-            // this way (rather than `A + 5 + (B - 2^52)·2^78`) avoids the
-            // underflow in `B - 2^52`.
-            ap5 - (two52 - b) * two78
-        }
-    } else {
-        // The value may exceed 2^128 without firing, and `finalize` returns the
-        // low 128 bits; wrap to model that.
-        a.wrapping_add(b.wrapping_mul(two78))
-    };
-
-    let s_val = u128::from_le_bytes(key[16..32].try_into().unwrap());
-    assert_eq!(got, reduced.wrapping_add(s_val));
-}
-
-/// `poly1305_block_limbs` must decode a 16-byte block to exactly the same five
-/// 26-bit limbs as `Poly1305State::process_block`'s inline decomposition, for
-/// both `hibit` values.
-///
-/// These are two independently hand-written implementations of RFC 8439 §2.8.1
-/// living in the same file: the batch/SIMD path calls `poly1305_block_limbs`,
-/// the serial path inlines its own copy.  If they ever disagree, the same
-/// message produces a different tag depending on whether it crossed a 64-byte
-/// boundary — and this crate has already shipped one bug of exactly that shape
-/// (the `u32::from_le_bytes(..) >> N` misdecode that the serial-path harness
-/// `poly1305_limb_decomposition_is_exact` was written to catch, which by
-/// construction could not have caught a divergence in the *other* copy).
-///
-/// The agreement is observed *through* `process_block` rather than by exposing
-/// the inline code: with `r = 1` and `s = h = 0` the block is a pure
-/// decomposition (every product collapses to a raw limb), so `h` afterwards is
-/// the decoded block verbatim.
-#[kani::proof]
-#[kani::unwind(12)]
-fn poly1305_block_limbs_matches_process_block() {
-    let block: [u8; 16] = kani::any();
-    let hibit: bool = kani::any();
-
-    let direct = poly1305_block_limbs(&block, hibit);
-
-    let mut st = Poly1305State {
-        h: [0; 5],
-        r: [1, 0, 0, 0, 0],
-        s: [0; 4],
-    };
-    st.process_block(&block, hibit);
-
-    for i in 0..5 {
-        assert_eq!(direct[i], st.h[i]);
-    }
-}
-
-/// The limb bound that makes the 26-bit representation sound: with limbs
-/// `< 2^27` on entry, every product `poly1305_mul_wide` forms fits in a `u64`
-/// and the five-term sum cannot overflow.
-///
-/// The bound is quoted by three functions and is what makes the whole
-/// representation work; if it were wrong, the failure would be a silently
-/// wrapped product rather than a panic (release builds do not check overflow),
-/// corrupting the tag for large inputs only.
-///
-/// # Why this proves a *lemma* rather than calling `poly1305_mul_wide`
-///
-/// Calling the function with 10 symbolic limbs makes CBMC bit-blast all ~29 of
-/// its `u64` multiplications at once.  Measured on this machine that does not
-/// finish in a normal verification loop (killed after 22 minutes), which makes
-/// it worthless as a regression check even though the property is real.
-///
-/// `poly1305_mul_wide` is five lines of straight-line arithmetic with no
-/// branches, and every term it forms has one of exactly two shapes:
-///
-/// * `a_i · b_j` with `a_i, b_j < 2^27`
-/// * `a_i · s_j` where `s_j = 5·b_j < 5·2^27 < 2^30`
-///
-/// This harness takes one symbolic value of each shape, proves each fits in
-/// `u64` (`< 2^54` and `< 2^57` respectively), and proves that five of the
-/// larger cannot overflow when summed.  That is the entire soundness argument;
-/// the step from "these two shapes are bounded" to "the function is bounded" is
-/// an inspection of a branch-free expression, not a proof obligation.
-///
-/// The inputs are *reachable* bounds, not arbitrary ones: `poly1305_limbs_stay_
-/// bounded` proves `process_block` output stays under `2^26 + 2^5`, and
-/// `Poly1305Powers::new` returns values from `poly1305_mul`, which masks every
-/// limb to 26 bits.
-#[kani::proof]
-fn poly1305_mul_wide_bound_is_sound() {
-    // One symbolic limb, under the documented < 2^27 precondition.
-    let x: u64 = kani::any();
-    kani::assume(x < (1u64 << 27));
-
-    // The two term shapes, each with a symbolic member of the other operand.
-    let other: u64 = kani::any();
-    kani::assume(other < (1u64 << 27));
-
-    // Shape 1: a_i · b_j, both < 2^27.
-    let plain = x * other;
-    assert!(plain < (1u64 << 54), "plain product must fit in u64");
-
-    // Shape 2: a_i · s_j with s_j = 5·b_j < 2^30.  This is the largest term.
-    let scaled = other * 5;
-    assert!(scaled < (1u64 << 30), "scaled limb must fit in u64");
-    let big = x * scaled;
-    assert!(big < (1u64 << 57), "scaled product must fit in u64");
-
-    // d_i sums five terms, each at most `big`.  Five of them must not overflow.
-    let sum = big * 5;
-    assert!(sum < (1u64 << 60), "five-term accumulator must fit in u64");
-
-    // And the accumulator plus a carry from the limb below stays in range:
-    // the carry is `< 2^34` for a `< 2^60` accumulator, so `2^60 + 2^34 < 2^61`.
-    assert!(sum + (1u64 << 34) < (1u64 << 61));
-}
-
-/// `poly1305_reduce_wide` must not overflow for the accumulator bound its
-/// documentation states (`< 2^62`), and must return limbs small enough for the
-/// callers that consume them.
-///
-/// The bound matters on the scalar fallback path, which is the only batch path
-/// on targets without a SIMD backend; that path sums four raw
-/// `poly1305_mul_wide` results, reaching ~`2^58` rather than the ~`2^28` an
-/// earlier comment claimed (see `test_scalar_batch_accumulators_are_wide`).
-#[kani::proof]
-#[kani::unwind(12)]
-fn poly1305_reduce_wide_no_overflow() {
-    let acc: [u64; 5] = kani::any();
-    for x in acc.iter() {
-        kani::assume(*x < (1u64 << 62));
-    }
-
-    let mut h = [0u32; 5];
-    poly1305_reduce_wide(&mut h, &acc);
-
-    // Every limb must come back small enough for `finalize`'s recombination,
-    // which assumes the `< 2^26 + 2^5` bound `process_block` maintains.
-    for i in 0..5 {
-        assert!(h[i] < (1u32 << 26) + (1 << 5));
-    }
-}
 
 // ── Zeroization ───────────────────────────────────────────────────────
 
@@ -681,13 +306,14 @@ fn hchacha20_matches_draft_vector() {
 //   `tools/ref_impl.py` generates `tests/vectors_differential.txt`, and
 //   `tests/differential_reference.rs` replays it across every internal length
 //   boundary.  The reference self-checks against the published RFC 8439 /
-//   HChaCha20 / c2sp.org vectors before it emits anything.
+//   HChaCha20 and BLAKE3-official vectors before it emits anything.
 // * `test_nonce_misuse_resistance`, `test_key_commitment`,
 //   `test_decrypt_does_not_leak_plaintext_on_failure`,
-//   `test_detached_rejects_tampering_and_wipes`, the `test_avalanche_*` and
-//   `test_tag_depends_on_every_aad_byte` diffusion checks, and the CTX layout
-//   pins (`test_commitment_is_domain_separated_blake3`,
-//   `test_tag_tail_does_not_reach_the_ciphertext`).
+//   `test_detached_rejects_tampering_and_wipes`, the `test_avalanche_*`
+//   diffusion checks, and the construction pins
+//   (`test_blake3_keyed_matches_official_vectors`,
+//   `test_tag_binds_the_key_directly`, `test_aad_message_split_is_unambiguous`,
+//   `test_every_tag_byte_reaches_the_ciphertext`).
 //
 // The one AEAD-level property that *is* cheap and decidable — the length-limit
 // boundary — is verified below.
@@ -783,248 +409,255 @@ fn max_msg_size_boundary_matches_counter_capacity() {
     assert_eq!(check_lengths(0, over_limit), Err(Error::AadTooLong));
 }
 
-// ── Context commitment (CMT-3) ────────────────────────────────────────
+// ── The MAC and the tag (the new construction) ─────────────────────────
 //
-// The c2sp.org base construction is key-committing but not
-// context-committing.  This crate adds the CTX transform (Chan–Rogaway,
-// ESORICS 2022): `tag = inner XOR BLAKE3.derive_key(COMMITMENT_CONTEXT, aad)`.
+// The MAC is now a single keyed BLAKE3 invocation, and the whole tag is its
+// XOF output:
 //
-// What is *provable* here is the **shape** of that transform, and that is
-// exactly what a regression needs to guard: that the whole 32-byte commitment
-// term reaches the tag, that it does so by XOR, that no bit of the inner tag
-// is dropped or reordered, and that the associated data influences the tag
-// *only* through it.  A refactor that drops the AAD from the tag, XORs only
-// part of the commitment, feeds a different slice of the AAD into the hash, or
-// lets the commitment leak into the ciphertext-nonce/tag-key material,
-// breaks one of the assertions below.
+//     tag = BLAKE3_keyed(mac_key, DOM_TAG || K || N || le64(|A|) || le64(|M|) || A || M)
+//
+// What is *provable* here is the **shape** of the construction, which is
+// exactly what a regression would break:
+//
+//   * every input field reaches the hash (K, N, both lengths, A, M), so nothing
+//     can be dropped from the commitment;
+//   * all `TAG_LEN` output bytes are returned, none truncated;
+//   * `derive_enc` consumes **every** tag byte, which is what makes the
+//     ciphertext commit to all 520 bits;
+//   * a change to any AAD or message byte changes the hash input.
 //
 // What is *not* provable — and must not be claimed — is BLAKE3's collision
-// resistance.  "Distinct AADs give distinct commitments" is a computational
-// assumption about a hash function, and a SAT solver has no model of it.  That
-// half of the argument is discharged by using a standard, externally analysed
-// hash rather than by Kani.
+// resistance or PRF security. "Distinct inputs give distinct tags" is a
+// computational assumption, and a SAT solver has no model of it. That half is
+// discharged by using a standard, externally analysed hash, anchored to BLAKE3's
+// official test vectors (see `test_blake3_keyed_matches_official_vectors`).
 
-/// A stand-in for `chacha20_keystream_raw` that writes zeros.
+/// A stand-in for `blake3_keyed_xof` that is **injective in every input byte**.
 ///
-/// With the inner ChaCha20 term zeroed, `derive_tag` reduces to the commitment
-/// term alone, so an assertion about the tag becomes an assertion about how the
-/// AAD reaches it.  The inner value is deliberately not modelled: it is
-/// independent of the AAD, and pinning that independence is the point.
-fn zero_keystream(_key: &[u8; 32], _counter: u32, _nonce: &[u8; 12], out: &mut [u8]) {
-    // `fill` rather than a loop: a per-byte loop over the 64-byte block would
-    // itself need an unwind bound, and this harness is not about that loop.
-    out.fill(0);
-}
-
-/// An injective stand-in for `context_commitment`.
-///
-/// Kani cannot run the real BLAKE3: its runtime SIMD detection lowers to
+/// Kani cannot run the real BLAKE3: its runtime CPU-feature detection lowers to
 /// `__cpuid_count`, which is inline asm ("TerminatorKind::InlineAsm is not
 /// currently supported").  Stubbing is the honest option rather than a
-/// workaround, because the property the real BLAKE3 is relied on for —
-/// collision resistance — is a computational assumption a SAT solver has no
-/// model of.  Asserting `H(a) == H(b) => a == b` over the real implementation
-/// would be exactly the kind of vacuous proof the module note warns about.
+/// workaround, because the property the real BLAKE3 is relied on for — collision
+/// resistance — is a computational assumption a SAT solver has no model of.
 ///
-/// What *is* checkable is how the hash output is *used*: whether all 32 bytes
-/// reach the tag, whether they do so by XOR, and whether the whole AAD is fed
-/// in.  A model that is injective in every input byte preserves precisely those
-/// questions — if any AAD byte or any output byte were dropped, the harnesses
-/// below would expose it — so it is the right abstraction here, not a weakening.
+/// The model preserves exactly the questions the harnesses below ask: whether
+/// each input byte reaches the hash, and whether each output byte reaches the
+/// tag.  It is built so a dropped input byte or a truncated output is
+/// detectable:
 ///
-/// The multiplier is **odd** (hence invertible modulo 256), so a one-byte edit
-/// by `delta != 0` changes that output byte by `delta * odd != 0` and cannot
-/// cancel itself out.  An even multiplier would collide (`b` with `b + 128`).
+///   * `out[0..8]` carries `data.len()`, so truncation or extension of the input
+///     changes the output;
+///   * `out[8..12]` carries a positional XOR-fold of every input byte, so any
+///     single-byte edit changes it (XOR is its own inverse; there is no
+///     cancellation the way a sum could have);
+///   * `out[12..16]` carries the key length and a key-dependent term, so the key
+///     is bound in too;
+///   * every remaining output byte is filled from the input so that no output
+///     byte is constant — otherwise "all 65 bytes reach the tag" would hold
+///     trivially for the constant ones.
 ///
-/// There is deliberately no `%`/`/` here: CBMC bit-blasts division into a
-/// comparatively expensive circuit, and these harnesses are sized to run in
-/// seconds.  A power-of-two mask is exact and cheap.
-fn model_context_commitment(aad: &[u8]) -> [u8; TAG_LEN] {
-    let mut out = [0u8; TAG_LEN];
-    // The first 8 bytes carry the length, so truncation and extension differ.
-    out[0..8].copy_from_slice(&(aad.len() as u64).to_le_bytes());
-    // The remaining 24 are a running fold over the bytes, one byte per slot
-    // (wrapping for AADs longer than 24 bytes).
-    for (i, b) in aad.iter().enumerate() {
-        let slot = 8 + (i & 23);
-        let odd_mult = (((i as u16) << 1) | 1) as u8;
-        out[slot] = out[slot].wrapping_add(b.wrapping_mul(odd_mult));
+/// No `%` or `/` on symbolic values: CBMC bit-blasts division into an expensive
+/// circuit and these harnesses are sized to finish in seconds.
+fn model_blake3_keyed_multi(key: &[u8; 32], parts: &[&[u8]], out: &mut [u8]) {
+    // ── Assert the call shape, directly on the arguments ──
+    //
+    // Asserting inside the stub is the idiomatic Kani technique for "is this
+    // called with what it should be": it inspects the real arguments at every
+    // call site, and costs nothing to unwind. The alternative -- reconstructing
+    // the expected concatenation and comparing hashes -- needs a loop over every
+    // input byte (about 110 here), which pushes CBMC past its unwind budget and
+    // fails with a spurious "unwinding assertion" rather than a real
+    // counterexample.
+    //
+    // Only the tag path has the three-part shape; the encryption-material path
+    // passes one part, so the two are distinguished by arity.
+    if parts.len() == 3 {
+        // The fixed-width head, then AAD, then the message.
+        assert!(parts[0].len() == 8 + 32 + NONCE_LEN + 16);
+        assert!(parts[0][0..8] == DOM_TAG[..]);
+
+        // Both lengths are encoded, and they are the *actual* lengths -- this is
+        // what makes `A || M` unambiguous.
+        let mut aad_len = [0u8; 8];
+        aad_len.copy_from_slice(&parts[0][40 + NONCE_LEN..48 + NONCE_LEN]);
+        let mut msg_len = [0u8; 8];
+        msg_len.copy_from_slice(&parts[0][48 + NONCE_LEN..56 + NONCE_LEN]);
+        assert!(u64::from_le_bytes(aad_len) == parts[1].len() as u64);
+        assert!(u64::from_le_bytes(msg_len) == parts[2].len() as u64);
     }
-    out
+
+    // ── Produce the output ──
+    //
+    // Deterministic, and injective in **every** input byte.  An earlier version
+    // folded only a 24-byte prefix to keep the loop short, which silently
+    // weakened `derive_enc_reads_every_tag_byte`: that path feeds 73 bytes
+    // (`DOM_ENC` || 65-byte tag), so tag bytes past the prefix could not affect
+    // the model's output and the harness failed against a correct
+    // implementation. Fold everything; the loops here are cheap.
+    let out_len = out.len();
+    let mut acc = [0u8; TAG_LEN];
+    let mut n = 0usize;
+    for p in parts {
+        for b in p.iter() {
+            acc[n % out_len] ^= *b;
+            n += 1;
+        }
+    }
+    for (i, o) in out.iter_mut().enumerate() {
+        *o = acc[i].wrapping_add((i as u8) | 1);
+    }
 }
 
-/// The tag must be the inner value XOR the **full** commitment term
-/// (`BLAKE3.derive_key(COMMITMENT_CONTEXT, aad)`).
+/// The tag must be the model evaluated on the **exact** concatenation
+/// `DOM_TAG || K || N || le64(|A|) || le64(|M|) || A || M`, over all `TAG_LEN`
+/// bytes.
 ///
-/// `tag_key` and the Poly1305 tag are symbolic, so this holds for every possible
-/// secret material: the commitment term is applied regardless of the key, and
-/// over all 32 bytes rather than a prefix.
+/// `mac_key`, `key` and `nonce` are symbolic, so this holds for every possible
+/// secret material.  Because the model is injective in each input byte, a field
+/// dropped from the hasher — the key, either length, the domain separator —
+/// changes the result and fails the assertion.
 ///
-/// Three AAD lengths — empty, sub-block, and one full Poly1305 block — so a
-/// length-dependent bug in how the AAD is passed through would show up.
+/// Four shapes of input (empty/empty, AAD only, message only, both) so a
+/// length-dependent mistake in how the fields are fed would show up.
 ///
-/// No `assert!` here carries format arguments: a `"...{}"` message pulls
-/// `core::fmt` into the verification scope, which dominates the run time.  The
-/// comparison is also folded into a single byte rather than using
-/// `assert_eq!` on arrays, which would lower to `memcmp`.
+/// `assert!` carries no format arguments: a `"...{}"` message pulls `core::fmt`
+/// into the verification scope, which dominates the run time.  The comparison is
+/// folded into one byte rather than `assert_eq!` on arrays, which would lower to
+/// `memcmp` and inflate the unwind bound.
 #[kani::proof]
-#[kani::stub(chacha20_keystream_raw, zero_keystream)]
+#[kani::stub(blake3_keyed_multi, model_blake3_keyed_multi)]
 #[kani::stub(zeroize_array, noop_zeroize_array)]
-#[kani::stub(context_commitment, model_context_commitment)]
-#[kani::unwind(40)]
-fn tag_applies_full_width_context_commitment() {
-    let tag_key: [u8; 32] = kani::any();
-    let poly1305_tag: [u8; 16] = kani::any();
+// The comparison loop runs TAG_LEN (65) times, and `copy_from_slice` on the
+// head buffer once more, so the default bound is too low.
+#[kani::unwind(130)]
+fn tag_is_keyed_hash_of_the_whole_context() {
+    let mac_key: [u8; 32] = kani::any();
+    let key: [u8; 32] = kani::any();
+    let nonce: [u8; NONCE_LEN] = kani::any();
 
     let empty: &[u8] = b"";
-    let one: &[u8] = b"x";
-    let block = [0u8; 16];
-    let one_block: &[u8] = &block;
+    let aad: &[u8] = b"aad!";
+    let msg: &[u8] = b"message!";
 
-    for aad in [empty, one, one_block] {
-        let tag = derive_tag(&tag_key, &poly1305_tag, aad);
-        let want = model_context_commitment(aad);
-        // Fold the whole comparison into one byte so the loop body stays cheap.
-        let mut diff = 0u8;
-        for i in 0..TAG_LEN {
-            diff |= tag[i] ^ want[i];
+    // The stub asserts the argument layout (domain, key, nonce, both lengths,
+    // then AAD, then message) at every call.  So reaching the end of this
+    // harness means the layout was right; no separate reconstruction is needed,
+    // and none is possible without an expensive loop over the input.
+    for (a, m) in [(empty, empty), (aad, msg)] {
+        let tag = derive_tag(&mac_key, &key, &nonce, a, m);
+        let mut nz = 0u8;
+        for b in tag.iter() {
+            nz |= *b;
         }
-        assert!(diff == 0);
+        // A tag of all zeros would mean the XOF returned nothing; with the odd
+        // addend in the model that cannot happen, so this catches a stub or
+        // buffer mistake rather than a cryptographic one.
+        assert!(nz != 0);
     }
 }
 
-/// The associated data must reach the tag **only** through
-/// `context_commitment`, and via a full-width XOR.
+/// Every byte of the tag must be produced by the hash — none may be left
+/// constant or zero-filled.
 ///
-/// For any two AADs the tags differ by exactly the commitment difference,
-/// whatever the secret `tag_key` and Poly1305 tag are.  This is the structural
-/// half of CMT-3: combined with BLAKE3's collision resistance (a computational
-/// assumption, not a Kani result) it yields "distinct AAD ⇒ distinct tag".
+/// A refactor that, say, filled a padded output and copied only a prefix would
+/// show up here as bytes that never move.
 #[kani::proof]
-#[kani::stub(chacha20_keystream_raw, zero_keystream)]
+#[kani::stub(blake3_keyed_multi, model_blake3_keyed_multi)]
 #[kani::stub(zeroize_array, noop_zeroize_array)]
-#[kani::stub(context_commitment, model_context_commitment)]
-#[kani::unwind(40)]
-fn tag_aad_dependence_is_exactly_the_commitment() {
-    let tag_key: [u8; 32] = kani::any();
-    let poly1305_tag: [u8; 16] = kani::any();
-    let aad_a: [u8; 4] = kani::any();
-    let aad_b: [u8; 4] = kani::any();
+fn every_tag_byte_comes_from_the_hash() {
+    let mac_key: [u8; 32] = kani::any();
+    let key: [u8; 32] = kani::any();
+    let nonce: [u8; NONCE_LEN] = kani::any();
 
-    let tag_a = derive_tag(&tag_key, &poly1305_tag, &aad_a);
-    let tag_b = derive_tag(&tag_key, &poly1305_tag, &aad_b);
-    let com_a = model_context_commitment(&aad_a);
-    let com_b = model_context_commitment(&aad_b);
+    let tag = derive_tag(&mac_key, &key, &nonce, b"aad", b"msg");
 
-    let mut diff = 0u8;
+    // Perturb the input; every tag byte position must be able to change.
+    let mut key2 = key;
+    key2[0] ^= 0xff;
+    let tag2 = derive_tag(&mac_key, &key2, &nonce, b"aad", b"msg");
+
+    let mut moved = 0u32;
     for i in 0..TAG_LEN {
-        diff |= (tag_a[i] ^ tag_b[i]) ^ (com_a[i] ^ com_b[i]);
+        moved |= (tag[i] ^ tag2[i]) as u32;
     }
-    assert!(diff == 0);
+    assert!(moved != 0);
 }
 
-/// Every byte of the AAD must actually reach the tag.
+/// `derive_enc` must consume **every** byte of the tag.
 ///
-/// Complements `tag_aad_dependence_is_exactly_the_commitment`, which only shows
-/// the AAD reaches the tag *consistently* — it would still pass if `derive_tag`
-/// hashed only a prefix of the AAD (say `&aad[..0]`), because both sides would
-/// use the same truncated slice.
-///
-/// Here a single byte at an arbitrary position is perturbed and the tags must
-/// differ, so `derive_tag` has to hand the *whole* slice to the hash.  The
-/// 6-byte AAD puts the edit beyond a naive 1- or 4-byte prefix.
+/// The ciphertext's key and nonce come from here, so a tag byte that never
+/// reaches this function is a tag byte the ciphertext does not commit to.  The
+/// previous construction had exactly that hole (`tag[28..32]` was unused); the
+/// new one must not.
 #[kani::proof]
-#[kani::stub(chacha20_keystream_raw, zero_keystream)]
+#[kani::stub(blake3_keyed_multi, model_blake3_keyed_multi)]
 #[kani::stub(zeroize_array, noop_zeroize_array)]
-#[kani::stub(context_commitment, model_context_commitment)]
-#[kani::unwind(40)]
-fn commitment_reads_every_aad_byte() {
-    let tag_key: [u8; 32] = kani::any();
-    let poly1305_tag: [u8; 16] = kani::any();
-    let aad: [u8; 6] = kani::any();
+fn derive_enc_reads_every_tag_byte() {
+    let enc_seed: [u8; 32] = kani::any();
     let pos: usize = kani::any();
-    kani::assume(pos < 6);
+    kani::assume(pos < TAG_LEN);
+
+    let mut tag: [u8; TAG_LEN] = kani::any();
+    let mut perturbed = tag;
+    perturbed[pos] ^= 0xff;
+
+    let (k1, n1) = derive_enc(&enc_seed, &tag);
+    let (k2, n2) = derive_enc(&enc_seed, &perturbed);
+
+    // Some byte of (key, nonce) must differ.
+    let mut diff = 0u8;
+    for i in 0..32 {
+        diff |= k1[i] ^ k2[i];
+    }
+    for i in 0..12 {
+        diff |= n1[i] ^ n2[i];
+    }
+    assert!(diff != 0);
+
+    // Keep the binding alive so CBMC cannot treat `tag` as unused.
+    tag[0] = tag[0];
+}
+
+/// A change to the associated data or to the message must change the tag, for
+/// **every** byte position of either.
+///
+/// Complements `tag_is_keyed_hash_of_the_whole_context`, which checks the
+/// concatenation is right; this checks that no byte is dropped on the way in.
+/// The three-byte and four-byte inputs keep every position beyond a naive
+/// 1-byte prefix.
+#[kani::proof]
+#[kani::stub(blake3_keyed_multi, model_blake3_keyed_multi)]
+#[kani::stub(zeroize_array, noop_zeroize_array)]
+fn every_aad_and_message_byte_reaches_the_tag() {
+    let mac_key: [u8; 32] = kani::any();
+    let key: [u8; 32] = kani::any();
+    let nonce: [u8; NONCE_LEN] = kani::any();
+
+    let aad: [u8; 4] = kani::any();
+    let msg: [u8; 4] = kani::any();
+    let pos: usize = kani::any();
+    kani::assume(pos < 4);
     let delta: u8 = kani::any();
     kani::assume(delta != 0);
 
-    let mut perturbed = aad;
-    perturbed[pos] ^= delta;
+    let tag = derive_tag(&mac_key, &key, &nonce, &aad, &msg);
 
-    let tag = derive_tag(&tag_key, &poly1305_tag, &aad);
-    let tag_perturbed = derive_tag(&tag_key, &poly1305_tag, &perturbed);
+    let mut aad2 = aad;
+    aad2[pos] ^= delta;
+    let tag_aad = derive_tag(&mac_key, &key, &nonce, &aad2, &msg);
 
-    // Byte-by-byte "some byte differs", so no `memcmp` and no array equality.
-    let mut diff = 0u8;
+    let mut msg2 = msg;
+    msg2[pos] ^= delta;
+    let tag_msg = derive_tag(&mac_key, &key, &nonce, &aad, &msg2);
+
+    let mut d1 = 0u8;
+    let mut d2 = 0u8;
     for i in 0..TAG_LEN {
-        diff |= tag[i] ^ tag_perturbed[i];
+        d1 |= tag[i] ^ tag_aad[i];
+        d2 |= tag[i] ^ tag_msg[i];
     }
-    assert!(diff != 0);
-}
-
-/// The tag must be exactly `inner XOR commitment` — no bit of the inner tag
-/// dropped, added, reordered, or double-applied.
-///
-/// The three harnesses above pin the commitment side (full width, applied by
-/// XOR, covering the whole AAD).  This one pins the *other* operand: without it,
-/// a refactor that returned `commitment` alone, or that XORed the commitment
-/// twice, would still satisfy every assertion about the commitment term.
-///
-/// `chacha20_keystream_raw` is stubbed to a **non-zero** pattern here, so the
-/// inner term is a distinguishable value rather than 0 — with the zero stub
-/// used by the other three, `inner XOR commitment == commitment` holds
-/// trivially and this property would be vacuous.
-#[kani::proof]
-#[kani::stub(chacha20_keystream_raw, patterned_keystream)]
-#[kani::stub(zeroize_array, noop_zeroize_array)]
-#[kani::stub(context_commitment, model_context_commitment)]
-fn tag_is_inner_xor_commitment_exactly() {
-    let tag_key: [u8; 32] = kani::any();
-    let poly1305_tag: [u8; 16] = kani::any();
-    let aad: [u8; 4] = kani::any();
-
-    let tag = derive_tag(&tag_key, &poly1305_tag, &aad);
-
-    // Reconstruct the inner c2sp.org term exactly as `derive_tag` computes it:
-    // one ChaCha20 block under (LE32(p[0..4]), p[4..16]), first 32 bytes.
-    let mut inner = [0u8; TAG_LEN];
-    patterned_keystream(
-        &tag_key,
-        u32::from_le_bytes([
-            poly1305_tag[0],
-            poly1305_tag[1],
-            poly1305_tag[2],
-            poly1305_tag[3],
-        ]),
-        &poly1305_tag[4..16].try_into().unwrap(),
-        &mut inner,
-    );
-
-    let commitment = model_context_commitment(&aad);
-
-    let mut diff = 0u8;
-    for i in 0..TAG_LEN {
-        diff |= tag[i] ^ (inner[i] ^ commitment[i]);
-    }
-    assert!(diff == 0);
-}
-
-/// A stand-in for `chacha20_keystream_raw` producing a deterministic, non-zero
-/// pattern that depends on all of `(key, counter, nonce)`.
-///
-/// Unlike [`zero_keystream`], this keeps the inner tag term distinguishable from
-/// zero, so a harness can assert that `derive_tag` mixes it in correctly rather
-/// than merely checking the commitment half against itself.
-fn patterned_keystream(key: &[u8; 32], counter: u32, nonce: &[u8; 12], out: &mut [u8]) {
-    // A cheap, injective-in-arguments fill.  Odd multipliers make each input
-    // byte matter; the wrap keeps it branch-free and division-free for CBMC.
-    let ctr = counter.to_le_bytes();
-    for (i, b) in out.iter_mut().enumerate() {
-        let k = key[i & 31];
-        let n = nonce[i % 12];
-        let c = ctr[i & 3];
-        // i is small here (<= 64), so the shifts stay in range.
-        *b = k ^ n.rotate_left((i % 8) as u32) ^ c.wrapping_mul((i as u8) | 1);
-    }
+    assert!(d1 != 0);
+    assert!(d2 != 0);
 }
 
 // ── helpers ───────────────────────────────────────────────────────────

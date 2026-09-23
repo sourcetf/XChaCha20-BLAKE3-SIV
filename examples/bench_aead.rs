@@ -2,7 +2,7 @@
 //!
 //! 运行: cargo run --release --example bench_aead
 use std::time::Instant;
-use xchacha20_poly1305_siv::{decrypt, encrypt};
+use xchacha20_blake3_siv::{decrypt, encrypt};
 
 fn mbps(bytes: usize, secs: f64) -> f64 {
     (bytes as f64 / (1024.0 * 1024.0)) / secs
@@ -24,7 +24,7 @@ fn main() {
     let nonce: [u8; 24] = [0x55; 24];
     let aad = b"associated data";
 
-    println!("=== XChaCha20-Poly1305-SIV 性能基准 ===\n");
+    println!("=== XChaCha20-BLAKE3-SIV 性能基准 ===\n");
     println!("消息大小\t\t加密 (MB/s)\t解密 (MB/s)");
     println!("=============================================");
 

@@ -1,5 +1,5 @@
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
-use xchacha20_poly1305_siv::{decrypt, encrypt};
+use xchacha20_blake3_siv::{decrypt, encrypt};
 
 fn bench_encrypt(c: &mut Criterion) {
     let plaintext: Vec<u8> = (0..4096).map(|i| (i % 256) as u8).collect();

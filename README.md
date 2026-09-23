@@ -1,10 +1,10 @@
-# XChaCha20-Poly1305-SIV
+# XChaCha20-BLAKE3-SIV
 
 Misuse-resistant, key- and context-committing AEAD with a 24-byte (192-bit)
 nonce.
 
 ```rust
-use xchacha20_poly1305_siv::{encrypt, decrypt};
+use xchacha20_blake3_siv::{encrypt, decrypt};
 
 let key   = [0x42u8; 32];
 let nonce = [0x55u8; 24];          // 192-bit nonce
@@ -13,7 +13,7 @@ let aad   = b"associated data";
 let (ciphertext, tag) = encrypt(&key, &nonce, aad, b"secret message")?;
 let plaintext = decrypt(&key, &nonce, aad, &ciphertext, &tag)?;
 assert_eq!(plaintext, b"secret message");
-# Ok::<(), xchacha20_poly1305_siv::Error>(())
+# Ok::<(), xchacha20_blake3_siv::Error>(())
 ```
 
 A detached, in-place API is also available
@@ -23,59 +23,79 @@ store the tag separately or want to avoid a second allocation.
 ## Not a standard
 
 **There is no published specification for this construction, and it is not
-byte-compatible with anything else.** It is a deliberate fusion of two
-standards:
+byte-compatible with anything else.** It combines two published primitives under
+a construction of this project's own design:
 
 | Component | Source |
 | --- | --- |
 | Subkey derivation (HChaCha20 nonce extension) | [draft-irtf-cfrg-xchacha-03](https://datatracker.ietf.org/doc/draft-irtf-cfrg-xchacha/) |
-| SIV core (tag → tag-key-derived encryption key) | [c2sp.org/chacha20-poly1305-siv](https://c2sp.org/chacha20-poly1305-siv) |
-| Context commitment (CTX transform) | Chan & Rogaway, *On Committing Authenticated-Encryption*, ESORICS 2022 |
+| Session key derivation | ChaCha20 keystream ([RFC 8439](https://www.rfc-editor.org/rfc/rfc8439)) |
+| Authenticated encryption (the MAC) | [BLAKE3](https://github.com/BLAKE3-team/BLAKE3) in keyed mode |
 
-Two deviations from the c2sp.org base construction are load-bearing:
+The construction in full:
+
+```
+K (256-bit)   N (192-bit)   A (associated data)   M (message)
+
+1. subkey   = HChaCha20(K, N[0..16])
+   material = ChaCha20_keystream(subkey, counter 0, "XSIV" || N[16..24])   64 B
+   mac_key  = material[0..32]      enc_seed = material[32..64]
+
+2. tag = BLAKE3_keyed(mac_key,
+            "XSIV-TAG" || K || N || le64(|A|) || le64(|M|) || A || M)     65 B
+
+3. km      = BLAKE3_keyed(enc_seed, "XSIV-ENC" || tag)                    43 B
+   enc_key = km[0..32]             enc_nonce = km[32..44]
+
+4. C = ChaCha20(enc_key, counter 0, enc_nonce, M)
+```
+
+Decryption runs step 3 and 4 first (SIV requires the plaintext to recompute the
+tag), then recomputes the tag and compares all 65 bytes in constant time.
+
+Three details are load-bearing rather than incidental:
 
 1. **Domain separation of the subkey-derivation block.** XChaCha20-Poly1305
-   leaves the first 4 bytes of that block's ChaCha20 nonce as NUL padding; this
-   crate puts `"XSIV"` there. Without it, the same `(key, nonce)` would derive
-   the *same one-time Poly1305 key* in both schemes, so a protocol that mixed
-   the two would reuse that key and lose authentication outright.
+   leaves those 4 bytes as NUL padding; this crate puts `"XSIV"` there, so the
+   same `(key, nonce)` derives different material in the two schemes and a
+   protocol that mixed them would not be reusing keys across schemes.
 
-2. **The CTX context-commitment term.** The tag is
-   `c2sp_tag XOR BLAKE3.derive_key(COMMITMENT_CONTEXT, aad)`. The c2sp.org
-   construction is key-committing but explicitly *not* context-committing (its
-   own specification says so), because a CMT-3 adversary chooses the key and
-   therefore knows Poly1305's `r`, making the Poly1305 tag solvable rather than
-   collision resistant. XORing in a domain-separated hash of the AAD closes
-   that gap at the cost of one hash of the AAD — independent of the message
-   length — without lengthening the tag.
+2. **The key goes into the tag input directly**, not only through the derived
+   `mac_key`. Binding it only via `mac_key` would let an adversary search for
+   two keys colliding on that 256-bit value — a 2^128 effort — and bypass the
+   520-bit tag entirely (`test_tag_binds_the_key_directly`).
 
-   `derive_key` rather than a bare `BLAKE3(aad)` so the commitment has a domain
-   of its own; `COMMITMENT_CONTEXT` is part of the wire format.
+3. **Both lengths are encoded, and every field is fixed width.** BLAKE3 is not
+   vulnerable to length extension (its finalisation is flagged, unlike
+   Merkle–Damgård constructions), but `A || M` alone would be ambiguous:
+   `("ab", "c")` and `("a", "bc")` would hash identically. The two `u64` length
+   fields remove that (`test_aad_message_split_is_unambiguous`).
 
-The unmodified c2sp.org construction remains available internally as
-`encrypt16`/`decrypt16`, which is what the c2sp.org known-answer vectors are
-checked against.
+This is **not** the c2sp.org ChaCha20-Poly1305-SIV construction: it does not use
+Poly1305, its tag is 65 bytes rather than 32, and it is not interoperable with
+anything.
 
 ### Wire format is not frozen
 
 Because the construction is bespoke, treat the byte format as unstable until
-this crate reaches 1.0: the tag construction and `COMMITMENT_CONTEXT` have
-already changed once (from a bare `BLAKE3(aad)` to
-`derive_key(COMMITMENT_CONTEXT, aad)`), which invalidates every previously
-produced ciphertext and tag.
+this crate reaches 1.0. It has already changed once: v0.1 used Poly1305 with a
+CTX-transformed 32-byte tag, and v0.2 replaces that with a keyed-BLAKE3 65-byte
+tag.
 
 ## Properties
 
 - **SIV mode** — the tag is computed before encryption, so nonce reuse degrades
   gracefully instead of catastrophically.
-- **Key- and context-committing** — a 256-bit tag, giving 128-bit committing
-  security.
+- **Key- and context-committing** — a 520-bit tag, giving **2^260** committing
+  security (see below).
 - **Constant-time** — the tag is compared with `subtle::ConstantTimeEq`;
   `Plaintext` compares in constant time too. Decryption is decrypt-then-verify
   (SIV requires the plaintext to recompute the tag), and the unverified
   plaintext is wiped, never returned.
-- **Zeroization** — intermediate secrets are wiped with volatile stores, and
-  the returned `Plaintext` wipes itself on drop.
+- **Zeroization** — intermediate secrets are wiped with volatile stores; the
+  returned `Plaintext` wipes itself on drop; and BLAKE3's internal state (which
+  holds the MAC key) is explicitly zeroized, since it is unreachable from here
+  and is not cleared on drop.
 - **`no_std`** — with `alloc`.
 - **SIMD** — SSE2 / AVX2 on x86-64, NEON on aarch64, with a scalar reference
   fallback on every other target. All backends are held byte-identical to the
@@ -87,57 +107,32 @@ produced ciphertext and tag.
 
 ## Security level
 
-**The 256-bit tag does not mean 256-bit security.** Read the numbers, not the
-tag size:
-
 | Property | Strength | Determined by |
 | --- | --- | --- |
 | Confidentiality (plaintext recovery) | 256-bit | the ChaCha20 key |
-| **Forgery resistance** | **≈103-bit**, degrading with message length | Poly1305's `r` (106 bits of entropy) |
-| **Key commitment** (CMT-1/CMTk) | **2^128** | birthday bound on the 256-bit tag |
-| **Context commitment** (CMT-3, added here) | **2^128** | birthday bound, resting on BLAKE3 |
+| Forgery resistance | **256-bit** | BLAKE3 keyed mode as a PRF over a 256-bit key |
+| Key commitment (CMT-1/CMTk) | **2^260** | birthday bound on the 520-bit tag |
+| Context commitment (CMT-3) | **2^260** | birthday bound, resting on BLAKE3 |
 
-Both "weak" figures are the construction's documented design parameters, not
-implementation shortcomings. The c2sp.org specification this builds on states
-them itself: *"256-bit security against plaintext recovery and 103-bit security
-against forgery"*, and *"the 256-bit tag should provide 128-bit key-committing
-security (CMT-1/CMTk) due to the birthday bound"*.
+**On forgery: 256 bits is the ceiling, not a choice.** Forgery resistance is
+bounded by the key's entropy, so with a 256-bit key it cannot exceed 256 bits.
+A longer tag does not raise it; it raises commitment. (Exceeding 256-bit forgery
+would require a larger key, which would be a different construction.)
 
-- **Forgery.** Poly1305's `r` has only 106 bits of entropy after clamping, so a
-  single forgery succeeds with probability ≲ `ℓ/2^106` where `ℓ` is the number of
-  16-byte blocks — about 2^-100 for a 1 KiB message, but only **2^-72 at the
-  2^38-byte maximum**. A longer tag would not help: the cap is the MAC, not the
-  tag. Extending the tag raises commitment, never forgery resistance.
-- **Commitment.** Commitment is a *collision* property, so an `n`-bit tag caps
-  it at `2^(n/2)`: 256 bits gives 2^128, and going beyond that would require a
-  longer tag, not a different construction. The CTX transform XORs a hash of the
-  context into the tag; an XOR does not add the two sides' strengths, it takes
-  the weaker, so the binding power here equals BLAKE3's differential collision
-  resistance.
+**On commitment: the tag is 65 bytes because commitment must exceed 2^256.**
+Commitment is a *collision* property, so an `n`-bit tag caps it at `2^(n/2)`.
+A 64-byte (512-bit) tag would give exactly `2^256` — not *more* than 256 bits —
+so 65 bytes (520 bits) is the smallest byte-aligned size that strictly exceeds
+it, giving `2^260`.
 
-Three further consequences of the design, worth stating plainly:
-
-- **The commitment term is unkeyed and covers the AAD only.** It is
-  `BLAKE3.derive_key(COMMITMENT_CONTEXT, aad)`, a public function, and since the
-  tag is public anyone can strip the mask (`inner = tag XOR H(aad)`). Hashing
-  only the AAD is inherited from CTX; the key and nonce are bound indirectly
-  through the tag key. If you need commitment over the whole context — protocol
-  identifier, header, ciphertext — commit to it in the AAD explicitly.
-- **`tag[28..32]` does not influence the ciphertext.** Encryption consumes
-  `tag[0..16]` (encryption key) and `tag[16..28]` (encryption nonce) only. The
-  commitment therefore lives on the *tag*, which is transmitted and compared in
-  full. Treat "transmit the whole tag and compare all 32 bytes in constant time"
-  as an invariant: truncating it, or comparing a prefix, breaks the commitment.
-  `test_tag_tail_does_not_reach_the_ciphertext` pins the underlying fact.
-- **Nonce reuse reuses the one-time Poly1305 key** (`poly_key` depends only on
-  `(key, nonce)`), which is not how Poly1305 is meant to be used. No exploit
-  follows — the Poly1305 output is never exposed, only masked by a PRF under the
-  same tag key — but this is why misuse resistance must not be relied on as
-  margin. Use a counter (see below).
-
-**In short:** this is suitable for what it claims (≈103-bit forgery, 128-bit
-commitment). It is not suitable where you need more than 128-bit commitment or
-more than 103-bit forgery resistance.
+**What is assumed, and what is not proven.** The figures above rest on BLAKE3
+being a secure PRF and collision-resistant, and on ChaCha20 being a secure
+stream cipher. Those are standard, heavily analysed assumptions — but they are
+assumptions, not theorems, and this particular *composition* has no public
+specification and has not been independently analysed. The formal harnesses in
+`src/proofs.rs` prove properties of the implementation (that the fields reach
+the hash, that every output byte is used, that the tag reaches the ciphertext),
+not cryptographic hardness.
 
 ## Nonces, and where randomness comes from
 
@@ -168,11 +163,11 @@ specification calls that out explicitly as unsuitable for commitment.
 With the opt-in `rng` feature the crate will draw from the OS CSPRNG for you:
 
 ```toml
-xchacha20-poly1305-siv = { version = "0.1", features = ["rng"] }
+xchacha20-blake3-siv = { version = "0.1", features = ["rng"] }
 ```
 
 ```rust
-use xchacha20_poly1305_siv::{encrypt, random};
+use xchacha20_blake3_siv::{encrypt, random};
 
 let key = random::generate_key()?;      // 256-bit
 let nonce = random::generate_nonce()?;  // 192-bit
@@ -210,50 +205,85 @@ directly for the narrow "re-prove after a small edit" case
 Neither script needs root. Package downloads use `apt-get download`, which
 works unprivileged, and the emulator is extracted into `~/.local/bin`.
 
-- **Published vectors** — RFC 8439 (ChaCha20 block, Poly1305),
-  draft-irtf-cfrg-xchacha-03 (HChaCha20, XChaCha20 keystream, Poly1305 key), and
-  c2sp.org ChaCha20-Poly1305-SIV Test Vectors 1–6.
+- **Published vectors** — RFC 8439 §2.3.2 (ChaCha20 block),
+  draft-irtf-cfrg-xchacha-03 §2.2.1 (HChaCha20), and **BLAKE3's official
+  `test_vectors.json` keyed vectors**. The last of these is the anchor for the
+  new MAC: without an external check, the tag vectors would only be validated
+  against this crate's own reference implementation, which proves nothing.
 - **Differential testing** — `tools/ref_impl.py` is an independent
-  implementation written from the pseudocode, self-checked against the published
-  vectors above before it emits anything. It generates
-  `tests/vectors_differential.txt`, replayed by
-  `tests/differential_reference.rs` across every internal length boundary.
-- **Cross-architecture execution** — the aarch64 code path (the NEON backend and
-  its scalar transpose) is *executed*, not merely type-checked, by running the
-  musl-target test binaries under `qemu-aarch64`. On x86 the NEON backend is
-  compiled out entirely, so without this step nothing would ever run it. The
-  build needs no cross C toolchain: `.cargo/config.toml` selects `rust-lld` and
-  musl supplies its own `libc.a`. Setup on Debian/Ubuntu needs no root:
-
-  ```sh
-  rustup target add aarch64-unknown-linux-musl
-  apt-get download qemu-user && dpkg-deb -x qemu-user_*.deb /tmp/qemu
-  cp /tmp/qemu/usr/bin/qemu-aarch64 ~/.local/bin/
-  ```
-
-  What this does **not** cover: throughput. qemu does not model real aarch64
-  performance, so the SIMD speedups are measured on x86 only.
-- **Kani** — bounded model checking of the construction properties: limb
-  arithmetic, carry propagation, both independent 26-bit block decodings, the
-  `finalize` reduction in *both* its regimes, counter sequencing, buffer wiping,
-  length limits, and the shape of the CTX transform. `-Z stubbing` is required
-  (see `src/proofs.rs` for the cost model and for which stubs are honest
-  abstractions).
+  implementation written from the RFC and BLAKE3 specifications, self-checked
+  against the published vectors above before it emits anything. It generates
+  `tests/vectors_differential.txt` (49 vectors, 65-byte tags), replayed by
+  `tests/differential_reference.rs` across every internal length boundary. The
+  Python and Rust keyed-BLAKE3 paths were verified byte-identical before relying
+  on them.
+- **Cross-architecture execution** — the aarch64 code path is *executed* under
+  `qemu-aarch64`, not merely type-checked; on x86 the NEON backend is compiled
+  out entirely, so nothing else would ever run it.
+- **Kani** — bounded model checking of the construction shape: that the domain,
+  key, nonce and both lengths reach the hash in the specified layout; that every
+  output byte comes from the hash; that every AAD and message byte reaches the
+  tag; and that `derive_enc` consumes all 65 tag bytes (so the ciphertext
+  commits to all 520 bits). Plus the ChaCha20 counter sequencing, zeroization
+  and length-limit harnesses. `-Z stubbing` is required, and the MAC is stubbed
+  through a single seam so no call site can escape the model.
+- **Measured performance** (see below).
 
 Kani proves properties of the *implementation*, not cryptographic hardness.
 "An adversary cannot forge a tag" is a claim about computational infeasibility,
 which a SAT solver has no model of; that half rests on the underlying primitives
 and on using them as specified.
 
+## Performance
+
+Measured on the development machine (WSL2, x86-64), release profile with
+`lto`/`codegen-units=1`, `blake3` with its `pure` Rust backends as this crate
+ships it. Figures are best-of-N with per-iteration A/B interleaving, because this
+host's throughput drifts by up to 2x between runs; ratios are the stable signal.
+
+End-to-end, versus the previous Poly1305-based version of this crate:
+
+| Message | encrypt | decrypt |
+| --- | --- | --- |
+| 64 B | 1.06–1.16x | 0.95–1.13x |
+| 1 KiB | 0.85–0.88x | 0.84–1.05x |
+| 16 KiB | 0.71–0.97x | 0.97–1.10x |
+| 64 KiB | 0.99–1.33x | 1.21–1.25x |
+| 1 MiB | 1.01–1.09x | 1.15–1.33x |
+
+(ratio > 1 means faster.) Isolated MAC throughput, two independent runs:
+
+| Message | Poly1305 | BLAKE3-XOF | ratio |
+| --- | --- | --- | --- |
+| 64 B | ~104 MB/s | ~103 MB/s | 0.98–1.01x |
+| 1 KiB | ~462 MB/s | ~237 MB/s | 0.50–0.53x |
+| 16 KiB | ~516 MB/s | ~910 MB/s | 1.63–1.91x |
+| 1 MiB | ~499 MB/s | ~875 MB/s | 1.60–1.95x |
+
+In short: no large regression. The new construction is faster for bulk messages
+(BLAKE3 beats Poly1305 by 1.6–2x there) and roughly 10–15% slower around 1 KiB,
+where Poly1305's four-block batching still helps and BLAKE3's wide parallelism
+has not yet engaged.
+
+Not covered: qemu cannot model real aarch64 performance, so the NEON figures
+would need measurement on real hardware. The `pure` feature also caps BLAKE3's
+throughput relative to its assembly kernels; switching would require a C
+toolchain and so would complicate cross-compilation.
+
 ## Layout
 
 ```
-src/lib.rs           the construction, the SIMD backends, and the test suite
-src/proofs.rs        Kani harnesses (`cfg(kani)` only)
-tests/               differential vectors and their replay
-tools/ref_impl.py    independent Python reference implementation
+src/lib.rs                  the construction, the SIMD backends, the test suite
+src/proofs.rs               Kani harnesses (`cfg(kani)` only)
+tests/                      differential vectors and their replay
+tools/ref_impl.py           independent Python reference implementation
 tools/gen_test_vectors.py   fixture generator for the differential vectors
-standard.txt         the two specification documents this is built from
+tools/kani_shards.py        derives the CI proof shards from src/proofs.rs
+standard.txt                the c2sp.org / XChaCha specification text this
+                            crate's older v0.1 construction was built from.
+                            Retained for the RFC 8439 and HChaCha20 test
+                            vectors it quotes; it does NOT describe the
+                            current construction.
 ```
 
 ## License

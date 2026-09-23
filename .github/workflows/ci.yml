@@ -193,7 +193,7 @@ jobs:
           set -euo pipefail
           deps=target/aarch64-unknown-linux-musl/release/deps
           ran=0
-          for bin in "$deps"/xchacha20_poly1305_siv-* "$deps"/differential_reference-*; do
+          for bin in "$deps"/xchacha20_blake3_siv-* "$deps"/differential_reference-*; do
             case "$bin" in *.d|*.rlib|*.rmeta) continue ;; esac
             [ -x "$bin" ] || continue
             echo "--- $(basename "$bin") ---"
@@ -290,7 +290,7 @@ jobs:
 
           gh release create "$tag" \
             --target "$GITHUB_SHA" \
-            --title "XChaCha20-Poly1305-SIV ${short}" \
+            --title "XChaCha20-BLAKE3-SIV ${short}" \
             --notes-file notes.md \
             --latest \
             target/package/*.crate

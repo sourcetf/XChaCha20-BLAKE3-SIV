@@ -11,7 +11,7 @@
 //! this covers the boundaries where stream-cipher wrappers and batched MACs
 //! actually break.
 
-use xchacha20_poly1305_siv::{decrypt, encrypt};
+use xchacha20_blake3_siv::{decrypt, encrypt, TAG_LEN};
 
 /// Must match `tools/gen_test_vectors.py`.
 fn pt_for(n: usize) -> Vec<u8> {
@@ -41,7 +41,7 @@ fn hex_decode(s: &str) -> Vec<u8> {
 struct Fixture {
     key: [u8; 32],
     nonce: [u8; 24],
-    rows: Vec<(usize, usize, Vec<u8>, [u8; 32])>,
+    rows: Vec<(usize, usize, Vec<u8>, [u8; TAG_LEN])>,
 }
 
 fn parse_fixture() -> Fixture {
@@ -85,7 +85,8 @@ fn parse_fixture() -> Fixture {
             msg_len,
             aad_len,
             hex_decode(ct_hex),
-            <[u8; 32]>::try_from(hex_decode(tag_hex).as_slice()).expect("32-byte tag"),
+            <[u8; TAG_LEN]>::try_from(hex_decode(tag_hex).as_slice())
+                .unwrap_or_else(|_| panic!("tag must be {TAG_LEN} bytes")),
         ));
     }
 
@@ -138,7 +139,7 @@ fn differential_decrypt_matches_reference() {
 /// entry points cannot drift apart on any length boundary.
 #[test]
 fn differential_detached_matches_reference() {
-    use xchacha20_poly1305_siv::{decrypt_in_place_detached, encrypt_in_place_detached};
+    use xchacha20_blake3_siv::{decrypt_in_place_detached, encrypt_in_place_detached};
 
     let f = parse_fixture();
     for (msg_len, aad_len, want_ct, want_tag) in &f.rows {
@@ -187,7 +188,7 @@ fn differential_every_position_is_authenticated() {
                 "ciphertext byte {pos} not authenticated (msg_len={msg_len}, aad_len={aad_len})"
             );
         }
-        for pos in 0..32 {
+        for pos in 0..TAG_LEN {
             let mut bad = *tag;
             bad[pos] ^= 0x80;
             assert!(
