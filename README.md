@@ -44,7 +44,7 @@ K (256-bit)   N (192-bit)   A (associated data)   M (message)
 2. tag = BLAKE3_keyed(mac_key,
             "XSIV-TAG" || K || N || le64(|A|) || le64(|M|) || A || M)     65 B
 
-3. km      = BLAKE3_keyed(enc_seed, "XSIV-ENC" || tag)                    43 B
+3. km      = BLAKE3_keyed(enc_seed, "XSIV-ENC" || tag)                    44 B
    enc_key = km[0..32]             enc_nonce = km[32..44]
 
 4. C = ChaCha20(enc_key, counter 0, enc_nonce, M)

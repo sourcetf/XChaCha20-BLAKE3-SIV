@@ -139,7 +139,8 @@ fn zeroize_slice_clears_unaligned_window() {
 // That is a tool limitation, not a property of the code, so these harnesses are
 // split along the line where the *interesting* logic actually lives:
 //
-// * The permutation itself is pinned by the published KATs (`test_vector_*`,
+// * The permutation itself is pinned by the published KATs
+//   (`test_hchacha20_and_chacha20_match_draft_vector`,
 //   `test_xchacha20_keystream_kat_counter0`, `hchacha20_matches_draft_vector`)
 //   and by the SIMD-vs-scalar differential tests.
 // * The *sequencing* — which counter each block uses, where the partial tail
@@ -300,8 +301,9 @@ fn hchacha20_matches_draft_vector() {
 //
 // What covers the AEAD layer instead:
 //
-// * `standard.txt` §Test Vectors and draft-irtf-cfrg-xchacha §A — published KATs
-//   for both constituent standards (`test_vector_*`, `test_xchacha20_*`).
+// * Published KATs for the constituent standards
+//   (`test_hchacha20_and_chacha20_match_draft_vector`,
+//   `test_xchacha20_keystream_kat_counter0`, and the in-crate tag KATs).
 // * Differential testing against an independent reference implementation:
 //   `tools/ref_impl.py` generates `tests/vectors_differential.txt`, and
 //   `tests/differential_reference.rs` replays it across every internal length
@@ -431,8 +433,23 @@ fn max_msg_size_boundary_matches_counter_capacity() {
 // computational assumption, and a SAT solver has no model of it. That half is
 // discharged by using a standard, externally analysed hash, anchored to BLAKE3's
 // official test vectors (see `test_blake3_keyed_matches_official_vectors`).
+//
+// Two further limits of this shard, stated so they are not mistaken for
+// coverage:
+//
+//   * Every harness here stubs `blake3_keyed_multi`, so the real function —
+//     including its `reader.zeroize(); hasher.zeroize();` pair — is **never
+//     executed under Kani at all**.  The claim that BLAKE3's internal key
+//     material is wiped therefore rests on reading that five-line function, not
+//     on a proof.  (A harness that ran it is impossible: real BLAKE3 lowers to
+//     inline asm, which CBMC rejects.)
+//   * The stub verifies the *shape* of each call, by asserting on the arguments
+//     at the call site.  A wrong-but-well-shaped call — right layout, wrong
+//     secret fed into the key parameter — is caught only because the model now
+//     folds `key` into its output; before that fix it was invisible.
 
-/// A stand-in for `blake3_keyed_xof` that is **injective in every input byte**.
+/// A stand-in for `blake3_keyed_multi` whose output depends on the key and on
+/// every input byte.
 ///
 /// Kani cannot run the real BLAKE3: its runtime CPU-feature detection lowers to
 /// `__cpuid_count`, which is inline asm ("TerminatorKind::InlineAsm is not
@@ -440,30 +457,37 @@ fn max_msg_size_boundary_matches_counter_capacity() {
 /// workaround, because the property the real BLAKE3 is relied on for — collision
 /// resistance — is a computational assumption a SAT solver has no model of.
 ///
-/// The model preserves exactly the questions the harnesses below ask: whether
-/// each input byte reaches the hash, and whether each output byte reaches the
-/// tag.  It is built so a dropped input byte or a truncated output is
-/// detectable:
+/// What the model does preserve, and what the harnesses below therefore really
+/// test:
 ///
-///   * `out[0..8]` carries `data.len()`, so truncation or extension of the input
-///     changes the output;
-///   * `out[8..12]` carries a positional XOR-fold of every input byte, so any
-///     single-byte edit changes it (XOR is its own inverse; there is no
-///     cancellation the way a sum could have);
-///   * `out[12..16]` carries the key length and a key-dependent term, so the key
-///     is bound in too;
-///   * every remaining output byte is filled from the input so that no output
-///     byte is constant — otherwise "all 65 bytes reach the tag" would hold
-///     trivially for the constant ones.
+///   * **The key is bound.**  Its bytes are folded into the output, so a call
+///     site passing the wrong key changes the result.  This is load-bearing: an
+///     earlier version of this function accepted `key` and never read it, so
+///     `derive_enc` passing `mac_key` where `enc_seed` belongs would have passed
+///     every harness in this shard.  The parameter is now used, and the doc
+///     bullets that claimed key binding when there was none are gone.
+///   * **Any single-byte edit to the input is visible.**  Each input byte is
+///     XORed into one accumulator slot, and the output byte at that slot is a
+///     function of it, so changing one byte by a nonzero amount changes the
+///     output.  An earlier version folded only a 24-byte prefix of each part,
+///     which silently weakened `derive_enc_reads_every_tag_byte`: that call site
+///     feeds 73 bytes (`DOM_ENC` || 65-byte tag), so tag bytes past the prefix
+///     could not affect the output at all.
+///   * **The total input length is in the output**, so truncation or extension
+///     is visible even when no individual byte is edited.
 ///
-/// No `%` or `/` on symbolic values: CBMC bit-blasts division into an expensive
-/// circuit and these harnesses are sized to finish in seconds.
+/// What it deliberately does *not* model: collisions between *simultaneous*
+/// compensating edits (two different bytes landing in the same slot can cancel,
+/// since a 65-byte output cannot distinguish 80 folded bytes injectively), and
+/// BLAKE3's actual cryptographic strength.  Every harness here perturbs one byte
+/// at a time, so the first limit is not reachable; the second is the reason the
+/// real function is anchored to BLAKE3's official vectors instead.
 fn model_blake3_keyed_multi(key: &[u8; 32], parts: &[&[u8]], out: &mut [u8]) {
     // ── Assert the call shape, directly on the arguments ──
     //
     // Asserting inside the stub is the idiomatic Kani technique for "is this
     // called with what it should be": it inspects the real arguments at every
-    // call site, and costs nothing to unwind. The alternative -- reconstructing
+    // call site and costs nothing to unwind.  The alternative -- reconstructing
     // the expected concatenation and comparing hashes -- needs a loop over every
     // input byte (about 110 here), which pushes CBMC past its unwind budget and
     // fails with a spurious "unwinding assertion" rather than a real
@@ -487,24 +511,32 @@ fn model_blake3_keyed_multi(key: &[u8; 32], parts: &[&[u8]], out: &mut [u8]) {
     }
 
     // ── Produce the output ──
-    //
-    // Deterministic, and injective in **every** input byte.  An earlier version
-    // folded only a 24-byte prefix to keep the loop short, which silently
-    // weakened `derive_enc_reads_every_tag_byte`: that path feeds 73 bytes
-    // (`DOM_ENC` || 65-byte tag), so tag bytes past the prefix could not affect
-    // the model's output and the harness failed against a correct
-    // implementation. Fold everything; the loops here are cheap.
     let out_len = out.len();
     let mut acc = [0u8; TAG_LEN];
     let mut n = 0usize;
+
+    // The key first, as a leading segment of the stream.
+    for b in key.iter() {
+        acc[n % out_len] ^= *b;
+        n += 1;
+    }
     for p in parts {
         for b in p.iter() {
             acc[n % out_len] ^= *b;
             n += 1;
         }
     }
+
+    let mut total = 0u64;
+    for p in parts {
+        total = total.wrapping_add(p.len() as u64);
+    }
+    let len_bytes = total.to_le_bytes();
+
     for (i, o) in out.iter_mut().enumerate() {
-        *o = acc[i].wrapping_add((i as u8) | 1);
+        // The length occupies the first eight bytes; the rest is the fold.
+        let l = if i < 8 { len_bytes[i] } else { 0 };
+        *o = acc[i] ^ l;
     }
 }
 

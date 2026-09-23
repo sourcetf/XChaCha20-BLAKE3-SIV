@@ -2,14 +2,15 @@
 //!
 //! The vectors in `tests/vectors_differential.txt` come from
 //! `tools/ref_impl.py` — an implementation written from the RFC 8439 /
-//! draft-irtf-cfrg-xchacha-03 pseudocode and the c2sp.org specification, not
-//! derived from this crate.  Regenerate with `python3 tools/gen_test_vectors.py`.
+//! draft-irtf-cfrg-xchacha-03 pseudocode and the BLAKE3 specification, not
+//! derived from this crate.  It self-checks against published RFC, HChaCha20 and
+//! official-BLAKE3 vectors before emitting anything.  Regenerate with
+//! `python3 tools/gen_test_vectors.py`.
 //!
-//! These pin the public 24-byte-nonce API across every internal length
-//! boundary (Poly1305 blocks, the 4-block batch, ChaCha20 blocks, and the
-//! SSE2/NEON/AVX2 SIMD widths).  The in-crate KATs cover a handful of inputs;
-//! this covers the boundaries where stream-cipher wrappers and batched MACs
-//! actually break.
+//! These pin the public 24-byte-nonce API across every internal length boundary
+//! (ChaCha20 blocks, the SSE2/NEON/AVX2 SIMD widths, and BLAKE3's chunk
+//! boundary).  The in-crate KATs cover a handful of inputs; this covers the
+//! boundaries where stream-cipher wrappers and buffered hashes actually break.
 
 use xchacha20_blake3_siv::{decrypt, encrypt, TAG_LEN};
 

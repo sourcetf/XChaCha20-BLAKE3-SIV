@@ -16,7 +16,7 @@
 //! 2. tag = BLAKE3_keyed(mac_key,
 //!             "XSIV-TAG" || K || N || le64(|A|) || le64(|M|) || A || M)  65 B
 //!
-//! 3. km      = BLAKE3_keyed(enc_seed, "XSIV-ENC" || tag)               43 B
+//! 3. km      = BLAKE3_keyed(enc_seed, "XSIV-ENC" || tag)               44 B
 //!    enc_key = km[0..32]             enc_nonce = km[32..44]
 //!
 //! 4. C = ChaCha20(enc_key, 0, enc_nonce, M)
@@ -377,8 +377,8 @@ impl core::fmt::Debug for Plaintext {
 ///
 /// [`encrypt`] is a deterministic function of `(key, nonce, aad, plaintext)`:
 /// every subkey, the tag and the keystream are derived from the key with
-/// ChaCha20/HChaCha20, and the commitment term is a hash of the associated
-/// data.  Nothing is drawn from a random source internally — which is exactly
+/// ChaCha20/HChaCha20, and the tag binds the associated data and the message
+/// directly.  Nothing is drawn from a random source internally — which is exactly
 /// what makes the known-answer vectors and the formal harnesses meaningful,
 /// since there is no hidden entropy dependency to mock out or to fail at run
 /// time.
@@ -635,6 +635,13 @@ fn derive_tag(
 
     let mut tag = [0u8; TAG_LEN];
     blake3_keyed_multi(mac_key, &[&head, aad, msg], &mut tag);
+
+    // `head` holds the master key at `head[8..40]`, so it is secret and must be
+    // wiped like every other key-bearing local in this module.  A `[u8; 80]`
+    // on the stack is not cleared by dropping it, and leaving the key there
+    // would break the invariant the rest of this file maintains (the same
+    // failure mode as the two previously fixed instances of unwiped copies).
+    zeroize_array(&mut head);
     tag
 }
 
@@ -1562,11 +1569,12 @@ mod tests {
         }
     }
 
-    // ── KAT Test Vectors (c2sp.org ChaCha20-Poly1305-SIV, 16-byte nonce) ──
-
     // ── XChaCha20 KAT (draft-irtf-cfrg-xchacha-03, 24-byte nonce) ──
-    // These pin the HChaCha20 nonce-suffix layout: the 4 NUL bytes come FIRST,
-    // then nonce[16..24].  Without these, a wrong-but-self-consistent layout
+    // These pin the draft's HChaCha20 nonce-suffix layout (`0^4 || nonce[16..24]`),
+    // which is deliberately NOT this crate's layout: `derive_material` places
+    // `SUBKEY_DOMAIN` ("XSIV") in those four bytes instead.  They are kept
+    // because they anchor the HChaCha20 and ChaCha20 primitives to an external
+    // vector.  Without them, a wrong-but-self-consistent layout
     // passes every roundtrip test.
 
     #[test]
@@ -1586,10 +1594,18 @@ mod tests {
     }
 
     #[test]
-    fn test_xchacha20_poly1305_key_kat() {
-        // draft-irtf-cfrg-xchacha-03 §A.3.1 — Poly1305 key of the AEAD vector.
-        // This is exactly ChaCha20(HChaCha20(key, iv[0..16]), 0, 0^4||iv[16..24])[0..32],
-        // i.e. our subkey derivation, so it pins the nonce-suffix byte order.
+    fn test_hchacha20_and_chacha20_match_draft_vector() {
+        // draft-irtf-cfrg-xchacha-03 §A.3.1 — the AEAD vector's first keystream
+        // block, i.e. ChaCha20(HChaCha20(key, iv[0..16]), 0, 0^4 || iv[16..24]).
+        //
+        // This anchors the two primitives this crate builds on: HChaCha20, and
+        // the ChaCha20 keystream that carries it.  Note it does NOT pin this
+        // crate's own subkey layout: the vector uses XChaCha20-Poly1305's `0^4`
+        // padding, whereas `derive_material` deliberately places `SUBKEY_DOMAIN`
+        // ("XSIV") there instead — see `test_subkey_domain_occupies_nonce_not_counter`
+        // for that.  An earlier version of this comment claimed the vector was
+        // "exactly our subkey derivation", which stopped being true when the
+        // domain constant was introduced.
         let key = hex("808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f");
         let iv = hex("404142434445464748494a4b4c4d4e4f5051525354555657");
         let expected = hex("7b191f80f361f099094f6f4b8fb97df847cc6873a8f2b190dd73807183f907d5");
@@ -2243,7 +2259,7 @@ mod tests {
 
     #[test]
     fn test_large_message_roundtrip() {
-        // Exercise multi-block ChaCha20 + Poly1305 padding boundaries.
+        // Exercise multi-block ChaCha20 boundaries.
         let key = [0x11u8; 32];
         let nonce = [0x22u8; 24];
         let aad = b"large aad";
@@ -2260,7 +2276,7 @@ mod tests {
     //
     // Diffusion is not a security *proof* — the construction's security rests on
     // the underlying primitives — but it is the cheapest detector of the bug class
-    // a hand-written ChaCha20/Poly1305 is most likely to have: a round function,
+    // a hand-written ChaCha20 or ARX hash is most likely to have: a round function,
     // counter lane or limb-recombination error that leaves part of the state
     // untouched.  A missing round still passes roundtrip tests; it fails these.
 
@@ -2332,12 +2348,13 @@ mod tests {
         );
     }
 
-    /// The tag must depend on **every** byte of the AAD, including bytes past
-    /// the first Poly1305 block and past the SIMD batch boundary.
+    /// The tag must depend on **every** byte of the AAD, including bytes well
+    /// past where a truncating implementation would plausibly stop (BLAKE3's
+    /// 64-byte block and 1024-byte chunk boundaries).
     ///
-    /// `test_context_commitment_covers_whole_aad` does this for a 4-byte AAD;
-    /// this sweeps every position of a longer one, so a `&aad[..16]`
-    /// truncation would be caught.
+    /// `test_aad_message_split_is_unambiguous` covers the encoding and a
+    /// 4-byte AAD; this sweeps every position of a 200-byte one, so a
+    /// `&aad[..N]` truncation would be caught.
     #[test]
     fn test_tag_depends_on_every_aad_byte() {
         let key = [0x71u8; 32];
@@ -2354,8 +2371,6 @@ mod tests {
             assert_ne!(tag, tag0, "AAD byte {pos} does not reach the tag");
         }
     }
-
-    // ── CTX commitment: mode and layout pins ──
 
     // ── Randomness (rng feature) ──
 

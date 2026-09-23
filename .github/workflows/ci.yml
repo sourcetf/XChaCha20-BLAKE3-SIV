@@ -59,6 +59,14 @@ jobs:
         env:
           RUSTDOCFLAGS: -D warnings
 
+      # `--no-default-features` is how a `no_std` user consumes this crate, and
+      # nothing else exercises it. It was broken once: `zeroize` was an optional
+      # dependency behind a default feature while the code used it
+      # unconditionally, so the crate failed to build exactly where `no_std`
+      # users would hit it. Cheap to check, so check it.
+      - name: build with no default features
+        run: cargo check --no-default-features --all-targets
+
       - name: cargo package
         run: cargo package
 

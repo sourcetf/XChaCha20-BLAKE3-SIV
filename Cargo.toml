@@ -20,7 +20,7 @@ subtle = { version = "2.6.1", default-features = false }
 getrandom = { version = "0.3", optional = true, default-features = false }
 
 # BLAKE3 supplies the context-commitment half of the tag (see
-# `context_commitment` in lib.rs).  `default-features = false` keeps it `no_std`.
+# `blake3_keyed_multi` in lib.rs).  `default-features = false` keeps it `no_std`.
 #
 # `pure` is **required for cross-compilation**: without it BLAKE3's build script
 # compiles C/assembly SIMD kernels (`blake3_neon.c`, `blake3_avx2_*.S`), which
@@ -32,27 +32,26 @@ getrandom = { version = "0.3", optional = true, default-features = false }
 # buildable by pure-Rust toolchains such as Kani.
 blake3 = { version = "1.8", default-features = false, features = ["pure", "zeroize"] }
 
-# `zeroize` (below) exists so BLAKE3's *internal* state can be wiped. The MAC key
-# lives inside `blake3::Hasher` (`key: CVWords`, plus the chunk state and CV
-# stack), and that memory is unreachable from this crate — enabling BLAKE3's
-# `zeroize` feature is the only way to clear it. It is not automatic on drop, so
-# `blake3_keyed_xof`/`derive_tag` call `.zeroize()` explicitly.
+# `zeroize` exists so BLAKE3's *internal* state can be wiped. The MAC key lives
+# inside `blake3::Hasher` (`key: CVWords`, plus the chunk state and CV stack), and
+# that memory is unreachable from this crate — enabling BLAKE3's `zeroize`
+# feature is the only way to clear it. It is not automatic on drop, so
+# `blake3_keyed_multi` calls `.zeroize()` explicitly.
+#
+# Required unconditionally, NOT optional and NOT behind a feature: `blake3`
+# always needs zeroizing and the code uses the trait unconditionally, so gating
+# it produced a crate that failed to build with `--no-default-features` — which
+# is exactly how a `no_std` user consumes it. Nothing needs it off.
 #
 # This crate still implements its own volatile wipes (`zeroize_array` /
 # `zeroize_slice`) for the secrets it owns, and those do not go through this
 # dependency.
-zeroize = { version = "1", default-features = false, optional = true }
+zeroize = { version = "1", default-features = false }
 
 [dev-dependencies]
 criterion = "0.5"
 
 [features]
-# The MAC key lives inside `blake3::Hasher`, which this crate cannot reach; the
-# dependency's own `zeroize` support is the only way to wipe it. Always on,
-# because the MAC always is.
-default = ["zeroize-blake3"]
-zeroize-blake3 = ["dep:zeroize"]
-
 # Opt-in OS randomness for `generate_key` / `generate_nonce`.  Off by default:
 # `no_std` builds and users who already have an entropy source pay nothing.
 rng = ["dep:getrandom"]

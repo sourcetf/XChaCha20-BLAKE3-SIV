@@ -28,8 +28,9 @@ ROOT = os.path.dirname(HERE)
 PROOFS = os.path.join(ROOT, "src", "proofs.rs")
 
 # Ordered: the first prefix that matches decides the shard.  Prefixes are
-# deliberately broad so a new `poly1305_*` harness lands with the other
-# Poly1305 work instead of falling through to a catch-all.
+# deliberately broad so a new harness lands with the work it belongs to instead
+# of failing the "no shard matched" check.  That check is the point: a harness
+# that matched nothing would otherwise be silently unproven.
 SHARDS = [
     # The only harness that executes the full 20-round permutation. Measured in
     # the tens of minutes on a 16-core machine; a CI runner is far slower.
