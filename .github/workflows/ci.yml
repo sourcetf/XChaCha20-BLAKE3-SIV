@@ -249,9 +249,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
 
       # Each job gets a fresh runner, so the lint job's `cargo package` output is
-      # NOT available here. An earlier version of this job relied on that and
-      # produced a release with no attached artifact, because the shell glob
-      # `target/package/*.crate` silently expanded to nothing.
+      # not available here: this job must package the crate itself.
       - name: package the crate
         run: |
           set -euo pipefail
@@ -272,9 +270,24 @@ jobs:
           short="$(git rev-parse --short=12 HEAD)"
           tag="sha-${short}"
 
-          # Idempotent: re-running CI on the same commit must not fail here.
+          # Expand the glob ourselves and refuse to publish an empty release.
+          # Defensive rather than a fix for a known failure: an unexpanded glob
+          # is silent, and an unattached artifact is easy to miss at the time.
+          shopt -s nullglob
+          crates=(target/package/*.crate)
+          if [ "${#crates[@]}" -eq 0 ]; then
+            echo "::error::no .crate artifact found to attach"
+            exit 1
+          fi
+          echo "artifacts to attach: ${crates[*]}"
+
+          # Idempotent in the strong sense: if the release already exists, attach
+          # the artifact to it rather than reporting "nothing to do". This path is
+          # not known to have been hit, but skipping the attach is the kind of
+          # thing that would go unnoticed for a long time.
           if gh release view "$tag" >/dev/null 2>&1; then
-            echo "release $tag already exists; nothing to do"
+            echo "release $tag already exists; uploading artifact"
+            gh release upload "$tag" "${crates[@]}" --clobber
             exit 0
           fi
 
@@ -295,15 +308,6 @@ jobs:
           > a 32-byte tag), so treat the format as unstable until 1.0. See
           > README.md for the construction and its security level.
           EOF
-
-          # Expand the glob ourselves and refuse to publish an empty release:
-          # an unattached artifact is easy to miss and hard to notice later.
-          shopt -s nullglob
-          crates=(target/package/*.crate)
-          if [ "${#crates[@]}" -eq 0 ]; then
-            echo "::error::no .crate artifact found to attach"
-            exit 1
-          fi
 
           gh release create "$tag" \
             --target "$GITHUB_SHA" \
