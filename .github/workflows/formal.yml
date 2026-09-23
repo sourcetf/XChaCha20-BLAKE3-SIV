@@ -1,0 +1,146 @@
+# Formal verification: Kani bounded model checking of the construction
+# properties.
+#
+# Kept separate from ci.yml because it is orders of magnitude slower -- the one
+# harness that executes the real 20-round permutation takes tens of minutes on a
+# 16-core machine, and a CI runner is slower still.
+#
+# Relationship to releases: the release job in ci.yml is gated on the CI jobs
+# only, so a release can exist for a commit whose proofs are still running. If
+# you want the proofs to block releases (defensible for a cryptographic
+# library), add a `workflow_run` trigger on this workflow and gate the release
+# there -- cross-workflow ordering cannot be expressed with `needs`.
+#
+# The harness set is derived from the source by tools/kani_shards.py rather than
+# listed here, so a newly added `#[kani::proof]` is picked up automatically. A
+# hardcoded list would silently stop covering new harnesses, and "the proofs
+# still pass" would quietly mean less than it used to.
+
+name: Formal verification
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  # Weekly, so a Kani, CBMC or Rust nightly regression cannot go unnoticed just
+  # because the source did not change.
+  schedule:
+    - cron: "0 3 * * 1"
+  workflow_dispatch:
+
+concurrency:
+  group: formal-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+  # Pinned to the version whose behaviour is described in src/proofs.rs. Kani is
+  # a research tool: its cost model and even its harness semantics have shifted
+  # between releases, so an unpinned version could make a harness that passes
+  # today fail tomorrow for reasons unrelated to this crate.
+  KANI_VERSION: "0.68.0"
+
+jobs:
+  # Derive the shard plan from the source, and fail if it does not account for
+  # every harness.
+  plan:
+    name: plan shards
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.plan.outputs.matrix }}
+      count: ${{ steps.plan.outputs.count }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.x"
+
+      # `--plan` exits non-zero if any harness matches no shard, or if the
+      # grouped counts do not add up to the number found in the source. That is
+      # the guard against silently under-covering the suite.
+      - name: derive the shard matrix
+        id: plan
+        run: |
+          set -euo pipefail
+          count="$(python3 tools/kani_shards.py --count)"
+          matrix="$(python3 tools/kani_shards.py --plan)"
+          echo "count=$count" >> "$GITHUB_OUTPUT"
+          echo "matrix=$(printf '%s' "$matrix")" >> "$GITHUB_OUTPUT"
+          echo "harnesses found: $count"
+          printf '%s\n' "$matrix" | python3 -m json.tool
+
+  prove:
+    name: prove (${{ matrix.shard }})
+    needs: plan
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    strategy:
+      # One shard failing must not cancel the others: the full picture of what
+      # is and is not proven is the useful output.
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: kani-${{ matrix.shard }}
+
+      # Installing Kani is the slowest step, so cache both the tool and the
+      # binaries `cargo-kani setup` fetches (the Rust nightly and CBMC).
+      - name: cache Kani
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.kani
+            ~/.cargo/bin/cargo-kani
+            ~/.cargo/bin/kani
+            ~/.cargo/bin/kani-driver
+            ~/.cargo/bin/kani-compiler
+            ~/.cargo/bin/kani-cov
+          key: kani-${{ env.KANI_VERSION }}-${{ runner.os }}-${{ runner.arch }}
+
+      - name: install Kani ${{ env.KANI_VERSION }}
+        run: |
+          set -euo pipefail
+          if command -v cargo-kani >/dev/null 2>&1; then
+            echo "cargo-kani already present; verifying setup is complete"
+          else
+            cargo install --locked --version "$KANI_VERSION" kani-verifier
+          fi
+          # Fetches the matching Rust nightly and CBMC. Idempotent.
+          cargo-kani setup
+          cargo kani --version
+
+      # -Z stubbing is REQUIRED: several harnesses use #[kani::stub] to replace
+      # the ChaCha20 permutation, the zeroization helper and the BLAKE3
+      # commitment with cheap stand-ins. Without it Kani rejects the attribute
+      # and the suite fails to compile. See the src/proofs.rs module docs for
+      # the cost model behind that decision.
+      - name: prove this shard
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          # Every harness name is passed explicitly, and Kani errors with
+          # "Failed to match the following harness(es)" if a name does not
+          # exist. So a typo or a renamed harness fails loudly here rather than
+          # quietly reducing what was proven.
+          args=(-Z stubbing)
+          n=0
+          for h in ${{ matrix.harnesses }}; do
+            args+=(--harness "$h")
+            n=$((n + 1))
+          done
+
+          echo "proving $n harness(es) in shard '${{ matrix.shard }}':"
+          for h in ${{ matrix.harnesses }}; do echo "  - $h"; done
+          echo
+
+          cargo kani "${args[@]}"

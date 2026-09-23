@@ -101,8 +101,8 @@
 //!    handle real secrets.  This is a property of the dependency, not of any
 //!    code in this crate.
 //!
-//! Secret material is wiped with `write_volatile` through
-//! [`zeroize_array`]/`zeroize_slice`, which the compiler cannot elide.
+//! Secret material is wiped with `write_volatile` through the internal
+//! `zeroize_array`/`zeroize_slice` helpers, which the compiler cannot elide.
 //!
 //! Test vectors:
 //! - XChaCha20 (24-byte nonce): draft-irtf-cfrg-xchacha-03 §2.2.1 / §A.2.1 / §A.3.1
@@ -366,8 +366,8 @@ impl core::fmt::Debug for Plaintext {
 /// * **A counter**, incremented after every encryption and never allowed to
 ///   wrap.  Deterministic, testable, and free of any collision bound.  Prefer
 ///   this whenever the application has somewhere to store the counter.
-/// * **[`generate_nonce`] (random)**.  The c2sp.org specification this
-///   construction extends RECOMMENDS "randomly generate[d] nonces with a
+/// * **[`random::generate_nonce`] (random)**.  The c2sp.org specification this
+///   construction extends RECOMMENDS "randomly generate\[d\] nonces with a
 ///   CSPRNG" and gives the budget as 2^48 messages under one key with a
 ///   collision probability of 2^-32, aligning with NIST guidance.  (The bare
 ///   birthday bound for a 192-bit nonce is far more generous than that; the

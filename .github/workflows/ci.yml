@@ -1,0 +1,256 @@
+# Continuous integration: lint, test, cross-check, execute the aarch64 suite,
+# and re-check the differential fixture against the independent reference
+# implementation.
+#
+# Once every job here passes on `main`, the `release` job tags the commit and
+# publishes a release.  See .github/workflows/formal.yml for the Kani proofs,
+# which are kept separate because they take far longer than everything here
+# combined.
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# One run per ref: a new push supersedes an in-flight run rather than queueing
+# behind it.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  # Incremental artefacts are useless in CI (nothing is reused between runs)
+  # and only slow down the cache.
+  CARGO_INCREMENTAL: "0"
+
+jobs:
+  lint:
+    name: fmt, clippy, docs
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: lint
+
+      - name: cargo fmt
+        run: cargo fmt --all --check
+
+      # Both feature sets: `rng` gates a public module, so a warning there
+      # would otherwise only surface once someone enabled the feature.
+      - name: clippy (default features)
+        run: cargo clippy --all-targets -- -D warnings
+      - name: clippy (all features)
+        run: cargo clippy --all-targets --all-features -- -D warnings
+
+      # Catches broken intra-doc links, which are invisible to `cargo test`.
+      - name: rustdoc
+        run: cargo doc --no-deps --all-features
+        env:
+          RUSTDOCFLAGS: -D warnings
+
+      - name: cargo package
+        run: cargo package
+
+  test:
+    name: test (${{ matrix.profile }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - profile: release, default features
+            args: --release
+          - profile: release, all features
+            args: --release --all-features
+          # Debug matters here beyond the usual reasons: `subtle`'s constant-time
+          # guarantees are release-only (its Choice runs invariant checks in
+          # debug), and this crate's own assertions and debug paths are only
+          # exercised in a debug build.
+          - profile: debug, all features
+            args: --all-features
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: test-${{ matrix.profile }}
+
+      - name: cargo test
+        run: cargo test ${{ matrix.args }}
+
+  cross:
+    name: cross-check ${{ matrix.target }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # aarch64: the NEON backend is compiled for these targets. The -musl
+          # variant is the one that is actually built and executed in the
+          # `aarch64` job below; here it is only type-checked.
+          - target: aarch64-unknown-linux-gnu
+            mode: check
+          - target: aarch64-unknown-linux-musl
+            mode: check
+          # riscv64 has no SIMD backend at all, so this is the only target that
+          # type-checks the scalar-only configuration. It can be checked but not
+          # linked by this toolchain -- see .cargo/config.toml.
+          - target: riscv64gc-unknown-linux-musl
+            mode: check
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: cross-${{ matrix.target }}
+
+      - name: cargo check
+        run: cargo check --target ${{ matrix.target }} --all-targets --all-features
+
+  # The NEON backend is compiled out entirely on x86, so a type-check says
+  # nothing about whether it computes the right keystream. This job is the only
+  # place it is actually executed.
+  aarch64:
+    name: execute aarch64 suite under qemu
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-unknown-linux-musl
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: aarch64-exec
+
+      - name: install qemu
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y qemu-user
+          qemu-aarch64 --version
+
+      # Mirrors stage 5 of ./verify.sh, which is the local entry point for the
+      # same check. The test binaries are invoked directly rather than through
+      # `cargo test --target`, so the emulator is used explicitly and a runner
+      # misconfiguration cannot silently execute aarch64 code natively.
+      - name: build aarch64 test binaries
+        run: cargo test --target aarch64-unknown-linux-musl --release --no-run
+
+      - name: execute under qemu
+        run: |
+          set -euo pipefail
+          deps=target/aarch64-unknown-linux-musl/release/deps
+          ran=0
+          for bin in "$deps"/xchacha20_poly1305_siv-* "$deps"/differential_reference-*; do
+            case "$bin" in *.d|*.rlib|*.rmeta) continue ;; esac
+            [ -x "$bin" ] || continue
+            echo "--- $(basename "$bin") ---"
+            qemu-aarch64 "$bin" --test-threads=1
+            ran=$((ran + 1))
+          done
+          if [ "$ran" -eq 0 ]; then
+            echo "no aarch64 test binaries found in $deps" >&2
+            exit 1
+          fi
+          echo "executed $ran aarch64 test binaries under qemu"
+
+  differential:
+    name: differential fixture vs reference implementation
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.x"
+
+      - name: install the blake3 module
+        run: python3 -m pip install --quiet blake3
+
+      # The reference implementation self-checks against the published RFC 8439,
+      # HChaCha20 and c2sp.org vectors before it emits anything, so a failure
+      # here means the reference itself is wrong, not merely that it disagrees.
+      - name: reference implementation self-checks
+        run: python3 tools/ref_impl.py
+
+      # Fails if the committed fixture no longer matches what the reference
+      # produces, i.e. if someone edited a KAT by hand or changed the
+      # construction without regenerating.
+      - name: committed fixture is current
+        run: python3 tools/gen_test_vectors.py --check
+
+  release:
+    name: tag the commit and publish a release
+    # Gate on every verification job: a release must not exist for a commit that
+    # did not pass. `needs` also means a failure anywhere blocks this.
+    needs: [lint, test, cross, aarch64, differential]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # Full history so the generated notes can be compared against the
+          # previous release.
+          fetch-depth: 0
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: package the crate
+        run: cargo package
+
+      # The tag is the commit, as requested: an immutable, unambiguous pointer
+      # at exactly the tree that passed CI. A *moving* tag such as `latest`
+      # would silently change what it points at, which is the wrong property for
+      # a release of a cryptographic library.
+      - name: publish
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          short="$(git rev-parse --short=12 HEAD)"
+          tag="sha-${short}"
+
+          # Idempotent: re-running CI on the same commit must not fail here.
+          if gh release view "$tag" >/dev/null 2>&1; then
+            echo "release $tag already exists; nothing to do"
+            exit 0
+          fi
+
+          cat > notes.md <<EOF
+          Snapshot of \`main\` at commit [\`${short}\`](${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/commit/${GITHUB_SHA}).
+
+          Gated by CI on this commit: formatting and lints clean, the full test
+          suite green in release and debug, three cross-targets type-checked, the
+          aarch64 (NEON) suite executed under qemu, and the differential fixture
+          re-checked against the independent reference implementation.
+
+          The formal proofs in \`.github/workflows/formal.yml\` run separately and
+          are not a gate for this release.
+
+          > **Wire format.** This construction is bespoke and not byte-compatible
+          > with anything else. The tag construction and \`COMMITMENT_CONTEXT\`
+          > have already changed once; treat the format as unstable until 1.0.
+          > See README.md.
+          EOF
+
+          gh release create "$tag" \
+            --target "$GITHUB_SHA" \
+            --title "XChaCha20-Poly1305-SIV ${short}" \
+            --notes-file notes.md \
+            --latest \
+            target/package/*.crate
