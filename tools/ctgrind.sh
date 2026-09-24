@@ -101,7 +101,16 @@ ctrl_out="$("$VG" --error-exitcode=99 --suppressions="$SUPP" \
   "$BIN" --ignored --test-threads=1 --nocapture deliberate_leak 2>&1)"
 rc=$?
 set -e
-if [ "$rc" -ne 99 ] || ! printf '%s\n' "$ctrl_out" | grep -q 'CONTROL_LEAK_OBSERVED'; then
+# `case` rather than `printf ... | grep -q`, deliberately: this script runs with
+# `set -o pipefail`, and `grep -q` exits as soon as it matches, which kills the
+# writer with SIGPIPE and makes the *pipeline* fail even though the match was
+# found. It only shows up when the captured output is large -- it passed locally
+# and failed on a CI runner whose output is bigger.
+ctrl_ok=0
+case "$ctrl_out" in
+  *CONTROL_LEAK_OBSERVED*) ctrl_ok=1 ;;
+esac
+if [ "$rc" -ne 99 ] || [ "$ctrl_ok" -ne 1 ]; then
   echo "FAIL: the deliberate leak was not detected (exit $rc)." >&2
   echo "      The control verifies itself, so this means either the poisoning" >&2
   echo "      is not reaching valgrind or the leak was optimized away -- and a" >&2
@@ -144,7 +153,7 @@ EOF
 
 if [ "$in_crate" -gt 0 ]; then
   echo "FAIL: memcheck reported $in_crate report(s) inside this crate:" >&2
-  printf '%s\n' "$out" | grep -B2 -A12 'xchacha20_blake3_siv' | head -60 >&2
+  printf '%s\n' "$out" | grep -B2 -A12 'xchacha20_blake3_siv' | awk 'NR<=60' >&2
   echo "      Re-run without --quiet to see all of them; do NOT add a" >&2
   echo "      suppression before understanding what it is." >&2
   exit 99
