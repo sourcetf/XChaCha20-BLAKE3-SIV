@@ -27,12 +27,19 @@ RUN_KANI=0
 KANI_ONLY=0
 RUN_AARCH64_EXEC=0
 RUN_MIRI=0
+RUN_CTGRIND=0
+RUN_DENY=0
+RUN_FUZZ=0
 for arg in "$@"; do
   case "$arg" in
     --kani) RUN_KANI=1 ;;
     --kani-only) RUN_KANI=1; KANI_ONLY=1 ;;
     --aarch64-exec) RUN_AARCH64_EXEC=1 ;;
     --miri) RUN_MIRI=1 ;;
+    --ctgrind) RUN_CTGRIND=1 ;;
+    --deny) RUN_DENY=1 ;;
+    --fuzz) RUN_FUZZ=1 ;;
+    --deep) RUN_KANI=1; RUN_AARCH64_EXEC=1; RUN_MIRI=1; RUN_CTGRIND=1; RUN_DENY=1; RUN_FUZZ=1 ;;
     --all) RUN_KANI=1; RUN_AARCH64_EXEC=1; RUN_MIRI=1 ;;
     *) echo "unknown option: $arg" >&2; exit 1 ;;
   esac
@@ -165,6 +172,43 @@ if [ "$RUN_MIRI" -eq 1 ]; then
   fi
 fi
 
+if [ "$RUN_CTGRIND" -eq 1 ]; then
+  step "7. ctgrind (constant-time, via valgrind memcheck)"
+  # Marks secrets as undefined and lets memcheck report any branch or index that
+  # depends on them. The script verifies its own negative control first, so a
+  # clean result cannot come from poisoning that never took effect.
+  if [ -x tools/ctgrind.sh ]; then
+    tools/ctgrind.sh
+  else
+    echo "SKIPPED: tools/ctgrind.sh missing"
+  fi
+fi
+
+if [ "$RUN_DENY" -eq 1 ]; then
+  step "8. cargo-deny (advisories, licences, bans, sources)"
+  if cargo deny --version >/dev/null 2>&1; then
+    cargo deny check
+  else
+    echo "SKIPPED: cargo-deny not installed"
+    echo "         (cargo install cargo-deny --locked)"
+  fi
+fi
+
+if [ "$RUN_FUZZ" -eq 1 ]; then
+  step "9. coverage-guided fuzzing (cargo-fuzz + libFuzzer + ASAN)"
+  # Bounded by FUZZ_SECONDS so this stays usable in a pipeline; raise it for a
+  # soak run. The target asserts round-trip correctness, rejection of every
+  # single-bit corruption, and the wipe-on-failure contract, so any failure here
+  # is a real defect rather than a smoke test.
+  FUZZ_SECONDS="${FUZZ_SECONDS:-120}"
+  if cargo fuzz --version >/dev/null 2>&1 && cargo +nightly --version >/dev/null 2>&1; then
+    cargo +nightly fuzz run roundtrip -- -max_total_time="$FUZZ_SECONDS"
+  else
+    echo "SKIPPED: cargo-fuzz and/or nightly toolchain not available"
+    echo "         (cargo install cargo-fuzz; rustup toolchain install nightly)"
+  fi
+fi
+
 if [ "$RUN_KANI" -eq 1 ]; then
   step "6. Kani bounded model checking"
   # `-Z stubbing` is REQUIRED: several harnesses use #[kani::stub] to replace the
@@ -175,7 +219,8 @@ if [ "$RUN_KANI" -eq 1 ]; then
 fi
 
 # Each hint is printed only for the step that was actually skipped.
-if [ "$RUN_KANI" -eq 0 ] || [ "$RUN_AARCH64_EXEC" -eq 0 ] || [ "$RUN_MIRI" -eq 0 ]; then
+if [ "$RUN_KANI" -eq 0 ] || [ "$RUN_AARCH64_EXEC" -eq 0 ] || [ "$RUN_MIRI" -eq 0 ] \
+   || [ "$RUN_CTGRIND" -eq 0 ] || [ "$RUN_DENY" -eq 0 ] || [ "$RUN_FUZZ" -eq 0 ]; then
   echo
   if [ "$RUN_KANI" -eq 0 ]; then
     echo "(Kani skipped; pass --kani to include it.)"
@@ -186,6 +231,16 @@ if [ "$RUN_KANI" -eq 0 ] || [ "$RUN_AARCH64_EXEC" -eq 0 ] || [ "$RUN_MIRI" -eq 0
   if [ "$RUN_MIRI" -eq 0 ]; then
     echo "(Miri skipped; pass --miri to include it.)"
   fi
+  if [ "$RUN_CTGRIND" -eq 0 ]; then
+    echo "(ctgrind skipped; pass --ctgrind to include it.)"
+  fi
+  if [ "$RUN_DENY" -eq 0 ]; then
+    echo "(cargo-deny skipped; pass --deny to include it.)"
+  fi
+  if [ "$RUN_FUZZ" -eq 0 ]; then
+    echo "(fuzzing skipped; pass --fuzz to include it.)"
+  fi
+  echo "(Pass --deep for Kani + aarch64 + Miri + ctgrind + deny + fuzz.)"
   echo "(Run ./verify.sh --all for everything.)"
 fi
 

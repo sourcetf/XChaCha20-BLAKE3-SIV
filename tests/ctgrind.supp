@@ -1,0 +1,122 @@
+# Valgrind suppressions for tests/ctgrind.rs — run via `verify.sh --ctgrind`.
+#
+# Every entry is justified below. Anything NOT listed fails the run: a
+# suppression file is a record of what has been examined and permitted, not a
+# silencer.
+#
+# The frames were generated with `--gen-suppressions=all` against the *release*
+# binary that actually runs. (Generating them from a debug build does not
+# transfer: different inlining gives different frames, and the file then fails
+# to suppress anything while still parsing cleanly.)
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Group 1 — glibc and libtest startup, reached before any test body runs
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# Every entry below is reached from `ctgrind::main` -> `test::cli::parse_opts`
+# or -> `pthread_getattr_np`, i.e. while the test harness parses its own command
+# line and asks for its stack size. That happens before one line of this crate
+# executes, so none of it can be caused by the poisoning these tests perform.
+#
+# It appears at all because the binary is statically linked against glibc, which
+# is deliberate: a static binary has no dynamic linker, which sidesteps the
+# `strcmp` redirection valgrind cannot set up here without root-installed libc
+# debuginfo. The cost is that memcheck also sees glibc's own startup.
+
+# glibc's static initialisation parses LD_LIBRARY_PATH with an SSE4.2 string
+# routine that reads a few bytes past each string's end.
+{
+   glibc-static-init-parses-ld-library-path
+   Memcheck:Cond
+   fun:__strcspn_sse42
+   fun:strsep
+}
+
+# libtest queries its stack size through /proc/self/stat; the getdelim buffer is
+# only partially written.
+{
+   libtest-stack-size-getdelim
+   Memcheck:Cond
+   fun:_int_realloc
+   fun:realloc
+}
+
+# The same query, via sscanf on that /proc line.
+{
+   libtest-stack-size-sscanf
+   Memcheck:Cond
+   fun:__strlen_avx2
+   fun:_IO_str_init_static_internal
+}
+
+# libtest's getopts-based command-line parsing, building its option table. The
+# chain of `UnknownInlinedFun` frames is the inlined allocator in a release
+# build; the distinguishing frame is the getopts closure at the end.
+{
+   libtest-getopts-parse-builds-option-table
+   Memcheck:Cond
+   fun:free
+   fun:UnknownInlinedFun
+   fun:UnknownInlinedFun
+   fun:UnknownInlinedFun
+   fun:UnknownInlinedFun
+   fun:UnknownInlinedFun
+   fun:UnknownInlinedFun
+   fun:UnknownInlinedFun
+   fun:UnknownInlinedFun
+   fun:UnknownInlinedFun
+   fun:UnknownInlinedFun
+   fun:UnknownInlinedFun
+   fun:UnknownInlinedFun
+   fun:{closure#0}<&[alloc::string::String]>
+}
+
+# libtest dropping those same structures at startup (the getopts Name / Opt /
+# Optval / OptGroup destructors all share this prefix).
+{
+   libtest-getopts-drops-option-table
+   Memcheck:Cond
+   fun:free
+   fun:UnknownInlinedFun
+   fun:UnknownInlinedFun
+   fun:dealloc_nonnull
+   fun:deallocate_impl_runtime
+   fun:deallocate_impl
+   fun:deallocate
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Group 2 — the SIV accept/reject decision, in this crate
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# These two ARE in this crate and are permitted deliberately.
+#
+# `decrypt` and `decrypt_in_place_detached` end in
+#     if bool::from(auth_ok) { Ok(..) } else { Err(..) }
+# where `auth_ok` comes from the tag, which comes from the secret key. That
+# branch therefore depends on secret-derived data, and it is unavoidable: SIV
+# needs the plaintext before it can compute the tag, so decrypt-then-verify is
+# inherent to the mode (the crate documents this). The decision reveals exactly
+# one bit that is already public — whether this ciphertext authenticates.
+#
+# This must NOT be read as "the tag comparison is unchecked". The comparison
+# *feeding* the branch is verified separately and mechanically:
+# `constant_time_eq_does_not_branch_on_operands` in tests/ctgrind.rs poisons both
+# operands, requires valgrind to report nothing from the comparison itself, and
+# only unpoisons the resulting `Choice` before branching on it. The timing screen
+# in tests/security.rs additionally checks position-independence end to end.
+#
+# Matching on the mangled name means a *new* function in this crate that branched
+# on secret data would not be suppressed and would fail the run.
+
+{
+   siv-decrypt-accept-reject-decision
+   Memcheck:Cond
+   fun:_RNvCs*_20xchacha20_blake3_siv7decrypt
+}
+
+{
+   siv-decrypt-in-place-accept-reject-decision
+   Memcheck:Cond
+   fun:_RNvCs*_20xchacha20_blake3_siv25decrypt_in_place_detached
+}

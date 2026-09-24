@@ -14,16 +14,43 @@ in the environment this crate was developed in. This file records what was run,
 what was substituted, and what therefore rests on reasoning rather than tooling —
 so a green run is not read as more than it is.
 
-| Check | Status here | What actually covers it |
+| Check | Status | What it found / how it runs |
 | --- | --- | --- |
-| Constant-time comparison | **verified by inspection + disassembly** | All 17 branch statements in non-test code were classified by hand: they depend on lengths, pointer alignment, CPU features, an enum variant, or the final accept/reject. None depends on the content of a key, nonce, AAD or message. The tag compare is `subtle::ConstantTimeEq` over all 65 bytes. |
-| Statistical timing test | **run, with a stated resolution floor** | `dudect-bencher` is unavailable, so `tests/security.rs` implements the Welch t-test directly. **`Instant::now()` costs ~40 µs on this host** (measured; ~25 ns on bare metal), so after batching to amortise it the screen resolves differences of roughly 3 µs/operation. A regression from `ct_eq` to `==` is tens of ns — *below that floor*. The tests are therefore a screen for gross regressions, not proof; `timing_screen_can_detect_a_real_difference` exists to keep that limit visible. |
-| Runtime UB detection (`miri`) | **run** on the unsafe paths | Miri cannot execute `__cpuid_count` (inline asm), so `detect_avx2` returns `false` under `cfg(miri)` and the run exercises the SSE2, transpose and zeroization paths — which is where the alignment-sensitive `unsafe` is. The AVX2 kernel is held byte-identical to scalar by the differential tests. |
-| `ctgrind` / `valgrind` | **unavailable** | Not installed, and `valgrind` is not available in this environment. Covered by inspection plus the disassembly review. |
-| Dependency advisories | **run** (`cargo-audit`, offline mirror of RustSec) | 92 dependencies scanned against 1267 advisories: 0 vulnerabilities, 0 warnings. |
-| `cargo-deny` | **unavailable** | Not installed. Licence and duplicate-version checks are not run. |
-| Coverage-guided fuzzing | **substituted** | `cargo-fuzz`/libFuzzer is unavailable, so `fuzz_decrypt_never_panics_and_never_returns_plaintext` drives 20,000 deterministic rounds from a fixed seed — roughly half structured (a real encryption, then a single corruption) and half arbitrary bytes. It is not coverage-guided and explores far less than libFuzzer would. |
-| `semgrep` / `codeql` | **not run** | Neither tool is available here. |
+| Constant-time comparison | **verified mechanically** by ctgrind | `tests/ctgrind.rs` + `tools/ctgrind.sh`: secrets are marked undefined in valgrind's shadow memory, so any branch or index depending on them is reported. Clean apart from the two documented SIV accept/reject decisions. Also confirmed by hand: all 17 branch statements in non-test code depend on lengths, alignment, CPU features, an enum variant, or the final decision — never on the content of a key, nonce, AAD or message. |
+| Statistical timing test | **run, with a stated resolution floor** | `dudect-bencher` is unavailable, so `tests/security.rs` implements the Welch t-test directly. **`Instant::now()` costs ~40 µs on this host** (measured; ~25 ns on bare metal), so after batching and min-of-8 the screen resolves ~3 µs/operation. A `ct_eq` → `==` regression is tens of ns — *below that floor*, which is why ctgrind, not this, is the evidence. `timing_screen_can_detect_a_real_difference` keeps the limit visible. |
+| Runtime UB detection (`miri`) | **run** on the unsafe paths | Miri cannot execute `__cpuid_count` (inline asm), so `detect_avx2` returns `false` under `cfg(miri)` and the run exercises the SSE2, transpose and zeroization paths — where the alignment-sensitive `unsafe` is. The AVX2 kernel is held byte-identical to scalar by the differential tests. |
+| Coverage-guided fuzzing | **run** (`cargo-fuzz` + libFuzzer + ASAN) | `fuzz/fuzz_targets/roundtrip.rs`. Bounded in CI by `FUZZ_SECONDS` (default 120 s, ~1100 exec/s). The target asserts round-trip correctness, rejection of every single-bit corruption of ciphertext/tag/AAD, and the wipe-on-failure contract — so a crash is a defect, not a smoke test. A deterministic seeded loop in `tests/security.rs` runs the same properties in plain `cargo test`. |
+| Dependency advisories | **run** (`cargo-audit` and `cargo-deny`) | 92 dependencies against 1267 advisories: 0 vulnerabilities, 0 warnings. `cargo deny check` covers advisories, licences, bans and sources. |
+| `cargo-deny` | **run** | See `deny.toml`. The licence allow-list was derived from what the tree actually uses, not copied from the template. |
+| `ctgrind` C macro / crate | **reimplemented** | Neither is available; the valgrind *client request* underneath is a documented ABI and is reimplemented in `tests/ctgrind.rs`, with the instruction sequence and request codes taken verbatim from valgrind 3.24.0's headers rather than recalled. |
+| `semgrep` / `codeql` | **not run** | Neither is available here. The branch classification above and the ctgrind run cover the same question (secret-dependent control flow); no automated pattern scanner was used. |
+
+### Tooling notes
+
+- **valgrind without root.** `sudo` needs a password here, but `apt-get download`
+  does not, and valgrind's binaries run from an extracted package:
+  `tools/ctgrind.sh --setup`.
+- **The ctgrind binary must be static.** Dynamic linking needs valgrind to
+  redirect `strcmp` in `ld-linux`, which needs libc debuginfo in a path valgrind
+  can only search as root. Building with `-C target-feature=+crt-static` removes
+  the dynamic linker and the problem with it. `strip=none` is required too, or
+  every frame prints as `???` and the suppressions cannot match.
+- **The RustSec database.** `git clone` from github.com fails on this network.
+  Fetch the tarball through the GitHub API instead, and note that both
+  `cargo-audit --db` and `cargo-deny` need it to look like a real git repo (an
+  `origin` remote), so `cargo-deny` expects it at
+  `<db-path>/advisory-db-<hash-of-url>`.
+
+```sh
+# advisories, both tools
+curl -sL https://api.github.com/repos/RustSec/advisory-db/tarball | tar xz
+cd rustsec-advisory-db-* && git init -q && git add -A && git commit -qm db \
+  && git remote add origin "$PWD"
+cargo audit --db "$PWD"
+# cargo-deny wants it under the name it derives from the URL:
+mkdir -p /tmp/adb/dbs && cp -r "$PWD" /tmp/adb/dbs/advisory-db-3157b0e258782691
+cargo deny --offline check
+```
 
 ## Notes on specific tests
 
@@ -46,10 +73,17 @@ so a green run is not read as more than it is.
 
 ```sh
 cargo test --release                        # unit + differential
-cargo test --release --test security        # property + fuzz + timing screen
+cargo test --release --test security        # property + deterministic fuzz + timing screen
+./verify.sh                                 # fmt, clippy, docs, tests, cross-build
+./verify.sh --deep                          # ...plus Kani, aarch64 under qemu, Miri,
+                                            #   ctgrind, cargo-deny, fuzzing
+./verify.sh --ctgrind                       # just the constant-time check (with its control)
+./verify.sh --deny                          # just cargo-deny
+FUZZ_SECONDS=600 ./verify.sh --fuzz         # a longer fuzz soak
 cargo +nightly miri test --release --lib    # UB detection (slow: ~minutes)
-./verify.sh --kani                          # proofs
 ```
+
+Dependency tooling needs advisory-database access; see the notes above.
 
 `cargo-audit` needs the RustSec database. Where the network is unreliable, fetch
 it via the GitHub API and point the tool at the local copy:

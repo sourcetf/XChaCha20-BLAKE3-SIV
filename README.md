@@ -227,6 +227,16 @@ works unprivileged, and the emulator is extracted into `~/.local/bin`.
   commits to all 520 bits). Plus the ChaCha20 counter sequencing, zeroization
   and length-limit harnesses. `-Z stubbing` is required, and the MAC is stubbed
   through a single seam so no call site can escape the model.
+- **Constant-time, mechanically** — `tools/ctgrind.sh` marks secrets as undefined
+  in valgrind's shadow memory and requires memcheck to report no branch depending
+  on them, apart from the two documented SIV accept/reject decisions. The script
+  first proves its own negative control is detected, so a clean run cannot come
+  from poisoning that never took effect.
+- **Fuzzing** — `fuzz/fuzz_targets/roundtrip.rs` under `cargo-fuzz` + libFuzzer +
+  AddressSanitizer, asserting round-trip correctness, rejection of every
+  single-bit corruption, and the wipe-on-failure contract.
+- **Dependency hygiene** — `cargo deny check` (advisories, licences, bans,
+  sources) and `cargo-audit`.
 - **Measured performance** (see below).
 
 Kani proves properties of the *implementation*, not cryptographic hardness.
