@@ -18,7 +18,7 @@ so a green run is not read as more than it is.
 | --- | --- | --- |
 | Constant-time comparison | **verified mechanically** by ctgrind | `tests/ctgrind.rs` + `tools/ctgrind.sh`: secrets are marked undefined in valgrind's shadow memory, so any branch or index depending on them is reported. Clean apart from the two documented SIV accept/reject decisions. Also confirmed by hand: all 17 branch statements in non-test code depend on lengths, alignment, CPU features, an enum variant, or the final decision — never on the content of a key, nonce, AAD or message. |
 | Statistical timing test | **run, with a stated resolution floor** | `dudect-bencher` is unavailable, so `tests/security.rs` implements the Welch t-test directly. **`Instant::now()` costs ~40 µs on this host** (measured; ~25 ns on bare metal), so after batching and min-of-8 the screen resolves ~3 µs/operation. A `ct_eq` → `==` regression is tens of ns — *below that floor*, which is why ctgrind, not this, is the evidence. `timing_screen_can_detect_a_real_difference` keeps the limit visible. |
-| Runtime UB detection (`miri`) | **run** on the unsafe paths | Miri cannot execute `__cpuid_count` (inline asm), so `detect_avx2` returns `false` under `cfg(miri)` and the run exercises the SSE2, transpose and zeroization paths — where the alignment-sensitive `unsafe` is. The AVX2 kernel is held byte-identical to scalar by the differential tests. |
+| Runtime UB detection (`miri`) | **run** on the unsafe paths, under **both** aliasing models (`-Zmiri-strict-provenance`, plus a `-Zmiri-tree-borrows` pass) | Miri cannot execute `__cpuid_count` (inline asm), so `detect_avx2` returns `false` under `cfg(miri)` and the run exercises the SSE2, transpose and zeroization paths — where the alignment-sensitive `unsafe` is. The AVX2 kernel is held byte-identical to scalar by the differential tests. |
 | Coverage-guided fuzzing | **run** (`cargo-fuzz` + libFuzzer + ASAN) | `fuzz/fuzz_targets/roundtrip.rs`. Bounded in CI by `FUZZ_SECONDS` (default 120 s, ~1100 exec/s). The target asserts round-trip correctness, rejection of every single-bit corruption of ciphertext/tag/AAD, and the wipe-on-failure contract — so a crash is a defect, not a smoke test. A deterministic seeded loop in `tests/security.rs` runs the same properties in plain `cargo test`. |
 | Dependency advisories | **run** (`cargo-audit` and `cargo-deny`) | 92 dependencies against 1267 advisories: 0 vulnerabilities, 0 warnings. `cargo deny check` covers advisories, licences, bans and sources. |
 | `cargo-deny` | **run** | See `deny.toml`. The licence allow-list was derived from what the tree actually uses, not copied from the template. |
@@ -40,6 +40,15 @@ so a green run is not read as more than it is.
   `cargo-audit --db` and `cargo-deny` need it to look like a real git repo (an
   `origin` remote), so `cargo-deny` expects it at
   `<db-path>/advisory-db-<hash-of-url>`.
+
+- **Suppression frames are valgrind-version specific.** The `ctgrind.supp` startup
+  entries in Group 1 were generated with valgrind 3.24.0; 3.26 prints the inlined
+  allocator frames around `free` differently, so those entries stop matching and
+  the run fails with a leak report that is really libtest parsing its own command
+  line. Group 1b carries the 3.26 frames as well. A *new* valgrind version may
+  need the same treatment — regenerate with `--gen-suppressions=all` on the
+  release binary, check that every new block ends in `test::cli::parse_opts` with
+  no frame from this crate, and confirm the negative control still exits 99.
 
 ```sh
 # advisories, both tools

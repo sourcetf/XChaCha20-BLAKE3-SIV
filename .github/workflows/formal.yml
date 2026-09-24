@@ -123,6 +123,12 @@ jobs:
       # commitment with cheap stand-ins. Without it Kani rejects the attribute
       # and the suite fails to compile. See the src/proofs.rs module docs for
       # the cost model behind that decision.
+      #
+      # --extra-pointer-checks adds CBMC's pointer-safety checks on top of the
+      # harness assertions, which is where the raw-pointer work in the
+      # zeroization helpers gets exercised. It is an unstable option, hence the
+      # `-Z unstable-options`; the Kani version is pinned above so the flag's
+      # meaning cannot drift underneath the run.
       - name: prove this shard
         shell: bash
         run: |
@@ -132,7 +138,7 @@ jobs:
           # "Failed to match the following harness(es)" if a name does not
           # exist. So a typo or a renamed harness fails loudly here rather than
           # quietly reducing what was proven.
-          args=(-Z stubbing)
+          args=(-Z stubbing -Z unstable-options --extra-pointer-checks)
           n=0
           for h in ${{ matrix.harnesses }}; do
             args+=(--harness "$h")

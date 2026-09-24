@@ -1,4 +1,4 @@
-# Continuous integration: lint, test, cross-check, execute the aarch64 suite,
+# Continuous integration: lint, test, cross-check, execute the cross-target suites,
 # and re-check the differential fixture against the independent reference
 # implementation.
 #
@@ -146,7 +146,7 @@ jobs:
         include:
           # aarch64: the NEON backend is compiled for these targets. The -musl
           # variant is the one that is actually built and executed in the
-          # `aarch64` job below; here it is only type-checked.
+          # `cross-exec` job below; here it is only type-checked.
           - target: aarch64-unknown-linux-gnu
             mode: check
           - target: aarch64-unknown-linux-musl
@@ -168,51 +168,66 @@ jobs:
       - name: cargo check
         run: cargo check --target ${{ matrix.target }} --all-targets --all-features
 
-  # The NEON backend is compiled out entirely on x86, so a type-check says
-  # nothing about whether it computes the right keystream. This job is the only
-  # place it is actually executed.
-  aarch64:
-    name: execute aarch64 suite under qemu
+  # Cross-architecture execution. aarch64 is the only place the NEON backend
+  # runs at all (it is compiled out on x86), and i686 is the only place the
+  # 32-bit code paths run (`usize` is 32 bits, so `check_lengths` and every
+  # length arithmetic take a different route). A type-check says nothing about
+  # either, so both are executed here.
+  cross-exec:
+    name: execute ${{ matrix.target }} suite under qemu
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: aarch64-unknown-linux-musl
+            qemu: qemu-aarch64
+          - target: i686-unknown-linux-musl
+            qemu: qemu-i386
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
-          targets: aarch64-unknown-linux-musl
+          targets: ${{ matrix.target }}
       - uses: Swatinem/rust-cache@v2
         with:
-          shared-key: aarch64-exec
+          shared-key: cross-exec-${{ matrix.target }}
 
       - name: install qemu
         run: |
           sudo apt-get update
           sudo apt-get install --no-install-recommends -y qemu-user
-          qemu-aarch64 --version
+          ${{ matrix.qemu }} --version
 
       # Mirrors stage 5 of ./verify.sh, which is the local entry point for the
       # same check. The test binaries are invoked directly rather than through
       # `cargo test --target`, so the emulator is used explicitly and a runner
-      # misconfiguration cannot silently execute aarch64 code natively.
-      - name: build aarch64 test binaries
-        run: cargo test --target aarch64-unknown-linux-musl --release --no-run
+      # misconfiguration cannot silently execute the target code natively.
+      - name: build ${{ matrix.target }} test binaries
+        run: cargo test --target ${{ matrix.target }} --release --no-run
 
       - name: execute under qemu
         run: |
           set -euo pipefail
-          deps=target/aarch64-unknown-linux-musl/release/deps
+          deps=target/${{ matrix.target }}/release/deps
           ran=0
-          for bin in "$deps"/xchacha20_blake3_siv-* "$deps"/differential_reference-*; do
+          for bin in "$deps"/xchacha20_blake3_siv-* "$deps"/differential_reference-* "$deps"/security-*; do
             case "$bin" in *.d|*.rlib|*.rmeta) continue ;; esac
             [ -x "$bin" ] || continue
+            # The security binary runs too (property tests + deterministic fuzz),
+            # but its dudect-style timing screen is skipped: an emulated clock
+            # cannot resolve real timing differences.
+            extra=()
+            case "$(basename "$bin")" in security-*) extra=(--skip timing) ;; esac
             echo "--- $(basename "$bin") ---"
-            qemu-aarch64 "$bin" --test-threads=1
+            ${{ matrix.qemu }} "$bin" --test-threads=1 ${extra[@]+"${extra[@]}"}
             ran=$((ran + 1))
           done
           if [ "$ran" -eq 0 ]; then
-            echo "no aarch64 test binaries found in $deps" >&2
+            echo "no ${{ matrix.target }} test binaries found in $deps" >&2
             exit 1
           fi
-          echo "executed $ran aarch64 test binaries under qemu"
+          echo "executed $ran ${{ matrix.target }} test binaries under qemu"
 
   differential:
     name: differential fixture vs reference implementation
@@ -242,7 +257,7 @@ jobs:
     name: tag the commit and publish a release
     # Gate on every verification job: a release must not exist for a commit that
     # did not pass. `needs` also means a failure anywhere blocks this.
-    needs: [lint, test, msrv, cross, aarch64, differential]
+    needs: [lint, test, msrv, cross, cross-exec, differential]
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     permissions:
@@ -304,7 +319,8 @@ jobs:
 
           Gated by CI on this commit: formatting and lints clean, the full test
           suite green in release and debug, three cross-targets type-checked, the
-          aarch64 (NEON) suite executed under qemu, and the differential fixture
+          aarch64 (NEON) and i686 (32-bit) suites executed under qemu, and the
+          differential fixture
           re-checked against the independent reference implementation.
 
           The formal proofs in \`.github/workflows/formal.yml\` run separately and

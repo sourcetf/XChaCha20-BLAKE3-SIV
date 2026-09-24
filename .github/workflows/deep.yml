@@ -50,13 +50,31 @@ jobs:
       # Miri cannot run `__cpuid_count` (inline asm), so `detect_avx2` returns
       # false under `cfg(miri)` and this exercises the SSE2/transpose/zeroization
       # paths — which is where the alignment-sensitive `unsafe` is.
+      #
+      # `-Zmiri-strict-provenance` turns int-to-pointer casts into errors, which
+      # is what actually checks the raw-pointer arithmetic in `zeroize_slice` /
+      # `zeroize_array` (and the tag-buffer wipe in `Plaintext::drop`).
       - name: miri on the unsafe paths
         run: |
-          MIRIFLAGS="-Zmiri-disable-isolation" cargo +nightly miri test --release --lib -- \
-            test_zeroize_covers_unaligned_prefix \
-            test_x86_simd_kernels_match_scalar \
-            test_simd_xor_matches_scalar_and_raw \
-            test_empty_inputs
+          MIRIFLAGS="-Zmiri-disable-isolation -Zmiri-strict-provenance" \
+            cargo +nightly miri test --release --lib -- \
+              test_zeroize_covers_unaligned_prefix \
+              test_x86_simd_kernels_match_scalar \
+              test_simd_xor_matches_scalar_and_raw \
+              test_empty_inputs
+
+      # The same tests under Miri's *other* aliasing model. Stacked Borrows
+      # (the default) and Tree Borrows disagree about some programs, so passing
+      # one is not evidence for the other; the code under test here is exactly
+      # the kind that sits in the gap (raw pointers derived from a `&mut`).
+      - name: miri, tree borrows
+        run: |
+          MIRIFLAGS="-Zmiri-disable-isolation -Zmiri-strict-provenance -Zmiri-tree-borrows" \
+            cargo +nightly miri test --release --lib -- \
+              test_zeroize_covers_unaligned_prefix \
+              test_x86_simd_kernels_match_scalar \
+              test_simd_xor_matches_scalar_and_raw \
+              test_empty_inputs
 
   ctgrind:
     name: ctgrind (constant-time)

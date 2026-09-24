@@ -6,7 +6,7 @@
 #   1. reference-implementation self-checks (python) and fixture freshness
 #   2. cargo fmt / clippy
 #   3. the unit + differential test suite
-#   4. cross-compilation for aarch64 (the NEON path)
+#   4. cross-compilation for aarch64, i686 and riscv64
 #   5. Kani bounded model checking  (slow: minutes; the whole-permutation
 #      harnesses dominate)
 #
@@ -25,7 +25,7 @@ export PATH="$HOME/.cargo/bin:$PATH"
 
 RUN_KANI=0
 KANI_ONLY=0
-RUN_AARCH64_EXEC=0
+RUN_CROSS_EXEC=0
 RUN_MIRI=0
 RUN_CTGRIND=0
 RUN_DENY=0
@@ -34,26 +34,32 @@ for arg in "$@"; do
   case "$arg" in
     --kani) RUN_KANI=1 ;;
     --kani-only) RUN_KANI=1; KANI_ONLY=1 ;;
-    --aarch64-exec) RUN_AARCH64_EXEC=1 ;;
+    --cross-exec) RUN_CROSS_EXEC=1 ;;
+    # Kept as an alias: the stage used to execute aarch64 only.
+    --aarch64-exec) RUN_CROSS_EXEC=1 ;;
     --miri) RUN_MIRI=1 ;;
     --ctgrind) RUN_CTGRIND=1 ;;
     --deny) RUN_DENY=1 ;;
     --fuzz) RUN_FUZZ=1 ;;
-    --deep) RUN_KANI=1; RUN_AARCH64_EXEC=1; RUN_MIRI=1; RUN_CTGRIND=1; RUN_DENY=1; RUN_FUZZ=1 ;;
-    --all) RUN_KANI=1; RUN_AARCH64_EXEC=1; RUN_MIRI=1 ;;
+    --deep) RUN_KANI=1; RUN_CROSS_EXEC=1; RUN_MIRI=1; RUN_CTGRIND=1; RUN_DENY=1; RUN_FUZZ=1 ;;
+    --all) RUN_KANI=1; RUN_CROSS_EXEC=1; RUN_MIRI=1 ;;
     *) echo "unknown option: $arg" >&2; exit 1 ;;
   esac
 done
 
 step() { echo; echo "=== $* ==="; }
 
-# Locate an aarch64 emulator for step 5.  Honour $QEMU_AARCH64 first, then the
-# usual user-local install, then whatever is on $PATH.
-find_qemu_aarch64() {
-  if [ -n "${QEMU_AARCH64:-}" ] && [ -x "${QEMU_AARCH64}" ]; then
-    echo "${QEMU_AARCH64}"; return 0
+# Locate a qemu-user emulator for a target.  Honours `$QEMU_<ARCH>` (e.g.
+# `$QEMU_AARCH64`, `$QEMU_I386`) first, then the usual user-local install, then
+# whatever is on $PATH.
+find_qemu() {
+  local name="$1" arch var
+  arch="$(printf '%s' "${name#qemu-}" | tr '[:lower:]-' '[:upper:]_')"
+  var="QEMU_${arch}"
+  if [ -n "${!var:-}" ] && [ -x "${!var}" ]; then
+    echo "${!var}"; return 0
   fi
-  for c in "$HOME/.local/bin/qemu-aarch64" "$(command -v qemu-aarch64 2>/dev/null || true)"; do
+  for c in "$HOME/.local/bin/$name" "$(command -v "$name" 2>/dev/null || true)"; do
     if [ -n "$c" ] && [ -x "$c" ]; then echo "$c"; return 0; fi
   done
   return 1
@@ -120,39 +126,63 @@ if [ "$KANI_ONLY" -eq 0 ]; then
   fi
 fi
 
-if [ "$RUN_AARCH64_EXEC" -eq 1 ]; then
-  step "5. aarch64 execution under qemu (the NEON path)"
-  # This is the only way the aarch64 SIMD kernel is ever *executed*.  On x86 the
-  # NEON backend is compiled out entirely, so a type-check alone says nothing
-  # about whether it computes the right keystream -- and the crate's own docs
-  # flag the NEON scalar transpose as unverifiable without aarch64 hardware.
-  # qemu-user closes that gap for everything except throughput.
-  if ! QEMU="$(find_qemu_aarch64)"; then
-    echo "SKIPPED: no aarch64 emulator found."
-    echo "         Expected \$QEMU_AARCH64, \$HOME/.local/bin/qemu-aarch64, or"
-    echo "         qemu-aarch64 on \$PATH.  On Debian/Ubuntu this needs no root:"
-    echo "           apt-get download qemu-user && dpkg-deb -x qemu-user_*.deb ~/.local"
-    exit 1
-  fi
-  echo "using emulator: $QEMU"
+if [ "$RUN_CROSS_EXEC" -eq 1 ]; then
+  step "5. cross-architecture execution under qemu (aarch64 NEON, i686 32-bit)"
+  # Two configurations that cannot be exercised natively here:
+  #
+  #   * aarch64 -- the only way the NEON kernel is ever *executed*.  On x86 it is
+  #     compiled out entirely, so a type-check says nothing about whether it
+  #     computes the right keystream; the crate's own docs flag the NEON scalar
+  #     transpose as unverifiable without aarch64 hardware.
+  #   * i686 -- the only way the 32-bit code paths run.  `usize` is 32 bits
+  #     there, so `check_lengths`, the length fields fed to the tag and every
+  #     loop bound take a different route through the same source.
+  #
+  # qemu-user closes both gaps for everything except throughput.
+  # `--aarch64-exec` is accepted as an alias of `--cross-exec`.
+  pair_list="aarch64-unknown-linux-musl:qemu-aarch64 i686-unknown-linux-musl:qemu-i386"
+  total=0
+  for pair in $pair_list; do
+    target="${pair%%:*}"
+    emulator="${pair##*:}"
+    if ! QEMU="$(find_qemu "$emulator")"; then
+      echo "SKIPPED ($emulator): no $emulator found."
+      echo "         Expected \$QEMU_${emulator^^}, \$HOME/.local/bin/$emulator, or"
+      echo "         $emulator on \$PATH.  On Debian/Ubuntu this needs no root:"
+      echo "           apt-get download qemu-user && dpkg-deb -x qemu-user_*.deb ~/.local"
+      continue
+    fi
+    echo
+    echo "--- $target ---"
+    echo "using emulator: $QEMU"
 
-  cargo test --target aarch64-unknown-linux-musl --release --no-run
+    cargo test --target "$target" --release --no-run
 
-  # Run the built test executables directly rather than through
-  # `cargo test --target`, so the emulator is used explicitly and the runner
-  # config cannot silently fall back to executing aarch64 code natively.
-  deps="target/aarch64-unknown-linux-musl/release/deps"
-  ran=0
-  for bin in "$deps"/xchacha20_blake3_siv-* "$deps"/differential_reference-*; do
-    case "$bin" in *.d|*.rlib|*.rmeta) continue ;; esac
-    [ -x "$bin" ] || continue
-    echo "--- $(basename "$bin") ---"
-    "$QEMU" "$bin" --test-threads=1
-    ran=$((ran + 1))
+    # Run the built test executables directly rather than through
+    # `cargo test --target`, so the emulator is used explicitly and the runner
+    # config cannot silently fall back to executing the target code natively.
+    deps="target/$target/release/deps"
+    ran=0
+    for bin in "$deps"/xchacha20_blake3_siv-* "$deps"/differential_reference-* "$deps"/security-*; do
+      case "$bin" in *.d|*.rlib|*.rmeta) continue ;; esac
+      [ -x "$bin" ] || continue
+      # The security binary runs too -- its property tests and deterministic fuzz
+      # loop are exactly the kind of broad exercise that a new backend or a new
+      # word size needs -- but the dudect-style timing screen is skipped there:
+      # an emulated clock cannot resolve real timing differences, so it would be
+      # measuring the emulator and could fail for reasons that have nothing to
+      # do with this code.
+      extra=()
+      case "$(basename "$bin")" in security-*) extra=(--skip timing) ;; esac
+      echo "--- $(basename "$bin") ---"
+      "$QEMU" "$bin" --test-threads=1 ${extra[@]+"${extra[@]}"}
+      ran=$((ran + 1))
+    done
+    [ "$ran" -gt 0 ] || { echo "no $target test binaries found in $deps" >&2; exit 1; }
+    echo "executed $ran $target test binaries under qemu"
+    total=$((total + ran))
   done
-  [ "$ran" -gt 0 ] || { echo "no aarch64 test binaries found in $deps" >&2; exit 1; }
-  echo
-  echo "Executed $ran aarch64 test binaries under qemu."
+  [ "$total" -gt 0 ] || { echo "no cross-architecture emulator available" >&2; exit 1; }
 fi
 
 if [ "$RUN_MIRI" -eq 1 ]; then
@@ -161,11 +191,20 @@ if [ "$RUN_MIRI" -eq 1 ]; then
   # under `cfg(miri)` and this exercises the SSE2, transpose and zeroization
   # paths. Slow: minutes, not seconds. Requires `rustup component add miri`.
   if cargo +nightly miri --version >/dev/null 2>&1; then
-    MIRIFLAGS="-Zmiri-disable-isolation" cargo +nightly miri test --release --lib -- \
-      test_zeroize_covers_unaligned_prefix \
-      test_x86_simd_kernels_match_scalar \
-      test_simd_xor_matches_scalar_and_raw \
+    MIRI_TESTS=(
+      test_zeroize_covers_unaligned_prefix
+      test_x86_simd_kernels_match_scalar
+      test_simd_xor_matches_scalar_and_raw
       test_empty_inputs
+    )
+    # `-Zmiri-strict-provenance` is what actually exercises the raw-pointer
+    # arithmetic in the zeroization helpers and the tag-buffer wipe; the Tree
+    # Borrows pass is a second opinion, because the two aliasing models do not
+    # accept the same programs.
+    MIRIFLAGS="-Zmiri-disable-isolation -Zmiri-strict-provenance" \
+      cargo +nightly miri test --release --lib -- "${MIRI_TESTS[@]}"
+    MIRIFLAGS="-Zmiri-disable-isolation -Zmiri-strict-provenance -Zmiri-tree-borrows" \
+      cargo +nightly miri test --release --lib -- "${MIRI_TESTS[@]}"
   else
     echo "SKIPPED: miri component not installed"
     echo "         (rustup component add miri --toolchain nightly)"
@@ -215,18 +254,22 @@ if [ "$RUN_KANI" -eq 1 ]; then
   # ChaCha20 permutation, the zeroization helper and the BLAKE3 commitment with
   # cheap stand-ins.  Without the flag Kani rejects the attribute and the suite
   # fails to compile.  See the `proofs` module for the cost model.
-  cargo kani -Z stubbing
+  #
+  # `--extra-pointer-checks` adds CBMC's pointer-safety checks on top of the
+  # harness assertions; it is unstable, hence `-Z unstable-options`.  CI uses the
+  # same pair (the Kani version is pinned there so neither can drift).
+  cargo kani -Z stubbing -Z unstable-options --extra-pointer-checks
 fi
 
 # Each hint is printed only for the step that was actually skipped.
-if [ "$RUN_KANI" -eq 0 ] || [ "$RUN_AARCH64_EXEC" -eq 0 ] || [ "$RUN_MIRI" -eq 0 ] \
+if [ "$RUN_KANI" -eq 0 ] || [ "$RUN_CROSS_EXEC" -eq 0 ] || [ "$RUN_MIRI" -eq 0 ] \
    || [ "$RUN_CTGRIND" -eq 0 ] || [ "$RUN_DENY" -eq 0 ] || [ "$RUN_FUZZ" -eq 0 ]; then
   echo
   if [ "$RUN_KANI" -eq 0 ]; then
     echo "(Kani skipped; pass --kani to include it.)"
   fi
-  if [ "$RUN_AARCH64_EXEC" -eq 0 ]; then
-    echo "(aarch64 execution skipped; pass --aarch64-exec to include it.)"
+  if [ "$RUN_CROSS_EXEC" -eq 0 ]; then
+    echo "(cross-architecture execution skipped; pass --cross-exec to include it.)"
   fi
   if [ "$RUN_MIRI" -eq 0 ]; then
     echo "(Miri skipped; pass --miri to include it.)"

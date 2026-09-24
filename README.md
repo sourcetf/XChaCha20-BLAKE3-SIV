@@ -190,7 +190,7 @@ Two entry points, both runnable from a fresh checkout:
 ./check.sh --all            # ...including qemu execution and Kani
 
 ./verify.sh                 # the verification stages on their own
-./verify.sh --aarch64-exec  # ...plus executing the aarch64 suite under qemu
+./verify.sh --cross-exec    # ...plus executing the aarch64/i686 suites under qemu
 ./verify.sh --kani          # ...plus Kani bounded model checking (slow)
 ./verify.sh --all           # everything
 ```
@@ -217,9 +217,12 @@ works unprivileged, and the emulator is extracted into `~/.local/bin`.
   `tests/differential_reference.rs` across every internal length boundary. The
   Python and Rust keyed-BLAKE3 paths were verified byte-identical before relying
   on them.
-- **Cross-architecture execution** — the aarch64 code path is *executed* under
-  `qemu-aarch64`, not merely type-checked; on x86 the NEON backend is compiled
-  out entirely, so nothing else would ever run it.
+- **Cross-architecture execution** — two configurations are *executed* under
+  qemu, not merely type-checked. On x86 the aarch64 (NEON) backend is compiled
+  out entirely, so `qemu-aarch64` is the only thing that ever runs it; and
+  `qemu-i386` is the only place the 32-bit code paths run, where `usize` is 32
+  bits and every length calculation takes a different route. `--aarch64-exec` is
+  still accepted as an alias of `--cross-exec`.
 - **Kani** — bounded model checking of the construction shape: that the domain,
   key, nonce and both lengths reach the hash in the specified layout; that every
   output byte comes from the hash; that every AAD and message byte reaches the

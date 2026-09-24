@@ -15,7 +15,7 @@
 # Usage:
 #   ./check.sh                 provision, build, verify (fast stages only)
 #   ./check.sh --fast          skip all cross-target work
-#   ./check.sh --aarch64-exec  also execute the aarch64 suite under qemu
+#   ./check.sh --cross-exec    also execute the aarch64/i686 suites under qemu
 #   ./check.sh --kani          also run Kani bounded model checking (slow)
 #   ./check.sh --all           both of the above
 #   ./check.sh --no-provision  never touch the network or modify the toolchain
@@ -46,7 +46,7 @@ One-command build + verification for XChaCha20-BLAKE3-SIV.
 Usage:
   ./check.sh                 provision, build, verify (fast stages only)
   ./check.sh --fast          skip all cross-target work
-  ./check.sh --aarch64-exec  also execute the aarch64 suite under qemu
+  ./check.sh --cross-exec    also execute the aarch64/i686 suites under qemu
   ./check.sh --kani          also run Kani bounded model checking (slow)
   ./check.sh --all           both of the above
   ./check.sh --no-provision  never touch the network or modify the toolchain
@@ -66,7 +66,7 @@ while [ $# -gt 0 ]; do
   case "$1" in
     --all)          VERIFY_ARGS+=(--all) ;;
     --kani)         VERIFY_ARGS+=(--kani) ;;
-    --aarch64-exec) VERIFY_ARGS+=(--aarch64-exec) ;;
+    --cross-exec|--aarch64-exec) VERIFY_ARGS+=(--cross-exec) ;;
     --fast)         FAST=1 ;;
     --no-provision) PROVISION=0 ;;
     -h|--help)      usage ;;
@@ -123,10 +123,15 @@ ensure_target() {
   rustup target add "$target" >/dev/null 2>&1
 }
 
-find_qemu_aarch64() {
-  local c
-  for c in "${QEMU_AARCH64:-}" "$HOME/.local/bin/qemu-aarch64" \
-           "$(command -v qemu-aarch64 2>/dev/null || true)"; do
+# `qemu-user` ships every emulator this project uses (qemu-aarch64, qemu-i386),
+# so one download covers the whole cross-execution stage; only the lookup is
+# per-architecture.  Mirrors verify.sh's find_qemu.
+find_qemu() {
+  local name="$1" arch var c
+  arch="$(printf '%s' "${name#qemu-}" | tr '[:lower:]-' '[:upper:]_')"
+  var="QEMU_${arch}"
+  for c in "${!var:-}" "$HOME/.local/bin/$name" \
+           "$(command -v "$name" 2>/dev/null || true)"; do
     if [ -n "$c" ] && [ -x "$c" ]; then printf '%s\n' "$c"; return 0; fi
   done
   return 1
@@ -139,8 +144,8 @@ find_qemu_aarch64() {
 # the package to fetch.  Every step is best-effort: no emulator simply means
 # the aarch64 execution stage is skipped, not that the build fails.
 provision_qemu() {
-  if find_qemu_aarch64 >/dev/null; then
-    ok "aarch64 emulator present: $(find_qemu_aarch64)"
+  if find_qemu qemu-aarch64 >/dev/null; then
+    ok "aarch64 emulator present: $(find_qemu qemu-aarch64)"
     return 0
   fi
   if ! command -v apt-get >/dev/null || ! command -v dpkg-deb >/dev/null; then
@@ -206,9 +211,10 @@ if [ "$PROVISION" -eq 1 ]; then
     skip "rustup not found; cross targets cannot be installed"
     record "provision: no rustup (cross targets unavailable)"
   else
-    # musl is what gets built and *executed* under qemu; gnu is type-checked
-    # only.  Both are attempted so `verify.sh` can use either.
-    for t in aarch64-unknown-linux-musl aarch64-unknown-linux-gnu; do
+    # musl is what gets built and *executed* under qemu (aarch64 for the NEON
+    # kernel, i686 for the 32-bit paths); gnu is type-checked only.  All are
+    # attempted so `verify.sh` can use whichever is available.
+    for t in aarch64-unknown-linux-musl i686-unknown-linux-musl aarch64-unknown-linux-gnu; do
       if ensure_target "$t"; then
         ok "target $t"
       else
@@ -294,7 +300,7 @@ if [ "$FAST" -eq 1 ]; then
   for a in ${VERIFY_ARGS[@]+"${VERIFY_ARGS[@]}"}; do
     case "$a" in
       --all)          saw_all=1 ;;
-      --aarch64-exec) ;; # dropped: contradicts --fast
+      --cross-exec|--aarch64-exec) ;; # dropped: contradicts --fast
       *)              FILTERED+=("$a") ;;
     esac
   done
