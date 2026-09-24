@@ -203,8 +203,13 @@ jobs:
       # same check. The test binaries are invoked directly rather than through
       # `cargo test --target`, so the emulator is used explicitly and a runner
       # misconfiguration cannot silently execute the target code natively.
+      # `--features pure` because BLAKE3's build script compiles C kernels for
+      # x86_64/aarch64 by default and needs a *target* C toolchain to do it; the
+      # Rust backends need nothing. BLAKE3's backend is irrelevant to what this
+      # job tests (the crate's own SIMD code), and the wire format is identical
+      # either way -- the KATs and the equivalence corpus pin it.
       - name: build ${{ matrix.target }} test binaries
-        run: cargo test --target ${{ matrix.target }} --release --no-run
+        run: cargo test --target ${{ matrix.target }} --release --no-run --features pure
 
       - name: execute under qemu
         run: |

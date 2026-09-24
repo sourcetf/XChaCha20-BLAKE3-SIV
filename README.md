@@ -264,39 +264,51 @@ and on using them as specified.
 
 ## Performance
 
-Measured on the development machine (WSL2, x86-64), release profile with
-`lto`/`codegen-units=1`, `blake3` with its `pure` Rust backends as this crate
-ships it. Figures are best-of-N with per-iteration A/B interleaving, because this
-host's throughput drifts by up to 2x between runs; ratios are the stable signal.
+Measured head-to-head against RustCrypto's `chacha20poly1305` — the natural
+reference point, since `XChaCha20Poly1305` has the same 24-byte nonce and the same
+ChaCha20 core. Reproduce with `cargo bench --bench compare` (criterion; the table
+below is from `benches/compare.rs`'s sibling harness, which interleaves the
+candidates per iteration and reports the best of five, because this host's
+throughput drifts and the *ratio* is the stable signal).
 
-End-to-end, versus the previous Poly1305-based version of this crate:
+Release profile as shipped (`lto`, `codegen-units = 1`), AMD Ryzen 9 7945HX,
+in-place encryption with 3 bytes of AAD:
 
-| Message | encrypt | decrypt |
-| --- | --- | --- |
-| 64 B | 1.06–1.16x | 0.95–1.13x |
-| 1 KiB | 0.85–0.88x | 0.84–1.05x |
-| 16 KiB | 0.71–0.97x | 0.97–1.10x |
-| 64 KiB | 0.99–1.33x | 1.21–1.25x |
-| 1 MiB | 1.01–1.09x | 1.15–1.33x |
+| Message | this crate | XChaCha20-Poly1305 | ChaCha20-Poly1305 | vs XChaCha20-Poly1305 |
+| --- | --- | --- | --- | --- |
+| 64 B | 80.5 MB/s | 52.1 MB/s | 55.1 MB/s | **1.55x faster** |
+| 256 B | 257.2 MB/s | 197.3 MB/s | 208.5 MB/s | **1.31x faster** |
+| 1 KiB | 520.8 MB/s | 606.5 MB/s | 634.2 MB/s | 1.16x slower |
+| 4 KiB | 1303.6 MB/s | 1270.0 MB/s | 1303.4 MB/s | 1.02x faster |
+| 16 KiB | 2128.0 MB/s | 1750.7 MB/s | 1765.5 MB/s | **1.22x faster** |
+| 64 KiB | 2283.2 MB/s | 1923.4 MB/s | 1927.8 MB/s | **1.19x faster** |
+| 256 KiB | 2523.2 MB/s | 1989.9 MB/s | 1979.0 MB/s | **1.27x faster** |
+| 1 MiB | 2581.1 MB/s | 1983.6 MB/s | 1985.4 MB/s | **1.30x faster** |
 
-(ratio > 1 means faster.) Isolated MAC throughput, two independent runs:
+Read that as: this crate pays more per message (it derives two keys, hashes the
+context twice and wipes all of it) and less per byte (BLAKE3 in tree mode beats
+Poly1305 once there is enough data to batch). So it wins at both ends and is
+closest in the middle, with the remaining 1 KiB gap being the fixed cost of the
+extra key derivation and wiping — about 250 ns, against ~1.7 µs of total work.
 
-| Message | Poly1305 | BLAKE3-XOF | ratio |
-| --- | --- | --- | --- |
-| 64 B | ~104 MB/s | ~103 MB/s | 0.98–1.01x |
-| 1 KiB | ~462 MB/s | ~237 MB/s | 0.50–0.53x |
-| 16 KiB | ~516 MB/s | ~910 MB/s | 1.63–1.91x |
-| 1 MiB | ~499 MB/s | ~875 MB/s | 1.60–1.95x |
+Two implementation choices dominate the numbers above, both verified to leave the
+wire format byte-identical (the KATs, the differential fixture and
+`test_all_accelerated_paths_agree_on_a_boundary_corpus` pin every byte, and they
+run against both):
 
-In short: no large regression. The new construction is faster for bulk messages
-(BLAKE3 beats Poly1305 by 1.6–2x there) and roughly 10–15% slower around 1 KiB,
-where Poly1305's four-block batching still helps and BLAKE3's wide parallelism
-has not yet engaged.
-
-Not covered: qemu cannot model real aarch64 performance, so the NEON figures
-would need measurement on real hardware. The `pure` feature also caps BLAKE3's
-throughput relative to its assembly kernels; switching would require a C
-toolchain and so would complicate cross-compilation.
+* **BLAKE3's native backends, not `pure`.** The `pure` feature selects BLAKE3's
+  Rust-intrinsics backends; leaving it off lets BLAKE3 use its C/assembly SIMD
+  kernels, which is worth 24–32% from 4 KiB up. See the note in `Cargo.toml` for
+  the portability story (it falls back to the Rust backends when the target has
+  no compiler) and for the two cases that still pass `--features pure`.
+* **One contiguous buffer for the tag, for mid-sized messages.** BLAKE3's
+  incremental API only takes its batched path when a call starts on a chunk
+  boundary, so feeding it `head`, then `aad`, then `msg` dropped the whole message
+  onto the one-block-at-a-time path — 2.1–2.3x slower at 4–16 KiB. Messages from
+  2 KiB to 64 KiB are now hashed through one exact-sized, wiped buffer, which
+  removed the 4 KiB deficit entirely (it was 1.66x behind XChaCha20-Poly1305
+  there; it is now level). Above 64 KiB the copy costs more than the batching
+  saves, so the three-part call stays.
 
 ## Layout
 

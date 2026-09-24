@@ -22,15 +22,32 @@ getrandom = { version = "0.3", optional = true, default-features = false }
 # BLAKE3 supplies the context-commitment half of the tag (see
 # `blake3_keyed_multi` in lib.rs).  `default-features = false` keeps it `no_std`.
 #
-# `pure` is **required for cross-compilation**: without it BLAKE3's build script
-# compiles C/assembly SIMD kernels (`blake3_neon.c`, `blake3_avx2_*.S`), which
-# needs a target C toolchain — `cargo check --target aarch64-unknown-linux-gnu`
-# fails with "failed to find tool aarch64-linux-gnu-gcc".  `pure` selects the
-# Rust-intrinsics backends instead, which the Rust compiler handles for any
-# target.  They are still vectorised (SSE2/SSE4.1/AVX2 on x86, NEON on aarch64),
-# so the throughput difference is small, and it also keeps the dependency
-# buildable by pure-Rust toolchains such as Kani.
-blake3 = { version = "1.8", default-features = false, features = ["pure", "zeroize"] }
+# **No `pure` here, deliberately: it costs 24-32%.** BLAKE3's `pure` feature
+# selects its Rust-intrinsics backends; without it, BLAKE3 uses its C/assembly
+# SIMD kernels where the target has them. Measured with `benches/bench.rs` on
+# x86_64 (Ryzen 9 7945HX, release+LTO): 966 -> 766 MB/s at 4 KiB, 2540 -> 2053
+# MB/s at 1 MiB, and the whole crate goes from ~30% behind RustCrypto's
+# XChaCha20-Poly1305 at 4-64 KiB to parity or ahead.
+#
+# Portability is not lost, because BLAKE3's build script *falls back* to the Rust
+# backends when no compiler is available for the target (`support == NoCompiler`).
+# Verified: a build with `CC=/nonexistent` produces identical output, as does
+# `cargo check --target thumbv7em-none-eabihf` (bare metal).
+#
+# Two cases still need `--features pure`, and both are in the scripts/CI:
+#
+#   * cross-compiling to a target BLAKE3 has C kernels for (x86_64, aarch64)
+#     *without* a cross C toolchain -- the build script fails rather than falling
+#     back there, because a compiler for the *host* is found and the target's
+#     kernels are then attempted. That is the `aarch64-unknown-linux-musl` /
+#     `i686-unknown-linux-musl` builds used to execute the crate's own SIMD code
+#     under qemu, where BLAKE3's backend makes no difference to what is tested;
+#   * Miri, which cannot execute C or the CPU-feature detection.
+#
+# Either way the wire format is identical -- the KATs, the differential fixture
+# and `test_all_accelerated_paths_agree_on_a_boundary_corpus` pin the bytes, and
+# they run against both backends.
+blake3 = { version = "1.8", default-features = false, features = ["zeroize"] }
 
 # `zeroize` exists so BLAKE3's *internal* state can be wiped. The MAC key lives
 # inside `blake3::Hasher` (`key: CVWords`, plus the chunk state and CV stack), and
@@ -50,6 +67,11 @@ zeroize = { version = "1", default-features = false }
 
 [dev-dependencies]
 criterion = "0.5"
+# The head-to-head benchmark in `benches/compare.rs`: RustCrypto's
+# XChaCha20-Poly1305 is the natural reference point (same 24-byte nonce), and
+# `aead` supplies the trait both sides are driven through.
+chacha20poly1305 = "0.10"
+aead = { version = "0.5", features = ["alloc"] }
 # Property-based tests. The security tests in `tests/security.rs` are the main
 # reason for this: "no single-bit tamper is ever accepted" is a statement over
 # every possible input, which is exactly what a property test is for.
@@ -67,8 +89,19 @@ subtle = { version = "2.6.1", default-features = false }
 # `no_std` builds and users who already have an entropy source pay nothing.
 rng = ["dep:getrandom"]
 
+# Force BLAKE3's portable Rust backends. Off by default: the native ones are
+# faster, and BLAKE3 falls back to the Rust ones automatically when the target
+# has no compiler. Turn this on when cross-compiling to a target with C kernels
+# and no cross C toolchain, or when running under Miri.
+pure = ["blake3/pure"]
+
 [[bench]]
 name = "bench"
+harness = false
+
+# Head-to-head against RustCrypto's XChaCha20-Poly1305 and ChaCha20-Poly1305.
+[[bench]]
+name = "compare"
 harness = false
 
 [lints.rust]

@@ -149,4 +149,7 @@ jobs:
           for h in ${{ matrix.harnesses }}; do echo "  - $h"; done
           echo
 
-          cargo kani "${args[@]}"
+          # `--features pure`: keep the proofs on BLAKE3's portable backend, the
+          # configuration they were developed against (Kani never reaches BLAKE3
+          # -- every harness stubs the one seam -- but it does build it).
+          cargo kani --features pure "${args[@]}"

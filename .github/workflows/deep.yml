@@ -47,8 +47,11 @@ jobs:
         with:
           shared-key: miri
 
-      # Miri cannot run `__cpuid_count` (inline asm), so `detect_avx2` returns
-      # false under `cfg(miri)` and this exercises the SSE2/transpose/zeroization
+      # `--features pure` throughout: Miri cannot execute BLAKE3's C kernels, so
+      # the portable Rust backend is what makes these runs possible at all.
+      #
+      # Miri cannot run `__cpuid_count` (inline asm) either, so `detect_avx2` falls
+      # back to the compiled feature set under `cfg(miri)` and this exercises the SSE2/transpose/zeroization
       # paths — which is where the alignment-sensitive `unsafe` is.
       #
       # `-Zmiri-strict-provenance` turns int-to-pointer casts into errors, which
@@ -57,11 +60,12 @@ jobs:
       - name: miri on the unsafe paths
         run: |
           MIRIFLAGS="-Zmiri-disable-isolation -Zmiri-strict-provenance" \
-            cargo +nightly miri test --release --lib -- \
+            cargo +nightly miri test --release --features pure --lib -- \
               test_zeroize_covers_unaligned_prefix \
               test_x86_simd_kernels_match_scalar \
               test_simd_xor_matches_scalar_and_raw \
-              test_empty_inputs
+              test_empty_inputs \
+              test_detached_matches_attached
 
       # The same tests under Miri's *other* aliasing model. Stacked Borrows
       # (the default) and Tree Borrows disagree about some programs, so passing
@@ -70,11 +74,12 @@ jobs:
       - name: miri, tree borrows
         run: |
           MIRIFLAGS="-Zmiri-disable-isolation -Zmiri-strict-provenance -Zmiri-tree-borrows" \
-            cargo +nightly miri test --release --lib -- \
+            cargo +nightly miri test --release --features pure --lib -- \
               test_zeroize_covers_unaligned_prefix \
               test_x86_simd_kernels_match_scalar \
               test_simd_xor_matches_scalar_and_raw \
-              test_empty_inputs
+              test_empty_inputs \
+              test_detached_matches_attached
 
       # `detect_avx2` reports the *compiled* feature set under Miri (it cannot run
       # CPUID there), so the default run above takes the SSE2 path and this one
@@ -85,7 +90,7 @@ jobs:
         run: |
           MIRIFLAGS="-Zmiri-disable-isolation -Zmiri-strict-provenance" \
             RUSTFLAGS="-C target-feature=+avx2" \
-            cargo +nightly miri test --release --lib -- \
+            cargo +nightly miri test --release --features pure --lib -- \
               test_x86_simd_kernels_match_scalar \
               test_simd_xor_matches_scalar_and_raw \
               test_simd_matches_scalar_all_lengths
@@ -97,7 +102,7 @@ jobs:
         run: |
           cargo +nightly miri setup --target aarch64-unknown-linux-gnu >/dev/null
           MIRIFLAGS="-Zmiri-disable-isolation -Zmiri-strict-provenance" \
-            cargo +nightly miri test --release --target aarch64-unknown-linux-gnu --lib -- \
+            cargo +nightly miri test --release --features pure --target aarch64-unknown-linux-gnu --lib -- \
               test_aarch64_neon_kernel_matches_scalar \
               test_simd_xor_matches_scalar_and_raw \
               test_zeroize_covers_unaligned_prefix

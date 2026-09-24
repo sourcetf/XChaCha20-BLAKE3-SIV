@@ -248,7 +248,8 @@ fn encrypt_does_not_branch_on_secrets() {
     let key = [0x5Au8; 32];
     let nonce = [0x3Cu8; NONCE_LEN];
     let aad = *b"poisoned aad";
-    let pt: Vec<u8> = (0..300).map(|i| (i % 251) as u8).collect();
+    // 4 KiB lands in the tag's concatenation window, so that path is checked too.
+    let pt: Vec<u8> = (0..4096).map(|i| (i % 251) as u8).collect();
 
     // The plaintext is public here (an attacker-chosen message), so it stays
     // defined. The key, nonce and AAD are the secrets.
@@ -284,7 +285,7 @@ fn decrypt_does_not_branch_on_secrets() {
     let key = [0x11u8; 32];
     let nonce = [0x22u8; NONCE_LEN];
     let aad = *b"aad";
-    let pt: Vec<u8> = (0..200).map(|i| (i % 241) as u8).collect();
+    let pt: Vec<u8> = (0..4096).map(|i| (i % 241) as u8).collect();
     let (ct, tag) = encrypt(&key, &nonce, &aad, &pt).unwrap();
 
     let mut bad_tag = tag;
@@ -341,7 +342,7 @@ fn encrypt_in_place_does_not_branch_on_secrets() {
     let key = [0x77u8; 32];
     let nonce = [0x88u8; NONCE_LEN];
     let aad = *b"in-place aad";
-    let mut buf: Vec<u8> = (0..256).map(|i| (i % 253) as u8).collect();
+    let mut buf: Vec<u8> = (0..4096).map(|i| (i % 253) as u8).collect();
     let expect = buf.clone();
 
     poison(key.as_ptr(), key.len());

@@ -271,7 +271,8 @@ if [ "$FAST" -eq 0 ]; then
   if rustup target list --installed 2>/dev/null | grep -qx aarch64-unknown-linux-musl; then
     # The musl target links with the toolchain's own rust-lld against a
     # self-contained libc.a, so no cross C toolchain is needed.
-    cargo build --target aarch64-unknown-linux-musl --release
+    # `--features pure`: BLAKE3's C kernels would need a cross C toolchain.
+    cargo build --target aarch64-unknown-linux-musl --release --features pure
     ok "aarch64-unknown-linux-musl release"
     record "build: aarch64-unknown-linux-musl"
   else

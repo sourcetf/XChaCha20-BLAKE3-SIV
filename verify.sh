@@ -104,13 +104,13 @@ if [ "$KANI_ONLY" -eq 0 ]; then
   # target, which is what step 5 executes.  `.cargo/config.toml` selects
   # rust-lld so no cross C toolchain is required.
   if rustup target list --installed 2>/dev/null | grep -q aarch64-unknown-linux-gnu; then
-    cargo check --target aarch64-unknown-linux-gnu --all-targets
+    cargo check --target aarch64-unknown-linux-gnu --all-targets --features pure
   else
     echo "SKIPPED (gnu): aarch64-unknown-linux-gnu target not installed."
     echo "         (rustup target add aarch64-unknown-linux-gnu)"
   fi
   if rustup target list --installed 2>/dev/null | grep -q aarch64-unknown-linux-musl; then
-    cargo check --target aarch64-unknown-linux-musl --all-targets
+    cargo check --target aarch64-unknown-linux-musl --all-targets --features pure
   else
     echo "SKIPPED (musl): aarch64-unknown-linux-musl target not installed."
     echo "         (rustup target add aarch64-unknown-linux-musl)"
@@ -119,7 +119,7 @@ if [ "$KANI_ONLY" -eq 0 ]; then
   # scalar-only configuration (see `.cargo/config.toml` for why it is not
   # linked/executed).
   if rustup target list --installed 2>/dev/null | grep -q riscv64gc-unknown-linux-musl; then
-    cargo check --target riscv64gc-unknown-linux-musl --all-targets
+    cargo check --target riscv64gc-unknown-linux-musl --all-targets --features pure
   else
     echo "SKIPPED (riscv64): target not installed."
     echo "         (rustup target add riscv64gc-unknown-linux-musl)"
@@ -156,7 +156,10 @@ if [ "$RUN_CROSS_EXEC" -eq 1 ]; then
     echo "--- $target ---"
     echo "using emulator: $QEMU"
 
-    cargo test --target "$target" --release --no-run
+    # `--features pure`: BLAKE3 needs a *target* C toolchain for its C kernels on
+    # x86_64/aarch64, and this stage exists to execute *this crate's* SIMD code,
+    # not BLAKE3's; the wire format is identical either way.
+    cargo test --target "$target" --release --no-run --features pure
 
     # Run the built test executables directly rather than through
     # `cargo test --target`, so the emulator is used explicitly and the runner
@@ -199,21 +202,22 @@ if [ "$RUN_MIRI" -eq 1 ]; then
       test_x86_simd_kernels_match_scalar
       test_simd_xor_matches_scalar_and_raw
       test_empty_inputs
+      test_detached_matches_attached
     )
     # `-Zmiri-strict-provenance` is what actually exercises the raw-pointer
     # arithmetic in the zeroization helpers and the tag-buffer wipe; the Tree
     # Borrows pass is a second opinion, because the two aliasing models do not
     # accept the same programs.
     MIRIFLAGS="-Zmiri-disable-isolation -Zmiri-strict-provenance" \
-      cargo +nightly miri test --release --lib -- "${MIRI_TESTS[@]}"
+      cargo +nightly miri test --release --features pure --lib -- "${MIRI_TESTS[@]}"
     MIRIFLAGS="-Zmiri-disable-isolation -Zmiri-strict-provenance -Zmiri-tree-borrows" \
-      cargo +nightly miri test --release --lib -- "${MIRI_TESTS[@]}"
+      cargo +nightly miri test --release --features pure --lib -- "${MIRI_TESTS[@]}"
 
     echo
     echo "--- Miri, AVX2 kernel (x86_64) ---"
     MIRIFLAGS="-Zmiri-disable-isolation -Zmiri-strict-provenance" \
       RUSTFLAGS="-C target-feature=+avx2" \
-      cargo +nightly miri test --release --lib -- \
+      cargo +nightly miri test --release --features pure --lib -- \
         test_x86_simd_kernels_match_scalar \
         test_simd_xor_matches_scalar_and_raw \
         test_simd_matches_scalar_all_lengths
@@ -222,7 +226,7 @@ if [ "$RUN_MIRI" -eq 1 ]; then
     echo "--- Miri, NEON kernel (aarch64, cross-interpreted) ---"
     cargo +nightly miri setup --target aarch64-unknown-linux-gnu >/dev/null
     MIRIFLAGS="-Zmiri-disable-isolation -Zmiri-strict-provenance" \
-      cargo +nightly miri test --release --target aarch64-unknown-linux-gnu --lib -- \
+      cargo +nightly miri test --release --features pure --target aarch64-unknown-linux-gnu --lib -- \
         test_aarch64_neon_kernel_matches_scalar \
         test_simd_xor_matches_scalar_and_raw \
         test_zeroize_covers_unaligned_prefix
@@ -279,7 +283,7 @@ if [ "$RUN_KANI" -eq 1 ]; then
   # `--extra-pointer-checks` adds CBMC's pointer-safety checks on top of the
   # harness assertions; it is unstable, hence `-Z unstable-options`.  CI uses the
   # same pair (the Kani version is pinned there so neither can drift).
-  cargo kani -Z stubbing -Z unstable-options --extra-pointer-checks
+  cargo kani --features pure -Z stubbing -Z unstable-options --extra-pointer-checks
 fi
 
 # Each hint is printed only for the step that was actually skipped.

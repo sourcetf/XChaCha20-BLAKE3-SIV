@@ -104,6 +104,7 @@ cargo test --release --test security        # property + deterministic fuzz + ti
                                             #   ctgrind, cargo-deny, fuzzing
 ./verify.sh --ctgrind                       # just the constant-time check (with its control)
 tools/mutation_check.sh                   # plant known bugs; the checks must catch them
+cargo bench --bench compare               # head-to-head vs RustCrypto's chacha20poly1305
 ./verify.sh --deny                          # just cargo-deny
 FUZZ_SECONDS=600 ./verify.sh --fuzz         # a longer fuzz soak
 cargo +nightly miri test --release --lib    # UB detection (slow: ~minutes)
