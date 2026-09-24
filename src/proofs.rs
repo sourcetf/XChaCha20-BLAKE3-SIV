@@ -56,6 +56,24 @@
 //!   (`tools/ref_impl.py` → `tests/vectors_differential.txt`, replayed by
 //!   `tests/differential_reference.rs`), and
 //! * the avalanche / nonce-misuse / key-commitment tests in `lib.rs`.
+//!
+//! # Two limits of this suite, so a green run is not over-read
+//!
+//! 1. **The MAC is stubbed in every harness that reaches it.** Kani cannot run
+//!    the real BLAKE3 — its CPU-feature detection lowers to inline asm, which
+//!    CBMC rejects — so `blake3_keyed_multi` is replaced by the model below. The
+//!    real function is therefore never *executed* here; it is executed by every
+//!    `cargo test` run, so its behaviour as a call is covered there, but the
+//!    claim that its `zeroize()` pair clears BLAKE3's internal key material rests
+//!    on reading the function and on the release disassembly showing both calls
+//!    emitted, not on a proof.
+//! 2. **The model bounds the assertion strength.** It folds each input byte into
+//!    a positional accumulator, and a harness requiring *every* output byte to
+//!    move when a whole field changes could not be unrolled in reasonable time
+//!    (measured: over 18 minutes for one harness). Harnesses here therefore state
+//!    one-sided properties, and full-width coverage comes from the KATs and from
+//!    `test_tag_matches_blake3_over_the_documented_input` in `lib.rs`, which
+//!    compares all 65 tag bytes against an independently assembled input.
 
 use super::*;
 use alloc::vec;
@@ -549,8 +567,13 @@ fn model_blake3_keyed_multi(key: &[u8; 32], parts: &[&[u8]], out: &mut [u8]) {
 /// dropped from the hasher — the key, either length, the domain separator —
 /// changes the result and fails the assertion.
 ///
-/// Four shapes of input (empty/empty, AAD only, message only, both) so a
-/// length-dependent mistake in how the fields are fed would show up.
+/// Two shapes of input: all-zero lengths, and both non-empty. The second is the
+/// one that matters for the length encoding, because the two encoded lengths
+/// differ there (4 vs 8) and so a mix-up between the two length fields cannot
+/// hide. Four shapes were tried and exceeded a 15-minute budget, so the
+/// "AAD only" and "message only" cases are **not** run here; the stub's shape
+/// assertions still check both length fields against the real part lengths for
+/// whichever shapes do run.
 ///
 /// `assert!` carries no format arguments: a `"...{}"` message pulls `core::fmt`
 /// into the verification scope, which dominates the run time.  The comparison is
@@ -581,29 +604,40 @@ fn tag_is_keyed_hash_of_the_whole_context() {
         for b in tag.iter() {
             nz |= *b;
         }
-        // A tag of all zeros would mean the XOF returned nothing; with the odd
-        // addend in the model that cannot happen, so this catches a stub or
-        // buffer mistake rather than a cryptographic one.
+        // A smoke check on the stub and the output buffer: a tag of all zeros
+        // would mean the model's fold produced nothing. Note this is a property
+        // of the model, not of the hash — an earlier comment justified it with an
+        // "odd addend" that the model no longer contains. It is left in place
+        // because it is what CI verified; the substantive assertions of this
+        // harness are the layout ones in the stub.
         assert!(nz != 0);
     }
 }
 
-/// Every byte of the tag must be produced by the hash — none may be left
-/// constant or zero-filled.
+/// A change to the key must change the tag.
 ///
-/// A refactor that, say, filled a padded output and copied only a prefix would
-/// show up here as bytes that never move.
+/// **What this does not establish**, despite what an earlier version of this doc
+/// claimed: it flips one key byte and asserts only that *some* tag byte moved, so
+/// an implementation that filled a prefix of the output and left the rest
+/// constant passes. The stronger "all 65 bytes move" form is not usable here —
+/// asking CBMC to unroll the model's positional fold over a whole field exceeded
+/// 18 minutes (measured, twice). The full-width property is covered instead by
+/// `test_tag_matches_blake3_over_the_documented_input` in `lib.rs`, which runs
+/// the **real** BLAKE3 and compares all 65 bytes, and by
+/// `derive_enc_reads_every_tag_byte` below.
 #[kani::proof]
 #[kani::stub(blake3_keyed_multi, model_blake3_keyed_multi)]
 #[kani::stub(zeroize_array, noop_zeroize_array)]
-fn every_tag_byte_comes_from_the_hash() {
+fn tag_changes_when_the_key_changes() {
     let mac_key: [u8; 32] = kani::any();
     let key: [u8; 32] = kani::any();
     let nonce: [u8; NONCE_LEN] = kani::any();
 
     let tag = derive_tag(&mac_key, &key, &nonce, b"aad", b"msg");
 
-    // Perturb the input; every tag byte position must be able to change.
+    // Flip one key byte.  The assertion is deliberately one-sided ("some tag
+    // byte moved", not "all did") -- see the doc comment for why, and for where
+    // the full-width property is actually established.
     let mut key2 = key;
     key2[0] ^= 0xff;
     let tag2 = derive_tag(&mac_key, &key2, &nonce, b"aad", b"msg");

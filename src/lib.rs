@@ -2644,4 +2644,62 @@ mod tests {
             assert_ne!(t, tag0, "message byte {pos} does not reach the tag");
         }
     }
+
+    /// The tag must equal a keyed BLAKE3 over **exactly** the documented byte
+    /// string, all 65 bytes.
+    ///
+    /// The input is rebuilt here from the specification in the module docs
+    /// (`DOM_TAG || K || N || le64(|A|) || le64(|M|) || A || M`), independently of
+    /// how `derive_tag` assembles it, and compared byte for byte. This makes the
+    /// full width deterministic: an implementation that filled a prefix and
+    /// zeroed the rest, or that dropped or reordered a field, fails here and
+    /// cannot pass by luck.
+    ///
+    /// An earlier version of this test flipped one input byte and required all
+    /// 65 tag bytes to move. That is *probabilistic* — a single fixed byte
+    /// collision has probability 2^-8, so with 65 comparisons per case the test
+    /// had roughly a 22% chance of failing spuriously, and it did (tag byte 6 of
+    /// a real tag happened to be equal). It was replaced rather than loosened,
+    /// because exact equality is both stronger and deterministic.
+    #[test]
+    fn test_tag_matches_blake3_over_the_documented_input() {
+        let mac_key = [0x5Au8; 32];
+        let key = [0x11u8; 32];
+        let nonce = [0x22u8; NONCE_LEN];
+
+        for (aad, msg) in [
+            (b"".as_slice(), b"".as_slice()),
+            (b"aad".as_slice(), b"message".as_slice()),
+            (b"x".as_slice(), b"".as_slice()),
+            (b"".as_slice(), b"y".as_slice()),
+        ] {
+            let mut want = [0u8; TAG_LEN];
+
+            let mut hasher = blake3::Hasher::new_keyed(&mac_key);
+            hasher.update(&DOM_TAG);
+            hasher.update(&key);
+            hasher.update(&nonce);
+            hasher.update(&(aad.len() as u64).to_le_bytes());
+            hasher.update(&(msg.len() as u64).to_le_bytes());
+            hasher.update(aad);
+            hasher.update(msg);
+            hasher.finalize_xof().fill(&mut want);
+
+            let got = derive_tag(&mac_key, &key, &nonce, aad, msg);
+            assert_eq!(
+                got,
+                want,
+                "tag diverges from keyed BLAKE3 over the documented input \
+                 (aad_len={}, msg_len={})",
+                aad.len(),
+                msg.len()
+            );
+        }
+
+        // The nonce and the key must each be in the hashed input, and the two
+        // length fields must swap when the roles are swapped.
+        let t1 = derive_tag(&mac_key, &key, &nonce, b"ab", b"cde");
+        let t2 = derive_tag(&mac_key, &key, &nonce, b"abc", b"de");
+        assert_ne!(t1, t2, "A||M must not be ambiguous");
+    }
 }
