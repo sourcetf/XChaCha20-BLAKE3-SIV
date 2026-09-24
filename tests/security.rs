@@ -468,13 +468,50 @@ const INNER: usize = 8;
 
 /// `SAMPLES` timings of `f`, each the minimum of `INNER` batches. Returns
 /// nanoseconds per operation.
-fn sample(f: &mut impl FnMut()) -> Vec<f64> {
-    for _ in 0..OPS_PER_SAMPLE {
-        f(); // warm up: caches, branch predictors, and any one-time setup
+/// A small deterministic PRNG, used only to randomise measurement order.
+struct Lcg(u64);
+impl Lcg {
+    fn next(&mut self) -> u64 {
+        self.0 = self
+            .0
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        self.0 >> 11
     }
-    (0..SAMPLES)
-        .map(|_| (0..INNER).map(|_| time_batch(f)).fold(f64::MAX, f64::min))
-        .collect()
+}
+
+/// One sample: the minimum of `INNER` batches, in nanoseconds per operation.
+fn sample_one(f: &mut impl FnMut()) -> f64 {
+    (0..INNER).map(|_| time_batch(f)).fold(f64::MAX, f64::min)
+}
+
+/// Sample two classes with the **order randomised per sample**.
+///
+/// This is not a detail. Measuring A then B in every sample makes any
+/// within-pair drift — frequency scaling, cache or branch-predictor state —
+/// systematically favour one side. The first version of this test did exactly
+/// that, and CI (whose clock is precise enough to resolve it: 2.8 ns/op against
+/// 3 us on the development host) reported t = 35.6 for two inputs whose work
+/// cannot differ, which is the signature of an order artefact rather than a
+/// leak. Randomising the order makes the artefact cancel.
+fn sample_pair(a: &mut impl FnMut(), b: &mut impl FnMut()) -> (Vec<f64>, Vec<f64>) {
+    for _ in 0..OPS_PER_SAMPLE {
+        a();
+        b();
+    }
+    let mut va = Vec::with_capacity(SAMPLES);
+    let mut vb = Vec::with_capacity(SAMPLES);
+    let mut rng = Lcg(0x9E37_79B9_7F4A_7C15);
+    for _ in 0..SAMPLES {
+        if rng.next() & 1 == 0 {
+            va.push(sample_one(a));
+            vb.push(sample_one(b));
+        } else {
+            vb.push(sample_one(b));
+            va.push(sample_one(a));
+        }
+    }
+    (va, vb)
 }
 
 /// Standard error of the difference in means, i.e. the effect size this run
@@ -518,12 +555,14 @@ fn timing_tag_comparison_does_not_leak_position() {
         let _ = std::hint::black_box(decrypt(&key, &nonce, b"aad", &ct, &tag_first).is_err());
         let _ = std::hint::black_box(decrypt(&key, &nonce, b"aad", &ct, &tag_last).is_err());
     }
-    let a = sample(&mut || {
-        let _ = std::hint::black_box(decrypt(&key, &nonce, b"aad", &ct, &tag_first).is_err());
-    });
-    let b = sample(&mut || {
-        let _ = std::hint::black_box(decrypt(&key, &nonce, b"aad", &ct, &tag_last).is_err());
-    });
+    let (a, b) = sample_pair(
+        &mut || {
+            let _ = std::hint::black_box(decrypt(&key, &nonce, b"aad", &ct, &tag_first).is_err());
+        },
+        &mut || {
+            let _ = std::hint::black_box(decrypt(&key, &nonce, b"aad", &ct, &tag_last).is_err());
+        },
+    );
     let t = welch_t(&a, &b);
     let res = resolution_ns(&a, &b);
     eprintln!(
@@ -558,23 +597,29 @@ fn timing_does_not_depend_on_key_contents() {
         let _ = std::hint::black_box(encrypt(&k_all0, &nonce, aad, &pt).unwrap());
         let _ = std::hint::black_box(encrypt(&k_allf, &nonce, aad, &pt).unwrap());
     }
-    let a = sample(&mut || {
-        let _ = std::hint::black_box(encrypt(&k_all0, &nonce, aad, &pt).unwrap());
-    });
-    let b = sample(&mut || {
-        let _ = std::hint::black_box(encrypt(&k_allf, &nonce, aad, &pt).unwrap());
-    });
+    let (a, b) = sample_pair(
+        &mut || {
+            let _ = std::hint::black_box(encrypt(&k_all0, &nonce, aad, &pt).unwrap());
+        },
+        &mut || {
+            let _ = std::hint::black_box(encrypt(&k_allf, &nonce, aad, &pt).unwrap());
+        },
+    );
     let t_enc = welch_t(&a, &b);
     let r_enc = resolution_ns(&a, &b);
 
     // And a valid vs invalid decrypt of the same length, which an attacker can
     // actually drive.
-    let a = sample(&mut || {
-        let _ = std::hint::black_box(decrypt(&k_all0, &nonce, aad, &ct0, &[0u8; TAG_LEN]).is_err());
-    });
-    let b = sample(&mut || {
-        let _ = std::hint::black_box(decrypt(&k_allf, &nonce, aad, &ctf, &[0u8; TAG_LEN]).is_err());
-    });
+    let (a, b) = sample_pair(
+        &mut || {
+            let _ =
+                std::hint::black_box(decrypt(&k_all0, &nonce, aad, &ct0, &[0u8; TAG_LEN]).is_err());
+        },
+        &mut || {
+            let _ =
+                std::hint::black_box(decrypt(&k_allf, &nonce, aad, &ctf, &[0u8; TAG_LEN]).is_err());
+        },
+    );
     let t_dec = welch_t(&a, &b);
     let r_dec = resolution_ns(&a, &b);
 
@@ -608,17 +653,19 @@ fn timing_screen_can_detect_a_real_difference() {
         let _ = std::hint::black_box(small);
     }
 
-    let a = sample(&mut || {
-        let _ = std::hint::black_box(small[0]);
-    });
-    let b = sample(&mut || {
-        let mut acc = 0u8;
-        for x in big.iter_mut() {
-            *x = x.wrapping_add(1);
-            acc ^= *x;
-        }
-        std::hint::black_box(acc);
-    });
+    let (a, b) = sample_pair(
+        &mut || {
+            let _ = std::hint::black_box(small[0]);
+        },
+        &mut || {
+            let mut acc = 0u8;
+            for x in big.iter_mut() {
+                *x = x.wrapping_add(1);
+                acc ^= *x;
+            }
+            std::hint::black_box(acc);
+        },
+    );
 
     let t = welch_t(&a, &b);
     let ma = a.iter().sum::<f64>() / a.len() as f64;
