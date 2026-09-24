@@ -1,0 +1,129 @@
+# The audit checks that need external tooling: Miri, ctgrind, cargo-deny, fuzzing.
+#
+# Kept out of ci.yml because each needs its own install and they are much slower
+# than the ordinary test suite. Like formal.yml, this is not a gate for releases;
+# it exists so the checks in tests/README.md actually run somewhere other than one
+# developer's machine.
+#
+# Every step here was verified locally first. Where a tool needed a workaround to
+# run at all, the workaround is in the step and the reason is in a comment.
+
+name: Deep checks
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    # Weekly, so a toolchain or tool regression does not go unnoticed just
+    # because the source is unchanged.
+    - cron: "0 4 * * 1"
+  workflow_dispatch:
+
+concurrency:
+  group: deep-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+
+jobs:
+  miri:
+    name: Miri (UB detection)
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+      # Miri is only available on nightly; on stable, `rustup component add miri`
+      # fails with "component 'miri' is unavailable for download".
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: miri
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: miri
+
+      # Miri cannot run `__cpuid_count` (inline asm), so `detect_avx2` returns
+      # false under `cfg(miri)` and this exercises the SSE2/transpose/zeroization
+      # paths — which is where the alignment-sensitive `unsafe` is.
+      - name: miri on the unsafe paths
+        run: |
+          MIRIFLAGS="-Zmiri-disable-isolation" cargo +nightly miri test --release --lib -- \
+            test_zeroize_covers_unaligned_prefix \
+            test_x86_simd_kernels_match_scalar \
+            test_simd_xor_matches_scalar_and_raw \
+            test_empty_inputs
+
+  ctgrind:
+    name: ctgrind (constant-time)
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ctgrind
+
+      # On a runner this is just an apt install; locally it is not, which is why
+      # tools/ctgrind.sh can also find an extracted copy.
+      - name: install valgrind
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y valgrind
+          valgrind --version
+
+      # The script runs its own negative control first and refuses to report a
+      # clean result unless valgrind flags it, so this cannot pass vacuously.
+      - name: run ctgrind
+        run: ./tools/ctgrind.sh
+
+  deny:
+    name: cargo-deny
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: deny
+
+      - uses: taiki-e/install-action@cargo-deny
+
+      # github.com is reachable from a runner, so the advisory database fetches
+      # normally here — unlike on the development machine, where it had to be
+      # fetched through the GitHub API and placed where cargo-deny looks.
+      - name: cargo deny check
+        run: cargo deny check
+
+  fuzz:
+    name: fuzzing (libFuzzer + ASAN)
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@nightly
+      - uses: Swatinem/rust-cache@v2
+
+      - uses: taiki-e/install-action@cargo-fuzz
+
+      # Bounded rather than indefinite: the scheduled run is the soak. The target
+      # asserts round-trip correctness, rejection of every single-bit corruption,
+      # and the wipe-on-failure contract, so a failure is a defect.
+      - name: fuzz
+        run: cargo +nightly fuzz run roundtrip -- -max_total_time=300 -print_final_stats=1
+
+      # A crashing input is written to fuzz/artifacts; upload it so the failure
+      # is reproducible rather than just reported.
+      - name: upload any crash artifact
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-artifacts
+          path: fuzz/artifacts/
+          if-no-files-found: ignore
