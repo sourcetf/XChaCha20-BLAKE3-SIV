@@ -99,7 +99,11 @@ tag.
 - **`no_std`** — with `alloc`.
 - **SIMD** — SSE2 / AVX2 on x86-64, NEON on aarch64, with a scalar reference
   fallback on every other target. All backends are held byte-identical to the
-  scalar path by differential tests.
+  scalar path by differential tests, and to *each other* by
+  `test_all_accelerated_paths_agree_on_a_boundary_corpus`, whose expected digest
+  was produced identically by AVX2, SSE2-only, NEON, scalar, and a big-endian
+  target. CI runs that test under qemu on aarch64 and i686, so one backend
+  drifting from the others fails there.
 - **No hidden entropy** — `encrypt` is a deterministic function of
   `(key, nonce, aad, plaintext)`; nothing is drawn from a random source
   internally. That is what makes the known-answer vectors and the formal
@@ -223,6 +227,10 @@ works unprivileged, and the emulator is extracted into `~/.local/bin`.
   `qemu-i386` is the only place the 32-bit code paths run, where `usize` is 32
   bits and every length calculation takes a different route. `--aarch64-exec` is
   still accepted as an alias of `--cross-exec`.
+- **Every accelerated path under Miri** — the SSE2 and scalar paths in a default
+  build, the AVX2 kernel with `-C target-feature=+avx2` (Miri refuses a
+  `#[target_feature]` call whose feature is not enabled, which is why it is a
+  separate run), and the NEON kernel by cross-interpreting the aarch64 target.
 - **Kani** — bounded model checking of the construction shape: that the domain,
   key, nonce and both lengths reach the hash in the specified layout; that every
   output byte comes from the hash; that every AAD and message byte reaches the

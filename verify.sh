@@ -186,10 +186,13 @@ if [ "$RUN_CROSS_EXEC" -eq 1 ]; then
 fi
 
 if [ "$RUN_MIRI" -eq 1 ]; then
-  step "6b. Miri (UB detection on the unsafe paths)"
-  # Miri cannot run `__cpuid_count` (inline asm), so `detect_avx2` returns false
-  # under `cfg(miri)` and this exercises the SSE2, transpose and zeroization
-  # paths. Slow: minutes, not seconds. Requires `rustup component add miri`.
+  step "6b. Miri (UB detection on the unsafe paths, both accelerated targets)"
+  # Miri cannot run `__cpuid_count` (inline asm), so `detect_avx2` falls back to
+  # the *compiled* feature set: a default build takes the SSE2 and scalar paths,
+  # and `-C target-feature=+avx2` makes Miri execute the AVX2 kernel too (it
+  # refuses a `#[target_feature]` call whose feature is not enabled, which is why
+  # this is a separate run rather than always on). The aarch64 run interprets the
+  # NEON kernel. Slow: minutes, not seconds. Requires `rustup component add miri`.
   if cargo +nightly miri --version >/dev/null 2>&1; then
     MIRI_TESTS=(
       test_zeroize_covers_unaligned_prefix
@@ -205,6 +208,24 @@ if [ "$RUN_MIRI" -eq 1 ]; then
       cargo +nightly miri test --release --lib -- "${MIRI_TESTS[@]}"
     MIRIFLAGS="-Zmiri-disable-isolation -Zmiri-strict-provenance -Zmiri-tree-borrows" \
       cargo +nightly miri test --release --lib -- "${MIRI_TESTS[@]}"
+
+    echo
+    echo "--- Miri, AVX2 kernel (x86_64) ---"
+    MIRIFLAGS="-Zmiri-disable-isolation -Zmiri-strict-provenance" \
+      RUSTFLAGS="-C target-feature=+avx2" \
+      cargo +nightly miri test --release --lib -- \
+        test_x86_simd_kernels_match_scalar \
+        test_simd_xor_matches_scalar_and_raw \
+        test_simd_matches_scalar_all_lengths
+
+    echo
+    echo "--- Miri, NEON kernel (aarch64, cross-interpreted) ---"
+    cargo +nightly miri setup --target aarch64-unknown-linux-gnu >/dev/null
+    MIRIFLAGS="-Zmiri-disable-isolation -Zmiri-strict-provenance" \
+      cargo +nightly miri test --release --target aarch64-unknown-linux-gnu --lib -- \
+        test_aarch64_neon_kernel_matches_scalar \
+        test_simd_xor_matches_scalar_and_raw \
+        test_zeroize_covers_unaligned_prefix
   else
     echo "SKIPPED: miri component not installed"
     echo "         (rustup component add miri --toolchain nightly)"

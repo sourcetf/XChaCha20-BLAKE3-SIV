@@ -18,6 +18,7 @@ so a green run is not read as more than it is.
 | --- | --- | --- |
 | Constant-time comparison | **verified mechanically** by ctgrind | `tests/ctgrind.rs` + `tools/ctgrind.sh`: secrets are marked undefined in valgrind's shadow memory, so any branch or index depending on them is reported. Clean apart from the two documented SIV accept/reject decisions. Also confirmed by hand: all 17 branch statements in non-test code depend on lengths, alignment, CPU features, an enum variant, or the final decision — never on the content of a key, nonce, AAD or message. |
 | Statistical timing test | **run, with a stated resolution floor** | `dudect-bencher` is unavailable, so `tests/security.rs` implements the Welch t-test directly. **`Instant::now()` costs ~40 µs on this host** (measured; ~25 ns on bare metal), so after batching and min-of-8 the screen resolves ~3 µs/operation. A `ct_eq` → `==` regression is tens of ns — *below that floor*, which is why ctgrind, not this, is the evidence. `timing_screen_can_detect_a_real_difference` keeps the limit visible. |
+| Accelerated paths agree | **enforced**: `test_all_accelerated_paths_agree_on_a_boundary_corpus` |
 | Runtime UB detection (`miri`) | **run** on the unsafe paths, under **both** aliasing models (`-Zmiri-strict-provenance`, plus a `-Zmiri-tree-borrows` pass) | Miri cannot execute `__cpuid_count` (inline asm), so `detect_avx2` returns `false` under `cfg(miri)` and the run exercises the SSE2, transpose and zeroization paths — where the alignment-sensitive `unsafe` is. The AVX2 kernel is held byte-identical to scalar by the differential tests. |
 | Coverage-guided fuzzing | **run** (`cargo-fuzz` + libFuzzer + ASAN) | `fuzz/fuzz_targets/roundtrip.rs`. Bounded in CI by `FUZZ_SECONDS` (default 120 s, ~1100 exec/s). The target asserts round-trip correctness, rejection of every single-bit corruption of ciphertext/tag/AAD, and the wipe-on-failure contract — so a crash is a defect, not a smoke test. A deterministic seeded loop in `tests/security.rs` runs the same properties in plain `cargo test`. |
 | Dependency advisories | **run** (`cargo-audit` and `cargo-deny`) | 92 dependencies against 1267 advisories: 0 vulnerabilities, 0 warnings. `cargo deny check` covers advisories, licences, bans and sources. |
@@ -76,6 +77,20 @@ cargo deny --offline check
   identical inputs give identical output, different inputs give different tags
   and ciphertexts, and both still authenticate. Reuse costs confidentiality, not
   authenticity.
+- **`test_all_accelerated_paths_agree_on_a_boundary_corpus`** folds every
+  ciphertext and tag byte of a corpus that crosses every internal boundary into
+  one digest, and compares it with a constant. That constant was produced
+  identically by x86_64 with AVX2, x86_64 with AVX2 disabled under
+  `qemu-x86_64 -cpu Nehalem` (SSE2 only), aarch64 under qemu (NEON), i686 under
+  qemu (pure scalar) and s390x big-endian under Miri, so it is a cross-
+  implementation equivalence check rather than a known-answer test. The
+  cross-execution CI job runs it on both accelerated targets.
+- **Miri covers every accelerated path**, not just the default one: the AVX2
+  kernel runs when the build enables the feature (`detect_avx2` reports the
+  compiled feature set under Miri, since it cannot run CPUID there), and the NEON
+  kernel by cross-interpreting aarch64. ASan is not available for the aarch64
+  target here (it cannot link a static musl libc), so for that backend the
+  evidence is Miri plus byte-equality with the scalar reference.
 - Timing tests are `--release` only by convention (debug builds are not
   representative); run them with `cargo test --release --test security`.
 

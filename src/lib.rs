@@ -1288,17 +1288,23 @@ mod x86_simd {
 
     fn detect_avx2() -> bool {
         // Miri cannot execute `__cpuid_count` — it lowers to inline assembly,
-        // which Miri rejects ("unsupported operation: inline assembly"). Reporting
-        // "no AVX2" under Miri sends the run down the SSE2 and scalar paths, which
-        // is where the alignment-sensitive `unsafe` actually is (the unaligned
-        // `_mm_storeu_si128` stores and the transpose shuffles), so this is the
-        // arrangement that gets Miri to check the interesting code instead of
-        // aborting before it is reached. The AVX2 kernel is not left unchecked: it
-        // is held byte-identical to the scalar path by the `simd_matches_scalar`
-        // tests.
+        // which Miri rejects ("unsupported operation: inline assembly"). What it
+        // *can* do is emulate target features: Miri refuses to run a
+        // `#[target_feature(enable = "avx2")]` function unless the *build*
+        // enables AVX2 ("calling a function that requires unavailable target
+        // features"). So the feature set compiled into this crate is the honest
+        // answer under Miri, and it makes both accelerated paths reachable:
+        //
+        //   * default Miri build -> SSE2 and scalar, as before;
+        //   * `RUSTFLAGS=-C target-feature=+avx2` -> the AVX2 kernel as well,
+        //     including the dispatcher's AVX2 loop, which was otherwise the one
+        //     accelerated path Miri never inspected.
+        //
+        // Either way the SIMD kernels are held byte-identical to the scalar
+        // reference by the `simd_matches_scalar` tests.
         #[cfg(miri)]
         {
-            return false;
+            return cfg!(target_feature = "avx2");
         }
 
         #[cfg(not(miri))]
@@ -1967,6 +1973,100 @@ mod tests {
             let back = decrypt(&key, &nonce, aad, &ct, &tag).unwrap();
             assert_eq!(back, pt, "roundtrip mismatch at size {size}");
         }
+    }
+
+    /// Every accelerated path must agree with the scalar reference **and with
+    /// each other**, byte for byte, on a corpus that crosses every boundary.
+    ///
+    /// The corpus covers lengths around the ChaCha20 block (64), the SSE2/NEON
+    /// width (256), the AVX2 width (512) and BLAKE3's chunk boundary (1024), up to
+    /// 4097, times four AAD lengths, through both the allocating and the in-place
+    /// API, and folds every ciphertext and tag byte into one FNV-1a value.
+    ///
+    /// The expected digest below is not a KAT for one implementation: it is the
+    /// value produced *identically* by
+    ///
+    /// * x86_64 with AVX2 (native, so the AVX2 and SSE2 loops and the scalar tail),
+    /// * x86_64 with AVX2 disabled under `qemu-x86_64 -cpu Nehalem` (SSE2 only),
+    /// * aarch64 under `qemu-aarch64` (NEON),
+    /// * i686 under `qemu-i386` (no SIMD backend at all, pure scalar),
+    /// * s390x, big-endian, interpreted by Miri.
+    ///
+    /// CI runs this test under qemu on aarch64 and i686, so a change that makes
+    /// one backend disagree with the others fails there rather than on a user's
+    /// machine.
+    #[test]
+    fn test_all_accelerated_paths_agree_on_a_boundary_corpus() {
+        struct Rng(u64);
+        impl Rng {
+            fn next(&mut self) -> u64 {
+                let mut x = self.0;
+                x ^= x >> 12;
+                x ^= x << 25;
+                x ^= x >> 27;
+                self.0 = x;
+                x.wrapping_mul(0x2545_F491_4F6C_DD1D)
+            }
+            fn byte(&mut self) -> u8 {
+                (self.next() >> 33) as u8
+            }
+        }
+        fn fold(digest: &mut u64, bytes: &[u8]) {
+            for &b in bytes {
+                *digest ^= b as u64;
+                *digest = digest.wrapping_mul(0x0000_0100_0000_01B3);
+            }
+        }
+
+        let lens: [usize; 30] = [
+            0, 1, 2, 63, 64, 65, 127, 128, 129, 255, 256, 257, 383, 384, 511, 512, 513, 640, 767,
+            768, 1023, 1024, 1025, 1535, 2047, 2048, 2049, 4095, 4096, 4097,
+        ];
+        let aad_lens: [usize; 4] = [0, 1, 64, 255];
+
+        let mut rng = Rng(0x1234_5678_9ABC_DEF0);
+        let mut digest = 0xcbf2_9ce4_8422_2325u64;
+        let mut total = 0usize;
+        let mut cases = 0usize;
+
+        for &len in &lens {
+            for &alen in &aad_lens {
+                let mut key = [0u8; 32];
+                let mut nonce = [0u8; NONCE_LEN];
+                for b in key.iter_mut() {
+                    *b = rng.byte();
+                }
+                for b in nonce.iter_mut() {
+                    *b = rng.byte();
+                }
+                let pt: Vec<u8> = (0..len).map(|_| rng.byte()).collect();
+                let aad: Vec<u8> = (0..alen).map(|_| rng.byte()).collect();
+
+                let (ct, tag) = encrypt(&key, &nonce, &aad, &pt).unwrap();
+
+                // The in-place API must produce exactly the same bytes.
+                let mut buf = pt.clone();
+                let tag2 = encrypt_in_place_detached(&key, &nonce, &aad, &mut buf).unwrap();
+                assert_eq!(buf, ct, "in-place differs from allocating at len {len}");
+                assert_eq!(tag2, tag, "in-place tag differs at len {len}");
+
+                let back = decrypt(&key, &nonce, &aad, &ct, &tag).unwrap();
+                assert_eq!(back.as_slice(), pt, "roundtrip at len {len}");
+
+                fold(&mut digest, &ct);
+                fold(&mut digest, &tag);
+                total += ct.len() + TAG_LEN;
+                cases += 1;
+            }
+        }
+
+        assert_eq!(cases, 120);
+        assert_eq!(total, 123_256);
+        assert_eq!(
+            digest, 0x430e_de7e_c152_53fe,
+            "the accelerated paths disagree with the scalar reference \
+             (digest {digest:#018x} over {cases} cases, {total} bytes)"
+        );
     }
 
     // ── Property-based tests (XChaCha20, 24-byte nonce) ──

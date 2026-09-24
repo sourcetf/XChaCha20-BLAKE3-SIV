@@ -76,6 +76,32 @@ jobs:
               test_simd_xor_matches_scalar_and_raw \
               test_empty_inputs
 
+      # `detect_avx2` reports the *compiled* feature set under Miri (it cannot run
+      # CPUID there), so the default run above takes the SSE2 path and this one
+      # runs the AVX2 kernel as well -- unaligned 256-bit stores, the 8x8
+      # transpose, the volatile wipe. Miri refuses a `#[target_feature]` call
+      # whose feature is not enabled, so enabling it is what makes this legal.
+      - name: miri, avx2 kernel
+        run: |
+          MIRIFLAGS="-Zmiri-disable-isolation -Zmiri-strict-provenance" \
+            RUSTFLAGS="-C target-feature=+avx2" \
+            cargo +nightly miri test --release --lib -- \
+              test_x86_simd_kernels_match_scalar \
+              test_simd_xor_matches_scalar_and_raw \
+              test_simd_matches_scalar_all_lengths
+
+      # The NEON kernel only exists on aarch64, and this is the only way Miri can
+      # reach it: cross-interpretation. `miri setup` builds that sysroot from
+      # rust-src, so no `rustup target add` is needed.
+      - name: miri, neon kernel (aarch64)
+        run: |
+          cargo +nightly miri setup --target aarch64-unknown-linux-gnu >/dev/null
+          MIRIFLAGS="-Zmiri-disable-isolation -Zmiri-strict-provenance" \
+            cargo +nightly miri test --release --target aarch64-unknown-linux-gnu --lib -- \
+              test_aarch64_neon_kernel_matches_scalar \
+              test_simd_xor_matches_scalar_and_raw \
+              test_zeroize_covers_unaligned_prefix
+
   ctgrind:
     name: ctgrind (constant-time)
     runs-on: ubuntu-latest
