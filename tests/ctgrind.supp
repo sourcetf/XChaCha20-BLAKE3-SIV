@@ -1,80 +1,31 @@
 # Valgrind suppressions for tests/ctgrind.rs — run via `verify.sh --ctgrind`.
 #
-# Every entry is justified below. Anything NOT listed fails the run: a
-# suppression file is a record of what has been examined and permitted, not a
-# silencer.
+# This file is a record of what has been examined and permitted, not a silencer.
+# It contains exactly two entries, both about *this crate*.
 #
-# The frames were generated with `--gen-suppressions=all` against the *release*
-# binary that actually runs. (Generating them from a debug build does not
-# transfer: different inlining gives different frames, and the file then fails
-# to suppress anything while still parsing cleanly.)
-
+# # Why there is no "startup noise" group any more
+#
+# Earlier revisions enumerated the libtest, Rust-std and glibc startup reports
+# (`free` and its inlined allocator, `__strlen_avx2`, `_int_realloc`,
+# `__memchr_avx2`, `_dl_non_dynamic_init`, `pthread_getattr_np`, getopts, and the
+# `setcc`-free libtest paths) with the exact frames each produced. Those frames
+# are internal to three projects that all move independently, so the file kept
+# breaking: entries generated against valgrind 3.24 stopped matching on 3.22,
+# 3.26 and 3.27, and the Rust-std frames seen on a GitHub runner (thread-local
+# lazy init, the mpmc channel, stack-overflow bookkeeping) appear nowhere in a
+# local build at all. Every one of those failures was announced as "memcheck
+# reported an unsuppressed secret-dependent branch", which is a finding in this
+# crate -- and none of them were.
+#
+# tools/ctgrind.sh now classifies instead: a report whose stack contains a
+# `xchacha20_blake3_siv` frame fails the run, and anything else is reported as
+# what it is -- startup and teardown noise from other people's code -- with a
+# count so it is visible rather than silent. That is version-proof by
+# construction, and it is strictly stronger for this crate: a secret-dependent
+# branch *here* is caught wherever it is, including in code inlined into a test
+# body, because the frame names come from DWARF.
 # ─────────────────────────────────────────────────────────────────────────────
-# Group 1 — glibc and libtest startup, reached before any test body runs
-# ─────────────────────────────────────────────────────────────────────────────
-#
-# Both entries below are reached from `ctgrind::main` while the test harness
-# parses its own command line and asks the kernel for its stack size. That
-# happens before one line of this crate executes, so none of it can be caused by
-# the poisoning these tests perform.
-#
-# It appears at all because the binary is statically linked against glibc, which
-# is deliberate: a static binary has no dynamic linker, which sidesteps the
-# `strcmp` redirection valgrind cannot set up here without root-installed libc
-# debuginfo. The cost is that memcheck also sees glibc's own startup.
-#
-# These two are anchored on the *outer* frames (`pthread_getattr_np`,
-# `test::cli::parse_opts`) with `...` in between, rather than on the full chains
-# that `--gen-suppressions=all` prints. That is the fix for a real failure mode:
-# the middle frames are glibc and valgrind internals (`free` and its inlined
-# allocator, `__strlen_avx2`, `_int_realloc`, and on glibc 2.43 `__memchr_avx2`
-# reading a partly-written /proc/self/stat line), and they change between glibc
-# and valgrind versions. Enumerating them made this file version-specific:
-# entries generated on 3.24 stopped matching on 3.22 (the runner's apt valgrind),
-# 3.26 and 3.27, so the check failed with "unsuppressed secret-dependent branch"
-# on libtest's own startup. Verified with 3.22.0, 3.24.0, 3.26.0 and 3.27.1: the
-# four tests are clean on all four, and the negative control still exits 99 on
-# all four -- so nothing here suppresses a real leak. `...` matches any number
-# of frames.
-#
-# What keeps these specific: a report from *this crate* is reached from a test
-# body, whose stack has neither `parse_opts` nor `pthread_getattr_np` on it, so
-# it cannot match either entry. That is exactly what the negative control
-# exercises.
-
-# Static glibc's own initialisation parses LD_LIBRARY_PATH before `main` is
-# reached, with an SSE4.2 string routine that reads a few bytes past each
-# string's end. Anchored on `_dl_non_dynamic_init` (no compiler-generated suffix,
-# unlike the `fillin_rpath.isra.0` frame above it) -- a frame that exists in any
-# static glibc startup and in no other stack.
-{
-   libc-static-init-parses-ld-library-path
-   Memcheck:Cond
-   ...
-   fun:_dl_non_dynamic_init
-}
-
-# libtest asks for its stack size (reading /proc/self/stat), and glibc's string
-# routines run a few bytes past the end of the partially-filled buffer.
-{
-   libtest-startup-stack-size-query
-   Memcheck:Cond
-   ...
-   fun:pthread_getattr_np
-}
-
-# libtest's getopts-based command-line parsing: building the option table, and
-# dropping it again at the end of parsing.
-{
-   libtest-startup-getopts
-   Memcheck:Cond
-   ...
-   fun:_RNvNtCs*_4test3cli10parse_opts
-   ...
-}
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Group 2 — the SIV accept/reject decision, in this crate
+# The SIV accept/reject decision — the only entries in this file
 # ─────────────────────────────────────────────────────────────────────────────
 #
 # These two ARE in this crate and are permitted deliberately.

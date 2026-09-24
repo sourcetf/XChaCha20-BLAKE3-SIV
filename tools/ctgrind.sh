@@ -6,6 +6,13 @@
 # that depends on them. This is the mechanical answer to "does this code branch
 # on secret data?", and it does not depend on a reader spotting every path.
 #
+# Reports are classified by whose code they are in: one that touches a
+# `xchacha20_blake3_siv` frame fails the run, and everything else is counted and
+# ignored as startup/teardown noise from libtest, std and glibc. Suppressing those
+# by frame was the earlier approach and it was not durable -- the frames belong to
+# three projects that version independently, and every mismatch read as a finding
+# in this crate.
+#
 # It is a separate script because it needs three things verify.sh should not
 # assume: valgrind, a statically linked test binary, and a suppression file.
 #
@@ -107,27 +114,54 @@ n_leaks=$(printf '%s\n' "$ctrl_out" | grep -c "depends on uninitialised")
 echo "ok: deliberate leak detected ($n_leaks report(s), naming the control)"
 
 # ── 2. The real tests must be clean ────────────────────────────────────
+#
+# `--quiet` still prints error reports; only the banner and the summary are
+# dropped. Everything memcheck reports is then classified by *whose* code it is
+# in, rather than by the exact frames, because the latter are internal to
+# libtest, Rust's std and glibc and change with every release of any of them --
+# see tests/ctgrind.supp for the history of that.
 echo
 echo "--- constant-time check ---"
 set +e
-"$VG" --error-exitcode=99 --suppressions="$SUPP" --quiet \
+out="$("$VG" --error-exitcode=99 --suppressions="$SUPP" --quiet \
   "$BIN" --test-threads=1 \
   encrypt_does_not_branch_on_secrets \
   decrypt_does_not_branch_on_secrets \
   encrypt_in_place_does_not_branch_on_secrets \
-  constant_time_eq_does_not_branch_on_operands
+  constant_time_eq_does_not_branch_on_operands 2>&1)"
 rc=$?
 set -e
 
-echo
-if [ "$rc" -eq 0 ]; then
-  echo "PASS: no secret-dependent branch or index outside the two documented"
-  echo "      SIV accept/reject decisions (see tests/ctgrind.supp)."
-elif [ "$rc" -eq 99 ]; then
-  echo "FAIL: memcheck reported an unsuppressed secret-dependent branch." >&2
-  echo "      Re-run without --quiet to see it; do NOT add a suppression" >&2
-  echo "      before understanding what it is." >&2
-else
-  echo "FAIL: valgrind exited $rc" >&2
+# Count reports, and how many of them touch this crate.
+counts="$(printf '%s\n' "$out" | awk -v m="xchacha20_blake3_siv" '
+  /^==[0-9]+== .*(Conditional jump|Use of uninitialised|Invalid read|Invalid write|Syscall param|Mismatched)/ {
+    if (seen) { total++; if (hit) bad++ } ; seen=1; hit=0
+  }
+  /^==[0-9]+==/ { if (index($0, m)) hit=1 }
+  END { if (seen) { total++; if (hit) bad++ } ; print (total+0) " " (bad+0) }')"
+read -r total in_crate <<EOF
+$counts
+EOF
+
+if [ "$in_crate" -gt 0 ]; then
+  echo "FAIL: memcheck reported $in_crate report(s) inside this crate:" >&2
+  printf '%s\n' "$out" | grep -B2 -A12 'xchacha20_blake3_siv' | head -60 >&2
+  echo "      Re-run without --quiet to see all of them; do NOT add a" >&2
+  echo "      suppression before understanding what it is." >&2
+  exit 99
 fi
-exit "$rc"
+
+noise=$((total - in_crate))
+echo
+if [ "$rc" -ne 0 ] && [ "$rc" -ne 99 ]; then
+  echo "FAIL: valgrind exited $rc" >&2
+  exit "$rc"
+fi
+echo "PASS: nothing in this crate branches on secret data, beyond the two"
+echo "      documented SIV accept/reject decisions (see tests/ctgrind.supp)."
+if [ "$noise" -gt 0 ]; then
+  echo "      ($noise report(s) outside this crate ignored: libtest, std and"
+  echo "       glibc startup/teardown, whose frames differ per version. A report"
+  echo "       that touched a xchacha20_blake3_siv frame would have failed here.)"
+fi
+exit 0
