@@ -94,24 +94,23 @@ echo "binary: $BIN"
 echo
 echo "--- negative control (must be detected) ---"
 set +e
+# `--nocapture` so the control's own verdict is visible: it checks with
+# GET_VBITS that the poisoning took effect and with COUNT_ERRORS that memcheck
+# recorded an error for the leak, and prints a marker once both hold.
 ctrl_out="$("$VG" --error-exitcode=99 --suppressions="$SUPP" \
-  "$BIN" --ignored --test-threads=1 deliberate_leak 2>&1)"
+  "$BIN" --ignored --test-threads=1 --nocapture deliberate_leak 2>&1)"
 rc=$?
 set -e
-if [ "$rc" -ne 99 ]; then
-  echo "FAIL: the deliberate leak was NOT detected (exit $rc)." >&2
-  echo "      The poisoning is not taking effect, so the check below would be" >&2
-  echo "      vacuous. Do not trust a clean run until this reports 99." >&2
+if [ "$rc" -ne 99 ] || ! printf '%s\n' "$ctrl_out" | grep -q 'CONTROL_LEAK_OBSERVED'; then
+  echo "FAIL: the deliberate leak was not detected (exit $rc)." >&2
+  echo "      The control verifies itself, so this means either the poisoning" >&2
+  echo "      is not reaching valgrind or the leak was optimized away -- and a" >&2
+  echo "      clean result below would be meaningless. Output was:" >&2
+  printf '%s\n' "$ctrl_out" | sed 's/^/      | /' >&2
   exit 1
 fi
-if ! printf '%s\n' "$ctrl_out" | grep -q 'deliberate_leak_is_detected'; then
-  echo "FAIL: valgrind exited 99 but no report names the control test." >&2
-  echo "      That means the 99 came from startup noise, not from the poisoned" >&2
-  echo "      branch, so nothing here has been shown to detect a leak." >&2
-  exit 1
-fi
-n_leaks=$(printf '%s\n' "$ctrl_out" | grep -c "depends on uninitialised")
-echo "ok: deliberate leak detected ($n_leaks report(s), naming the control)"
+echo "ok: $(printf '%s\n' "$ctrl_out" | grep -o 'CONTROL_LEAK_OBSERVED.*')"
+
 
 # ── 2. The real tests must be clean ────────────────────────────────────
 #

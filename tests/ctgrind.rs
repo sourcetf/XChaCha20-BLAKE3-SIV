@@ -95,6 +95,13 @@ unsafe fn client_request(default: usize, args: &mut [usize; 6]) -> usize {
 const MAKE_MEM_UNDEFINED: usize = 0x4d43_0001;
 #[cfg_attr(not(target_arch = "x86_64"), allow(dead_code))]
 const MAKE_MEM_DEFINED: usize = 0x4d43_0002;
+/// `VG_USERREQ__GET_VBITS` — read back the definedness bitmap, so a test can
+/// check that the poisoning above actually took effect instead of trusting that
+/// memcheck will report something later.
+const GET_VBITS: usize = 0x4d43_0008;
+/// `VG_USERREQ__COUNT_ERRORS` (a core request, not tool-specific) — how many
+/// errors the tool has recorded so far.
+const COUNT_ERRORS: usize = 0x1201;
 
 /// Mark `len` bytes at `ptr` as undefined, so valgrind reports any branch or
 /// index that depends on them.
@@ -128,6 +135,98 @@ pub fn unpoison(ptr: *const u8, len: usize) {
 pub fn poison(_ptr: *const u8, _len: usize) {}
 #[cfg(not(target_arch = "x86_64"))]
 pub fn unpoison(_ptr: *const u8, _len: usize) {}
+
+/// Whether every byte in `ptr[..len]` is currently marked *undefined* (the vbit
+/// for each byte is 0xff). Outside valgrind `GET_VBITS` returns the default, so
+/// this reports `false` and the control below is skipped there.
+#[cfg(target_arch = "x86_64")]
+pub fn all_bytes_undefined(ptr: *const u8, len: usize) -> bool {
+    let mut vbits = vec![0u8; len];
+    // SAFETY: as `poison` — the request only reads `len` valid bytes, and writes
+    // `len` bytes into a buffer this function owns.
+    //
+    // The return value is not inspected: memcheck's documented convention here is
+    // "1 on success", but it is the *vbitmap* that answers the question, and it is
+    // only written when the request succeeded. (Checking `rc == 0` was the first
+    // version of this function and it reported "poisoning did not take effect"
+    // for a request that had worked.)
+    unsafe {
+        let mut args = [
+            GET_VBITS,
+            ptr as usize,
+            vbits.as_mut_ptr() as usize,
+            len,
+            0,
+            0,
+        ];
+        let _ = client_request(0, &mut args);
+    }
+    vbits.iter().all(|&b| b == 0xff)
+}
+
+/// Whether this process is running under valgrind (`VG_USERREQ__RUNNING_ON_VALGRIND`).
+#[cfg(target_arch = "x86_64")]
+pub fn valgrind_present() -> bool {
+    // SAFETY: as `poison` — a request with no arguments.
+    unsafe {
+        let mut args = [0x1001usize, 0, 0, 0, 0, 0];
+        client_request(0, &mut args) > 0
+    }
+}
+
+#[cfg(not(target_arch = "x86_64"))]
+pub fn valgrind_present() -> bool {
+    false
+}
+
+/// Number of errors the tool has recorded so far (`0` outside valgrind).
+#[cfg(target_arch = "x86_64")]
+pub fn count_errors() -> usize {
+    // SAFETY: as `poison` — a request with no arguments.
+    unsafe {
+        let mut args = [COUNT_ERRORS, 0, 0, 0, 0, 0];
+        client_request(0, &mut args)
+    }
+}
+
+#[cfg(not(target_arch = "x86_64"))]
+pub fn all_bytes_undefined(_ptr: *const u8, _len: usize) -> bool {
+    false
+}
+#[cfg(not(target_arch = "x86_64"))]
+pub fn count_errors() -> usize {
+    0
+}
+
+/// The leak itself: a branch on a poisoned byte, in its own `#[inline(never)]`
+/// function, with a *different* observable effect in each arm.
+///
+/// The shape is load-bearing, and two cheaper formulations were measured to fail:
+///
+/// * a comparison the optimizer can fold emits a branchless `setcc`, which
+///   memcheck does not report at all -- that is what made the first version of
+///   this control vacuous;
+/// * one sink shared by both arms is compiled to `cmov` plus a single store,
+///   which is branchless too, so it is not reported either (measured: a poisoned
+///   branch with one sink produced `COUNT_ERRORS` delta 0);
+/// * an address derived from a poisoned *byte* -- `TABLE[poisoned as usize]` --
+///   is not reported either: memcheck tolerates undefined values flowing into
+///   address arithmetic and only complains when the pointer itself is undefined.
+///
+/// Two distinct store targets cannot be expressed without a branch, because x86
+/// has no conditional store. Measured on the same build: delta 1.
+#[inline(never)]
+fn secret_dependent_branch(byte: u8, threshold: u8) -> u8 {
+    static SINK_HI: core::sync::atomic::AtomicU8 = core::sync::atomic::AtomicU8::new(0);
+    static SINK_LO: core::sync::atomic::AtomicU8 = core::sync::atomic::AtomicU8::new(0);
+    if byte > threshold {
+        SINK_HI.store(1, core::sync::atomic::Ordering::Relaxed);
+        1
+    } else {
+        SINK_LO.store(1, core::sync::atomic::Ordering::Relaxed);
+        2
+    }
+}
 
 // ── Tests ─────────────────────────────────────────────────────────────
 
@@ -293,49 +392,59 @@ fn constant_time_eq_does_not_branch_on_operands() {
     assert!(!bool::from(choice));
 }
 
-/// **Negative control.** Branches on a poisoned byte on purpose, so that running
-/// this under valgrind *must* produce an error.
+/// **Negative control.** Deliberately leaks secret data, and checks *itself*
+/// that the harness can see it.
 ///
-/// Ignored by default because it makes valgrind fail by design — its value is in
-/// `verify.sh --ctgrind`, which runs it expecting exactly that. Without this,
-/// the tests above could be passing because the poisoning never took effect, and
-/// nobody would know.
+/// This test is the only thing standing between the check above and a vacuous
+/// result, and it has to work on any Rust, glibc and valgrind the project is
+/// built with. Two earlier versions did not:
 ///
-/// # Why the operands are wrapped in `black_box`
+/// * the obvious "branch on a poisoned byte" was compiled into a branchless
+///   `setcc`, which memcheck does not report, so the control produced nothing;
+/// * requiring the report to *name* this function then depended on frame naming,
+///   which differs per toolchain.
 ///
-/// This test only means something if the branch survives code generation, and
-/// the obvious formulation does not survive it. With a constant array and a
-/// constant threshold, LLVM folds the comparison and emits a branchless `setae`;
-/// memcheck reports conditional *jumps* and *moves* and undefined addresses, but
-/// not `setcc`, so the control produced **no report at all** — and the "leak
-/// detected" check in `tools/ctgrind.sh` was then satisfied by unrelated libtest
-/// startup noise instead. Both the control and that check were therefore
-/// vacuous: the four tests above would have looked meaningful while nothing was
-/// being poisoned.
-///
-/// `black_box` on the loaded byte and on the threshold keeps the comparison in
-/// the generated code. Verified both ways: with `poison` active the report is
-/// produced and its stack names this function; with the request code stubbed out
-/// (poison made a no-op) it is not produced at all.
+/// So it now verifies itself with valgrind's own API instead of inspecting
+/// output: `GET_VBITS` confirms the bytes really are marked undefined, and
+/// `COUNT_ERRORS` confirms that memcheck recorded at least one error while the
+/// leak was executed. Both are checked *inside* the test, so a toolchain change
+/// makes this test fail loudly rather than silently pass.
 #[test]
 #[ignore = "deliberately leaks; run under valgrind to confirm the harness detects it"]
 fn deliberate_leak_is_detected() {
-    // A run-time-filled buffer, so no part of this can be constant-folded.
+    // Run-time-filled so nothing here can be constant-folded.
     let secret: Vec<u8> = (0..64u8).map(|i| i.wrapping_mul(13)).collect();
     core::hint::black_box(&secret);
-    poison(secret.as_ptr(), secret.len());
 
-    // A textbook secret-dependent branch, on operands the optimizer cannot see
-    // through.
-    let byte = core::hint::black_box(secret[0]);
-    let threshold = core::hint::black_box(128u8);
-    let mut out = 0u8;
-    if byte > threshold {
-        out = core::hint::black_box(1u8);
+    if !valgrind_present() {
+        // Outside valgrind there is nothing to detect; the script runs this
+        // under valgrind, and `tools/ctgrind.sh` says so if that ever changes.
+        eprintln!("CONTROL_SKIPPED (not running under valgrind)");
+        return;
     }
 
+    poison(secret.as_ptr(), secret.len());
+    assert!(
+        all_bytes_undefined(secret.as_ptr(), secret.len()),
+        "poisoning did not take effect: the client request is not reaching \
+         valgrind, so every other test in this file would be vacuous"
+    );
+
+    let before = count_errors();
+    let byte = core::hint::black_box(secret[3]);
+    let threshold = core::hint::black_box(128u8);
+    let leaked = core::hint::black_box(secret_dependent_branch(byte, threshold));
+    core::hint::black_box(leaked);
+    let after = count_errors();
+    assert!(
+        after > before,
+        "memcheck recorded no error for a secret-dependent address: the leak \
+         was optimized away, so this control proves nothing"
+    );
+
     unpoison(secret.as_ptr(), secret.len());
-    unpoison(&out as *const u8, 1);
-    core::hint::black_box(out);
-    assert!(out <= 1);
+    eprintln!(
+        "CONTROL_LEAK_OBSERVED ({} new memcheck error(s))",
+        after - before
+    );
 }
