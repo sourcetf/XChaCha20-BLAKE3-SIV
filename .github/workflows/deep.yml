@@ -111,7 +111,13 @@ jobs:
         with:
           shared-key: deny
 
-      - uses: taiki-e/install-action@cargo-deny
+      # The tool is named explicitly rather than through the `@cargo-deny` ref
+      # shorthand: when a ref is not one of install-action's tool tags, the
+      # action warns "no tool specified" and exits *successfully*, so the failure
+      # only shows up later as `no such command` in the step that needs it.
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deny
 
       # github.com is reachable from a runner, so the advisory database fetches
       # normally here — unlike on the development machine, where it had to be
@@ -128,13 +134,23 @@ jobs:
       - uses: dtolnay/rust-toolchain@nightly
       - uses: Swatinem/rust-cache@v2
 
-      - uses: taiki-e/install-action@cargo-fuzz
+      # This job was red for exactly this reason: `@cargo-fuzz` is not one of
+      # install-action's tool tags, so the action warned "no tool specified",
+      # exited 0, and `cargo fuzz` then failed with "no such command: fuzz" --
+      # the job never fuzzed anything. Name the tool, and keep a source build as
+      # a fallback so the fuzzer runs even if the action cannot provide it.
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-fuzz
 
       # Bounded rather than indefinite: the scheduled run is the soak. The target
       # asserts round-trip correctness, rejection of every single-bit corruption,
       # and the wipe-on-failure contract, so a failure is a defect.
       - name: fuzz
-        run: cargo +nightly fuzz run roundtrip -- -max_total_time=300 -print_final_stats=1
+        run: |
+          set -euo pipefail
+          command -v cargo-fuzz >/dev/null || cargo install --locked cargo-fuzz
+          cargo +nightly fuzz run roundtrip -- -max_total_time=300 -print_final_stats=1
 
       # A crashing input is written to fuzz/artifacts; upload it so the failure
       # is reproducible rather than just reported.
