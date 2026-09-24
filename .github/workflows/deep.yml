@@ -125,6 +125,32 @@ jobs:
       - name: cargo deny check
         run: cargo deny check
 
+  # The checks above can be silently vacuous, and one of them was: the ctgrind
+  # negative control was compiled into a branchless `setcc` that memcheck does not
+  # report, and the "must exit 99" guard was being satisfied by unrelated startup
+  # noise, so the harness was green while proving nothing. A mutation check is
+  # what catches that class: plant a known bug and require the check to fail.
+  mutation:
+    name: verify the verifier (mutation check)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: mutation
+
+      # One of the mutations is caught by ctgrind, which needs valgrind.
+      - name: install valgrind
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y valgrind
+          valgrind --version
+
+      - name: plant bugs and require the checks to fail
+        run: ./tools/mutation_check.sh
+
   fuzz:
     name: fuzzing (libFuzzer + ASAN)
     runs-on: ubuntu-latest

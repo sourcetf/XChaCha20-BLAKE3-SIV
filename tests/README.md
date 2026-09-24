@@ -23,6 +23,7 @@ so a green run is not read as more than it is.
 | Dependency advisories | **run** (`cargo-audit` and `cargo-deny`) | 92 dependencies against 1267 advisories: 0 vulnerabilities, 0 warnings. `cargo deny check` covers advisories, licences, bans and sources. |
 | `cargo-deny` | **run** | See `deny.toml`. The licence allow-list was derived from what the tree actually uses, not copied from the template. |
 | `ctgrind` C macro / crate | **reimplemented** | Neither is available; the valgrind *client request* underneath is a documented ABI and is reimplemented in `tests/ctgrind.rs`, with the instruction sequence and request codes taken verbatim from valgrind 3.24.0's headers rather than recalled. |
+| Checks that are not vacuous | **run**: `tools/mutation_check.sh` |
 | `semgrep` / `codeql` | **not run** | Neither is available here. The branch classification above and the ctgrind run cover the same question (secret-dependent control flow); no automated pattern scanner was used. |
 
 ### Tooling notes
@@ -87,6 +88,7 @@ cargo test --release --test security        # property + deterministic fuzz + ti
 ./verify.sh --deep                          # ...plus Kani, aarch64 under qemu, Miri,
                                             #   ctgrind, cargo-deny, fuzzing
 ./verify.sh --ctgrind                       # just the constant-time check (with its control)
+tools/mutation_check.sh                   # plant known bugs; the checks must catch them
 ./verify.sh --deny                          # just cargo-deny
 FUZZ_SECONDS=600 ./verify.sh --fuzz         # a longer fuzz soak
 cargo +nightly miri test --release --lib    # UB detection (slow: ~minutes)

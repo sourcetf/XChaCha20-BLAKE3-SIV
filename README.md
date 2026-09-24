@@ -232,9 +232,16 @@ works unprivileged, and the emulator is extracted into `~/.local/bin`.
   through a single seam so no call site can escape the model.
 - **Constant-time, mechanically** — `tools/ctgrind.sh` marks secrets as undefined
   in valgrind's shadow memory and requires memcheck to report no branch depending
-  on them, apart from the two documented SIV accept/reject decisions. The script
-  first proves its own negative control is detected, so a clean run cannot come
-  from poisoning that never took effect.
+  on them, apart from the two documented SIV accept/reject decisions. Reports are
+  classified by whether they touch this crate, so the check does not depend on
+  libtest/std/glibc frames; the control verifies itself with valgrind's `GET_VBITS`
+  and `COUNT_ERRORS`.
+- **Checks that are not vacuous** — `tools/mutation_check.sh` plants known bugs
+  (a `ct_eq` → `==` regression, a changed domain constant) in a throwaway copy and
+  requires the relevant check to fail. This exists because one of them was
+  silently vacuous once: the ctgrind control was compiled to a branchless `setcc`
+  that memcheck does not report, and the guard meant to catch that was satisfied
+  by unrelated startup noise.
 - **Fuzzing** — `fuzz/fuzz_targets/roundtrip.rs` under `cargo-fuzz` + libFuzzer +
   AddressSanitizer, asserting round-trip correctness, rejection of every
   single-bit corruption, and the wipe-on-failure contract.
