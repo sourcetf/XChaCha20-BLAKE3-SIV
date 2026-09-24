@@ -5,12 +5,15 @@
 //! *time* (a dudect-style test), and statements about *arbitrary bytes* (a fuzz
 //! loop). The KATs pin the construction; these pin its security properties.
 //!
-//! Tooling note: `cargo-fuzz`/libFuzzer, `dudect-bencher` and `ctgrind` are not
-//! available in this environment, so the fuzz loop and the timing test are
-//! implemented here rather than delegating. They are substitutes, not the
-//! original tools, and the timing test in particular is a *statistical screen* —
-//! it can flag a leak, but passing it is not proof of constant-time behaviour.
-//! See `tests/README.md`.
+//! Tooling note: `cargo-fuzz`/libFuzzer and `ctgrind` are wired up (see
+//! `.github/workflows/deep.yml` and `tools/ctgrind.sh`), but the fuzz loop and the
+//! timing test here stay as they are, because they run in a plain `cargo test`
+//! with no extra tooling and no nightly: the deterministic seeded fuzz loop is the
+//! regression net that catches a failure without libFuzzer's corpus, and the
+//! timing test needs no external harness. `dudect-bencher` is still unavailable,
+//! so the Welch t-test is implemented directly. The timing test is a *statistical
+//! screen* — it can flag a leak, but passing it is not proof of constant-time
+//! behaviour; `tools/ctgrind.sh` is the mechanical check. See `tests/README.md`.
 
 use proptest::prelude::*;
 use xchacha20_blake3_siv::{

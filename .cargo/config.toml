@@ -22,7 +22,7 @@ linker = "rust-lld"
 
 # The scalar-only fallback path.  On riscv64 no SIMD backend is compiled at all
 # (`x86_simd`/`aarch64_simd` are target-gated out), so this target exercises the
-# scalar `chacha20_block` and the scalar four-block Poly1305 batch — the
+# scalar `chacha20_block` and the scalar block loop in `chacha20_apply` — the
 # correctness reference every other backend is held to.  It also has no
 # `has_avx2()`-style runtime detection, so the dispatch is compile-time only.
 #

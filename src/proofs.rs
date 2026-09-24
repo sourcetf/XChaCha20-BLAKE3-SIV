@@ -5,7 +5,7 @@
 //! The `-Z stubbing` flag is **required**: several harnesses use `#[kani::stub]`
 //! to replace the ChaCha20 permutation, the zeroization helper, and the keyed
 //! BLAKE3 MAC with cheap stand-ins (see the notes above `stub_chacha20_block`
-//! and `model_blake3_keyed_xof`).  Without the flag Kani rejects the attribute
+//! and `model_blake3_keyed_multi`).  Without the flag Kani rejects the attribute
 //! and the suite fails to compile.  Everything else runs unmodified.
 //!
 //! Compiled only under `cfg(kani)`, so they add nothing to normal builds or
@@ -312,9 +312,9 @@ fn hchacha20_matches_draft_vector() {
 //
 // 2. Some of the properties the removed harnesses appeared to state are not
 //    provable *in principle*, not merely expensive.  "Corrupting a ciphertext
-//    byte changes the tag" is Poly1305's collision resistance; "an attacker
-//    cannot forge" is a statement about computational infeasibility.  A SAT
-//    solver has no model of infeasibility, so any harness claiming to prove
+//    byte changes the tag" is the collision resistance of the tag's hash; "an
+//    attacker cannot forge" is a statement about computational infeasibility.  A
+//    SAT solver has no model of infeasibility, so any harness claiming to prove
 //    these either exhausts the solver or passes vacuously.
 //
 // What covers the AEAD layer instead:

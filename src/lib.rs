@@ -385,8 +385,25 @@ impl PartialEq<Vec<u8>> for Plaintext {
 
 impl Drop for Plaintext {
     fn drop(&mut self) {
-        // Wipe the whole allocation, not just `len` bytes.
+        // Wipe the whole allocation, not just `len` bytes.  `decrypt` builds this
+        // `Vec` with `vec![0u8; n]`, whose capacity is exactly `n`, so the
+        // initialized part *is* the allocation today; the `capacity` tail is
+        // handled anyway so a future constructor that grows the buffer cannot
+        // silently leave plaintext behind in it.
         zeroize_slice(self.0.as_mut_slice());
+        let (len, cap) = (self.0.len(), self.0.capacity());
+        if cap > len {
+            // Bytes past `len` belong to this allocation but were never written,
+            // so no reference may be formed over them (a `&mut [u8]` into
+            // uninitialized memory is not a valid reference).  Writing through
+            // the raw pointer is the sound way to clear them.
+            // SAFETY: `len` is in bounds of the allocation and `cap - len` bytes
+            // from there are owned by this `Vec` (still alive: we are in its
+            // owner's `Drop`), so the stores are in bounds and cannot alias a
+            // live reference.
+            unsafe { core::ptr::write_bytes(self.0.as_mut_ptr().add(len), 0, cap - len) };
+            core::sync::atomic::compiler_fence(core::sync::atomic::Ordering::SeqCst);
+        }
     }
 }
 
@@ -724,7 +741,7 @@ pub fn encrypt(
 
     let (mut mac_key, mut enc_seed) = derive_material(key, nonce);
     let tag = derive_tag(&mac_key, key, nonce, aad, plaintext);
-    let (mut enc_key, enc_nonce) = derive_enc(&enc_seed, &tag);
+    let (mut enc_key, mut enc_nonce) = derive_enc(&enc_seed, &tag);
 
     let mut ciphertext = vec![0u8; plaintext.len()];
     chacha20_keystream(&enc_key, 0, &enc_nonce, plaintext, &mut ciphertext);
@@ -732,6 +749,10 @@ pub fn encrypt(
     zeroize_array(&mut mac_key);
     zeroize_array(&mut enc_seed);
     zeroize_array(&mut enc_key);
+    // The per-message ChaCha20 nonce is secret-derived too (it comes out of
+    // the same XOF call as `enc_key`), so it is wiped with the rest rather
+    // than left on the stack.
+    zeroize_array(&mut enc_nonce);
 
     Ok((ciphertext, tag))
 }
@@ -748,13 +769,17 @@ pub fn encrypt_in_place_detached(
 
     let (mut mac_key, mut enc_seed) = derive_material(key, nonce);
     let tag = derive_tag(&mac_key, key, nonce, aad, buffer);
-    let (mut enc_key, enc_nonce) = derive_enc(&enc_seed, &tag);
+    let (mut enc_key, mut enc_nonce) = derive_enc(&enc_seed, &tag);
 
     chacha20_apply(&enc_key, 0, &enc_nonce, &Input::InPlace, buffer);
 
     zeroize_array(&mut mac_key);
     zeroize_array(&mut enc_seed);
     zeroize_array(&mut enc_key);
+    // The per-message ChaCha20 nonce is secret-derived too (it comes out of
+    // the same XOF call as `enc_key`), so it is wiped with the rest rather
+    // than left on the stack.
+    zeroize_array(&mut enc_nonce);
 
     Ok(tag)
 }
@@ -775,7 +800,7 @@ pub fn decrypt(
     check_lengths(ciphertext.len(), aad.len())?;
 
     let (mut mac_key, mut enc_seed) = derive_material(key, nonce);
-    let (mut enc_key, enc_nonce) = derive_enc(&enc_seed, tag);
+    let (mut enc_key, mut enc_nonce) = derive_enc(&enc_seed, tag);
 
     let mut plaintext = vec![0u8; ciphertext.len()];
     chacha20_keystream(&enc_key, 0, &enc_nonce, ciphertext, &mut plaintext);
@@ -786,6 +811,10 @@ pub fn decrypt(
     zeroize_array(&mut mac_key);
     zeroize_array(&mut enc_seed);
     zeroize_array(&mut enc_key);
+    // The per-message ChaCha20 nonce is secret-derived too (it comes out of
+    // the same XOF call as `enc_key`), so it is wiped with the rest rather
+    // than left on the stack.
+    zeroize_array(&mut enc_nonce);
     zeroize_array(&mut computed_tag);
 
     if bool::from(auth_ok) {
@@ -811,7 +840,7 @@ pub fn decrypt_in_place_detached(
     check_lengths(buffer.len(), aad.len())?;
 
     let (mut mac_key, mut enc_seed) = derive_material(key, nonce);
-    let (mut enc_key, enc_nonce) = derive_enc(&enc_seed, tag);
+    let (mut enc_key, mut enc_nonce) = derive_enc(&enc_seed, tag);
 
     chacha20_apply(&enc_key, 0, &enc_nonce, &Input::InPlace, buffer);
 
@@ -821,6 +850,10 @@ pub fn decrypt_in_place_detached(
     zeroize_array(&mut mac_key);
     zeroize_array(&mut enc_seed);
     zeroize_array(&mut enc_key);
+    // The per-message ChaCha20 nonce is secret-derived too (it comes out of
+    // the same XOF call as `enc_key`), so it is wiped with the rest rather
+    // than left on the stack.
+    zeroize_array(&mut enc_nonce);
     zeroize_array(&mut computed_tag);
 
     if bool::from(auth_ok) {
@@ -1671,18 +1704,19 @@ mod tests {
 
     // ── XChaCha20-BLAKE3-SIV KAT (24-byte nonce public API) ──
     //
-    // These lock the *fusion* construction: XChaCha20-style subkey derivation
-    // (HChaCha20 + SUBKEY_DOMAIN || nonce[16..24]) feeding the c2sp.org CCP-SIV
-    // core, plus the CTX context-commitment XOR over
-    // BLAKE3.derive_key(COMMITMENT_CONTEXT, aad).
+    // These lock the whole construction: XChaCha20-style subkey derivation
+    // (HChaCha20 + SUBKEY_DOMAIN || nonce[16..24]) producing `mac_key` and
+    // `enc_seed`, the keyed-BLAKE3 tag over `DOM_TAG || K || N || |A| || |M| ||
+    // A || M`, and the encryption key/nonce derived from that tag.  There is no
+    // CTX term and no Poly1305: both were part of v0.1 and are gone.
     //
     // The vectors were regenerated with the independent reference implementation
     // in `tools/ref_impl.py`, written from the RFC 8439 /
-    // draft-irtf-cfrg-xchacha-03 pseudocode and the c2sp.org specification, after
+    // draft-irtf-cfrg-xchacha-03 pseudocode and the BLAKE3 specification, after
     // the tag change.  That reference is checked
-    // against the published RFC 8439 §2.3.2 / §2.5.2, HChaCha20 draft, and
-    // c2sp.org Test Vectors 1/6 before it emits anything, so it is not merely a
-    // restatement of
+    // against the published RFC 8439 §2.3.2, the HChaCha20 draft (§2.2.1, §A.2.1,
+    // §A.3.1) and BLAKE3's official keyed vectors before it emits anything, so it
+    // is not merely a restatement of
     // this code.
 
     #[test]
@@ -1714,8 +1748,8 @@ mod tests {
 
     #[test]
     fn test_xchacha20_blake3_siv_kat_c2sp_key() {
-        // c2sp.org key with a 24-byte nonce; exercises the empty-AAD path
-        // (where the commitment term is BLAKE3("") rather than zero).
+        // A published c2sp.org test-vector key in the first 16 nonce bytes, with a
+        // fixed suffix in the last 8; exercises the empty-AAD path.
         let key: [u8; 32] = hex("1a1ea9537ef6e0587ac4d36d4c73e07b1526e18bf5bb008f63e4a49b2178a8d2")
             .try_into()
             .unwrap();

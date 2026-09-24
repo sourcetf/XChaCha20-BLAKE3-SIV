@@ -86,6 +86,122 @@
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Group 1b — the same startup, as valgrind 3.26 presents it
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# Group 1 above was generated against valgrind 3.24.0. With 3.26 the inlined
+# allocator frames around `free` are printed differently, so those entries stop
+# matching and the startup reports come back -- announced as "memcheck reported
+# an unsuppressed secret-dependent branch", which reads as a finding in this
+# crate when nothing of the sort is involved.
+#
+# These three are the blocks `--gen-suppressions=all` produced for those reports,
+# against the *release* binary that actually runs. Every one of the stacks ends in
+# `test::cli::parse_opts` -> `ctgrind::main` -> `main`: libtest parsing its own
+# command line and dropping the option table, before any test body runs. No frame
+# of this crate, and no byte this crate touched, appears anywhere in them.
+#
+# Crate hashes are wildcarded (`Cs*_`) exactly as the two SIV entries in Group 2
+# do, so the entries survive a toolchain rebuild.
+#
+# Additions, not replacements: on 3.24 Group 1 still matches. The negative control
+# in tools/ctgrind.sh is what keeps this honest -- it was re-run with these blocks
+# in place and still exits 99, so nothing here suppresses a real leak.
+{
+   libtest-getopts-parses-options
+   Memcheck:Cond
+   fun:free
+   fun:dealloc
+   fun:__rdl_dealloc
+   fun:dealloc_nonnull
+   fun:deallocate_impl_runtime
+   fun:deallocate_impl
+   fun:deallocate
+   fun:deallocate<alloc::alloc::Global>
+   fun:drop<u8, alloc::alloc::Global>
+   fun:drop_glue<alloc::raw_vec::RawVec<u8, alloc::alloc::Global>>
+   fun:drop_glue<alloc::vec::Vec<u8, alloc::alloc::Global>>
+   fun:drop_glue<alloc::string::String>
+   fun:long_to_short
+   fun:{closure#0}<&[alloc::string::String]>
+   fun:{closure#0}<&getopts::OptGroup, getopts::Opt, (), getopts::{impl#2}::parse::{closure_env#0}<&[alloc::string::String]>, core::iter::traits::iterator::Iterator::for_each::call::{closure_env#0}<getopts::Opt, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<getopts::Opt, alloc::alloc::Global, core::iter::adapters::map::Map<core::slice::iter::Iter<getopts::OptGroup>, getopts::{impl#2}::parse::{closure_env#0}<&[alloc::string::String]>>>>>
+   fun:fold<getopts::OptGroup, (), core::iter::adapters::map::map_fold::{closure_env#0}<&getopts::OptGroup, getopts::Opt, (), getopts::{impl#2}::parse::{closure_env#0}<&[alloc::string::String]>, core::iter::traits::iterator::Iterator::for_each::call::{closure_env#0}<getopts::Opt, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<getopts::Opt, alloc::alloc::Global, core::iter::adapters::map::Map<core::slice::iter::Iter<getopts::OptGroup>, getopts::{impl#2}::parse::{closure_env#0}<&[alloc::string::String]>>>>>>
+   fun:fold<getopts::Opt, core::slice::iter::Iter<getopts::OptGroup>, getopts::{impl#2}::parse::{closure_env#0}<&[alloc::string::String]>, (), core::iter::traits::iterator::Iterator::for_each::call::{closure_env#0}<getopts::Opt, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<getopts::Opt, alloc::alloc::Global, core::iter::adapters::map::Map<core::slice::iter::Iter<getopts::OptGroup>, getopts::{impl#2}::parse::{closure_env#0}<&[alloc::string::String]>>>>>
+   fun:for_each<core::iter::adapters::map::Map<core::slice::iter::Iter<getopts::OptGroup>, getopts::{impl#2}::parse::{closure_env#0}<&[alloc::string::String]>>, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<getopts::Opt, alloc::alloc::Global, core::iter::adapters::map::Map<core::slice::iter::Iter<getopts::OptGroup>, getopts::{impl#2}::parse::{closure_env#0}<&[alloc::string::String]>>>>
+   fun:extend_trusted<getopts::Opt, alloc::alloc::Global, core::iter::adapters::map::Map<core::slice::iter::Iter<getopts::OptGroup>, getopts::{impl#2}::parse::{closure_env#0}<&[alloc::string::String]>>>
+   fun:spec_extend<getopts::Opt, core::iter::adapters::map::Map<core::slice::iter::Iter<getopts::OptGroup>, getopts::{impl#2}::parse::{closure_env#0}<&[alloc::string::String]>>, alloc::alloc::Global>
+   fun:from_iter<getopts::Opt, core::iter::adapters::map::Map<core::slice::iter::Iter<getopts::OptGroup>, getopts::{impl#2}::parse::{closure_env#0}<&[alloc::string::String]>>>
+   fun:from_iter<getopts::Opt, core::iter::adapters::map::Map<core::slice::iter::Iter<getopts::OptGroup>, getopts::{impl#2}::parse::{closure_env#0}<&[alloc::string::String]>>>
+   fun:from_iter<getopts::Opt, core::iter::adapters::map::Map<core::slice::iter::Iter<getopts::OptGroup>, getopts::{impl#2}::parse::{closure_env#0}<&[alloc::string::String]>>>
+   fun:collect<core::iter::adapters::map::Map<core::slice::iter::Iter<getopts::OptGroup>, getopts::{impl#2}::parse::{closure_env#0}<&[alloc::string::String]>>, alloc::vec::Vec<getopts::Opt, alloc::alloc::Global>>
+   fun:parse<&[alloc::string::String]>
+   fun:_RNvNtCs*_4test3cli10parse_opts
+   fun:_RNvCs*_7ctgrind4main
+   fun:_RINvNtNtCs*_3std3sys9backtrace28___rust_begin_short_backtraceFEuuECs*_7ctgrind
+   fun:main
+}
+
+# The same parse path, dropping `getopts::Matches`.
+{
+   libtest-getopts-drops-matches
+   Memcheck:Cond
+   fun:free
+   fun:dealloc
+   fun:__rdl_dealloc
+   fun:dealloc_nonnull
+   fun:deallocate_impl_runtime
+   fun:deallocate_impl
+   fun:deallocate
+   fun:deallocate<alloc::alloc::Global>
+   fun:drop<u8, alloc::alloc::Global>
+   fun:drop_glue<alloc::raw_vec::RawVec<u8, alloc::alloc::Global>>
+   fun:drop_glue<alloc::vec::Vec<u8, alloc::alloc::Global>>
+   fun:drop_glue<alloc::string::String>
+   fun:drop_glue<getopts::Name>
+   fun:drop_glue<getopts::Opt>
+   fun:drop_glue<[getopts::Opt]>
+   fun:drop_in_place<[getopts::Opt]>
+   fun:drop_in_place<[getopts::Opt]>
+   fun:drop<getopts::Opt, alloc::alloc::Global>
+   fun:_RINvNtCs*_4core3ptr9drop_glueINtNtCs*_5alloc3vec3VecNtCs*_7getopts3OptEECs*_4test
+   fun:_RINvNtCs*_4core3ptr9drop_glueNtCs*_7getopts7MatchesECs*_4test
+   fun:parse_opts_impl
+   fun:_RNvNtCs*_4test3cli10parse_opts
+   fun:_RNvCs*_7ctgrind4main
+   fun:_RINvNtNtCs*_3std3sys9backtrace28___rust_begin_short_backtraceFEuuECs*_7ctgrind
+   fun:main
+}
+
+# And dropping `getopts::Options` (the option table itself).
+{
+   libtest-getopts-drops-options
+   Memcheck:Cond
+   fun:free
+   fun:dealloc
+   fun:__rdl_dealloc
+   fun:dealloc_nonnull
+   fun:deallocate_impl_runtime
+   fun:deallocate_impl
+   fun:deallocate
+   fun:deallocate<alloc::alloc::Global>
+   fun:drop<u8, alloc::alloc::Global>
+   fun:drop_glue<alloc::raw_vec::RawVec<u8, alloc::alloc::Global>>
+   fun:drop_glue<alloc::vec::Vec<u8, alloc::alloc::Global>>
+   fun:drop_glue<alloc::string::String>
+   fun:drop_glue<getopts::OptGroup>
+   fun:drop_glue<[getopts::OptGroup]>
+   fun:drop_in_place<[getopts::OptGroup]>
+   fun:drop_in_place<[getopts::OptGroup]>
+   fun:drop<getopts::OptGroup, alloc::alloc::Global>
+   fun:drop_glue<alloc::vec::Vec<getopts::OptGroup, alloc::alloc::Global>>
+   fun:_RINvNtCs*_4core3ptr9drop_glueNtCs*_7getopts7OptionsECs*_4test
+   fun:_RNvNtCs*_4test3cli10parse_opts
+   fun:_RNvCs*_7ctgrind4main
+   fun:_RINvNtNtCs*_3std3sys9backtrace28___rust_begin_short_backtraceFEuuECs*_7ctgrind
+   fun:main
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Group 2 — the SIV accept/reject decision, in this crate
 # ─────────────────────────────────────────────────────────────────────────────
 #

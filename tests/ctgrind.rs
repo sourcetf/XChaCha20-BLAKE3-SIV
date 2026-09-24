@@ -88,7 +88,12 @@ unsafe fn client_request(default: usize, args: &mut [usize; 6]) -> usize {
 /// VG_USERREQ__MAKE_MEM_UNDEFINED,
 /// VG_USERREQ__MAKE_MEM_DEFINED,
 /// ```
+/// The client-request codes are only reached through the x86_64 `asm!` path; on
+/// other targets `poison`/`unpoison` are no-ops, so these two would otherwise be
+/// dead code and `cargo check --target ...` reports them as warnings.
+#[cfg_attr(not(target_arch = "x86_64"), allow(dead_code))]
 const MAKE_MEM_UNDEFINED: usize = 0x4d43_0001;
+#[cfg_attr(not(target_arch = "x86_64"), allow(dead_code))]
 const MAKE_MEM_DEFINED: usize = 0x4d43_0002;
 
 /// Mark `len` bytes at `ptr` as undefined, so valgrind reports any branch or
