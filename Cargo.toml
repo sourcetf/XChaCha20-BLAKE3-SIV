@@ -50,6 +50,13 @@ zeroize = { version = "1", default-features = false }
 
 [dev-dependencies]
 criterion = "0.5"
+# Property-based tests. The security tests in `tests/security.rs` are the main
+# reason for this: "no single-bit tamper is ever accepted" is a statement over
+# every possible input, which is exactly what a property test is for.
+proptest = { version = "1", default-features = false, features = ["std", "bit-set"] }
+# NOTE: no `rand` dependency.  proptest brings its own generator, and the fuzz
+# loop in `tests/security.rs` uses a small deterministic PRNG defined there, so a
+# failure is reproducible from a seed without a third-party RNG in the tree.
 
 [features]
 # Opt-in OS randomness for `generate_key` / `generate_nonce`.  Off by default:

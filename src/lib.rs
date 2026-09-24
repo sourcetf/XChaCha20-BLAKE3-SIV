@@ -240,6 +240,36 @@ pub const DOM_ENC: [u8; 8] = *b"XSIV-ENC";
 // ── Error type ────────────────────────────────────────────────────────
 
 /// Errors returned by [`encrypt`], [`decrypt`] and the detached variants.
+///
+/// # What these variants do and do not reveal
+///
+/// [`Error::AuthenticationFailed`] is the only outcome that can depend on secret
+/// material, and it carries no information beyond "the tag did not verify": the
+/// comparison covers all [`TAG_LEN`] bytes in constant time, every intermediate
+/// secret is wiped before the decision is taken, and the unverified plaintext is
+/// wiped rather than returned. There is no distinction between "wrong key",
+/// "wrong nonce", "wrong AAD" and "corrupted ciphertext".
+///
+/// The two length variants are reported before any cryptography runs. That is a
+/// deliberate choice, not an oversight: message and AAD lengths are chosen by the
+/// caller and are not secret, and returning a distinct error lets a caller
+/// distinguish "this input is unsupported" from "this input is forged", which is
+/// what a protocol needs in order to report a usable failure. If an application
+/// must not distinguish them, it can collapse the three variants itself.
+///
+/// Note also that this API takes the tag as a separate `&[u8; TAG_LEN]`, so a
+/// caller cannot accidentally treat a truncated ciphertext as `ciphertext || tag`
+/// and compare only part of it — the types make that impossible. Length is also
+/// bound into the tag's input, so a truncated ciphertext changes the tag rather
+/// than authenticating a prefix of the plaintext.
+///
+/// # Allocation
+///
+/// [`decrypt`] allocates a buffer the size of the ciphertext. `MAX_MSG_SIZE` is
+/// 256 GiB, so a caller that accepts unbounded input from the network should
+/// bound the length itself *before* calling; this crate cannot do that on the
+/// caller's behalf. Decryption never returns a partial result, so a
+/// length-bounded call cannot leak a prefix.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Error {
     /// The plaintext (on encryption) or ciphertext (on decryption) is longer
@@ -1224,23 +1254,40 @@ mod x86_simd {
     }
 
     fn detect_avx2() -> bool {
-        use core::arch::x86_64::{__cpuid_count, _xgetbv};
-        // SAFETY: CPUID is always available on x86_64.  `_xgetbv` is only
-        // executed after confirming OSXSAVE, which guarantees the instruction
-        // exists and XCR0 is readable.
-        unsafe {
-            let leaf1 = __cpuid_count(1, 0);
-            let osxsave = (leaf1.ecx >> 27) & 1 == 1;
-            let avx = (leaf1.ecx >> 28) & 1 == 1;
-            if !osxsave || !avx {
-                return false;
+        // Miri cannot execute `__cpuid_count` — it lowers to inline assembly,
+        // which Miri rejects ("unsupported operation: inline assembly"). Reporting
+        // "no AVX2" under Miri sends the run down the SSE2 and scalar paths, which
+        // is where the alignment-sensitive `unsafe` actually is (the unaligned
+        // `_mm_storeu_si128` stores and the transpose shuffles), so this is the
+        // arrangement that gets Miri to check the interesting code instead of
+        // aborting before it is reached. The AVX2 kernel is not left unchecked: it
+        // is held byte-identical to the scalar path by the `simd_matches_scalar`
+        // tests.
+        #[cfg(miri)]
+        {
+            return false;
+        }
+
+        #[cfg(not(miri))]
+        {
+            use core::arch::x86_64::{__cpuid_count, _xgetbv};
+            // SAFETY: CPUID is always available on x86_64.  `_xgetbv` is only
+            // executed after confirming OSXSAVE, which guarantees the instruction
+            // exists and XCR0 is readable.
+            unsafe {
+                let leaf1 = __cpuid_count(1, 0);
+                let osxsave = (leaf1.ecx >> 27) & 1 == 1;
+                let avx = (leaf1.ecx >> 28) & 1 == 1;
+                if !osxsave || !avx {
+                    return false;
+                }
+                // XCR0[2:1] must both be set: XMM and YMM state enabled by the OS.
+                if _xgetbv(0) & 0b110 != 0b110 {
+                    return false;
+                }
+                let leaf7 = __cpuid_count(7, 0);
+                (leaf7.ebx >> 5) & 1 == 1
             }
-            // XCR0[2:1] must both be set: XMM and YMM state enabled by the OS.
-            if _xgetbv(0) & 0b110 != 0b110 {
-                return false;
-            }
-            let leaf7 = __cpuid_count(7, 0);
-            (leaf7.ebx >> 5) & 1 == 1
         }
     }
 }

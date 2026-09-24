@@ -26,12 +26,14 @@ export PATH="$HOME/.cargo/bin:$PATH"
 RUN_KANI=0
 KANI_ONLY=0
 RUN_AARCH64_EXEC=0
+RUN_MIRI=0
 for arg in "$@"; do
   case "$arg" in
     --kani) RUN_KANI=1 ;;
     --kani-only) RUN_KANI=1; KANI_ONLY=1 ;;
     --aarch64-exec) RUN_AARCH64_EXEC=1 ;;
-    --all) RUN_KANI=1; RUN_AARCH64_EXEC=1 ;;
+    --miri) RUN_MIRI=1 ;;
+    --all) RUN_KANI=1; RUN_AARCH64_EXEC=1; RUN_MIRI=1 ;;
     *) echo "unknown option: $arg" >&2; exit 1 ;;
   esac
 done
@@ -72,6 +74,17 @@ if [ "$KANI_ONLY" -eq 0 ]; then
   cargo test --release
   # `rng` gates the `random` module and its tests.
   cargo test --release --features rng
+
+  # The security tests are in `tests/security.rs` and run with the rest above,
+  # but they are called out because two of them can be slow (the timing screen
+  # takes ~45 s) and one is skipped by nothing -- if it starts failing, this
+  # line says which area to look at.
+  step "3b. security tests (property, fuzz, timing screen)"
+  cargo test --release --test security
+
+  # `--no-default-features` is how a `no_std` user consumes this crate.
+  step "3c. no-default-features build"
+  cargo check --no-default-features --all-targets
 
   step "4. cross-compilation"
   # Type-check against the gnu target (no linker needed), then build the musl
@@ -135,6 +148,23 @@ if [ "$RUN_AARCH64_EXEC" -eq 1 ]; then
   echo "Executed $ran aarch64 test binaries under qemu."
 fi
 
+if [ "$RUN_MIRI" -eq 1 ]; then
+  step "6b. Miri (UB detection on the unsafe paths)"
+  # Miri cannot run `__cpuid_count` (inline asm), so `detect_avx2` returns false
+  # under `cfg(miri)` and this exercises the SSE2, transpose and zeroization
+  # paths. Slow: minutes, not seconds. Requires `rustup component add miri`.
+  if cargo +nightly miri --version >/dev/null 2>&1; then
+    MIRIFLAGS="-Zmiri-disable-isolation" cargo +nightly miri test --release --lib -- \
+      test_zeroize_covers_unaligned_prefix \
+      test_x86_simd_kernels_match_scalar \
+      test_simd_xor_matches_scalar_and_raw \
+      test_empty_inputs
+  else
+    echo "SKIPPED: miri component not installed"
+    echo "         (rustup component add miri --toolchain nightly)"
+  fi
+fi
+
 if [ "$RUN_KANI" -eq 1 ]; then
   step "6. Kani bounded model checking"
   # `-Z stubbing` is REQUIRED: several harnesses use #[kani::stub] to replace the
@@ -145,13 +175,16 @@ if [ "$RUN_KANI" -eq 1 ]; then
 fi
 
 # Each hint is printed only for the step that was actually skipped.
-if [ "$RUN_KANI" -eq 0 ] || [ "$RUN_AARCH64_EXEC" -eq 0 ]; then
+if [ "$RUN_KANI" -eq 0 ] || [ "$RUN_AARCH64_EXEC" -eq 0 ] || [ "$RUN_MIRI" -eq 0 ]; then
   echo
   if [ "$RUN_KANI" -eq 0 ]; then
     echo "(Kani skipped; pass --kani to include it.)"
   fi
   if [ "$RUN_AARCH64_EXEC" -eq 0 ]; then
     echo "(aarch64 execution skipped; pass --aarch64-exec to include it.)"
+  fi
+  if [ "$RUN_MIRI" -eq 0 ]; then
+    echo "(Miri skipped; pass --miri to include it.)"
   fi
   echo "(Run ./verify.sh --all for everything.)"
 fi
