@@ -146,11 +146,23 @@ jobs:
       # Bounded rather than indefinite: the scheduled run is the soak. The target
       # asserts round-trip correctness, rejection of every single-bit corruption,
       # and the wipe-on-failure contract, so a failure is a defect.
+      #
+      # `--target` is not optional. cargo-fuzz's default target is
+      # `current_platform::CURRENT_PLATFORM`, a *compile-time constant of the
+      # cargo-fuzz binary itself*; install-action falls back to cargo-binstall on
+      # Linux, which downloads the musl build, so the default becomes
+      # x86_64-unknown-linux-musl — and ASan refuses to link a static musl
+      # ("sanitizer is incompatible with statically linked libc"), which is how
+      # this job failed even after the tool was installed. Naming the host triple
+      # keeps the sanitizer build on glibc whichever way the tool arrived.
       - name: fuzz
         run: |
           set -euo pipefail
           command -v cargo-fuzz >/dev/null || cargo install --locked cargo-fuzz
-          cargo +nightly fuzz run roundtrip -- -max_total_time=300 -print_final_stats=1
+          host="$(rustc +nightly -vV | sed -n 's/^host: //p')"
+          echo "fuzzing for host triple: $host"
+          cargo +nightly fuzz run roundtrip --target "$host" \
+            -- -max_total_time=300 -print_final_stats=1
 
       # A crashing input is written to fuzz/artifacts; upload it so the failure
       # is reproducible rather than just reported.

@@ -78,11 +78,17 @@ echo "binary: $BIN"
 # Without this, the clean result below would be worthless: poisoning that never
 # took effect also reports nothing. This test branches on a poisoned byte on
 # purpose, so valgrind must report an error *through the suppressions*.
+#
+# The exit code alone is not enough, and that is not a hypothetical: before the
+# control was fixed it produced no report at all (LLVM had turned the branch into
+# a branchless `setcc`, which memcheck does not report), and this check was then
+# satisfied by unrelated libtest startup noise -- exit 99 either way. So the
+# report is required to *name the control* as well.
 echo
 echo "--- negative control (must be detected) ---"
 set +e
-"$VG" --error-exitcode=99 --suppressions="$SUPP" --quiet \
-  "$BIN" --ignored --test-threads=1 deliberate_leak >/dev/null 2>&1
+ctrl_out="$("$VG" --error-exitcode=99 --suppressions="$SUPP" \
+  "$BIN" --ignored --test-threads=1 deliberate_leak 2>&1)"
 rc=$?
 set -e
 if [ "$rc" -ne 99 ]; then
@@ -91,7 +97,14 @@ if [ "$rc" -ne 99 ]; then
   echo "      vacuous. Do not trust a clean run until this reports 99." >&2
   exit 1
 fi
-echo "ok: deliberate leak detected"
+if ! printf '%s\n' "$ctrl_out" | grep -q 'deliberate_leak_is_detected'; then
+  echo "FAIL: valgrind exited 99 but no report names the control test." >&2
+  echo "      That means the 99 came from startup noise, not from the poisoned" >&2
+  echo "      branch, so nothing here has been shown to detect a leak." >&2
+  exit 1
+fi
+n_leaks=$(printf '%s\n' "$ctrl_out" | grep -c "depends on uninitialised")
+echo "ok: deliberate leak detected ($n_leaks report(s), naming the control)"
 
 # ── 2. The real tests must be clean ────────────────────────────────────
 echo

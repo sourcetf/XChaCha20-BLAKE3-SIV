@@ -298,21 +298,44 @@ fn constant_time_eq_does_not_branch_on_operands() {
 ///
 /// Ignored by default because it makes valgrind fail by design — its value is in
 /// `verify.sh --ctgrind`, which runs it expecting exactly that. Without this,
-/// the three tests above could be passing because the poisoning never took
-/// effect, and nobody would know.
+/// the tests above could be passing because the poisoning never took effect, and
+/// nobody would know.
+///
+/// # Why the operands are wrapped in `black_box`
+///
+/// This test only means something if the branch survives code generation, and
+/// the obvious formulation does not survive it. With a constant array and a
+/// constant threshold, LLVM folds the comparison and emits a branchless `setae`;
+/// memcheck reports conditional *jumps* and *moves* and undefined addresses, but
+/// not `setcc`, so the control produced **no report at all** — and the "leak
+/// detected" check in `tools/ctgrind.sh` was then satisfied by unrelated libtest
+/// startup noise instead. Both the control and that check were therefore
+/// vacuous: the four tests above would have looked meaningful while nothing was
+/// being poisoned.
+///
+/// `black_box` on the loaded byte and on the threshold keeps the comparison in
+/// the generated code. Verified both ways: with `poison` active the report is
+/// produced and its stack names this function; with the request code stubbed out
+/// (poison made a no-op) it is not produced at all.
 #[test]
 #[ignore = "deliberately leaks; run under valgrind to confirm the harness detects it"]
 fn deliberate_leak_is_detected() {
-    let secret = [0u8; 32];
+    // A run-time-filled buffer, so no part of this can be constant-folded.
+    let secret: Vec<u8> = (0..64u8).map(|i| i.wrapping_mul(13)).collect();
+    core::hint::black_box(&secret);
     poison(secret.as_ptr(), secret.len());
 
-    // A textbook secret-dependent branch.
+    // A textbook secret-dependent branch, on operands the optimizer cannot see
+    // through.
+    let byte = core::hint::black_box(secret[0]);
+    let threshold = core::hint::black_box(128u8);
     let mut out = 0u8;
-    if secret[0] > 128 {
-        out = 1;
+    if byte > threshold {
+        out = core::hint::black_box(1u8);
     }
 
     unpoison(secret.as_ptr(), secret.len());
     unpoison(&out as *const u8, 1);
+    core::hint::black_box(out);
     assert!(out <= 1);
 }

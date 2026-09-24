@@ -13,192 +13,64 @@
 # Group 1 — glibc and libtest startup, reached before any test body runs
 # ─────────────────────────────────────────────────────────────────────────────
 #
-# Every entry below is reached from `ctgrind::main` -> `test::cli::parse_opts`
-# or -> `pthread_getattr_np`, i.e. while the test harness parses its own command
-# line and asks for its stack size. That happens before one line of this crate
-# executes, so none of it can be caused by the poisoning these tests perform.
+# Both entries below are reached from `ctgrind::main` while the test harness
+# parses its own command line and asks the kernel for its stack size. That
+# happens before one line of this crate executes, so none of it can be caused by
+# the poisoning these tests perform.
 #
 # It appears at all because the binary is statically linked against glibc, which
 # is deliberate: a static binary has no dynamic linker, which sidesteps the
 # `strcmp` redirection valgrind cannot set up here without root-installed libc
 # debuginfo. The cost is that memcheck also sees glibc's own startup.
-
-# glibc's static initialisation parses LD_LIBRARY_PATH with an SSE4.2 string
-# routine that reads a few bytes past each string's end.
-{
-   glibc-static-init-parses-ld-library-path
-   Memcheck:Cond
-   fun:__strcspn_sse42
-   fun:strsep
-}
-
-# libtest queries its stack size through /proc/self/stat; the getdelim buffer is
-# only partially written.
-{
-   libtest-stack-size-getdelim
-   Memcheck:Cond
-   fun:_int_realloc
-   fun:realloc
-}
-
-# The same query, via sscanf on that /proc line.
-{
-   libtest-stack-size-sscanf
-   Memcheck:Cond
-   fun:__strlen_avx2
-   fun:_IO_str_init_static_internal
-}
-
-# libtest's getopts-based command-line parsing, building its option table. The
-# chain of `UnknownInlinedFun` frames is the inlined allocator in a release
-# build; the distinguishing frame is the getopts closure at the end.
-{
-   libtest-getopts-parse-builds-option-table
-   Memcheck:Cond
-   fun:free
-   fun:UnknownInlinedFun
-   fun:UnknownInlinedFun
-   fun:UnknownInlinedFun
-   fun:UnknownInlinedFun
-   fun:UnknownInlinedFun
-   fun:UnknownInlinedFun
-   fun:UnknownInlinedFun
-   fun:UnknownInlinedFun
-   fun:UnknownInlinedFun
-   fun:UnknownInlinedFun
-   fun:UnknownInlinedFun
-   fun:UnknownInlinedFun
-   fun:{closure#0}<&[alloc::string::String]>
-}
-
-# libtest dropping those same structures at startup (the getopts Name / Opt /
-# Optval / OptGroup destructors all share this prefix).
-{
-   libtest-getopts-drops-option-table
-   Memcheck:Cond
-   fun:free
-   fun:UnknownInlinedFun
-   fun:UnknownInlinedFun
-   fun:dealloc_nonnull
-   fun:deallocate_impl_runtime
-   fun:deallocate_impl
-   fun:deallocate
-}
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Group 1b — the same startup, as valgrind 3.26 presents it
-# ─────────────────────────────────────────────────────────────────────────────
 #
-# Group 1 above was generated against valgrind 3.24.0. With 3.26 the inlined
-# allocator frames around `free` are printed differently, so those entries stop
-# matching and the startup reports come back -- announced as "memcheck reported
-# an unsuppressed secret-dependent branch", which reads as a finding in this
-# crate when nothing of the sort is involved.
+# These two are anchored on the *outer* frames (`pthread_getattr_np`,
+# `test::cli::parse_opts`) with `...` in between, rather than on the full chains
+# that `--gen-suppressions=all` prints. That is the fix for a real failure mode:
+# the middle frames are glibc and valgrind internals (`free` and its inlined
+# allocator, `__strlen_avx2`, `_int_realloc`, and on glibc 2.43 `__memchr_avx2`
+# reading a partly-written /proc/self/stat line), and they change between glibc
+# and valgrind versions. Enumerating them made this file version-specific:
+# entries generated on 3.24 stopped matching on 3.22 (the runner's apt valgrind),
+# 3.26 and 3.27, so the check failed with "unsuppressed secret-dependent branch"
+# on libtest's own startup. Verified with 3.22.0, 3.24.0, 3.26.0 and 3.27.1: the
+# four tests are clean on all four, and the negative control still exits 99 on
+# all four -- so nothing here suppresses a real leak. `...` matches any number
+# of frames.
 #
-# These three are the blocks `--gen-suppressions=all` produced for those reports,
-# against the *release* binary that actually runs. Every one of the stacks ends in
-# `test::cli::parse_opts` -> `ctgrind::main` -> `main`: libtest parsing its own
-# command line and dropping the option table, before any test body runs. No frame
-# of this crate, and no byte this crate touched, appears anywhere in them.
-#
-# Crate hashes are wildcarded (`Cs*_`) exactly as the two SIV entries in Group 2
-# do, so the entries survive a toolchain rebuild.
-#
-# Additions, not replacements: on 3.24 Group 1 still matches. The negative control
-# in tools/ctgrind.sh is what keeps this honest -- it was re-run with these blocks
-# in place and still exits 99, so nothing here suppresses a real leak.
+# What keeps these specific: a report from *this crate* is reached from a test
+# body, whose stack has neither `parse_opts` nor `pthread_getattr_np` on it, so
+# it cannot match either entry. That is exactly what the negative control
+# exercises.
+
+# Static glibc's own initialisation parses LD_LIBRARY_PATH before `main` is
+# reached, with an SSE4.2 string routine that reads a few bytes past each
+# string's end. Anchored on `_dl_non_dynamic_init` (no compiler-generated suffix,
+# unlike the `fillin_rpath.isra.0` frame above it) -- a frame that exists in any
+# static glibc startup and in no other stack.
 {
-   libtest-getopts-parses-options
+   libc-static-init-parses-ld-library-path
    Memcheck:Cond
-   fun:free
-   fun:dealloc
-   fun:__rdl_dealloc
-   fun:dealloc_nonnull
-   fun:deallocate_impl_runtime
-   fun:deallocate_impl
-   fun:deallocate
-   fun:deallocate<alloc::alloc::Global>
-   fun:drop<u8, alloc::alloc::Global>
-   fun:drop_glue<alloc::raw_vec::RawVec<u8, alloc::alloc::Global>>
-   fun:drop_glue<alloc::vec::Vec<u8, alloc::alloc::Global>>
-   fun:drop_glue<alloc::string::String>
-   fun:long_to_short
-   fun:{closure#0}<&[alloc::string::String]>
-   fun:{closure#0}<&getopts::OptGroup, getopts::Opt, (), getopts::{impl#2}::parse::{closure_env#0}<&[alloc::string::String]>, core::iter::traits::iterator::Iterator::for_each::call::{closure_env#0}<getopts::Opt, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<getopts::Opt, alloc::alloc::Global, core::iter::adapters::map::Map<core::slice::iter::Iter<getopts::OptGroup>, getopts::{impl#2}::parse::{closure_env#0}<&[alloc::string::String]>>>>>
-   fun:fold<getopts::OptGroup, (), core::iter::adapters::map::map_fold::{closure_env#0}<&getopts::OptGroup, getopts::Opt, (), getopts::{impl#2}::parse::{closure_env#0}<&[alloc::string::String]>, core::iter::traits::iterator::Iterator::for_each::call::{closure_env#0}<getopts::Opt, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<getopts::Opt, alloc::alloc::Global, core::iter::adapters::map::Map<core::slice::iter::Iter<getopts::OptGroup>, getopts::{impl#2}::parse::{closure_env#0}<&[alloc::string::String]>>>>>>
-   fun:fold<getopts::Opt, core::slice::iter::Iter<getopts::OptGroup>, getopts::{impl#2}::parse::{closure_env#0}<&[alloc::string::String]>, (), core::iter::traits::iterator::Iterator::for_each::call::{closure_env#0}<getopts::Opt, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<getopts::Opt, alloc::alloc::Global, core::iter::adapters::map::Map<core::slice::iter::Iter<getopts::OptGroup>, getopts::{impl#2}::parse::{closure_env#0}<&[alloc::string::String]>>>>>
-   fun:for_each<core::iter::adapters::map::Map<core::slice::iter::Iter<getopts::OptGroup>, getopts::{impl#2}::parse::{closure_env#0}<&[alloc::string::String]>>, alloc::vec::{impl#21}::extend_trusted::{closure_env#0}<getopts::Opt, alloc::alloc::Global, core::iter::adapters::map::Map<core::slice::iter::Iter<getopts::OptGroup>, getopts::{impl#2}::parse::{closure_env#0}<&[alloc::string::String]>>>>
-   fun:extend_trusted<getopts::Opt, alloc::alloc::Global, core::iter::adapters::map::Map<core::slice::iter::Iter<getopts::OptGroup>, getopts::{impl#2}::parse::{closure_env#0}<&[alloc::string::String]>>>
-   fun:spec_extend<getopts::Opt, core::iter::adapters::map::Map<core::slice::iter::Iter<getopts::OptGroup>, getopts::{impl#2}::parse::{closure_env#0}<&[alloc::string::String]>>, alloc::alloc::Global>
-   fun:from_iter<getopts::Opt, core::iter::adapters::map::Map<core::slice::iter::Iter<getopts::OptGroup>, getopts::{impl#2}::parse::{closure_env#0}<&[alloc::string::String]>>>
-   fun:from_iter<getopts::Opt, core::iter::adapters::map::Map<core::slice::iter::Iter<getopts::OptGroup>, getopts::{impl#2}::parse::{closure_env#0}<&[alloc::string::String]>>>
-   fun:from_iter<getopts::Opt, core::iter::adapters::map::Map<core::slice::iter::Iter<getopts::OptGroup>, getopts::{impl#2}::parse::{closure_env#0}<&[alloc::string::String]>>>
-   fun:collect<core::iter::adapters::map::Map<core::slice::iter::Iter<getopts::OptGroup>, getopts::{impl#2}::parse::{closure_env#0}<&[alloc::string::String]>>, alloc::vec::Vec<getopts::Opt, alloc::alloc::Global>>
-   fun:parse<&[alloc::string::String]>
+   ...
+   fun:_dl_non_dynamic_init
+}
+
+# libtest asks for its stack size (reading /proc/self/stat), and glibc's string
+# routines run a few bytes past the end of the partially-filled buffer.
+{
+   libtest-startup-stack-size-query
+   Memcheck:Cond
+   ...
+   fun:pthread_getattr_np
+}
+
+# libtest's getopts-based command-line parsing: building the option table, and
+# dropping it again at the end of parsing.
+{
+   libtest-startup-getopts
+   Memcheck:Cond
+   ...
    fun:_RNvNtCs*_4test3cli10parse_opts
-   fun:_RNvCs*_7ctgrind4main
-   fun:_RINvNtNtCs*_3std3sys9backtrace28___rust_begin_short_backtraceFEuuECs*_7ctgrind
-   fun:main
-}
-
-# The same parse path, dropping `getopts::Matches`.
-{
-   libtest-getopts-drops-matches
-   Memcheck:Cond
-   fun:free
-   fun:dealloc
-   fun:__rdl_dealloc
-   fun:dealloc_nonnull
-   fun:deallocate_impl_runtime
-   fun:deallocate_impl
-   fun:deallocate
-   fun:deallocate<alloc::alloc::Global>
-   fun:drop<u8, alloc::alloc::Global>
-   fun:drop_glue<alloc::raw_vec::RawVec<u8, alloc::alloc::Global>>
-   fun:drop_glue<alloc::vec::Vec<u8, alloc::alloc::Global>>
-   fun:drop_glue<alloc::string::String>
-   fun:drop_glue<getopts::Name>
-   fun:drop_glue<getopts::Opt>
-   fun:drop_glue<[getopts::Opt]>
-   fun:drop_in_place<[getopts::Opt]>
-   fun:drop_in_place<[getopts::Opt]>
-   fun:drop<getopts::Opt, alloc::alloc::Global>
-   fun:_RINvNtCs*_4core3ptr9drop_glueINtNtCs*_5alloc3vec3VecNtCs*_7getopts3OptEECs*_4test
-   fun:_RINvNtCs*_4core3ptr9drop_glueNtCs*_7getopts7MatchesECs*_4test
-   fun:parse_opts_impl
-   fun:_RNvNtCs*_4test3cli10parse_opts
-   fun:_RNvCs*_7ctgrind4main
-   fun:_RINvNtNtCs*_3std3sys9backtrace28___rust_begin_short_backtraceFEuuECs*_7ctgrind
-   fun:main
-}
-
-# And dropping `getopts::Options` (the option table itself).
-{
-   libtest-getopts-drops-options
-   Memcheck:Cond
-   fun:free
-   fun:dealloc
-   fun:__rdl_dealloc
-   fun:dealloc_nonnull
-   fun:deallocate_impl_runtime
-   fun:deallocate_impl
-   fun:deallocate
-   fun:deallocate<alloc::alloc::Global>
-   fun:drop<u8, alloc::alloc::Global>
-   fun:drop_glue<alloc::raw_vec::RawVec<u8, alloc::alloc::Global>>
-   fun:drop_glue<alloc::vec::Vec<u8, alloc::alloc::Global>>
-   fun:drop_glue<alloc::string::String>
-   fun:drop_glue<getopts::OptGroup>
-   fun:drop_glue<[getopts::OptGroup]>
-   fun:drop_in_place<[getopts::OptGroup]>
-   fun:drop_in_place<[getopts::OptGroup]>
-   fun:drop<getopts::OptGroup, alloc::alloc::Global>
-   fun:drop_glue<alloc::vec::Vec<getopts::OptGroup, alloc::alloc::Global>>
-   fun:_RINvNtCs*_4core3ptr9drop_glueNtCs*_7getopts7OptionsECs*_4test
-   fun:_RNvNtCs*_4test3cli10parse_opts
-   fun:_RNvCs*_7ctgrind4main
-   fun:_RINvNtNtCs*_3std3sys9backtrace28___rust_begin_short_backtraceFEuuECs*_7ctgrind
-   fun:main
+   ...
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
