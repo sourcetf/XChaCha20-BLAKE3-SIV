@@ -289,10 +289,15 @@ jobs:
           sudo apt-get install --no-install-recommends -y valgrind
           valgrind --version
 
-      # The fault-injection counterpart: it writes a fault down as a source change,
-      # requires the *default* build to accept a forgery with it (so the fault is
-      # real), and requires the `hardened` build to reject it anyway.
-      - name: fault-injection check of the decision
+      # The fault-injection counterpart: a campaign of seven faults written down as
+      # source changes, each with the build it applies to, the test that acts as its
+      # detector, and the outcome that is expected. Three of the rows are the
+      # interesting ones: one skipped branch accepts a forgery on the default build
+      # (which is what makes the fault model real), one skipped gate or one corrupted
+      # gate *value* does not on the `hardened` build, and replacing the computed tag
+      # outright is accepted by both -- pinned there so a change in that known limit
+      # is noticed rather than rediscovered.
+      - name: fault-injection campaign
         run: ./tools/fi_check.sh
 
       - name: plant bugs and require the checks to fail

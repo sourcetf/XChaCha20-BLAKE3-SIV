@@ -170,12 +170,22 @@ introduced. `tools/ctgrind.sh --features hardened` checks that mechanically, and
 `tools/fi_check.sh` writes the fault down as a source change and requires the
 default build to *fail* the decision test with it while the hardened build passes.
 
-| Single fault on the decision | **defended** (`tools/fi_check.sh` demonstrates it) |
+| Single fault on the decision (a skipped branch, or a corrupted gate *value*) | **defended** — `tools/fi_check.sh` runs this as a campaign row on the hardened build |
+| A fault that replaces the computed tag with the received one | **not defended, and pinned**: the campaign asserts that both builds accept it, so a change in either direction is noticed. Both gates compare the same two values, so both are satisfied; a source-level fault model has nothing closer to the memory fault this represents |
 | Two independent faults | not defended — this is where the attacker's cost moves to a synchronized two-glitch bench |
 | A targeted fault inside the tag computation, making it produce the attacker's tag | not defended — precision injection, laboratory grade |
 | Key recovery by differential fault analysis of ChaCha20 | not defended — laboratory grade, and harder against ARX than against AES |
 | Extracting unverified plaintext by skipping the failure-path wipe | not defended — needs a read primitive as well as the fault |
 | Availability (any single glitch causes a rejection or a crash) | not defended, by anything |
+
+One more thing the campaign turned up, which is worth knowing before trusting a
+green suite here: the failure-path wipe of the *allocating* `decrypt` is not
+observable from a test at all — the plaintext is wiped and then freed, so a skipped
+wipe there leaves data in freed memory and nothing outside the crate can see it. The
+campaign therefore mutates the *in-place* wipe, which the caller's buffer does expose,
+and the allocating one rests on reading the code (the first version of that row
+mutated the unobservable one and the campaign reported "expected fail, got pass",
+which is what a mutation nothing can catch looks like).
 
 Measured cost, in-place round trip on the host above: **+10.8% at 64 bytes, +8.9% at 256, +3.6% at 1 KiB, +4.1% at 4 KiB, +2.5% at 16 KiB, +1.0% at 64 KiB, +0.4% at 1 MiB** — the added work
 is four 65-byte constant-time comparisons, so it does not scale with the message. The hardened build is byte-for-byte identical on the wire (the KATs and
