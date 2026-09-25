@@ -309,11 +309,11 @@ jobs:
       # the two comparisons inside a gate always agree, which is precisely the
       # property that differs only when a fault makes them disagree -- and that case
       # is a row of the fault campaign above, not a gap in the tests.
-      # Branch-level instruction faults: every branch instruction in the compiled
-      # decision code is NOPed in turn, and the decision test has to keep rejecting
-      # forgeries. Seconds, so it runs on every push; the exhaustive byte-by-byte
-      # version is in the scheduled job.
-      - name: instruction-level faults (branches)
+      # Instruction-level faults: every byte of the compiled decision code is NOPed
+      # in turn, in both builds, and the decision test has to keep rejecting
+      # forgeries. About seven minutes, so it lives here rather than in the fast
+      # jobs -- and, at that price, once rather than also in the scheduled one.
+      - name: instruction-level faults (every byte of the decision)
         run: ./tools/fi_instruction.sh
 
       - name: mutation run over the decision
@@ -418,9 +418,6 @@ jobs:
       # Byte-by-byte corruption of the compiled decision code, in both builds. It
       # rewrites the binary once per byte and re-runs the decision test, so it is a
       # ~30 minute job -- which is why it lives here and not on every push.
-      - name: instruction-level fault injection (every byte)
-        run: ./tools/fi_instruction.sh --exhaustive
-
       - name: Miri, full library suite under Tree Borrows
         run: |
           set -euo pipefail
