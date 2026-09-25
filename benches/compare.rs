@@ -19,7 +19,10 @@ use xchacha20_blake3_siv::{
     decrypt, decrypt_in_place_detached, encrypt, encrypt_in_place_detached,
 };
 
-const SIZES: [usize; 7] = [64, 256, 1024, 4096, 16384, 65536, 1048576];
+// Power-of-two sizes compare the dispatch paths cleanly; the odd ones keep the
+// *tails* visible, which is where a message that is not a multiple of the SIMD
+// width actually spends time (700 = 2x256 + 188, 5000 = 19x256 + 136).
+const SIZES: [usize; 9] = [64, 256, 700, 1024, 4096, 5000, 16384, 65536, 1048576];
 
 fn bench_encrypt(c: &mut Criterion) {
     let key = [0x42u8; 32];

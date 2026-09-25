@@ -638,6 +638,14 @@ fn blake3_keyed_multi(key: &[u8; 32], parts: &[&[u8]], out: &mut [u8]) {
     // Under Kani this code is unreachable, because harnesses stub this whole
     // function -- which also keeps `zeroize`'s own inline assembly out of the
     // verification scope.
+    //
+    // This wipe is not free, and it is worth knowing what it costs: callgrind puts
+    // `<Hasher as Zeroize>::zeroize` at 15% of all instructions in a 64-byte round
+    // trip (four calls: tag and key derivation, each encrypting and decrypting),
+    // because BLAKE3 wipes its whole CV stack rather than the part a one-chunk
+    // input touched. It stays. The guarantee is that no copy of the MAC key
+    // survives the call, and only the dependency can say which of its own state
+    // that covers.
     reader.zeroize();
     hasher.zeroize();
 }
@@ -1582,6 +1590,17 @@ fn chacha20_apply(
     }
 
     // Scalar tail: remaining full blocks, then a final partial block.
+    //
+    // Tried and rejected, so that it is not tried again: routing this through
+    // `blocks4` (four blocks, of which one to three are used) *lowers* the
+    // instruction count -- callgrind put the scalar rounds at 28% of all
+    // instructions in a 64-byte round trip -- and *raises* the wall clock, +22% at
+    // 64 bytes and +10% at 100, because the four-lane kernel writes a 256-byte
+    // keystream into a scratch that is then zeroized (64 bytes for the scalar
+    // block) and does a lane transpose the scalar path does not need. A small
+    // message is latency- and memory-bound, not issue-bound. There is also nothing
+    // for four lanes to win: the wide loops above consume everything from 256 bytes
+    // up, so this tail is at most three blocks plus a partial one.
     while off + CHACHA20_BLOCK <= n {
         let mut ks = chacha20_block(key, ctr, nonce);
         xor_or_copy(input, output, off, &ks);

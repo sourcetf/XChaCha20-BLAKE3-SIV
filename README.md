@@ -353,6 +353,40 @@ calls, so they do not show per-call jitter: this host's clock alone costs ~40 us
 per `Instant::now()` against ~25 ns on bare metal, so a genuine tail-latency
 measurement needs bare-metal Linux, not this container.
 
+The allocating `encrypt`/`decrypt` API costs more than the in-place one on a round
+trip, and by how much depends on the allocator: 5-13% in the criterion harness but
+up to 2.2x at 1 MiB in a standalone probe (`examples/profile_probe.rs`). The extra
+work is real either way -- two 1 MiB allocations, the copies into them, and the
+wipe of the `Plaintext` that `decrypt` returns -- and the in-place path touches
+none of it. For large messages, use the in-place API.
+
+**Where the remaining headroom is, and where it is not.** Measured, so that nobody
+has to rediscover it:
+
+* The ChaCha20 *tail* and the 64-byte key-material block stay scalar, even though a
+  four-lane kernel cuts their instruction count by roughly two thirds. Tried:
+  callgrind put the scalar rounds at 28% of the instructions in a 64-byte round
+  trip, so routing them through `blocks4` looked like free money -- and it measured
+  22% *slower* at 64 bytes and 10% slower at 100, because the four-lane kernel
+  writes a 256-byte keystream into a scratch that must then be zeroized (64 bytes
+  for the scalar block) and transposes lanes the scalar path does not need. A small
+  message is latency- and memory-bound, not issue-bound. The comment in
+  `chacha20_apply` carries these numbers.
+* Wiping BLAKE3's internal state costs 15% of the instructions in a 64-byte round
+  trip -- it wipes the whole CV stack, most of which a one-chunk input never
+  touched. It stays: that no copy of the MAC key survives the call is the
+  guarantee, and only the dependency can say which of its state that covers.
+* Above a few megabytes, intra-message parallelism is real, but it is a policy
+  decision rather than an oversight. Hashing 16 MiB with a reused four-thread pool
+  measured 3.7x against one thread (8 threads: 4.8x); at 1 MiB the same measurement
+  gives 1.02-1.08x, because a single core already runs at ~8.9 GiB/s there and the
+  coordination costs what the parallelism buys. The crate does not do it: it would
+  need `std`, a thread pool, and cores the caller may already be using. BLAKE3
+  ships threaded hashing (`update_rayon`) as an opt-in feature for the same reason,
+  and RustCrypto's ciphers are single-threaded. Parallelise across messages
+  instead, and check a workload with `examples/profile_probe.rs` before assuming
+  anything here.
+
 Two implementation choices dominate the throughput numbers, both verified to leave
 the wire format byte-identical (the KATs, the differential fixture and
 `test_all_accelerated_paths_agree_on_a_boundary_corpus` pin every byte, and they
