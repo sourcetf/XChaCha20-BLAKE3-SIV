@@ -45,6 +45,37 @@ struct Fixture {
     rows: Vec<(usize, usize, Vec<u8>, [u8; TAG_LEN])>,
 }
 
+/// The `# key = ...` / `# nonce = ...` header, shared by both fixtures.
+fn header(text: &str) -> ([u8; 32], [u8; 24]) {
+    let mut key = None;
+    let mut nonce = None;
+    for line in text.lines() {
+        let line = line.trim();
+        let Some(rest) = line.strip_prefix('#') else {
+            continue;
+        };
+        let rest = rest.trim();
+        if let Some(v) = rest.strip_prefix("key").and_then(|v| v.split('=').nth(1)) {
+            let v = v.trim();
+            if !v.is_empty() {
+                key = Some(hex_decode(v));
+            }
+        } else if let Some(v) = rest.strip_prefix("nonce").and_then(|v| v.split('=').nth(1)) {
+            let v = v.trim();
+            if !v.is_empty() {
+                nonce = Some(hex_decode(v));
+            }
+        }
+    }
+    (
+        key.expect("key header").try_into().expect("32-byte key"),
+        nonce
+            .expect("nonce header")
+            .try_into()
+            .expect("24-byte nonce"),
+    )
+}
+
 fn parse_fixture() -> Fixture {
     let text = include_str!("vectors_differential.txt");
 
@@ -219,5 +250,63 @@ fn differential_every_aad_bit_is_authenticated() {
                 "aad byte {pos} not authenticated (msg_len={msg_len}, aad_len={aad_len})"
             );
         }
+    }
+}
+
+/// The large-size fixture, whose expected output is a digest rather than bytes.
+///
+/// The fixture above stops at 2 KiB — a megabyte of message is two megabytes of hex
+/// — which left everything above `TAG_CONCAT_LIMIT` (65 536 bytes) witnessed only
+/// by the claim that the tag's hash *call shape* does not change the bytes it
+/// produces. These rows check that claim against the reference implementation
+/// instead: 64 KiB is the largest message that still takes the contiguous path,
+/// 65 537 is one byte past it, and the rest are larger.
+///
+/// The digest is plain BLAKE3 over `ciphertext || tag` — a comparison device, so
+/// deliberately not the keyed construction whose output it is checking.
+#[test]
+fn differential_large_vectors_match_reference() {
+    let text = include_str!("vectors_differential_large.txt");
+    let (key, nonce) = header(text);
+
+    let mut rows = Vec::new();
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let mut it = line.split_whitespace();
+        let msg_len: usize = it.next().expect("msg len").parse().expect("int");
+        let aad_len: usize = it.next().expect("aad len").parse().expect("int");
+        let digest = hex_decode(it.next().expect("digest"));
+        rows.push((msg_len, aad_len, digest));
+    }
+    assert!(
+        rows.len() >= 6,
+        "large fixture lost vectors: {}",
+        rows.len()
+    );
+
+    for (msg_len, aad_len, want) in &rows {
+        let pt = pt_for(*msg_len);
+        let aad = aad_for(*aad_len);
+        let (ct, tag) = encrypt(&key, &nonce, &aad, &pt).unwrap();
+
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(&ct);
+        hasher.update(&tag);
+        assert_eq!(
+            hasher.finalize().as_bytes().as_slice(),
+            want.as_slice(),
+            "digest mismatch at msg_len={msg_len} aad_len={aad_len}"
+        );
+
+        // Decryption at these sizes too, so the path is not only covered one way.
+        let back = decrypt(&key, &nonce, &aad, &ct, &tag).unwrap();
+        assert_eq!(
+            back.as_slice(),
+            pt.as_slice(),
+            "roundtrip at msg_len={msg_len}"
+        );
     }
 }

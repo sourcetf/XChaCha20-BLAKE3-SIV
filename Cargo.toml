@@ -67,6 +67,9 @@ zeroize = { version = "1", default-features = false }
 
 [dev-dependencies]
 criterion = "0.5"
+# For the digest-based large-vector fixture: the test hashes `ciphertext || tag`
+# with plain BLAKE3 and compares it to what the reference implementation produced.
+blake3 = { version = "1.8", default-features = false, features = ["zeroize"] }
 # The head-to-head benchmark in `benches/compare.rs`: RustCrypto's
 # XChaCha20-Poly1305 is the natural reference point (same 24-byte nonce), and
 # `aead` supplies the trait both sides are driven through.

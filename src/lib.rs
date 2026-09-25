@@ -1014,10 +1014,10 @@ fn chacha20_block(key: &[u8; 32], counter: u32, nonce: &[u8; 12]) -> [u8; 64] {
         keystream[i * 4..i * 4 + 4].copy_from_slice(&v.to_le_bytes());
     }
 
-    // 【侧信道防护】就地清除含密钥派生中间值的状态。
-    // 注意：必须直接清零 `s`/`orig`/`out` 这些局部变量本身。此前写成
-    // `let mut orig = orig; zeroize_array(&mut orig);` 只会清零一份**副本**
-    // （`[u32; 16]` 是 `Copy`），原始值仍留在栈内存中，等于没有擦除。
+    // Side-channel hygiene: wipe the key-derived state in place. It has to be these
+    // locals themselves -- an earlier version wrote `let mut orig = orig;
+    // zeroize_array(&mut orig);`, which wipes a *copy* (`[u32; 16]` is `Copy`) and
+    // leaves the original on the stack, i.e. no wipe at all.
     zeroize_array(&mut s);
     zeroize_array(&mut orig);
     zeroize_array(&mut out);
@@ -1665,7 +1665,6 @@ fn hchacha20(key: &[u8; 32], nonce: &[u8; 16]) -> [u8; 32] {
     s[14] = u32::from_le_bytes([nonce[8], nonce[9], nonce[10], nonce[11]]);
     s[15] = u32::from_le_bytes([nonce[12], nonce[13], nonce[14], nonce[15]]);
 
-    let mut orig = s;
     let mut out = chacha20_rounds(s);
 
     let mut r = [0u8; 32];
@@ -1675,11 +1674,11 @@ fn hchacha20(key: &[u8; 32], nonce: &[u8; 16]) -> [u8; 32] {
         r[i * 4..i * 4 + 4].copy_from_slice(&out[idx].to_le_bytes());
     }
 
-    // 【侧信道防护】就地清除 HChaCha20 内部状态（含主密钥材料）。
-    // 必须直接清零局部变量本身；若先 `let mut x = x;` 再清零，只会擦掉
-    // `[u32; 16]` 的副本，原值仍残留在栈上。
+    // Side-channel hygiene, as in `chacha20_block`: wipe the key-bearing locals
+    // themselves. There is no `orig` here because HChaCha20 has no feed-forward, so
+    // a copy of the pre-round state would be a second copy of the key material to
+    // keep alive for no reason.
     zeroize_array(&mut s);
-    zeroize_array(&mut orig);
     zeroize_array(&mut out);
 
     r
