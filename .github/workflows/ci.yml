@@ -183,9 +183,9 @@ jobs:
           - target: aarch64-unknown-linux-musl
             qemu: qemu-aarch64
           - target: i686-unknown-linux-musl
+            qemu: qemu-i386
           - target: powerpc64-unknown-linux-musl
             qemu: qemu-ppc64
-            qemu: qemu-i386
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
