@@ -65,7 +65,9 @@ fn main() {
         let aad = from_hex(fields[2]);
         let msg = from_hex(fields[3]);
 
-        let key: [u8; 32] = key.try_into().unwrap_or_else(|_| panic!("key not 32 bytes"));
+        let key: [u8; 32] = key
+            .try_into()
+            .unwrap_or_else(|_| panic!("key not 32 bytes"));
         let nonce: [u8; 24] = nonce
             .try_into()
             .unwrap_or_else(|_| panic!("nonce not 24 bytes"));
@@ -73,7 +75,11 @@ fn main() {
         let (ct, tag) = encrypt(&key, &nonce, &aad, &msg).expect("encrypt");
         // `-` for an empty ciphertext, matching the input convention: an empty
         // field would collapse under whitespace splitting.
-        let ct = if ct.is_empty() { "-".to_string() } else { to_hex(&ct) };
+        let ct = if ct.is_empty() {
+            "-".to_string()
+        } else {
+            to_hex(&ct)
+        };
         writeln!(out, "{} {}", ct, to_hex(&tag)).expect("stdout");
         n += 1;
     }

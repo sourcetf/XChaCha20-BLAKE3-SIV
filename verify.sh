@@ -89,14 +89,18 @@ if [ "$KANI_ONLY" -eq 0 ]; then
   cargo test --release --features rng
 
   # The security tests are in `tests/security.rs` and run with the rest above,
-  # but they are called out because two of them can be slow (the timing screen
-  # takes ~45 s) and one is skipped by nothing -- if it starts failing, this
-  # line says which area to look at.
-  step "3b. security tests (property, fuzz, timing screen)"
+  # but they are called out because one of them is a fuzz loop -- if it starts
+  # failing, this line says which area to look at.
+  step "3b. security tests (property, fuzz)"
   cargo test --release --test security
 
+  # The timing screen is its own target, gated `#![cfg(not(debug_assertions))]`,
+  # so a release build is what runs it.
+  step "3c. timing screen (release builds only)"
+  cargo test --release --test timing
+
   # `--no-default-features` is how a `no_std` user consumes this crate.
-  step "3c. no-default-features build"
+  step "3d. no-default-features build"
   cargo check --no-default-features --all-targets
 
   step "4. cross-compilation"

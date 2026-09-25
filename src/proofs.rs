@@ -569,7 +569,9 @@ fn model_blake3_keyed_multi(key: &[u8; 32], parts: &[&[u8]], out: &mut [u8]) {
             assert!(parts[0].len() >= HEAD_LEN);
             assert!(parts[0][0..8] == DOM_TAG[..]);
             let (aad_len, msg_len) = head_lengths(parts[0]);
-            let total = (HEAD_LEN as u64).wrapping_add(aad_len).wrapping_add(msg_len);
+            let total = (HEAD_LEN as u64)
+                .wrapping_add(aad_len)
+                .wrapping_add(msg_len);
             assert!(parts[0].len() as u64 == total);
         }
     }

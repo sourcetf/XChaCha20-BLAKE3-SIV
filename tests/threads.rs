@@ -70,8 +70,10 @@ fn concurrent_use_agrees_across_threads() {
         })
         .collect();
 
-    let results: Vec<(Vec<u8>, [u8; TAG_LEN])> =
-        handles.into_iter().map(|h| h.join().expect("thread")).collect();
+    let results: Vec<(Vec<u8>, [u8; TAG_LEN])> = handles
+        .into_iter()
+        .map(|h| h.join().expect("thread"))
+        .collect();
 
     for (ct, tag) in &results {
         assert_eq!(ct, &results[0].0, "threads disagree on the ciphertext");
