@@ -136,7 +136,31 @@ assumptions, not theorems, and this particular *composition* has no public
 specification and has not been independently analysed. The formal harnesses in
 `src/proofs.rs` prove properties of the implementation (that the fields reach
 the hash, that every output byte is used, that the tag reaches the ciphertext),
-not cryptographic hardness.
+
+**What is not defended against.** Fault injection — a voltage, clock or laser
+glitch that makes the *hardware* execute something other than what the code says —
+is outside this crate's threat model, and outside every tool used to verify it:
+Miri, Kani, ctgrind, ThreadSanitizer and libFuzzer all model *correct* execution,
+and none of them can observe a glitch. Concretely, the accept/reject decision is a
+single branch on a single comparison in both `decrypt` and
+`decrypt_in_place_detached`, so one skipped instruction is the difference between a
+forgery being rejected and being accepted. That is also the shape RustCrypto's
+`chacha20poly1305` has, and neither crate documents fault countermeasures.
+
+What the construction gives for free is asymmetric: a fault on the *encryption*
+side degrades to rejection rather than to forgery, because the tag is computed over
+the plaintext (see the SIV property above), so a corrupted keystream, a corrupted
+key derivation or a corrupted tag can only produce a message the receiver refuses.
+The data path is held to that empirically — every single-bit corruption of
+ciphertext, tag and AAD is rejected by the tests, and 115 million fuzz executions
+found no acceptance — but those are *non-physical* analogues: they show the
+acceptance predicate is exact, not that the decision survives a glitch.
+
+If your adversary can glitch silicon, this crate is not the component to use. A
+fault-hardened implementation needs a countermeasure set validated on a
+fault-injection bench — a double-checked decision, redundant computation,
+verify-by-re-encryption, canaries — and the bench is what makes the countermeasures
+mean anything, not the code alone.
 
 ## Nonces, and where randomness comes from
 

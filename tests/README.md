@@ -30,6 +30,7 @@ so a green run is not read as more than it is.
 | `cargo-deny` | **run** | See `deny.toml`. The licence allow-list was derived from what the tree actually uses, not copied from the template. |
 | `ctgrind` C macro / crate | **reimplemented** | Neither is available; the valgrind *client request* underneath is a documented ABI and is reimplemented in `tests/ctgrind.rs`, with the instruction sequence and request codes taken verbatim from valgrind 3.24.0's headers rather than recalled. |
 | Checks that are not vacuous | **run**: `tools/mutation_check.sh` |
+| Fault injection | **not covered, and not claimed** | No tool in this suite models a glitch — Miri, Kani, ctgrind, TSAN and libFuzzer all assume correct execution. The accept/reject decision is one branch on one comparison, so a single skipped instruction is an accepted forgery; encryption-side faults, by contrast, degrade to rejection, because the tag is computed over the plaintext. A hardened implementation would need a validated countermeasure set and a fault-injection bench — see README's "What is not defended against". |
 | `semgrep` / `codeql` | **not run** | Neither is available here. The branch classification above and the ctgrind run cover the same question (secret-dependent control flow); no automated pattern scanner was used. |
 
 ### Tooling notes
