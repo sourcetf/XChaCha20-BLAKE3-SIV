@@ -164,6 +164,29 @@ jobs:
       - name: run ctgrind with the hardened decision
         run: ./tools/ctgrind.sh --features hardened
 
+      # ctgrind classifies branches and indices in the source; this compares the
+      # compiled code's cache and branch *profile* for two different keys, which
+      # catches a leak with no branch and no index to name. The self-test plants a
+      # leak in a throwaway copy and requires the tool to find it -- a check whose
+      # detector can silently stop detecting is the failure this guards.
+      - name: cache-profile differential, with its self-test
+        run: |
+          set -euo pipefail
+          ./tools/cache_profile.sh 48
+          ./tools/cache_profile.sh --selftest
+
+      # The address-trace mode is the stronger technique -- it sees which line is
+      # touched, not just how many misses there were -- but it needs valgrind's
+      # lackey tool, which the extracted valgrind on the development host cannot
+      # start. Non-blocking, because "could not run" and "found something" must not
+      # be confused: the script reports them as different exit codes, and the
+      # self-test treats "could not run" as its own failure rather than a detection.
+      - name: address-trace differential (needs lackey)
+        continue-on-error: true
+        run: |
+          ./tools/cache_profile.sh --trace 12
+          ./tools/cache_profile.sh --selftest --trace
+
   audit:
     name: cargo-audit
     runs-on: ubuntu-latest

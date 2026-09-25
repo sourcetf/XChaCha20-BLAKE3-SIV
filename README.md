@@ -399,9 +399,10 @@ follow from the construction rather than from this implementation:
   until `decrypt` returns.
 
 The percentiles in the latency table are per *sample*, each averaging hundreds of
-calls, so they do not show per-call jitter: this host's clock alone costs ~40 us
-per `Instant::now()` against ~25 ns on bare metal, so a genuine tail-latency
-measurement needs bare-metal Linux, not this container.
+calls, so they do not show per-call jitter: this host's clock costs ~35 ns per
+`Instant::now()`, which is exactly why each sample averages hundreds of calls -- and
+a genuine tail-latency measurement still needs bare metal, where the clock and the
+scheduler are far quieter than in this container.
 
 The allocating `encrypt`/`decrypt` API costs more than the in-place one on a round
 trip, and by how much depends on the allocator: 5-13% in the criterion harness but

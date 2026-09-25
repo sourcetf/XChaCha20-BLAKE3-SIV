@@ -49,9 +49,12 @@ use xchacha20_blake3_siv::{decrypt, encrypt, TAG_LEN};
 // directly — and one hard fact about this host has to be stated up front,
 // because it bounds what these tests can conclude:
 //
-//   **`Instant::now()` costs ~40,000 ns here** (measured: 39-50 us per call on
-//   this WSL2 host, against ~25 ns on bare-metal Linux). A `decrypt` of a few
-//   hundred bytes takes ~1-3 us.
+//   **`Instant::now()` costs ~35 ns here** (re-measured; an earlier revision of
+//   this file said ~40,000 ns, which was wrong by three orders of magnitude and
+//   made the screen look far weaker than it is). `_rdtsc` would add ~7 ns on top of
+//   that and is not used. The tests print the resolution they achieve: ~0.16 us/op
+//   on a quiet release run, so a `ct_eq` -> `==` regression of a few tens of ns is
+//   below the floor by a factor of a few, not by a factor of a hundred.
 //
 // So a naive "time one operation" sample is >90% clock overhead, and an earlier
 // version of these tests was **vacuous**: it passed with t < 1.5 not because
@@ -61,7 +64,7 @@ use xchacha20_blake3_siv::{decrypt, encrypt, TAG_LEN};
 // The measurement is therefore **batched**: each sample times `OPS_PER_SAMPLE`
 // operations and divides, so the clock is amortised. That removes the overhead
 // as a *bias* but cannot manufacture resolution the clock does not have — the
-// detectable effect is still bounded by the jitter of a ~40 us clock across the
+// detectable effect is still bounded by the jitter of the clock across the
 // sample count. The tests report that floor and are explicit that they are a
 // screen, not evidence.
 //
@@ -80,7 +83,8 @@ use xchacha20_blake3_siv::{decrypt, encrypt, TAG_LEN};
 // `ct_eq` with `==`, whose early exit is a difference of *hundreds* of ns on a
 // 65-byte tag and would be visible even here.
 
-/// Operations per timed sample, chosen so the ~40 us clock is a small fraction.
+/// Operations per timed sample: enough that the clock's own cost is a small
+/// fraction of a sample, which at tens of nanoseconds per call is already true.
 const OPS_PER_SAMPLE: usize = 512;
 /// Samples per class.
 const SAMPLES: usize = 200;
@@ -326,7 +330,7 @@ fn timing_screen_can_detect_a_real_difference() {
     let mb = b.iter().sum::<f64>() / b.len() as f64;
     eprintln!(
         "calibration: {ma:.2} ns/op vs {mb:.2} ns/op, t = {t:.2}; \
-         this host's clock costs ~40,000 ns, so the floor documented above applies"
+         the resolution printed above is this host's floor, not the clock's"
     );
     assert!(
         t > 10.0,
