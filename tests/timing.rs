@@ -21,6 +21,23 @@
 //! (`#![cfg]` on the whole file, which also keeps the helpers from becoming dead
 //! code that `clippy -D warnings` would reject).
 #![cfg(not(debug_assertions))]
+//!
+//! Two measurements explain why this file is *advisory* in CI: the assertion is
+//! `t < 10`, and a hosted VM produces systematic bias between two classes whose
+//! work is identical --
+//!
+//! ```text
+//! CI release job, no possible cause:  encrypt t = 10.96  (resolution 5.72 ns/op)
+//! CI debug job,   no possible cause:  decrypt t = 11.89  (resolution 60.55 ns/op)
+//! a real order artefact, this harness:                 t = 35.6
+//! ```
+//!
+//! so 10 sits inside the noise and only 3x below a genuine effect. There is no
+//! threshold there that is both sensitive and stable, so CI runs these tests in a
+//! separate job that is allowed to fail (visible in the checks list), while the
+//! strict run is `./verify.sh --deep` on a quiet machine, where they report
+//! `t < 0.4`. The threshold itself is unchanged: the same test must still pass on
+//! hardware that can support the measurement.
 
 use xchacha20_blake3_siv::{decrypt, encrypt, TAG_LEN};
 
