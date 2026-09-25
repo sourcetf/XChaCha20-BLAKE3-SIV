@@ -3029,6 +3029,34 @@ mod tests {
     /// A one-byte message and a large AAD reach all four totals, so the buffers
     /// stay small while AAD and message both stay non-empty (an empty part is the
     /// case the two shapes could most easily disagree on, and the in-crate KATs
+    /// The length guard, tested directly.
+    ///
+    /// No test can allocate `MAX_MSG_SIZE` (256 GiB), which is why the guard had
+    /// **zero** coverage in `cargo test` until this existed: deleting it changed
+    /// nothing in the suite, while the Kani harnesses in `src/proofs.rs` did catch it
+    /// (verified -- two of the three limits harnesses fail without it). Testing the
+    /// guard itself, rather than a message of that size, is what makes it observable.
+    #[test]
+    fn test_length_guard_rejects_oversized_inputs() {
+        let max = MAX_MSG_SIZE as usize;
+        assert!(check_lengths(max, max).is_ok(), "the maximum is allowed");
+        assert_eq!(
+            check_lengths(max + 1, 0),
+            Err(Error::MessageTooLong),
+            "one byte over the maximum message length"
+        );
+        assert_eq!(
+            check_lengths(0, max + 1),
+            Err(Error::AadTooLong),
+            "one byte over the maximum AAD length"
+        );
+        assert_eq!(
+            check_lengths(max + 1, max + 1),
+            Err(Error::MessageTooLong),
+            "the message is checked first"
+        );
+    }
+
     /// cover those separately).
     #[test]
     fn test_both_tag_call_shapes_hash_the_same_bytes() {

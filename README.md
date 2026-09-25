@@ -137,6 +137,17 @@ specification and has not been independently analysed. The formal harnesses in
 `src/proofs.rs` prove properties of the implementation (that the fields reach
 the hash, that every output byte is used, that the tag reaches the ciphertext),
 
+**What no tool here detects: variable-latency operations on secrets.** ctgrind
+reports branches and memory indices that depend on poisoned data; a division, a
+remainder or a float operation has neither, and its latency varies inside the ALU with
+the operand. Measured, not assumed: with a division by a secret-derived byte planted
+inside `decrypt`, ctgrind passes and the release timing screen reports t = 0.22 / 0.48
+— the effect on this CPU is a few cycles against a floor of about seventeen. The
+control is therefore a list rather than a tool: `tests/variable_latency.rs` inventories
+every `/` and `%` in the crate's non-test source and fails if one appears that is not
+in the table with a reason. It makes them visible; it cannot tell whether one is safe,
+and the table's one entry today divides by the compile-time alignment of `usize`.
+
 **What is not defended against.** Fault injection — a voltage, clock or laser
 glitch that makes the *hardware* execute something other than what the code says —
 is outside this crate's threat model, and outside every tool used to verify it:

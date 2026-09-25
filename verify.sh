@@ -36,6 +36,7 @@ RUN_CTGRIND=0
 RUN_DENY=0
 RUN_FUZZ=0
 RUN_TSAN=0
+STRICT=0
 for arg in "$@"; do
   case "$arg" in
     --kani) RUN_KANI=1 ;;
@@ -48,13 +49,24 @@ for arg in "$@"; do
     --deny) RUN_DENY=1 ;;
     --fuzz) RUN_FUZZ=1 ;;
     --tsan) RUN_TSAN=1 ;;
-    --deep) RUN_KANI=1; RUN_CROSS_EXEC=1; RUN_MIRI=1; RUN_CTGRIND=1; RUN_DENY=1; RUN_FUZZ=1; RUN_TSAN=1 ;;
-    --all) RUN_KANI=1; RUN_CROSS_EXEC=1; RUN_MIRI=1 ;;
+    --deep) RUN_KANI=1; RUN_CROSS_EXEC=1; RUN_MIRI=1; RUN_CTGRIND=1; RUN_DENY=1; RUN_FUZZ=1; RUN_TSAN=1; STRICT=1 ;;
+    --all) RUN_KANI=1; RUN_CROSS_EXEC=1; RUN_MIRI=1; STRICT=1 ;;
     *) echo "unknown option: $arg" >&2; exit 1 ;;
   esac
 done
 
 step() { echo; echo "=== $* ==="; }
+
+# Skips are recorded, not just printed: a stage that did not run must not be reported
+# as one that passed. `--deep` and `--all` claim to have run everything, so they
+# refuse to finish while anything was skipped; a narrow invocation lists what it
+# skipped and still exits 0, which is the point of a narrow invocation.
+SKIPPED_STAGES=()
+skip() {
+  local stage="$1"; shift
+  SKIPPED_STAGES+=("$stage")
+  echo "SKIPPED ($stage): $*"
+}
 
 # Locate a qemu-user emulator for a target.  Honours `$QEMU_<ARCH>` (e.g.
 # `$QEMU_AARCH64`, `$QEMU_I386`) first, then the usual user-local install, then
@@ -78,9 +90,7 @@ if [ "$KANI_ONLY" -eq 0 ]; then
     python3 tools/ref_impl.py >/dev/null
     python3 tools/gen_test_vectors.py --check
   else
-    echo "SKIPPED: python3 with the 'blake3' module is required."
-    echo "         (pip install blake3)  The commited fixture is still tested"
-    echo "         below; only its regeneration check is skipped."
+    skip "reference implementation self-checks" "python3 with the 'blake3' module is required (pip install blake3). The committed fixture is still replayed by cargo test below; what is skipped is its regeneration against the published vectors, which is the anchor the whole fixture rests on."
   fi
 
   step "2. formatting and lints"
@@ -117,13 +127,13 @@ if [ "$KANI_ONLY" -eq 0 ]; then
   if rustup target list --installed 2>/dev/null | grep -q aarch64-unknown-linux-gnu; then
     cargo check --target aarch64-unknown-linux-gnu --all-targets --features pure
   else
-    echo "SKIPPED (gnu): aarch64-unknown-linux-gnu target not installed."
+    skip "aarch64-unknown-linux-gnu type-check" "target not installed"
     echo "         (rustup target add aarch64-unknown-linux-gnu)"
   fi
   if rustup target list --installed 2>/dev/null | grep -q aarch64-unknown-linux-musl; then
     cargo check --target aarch64-unknown-linux-musl --all-targets --features pure
   else
-    echo "SKIPPED (musl): aarch64-unknown-linux-musl target not installed."
+    skip "aarch64-unknown-linux-musl type-check" "target not installed"
     echo "         (rustup target add aarch64-unknown-linux-musl)"
   fi
   # riscv64 has no SIMD backend compiled at all, so this type-checks the
@@ -132,7 +142,7 @@ if [ "$KANI_ONLY" -eq 0 ]; then
   if rustup target list --installed 2>/dev/null | grep -q riscv64gc-unknown-linux-musl; then
     cargo check --target riscv64gc-unknown-linux-musl --all-targets --features pure
   else
-    echo "SKIPPED (riscv64): target not installed."
+    skip "riscv64gc-unknown-linux-musl type-check" "target not installed"
     echo "         (rustup target add riscv64gc-unknown-linux-musl)"
   fi
 fi
@@ -163,7 +173,7 @@ if [ "$RUN_CROSS_EXEC" -eq 1 ]; then
     target="${pair%%:*}"
     emulator="${pair##*:}"
     if ! QEMU="$(find_qemu "$emulator")"; then
-      echo "SKIPPED ($emulator): no $emulator found."
+      skip "$target execution" "no $emulator found"
       echo "         Expected \$QEMU_${emulator^^}, \$HOME/.local/bin/$emulator, or"
       echo "         $emulator on \$PATH.  On Debian/Ubuntu this needs no root:"
       echo "           apt-get download qemu-user && dpkg-deb -x qemu-user_*.deb ~/.local"
@@ -177,7 +187,7 @@ if [ "$RUN_CROSS_EXEC" -eq 1 ]; then
     # x86_64/aarch64, and this stage exists to execute *this crate's* SIMD code,
     # not BLAKE3's; the wire format is identical either way.
     if ! rustup target list --installed 2>/dev/null | grep -qx "$target"; then
-      echo "SKIPPED ($target): the target is not installed.  Add it with:"
+      skip "$target execution" "the target is not installed (rustup target add $target)"
       echo "           rustup target add $target"
       continue
     fi
@@ -284,7 +294,7 @@ if [ "$RUN_MIRI" -eq 1 ]; then
         test_simd_xor_matches_scalar_and_raw \
         test_zeroize_covers_unaligned_prefix
   else
-    echo "SKIPPED: miri component not installed"
+    skip "Miri" "the miri component is not installed (rustup +nightly component add miri)"
     echo "         (rustup component add miri --toolchain nightly)"
   fi
 fi
@@ -297,7 +307,7 @@ if [ "$RUN_CTGRIND" -eq 1 ]; then
   if [ -x tools/ctgrind.sh ]; then
     tools/ctgrind.sh
   else
-    echo "SKIPPED: tools/ctgrind.sh missing"
+    skip "ctgrind" "tools/ctgrind.sh missing"
   fi
 fi
 
@@ -306,7 +316,7 @@ if [ "$RUN_DENY" -eq 1 ]; then
   if cargo deny --version >/dev/null 2>&1; then
     cargo deny check
   else
-    echo "SKIPPED: cargo-deny not installed"
+    skip "cargo-deny" "not installed (cargo install cargo-deny)"
     echo "         (cargo install cargo-deny --locked)"
   fi
 fi
@@ -323,7 +333,7 @@ if [ "$RUN_TSAN" -eq 1 ]; then
   if cargo +nightly --version >/dev/null 2>&1 && rustup component list --installed 2>/dev/null | grep -q '^rust-src'; then
     tools/tsan.sh
   else
-    echo "SKIPPED: ThreadSanitizer needs the nightly toolchain and rust-src:"
+    skip "ThreadSanitizer" "needs the nightly toolchain and rust-src (rustup component add rust-src)"
     echo "           rustup component add rust-src"
   fi
 fi
@@ -338,7 +348,7 @@ if [ "$RUN_FUZZ" -eq 1 ]; then
   if cargo fuzz --version >/dev/null 2>&1 && cargo +nightly --version >/dev/null 2>&1; then
     cargo +nightly fuzz run roundtrip -- -max_total_time="$FUZZ_SECONDS"
   else
-    echo "SKIPPED: cargo-fuzz and/or nightly toolchain not available"
+    skip "fuzzing" "cargo-fuzz and/or the nightly toolchain not available"
     echo "         (cargo install cargo-fuzz; rustup toolchain install nightly)"
   fi
 fi
@@ -386,4 +396,17 @@ if [ "$RUN_KANI" -eq 0 ] || [ "$RUN_CROSS_EXEC" -eq 0 ] || [ "$RUN_MIRI" -eq 0 ]
   echo "(Run ./verify.sh --all for everything.)"
 fi
 
-step "all requested checks passed"
+if [ "${#SKIPPED_STAGES[@]}" -eq 0 ]; then
+  step "all requested checks passed"
+elif [ "$STRICT" -eq 1 ]; then
+  step "FAILED: ${#SKIPPED_STAGES[@]} stage(s) skipped in a run that claims to be complete"
+  for stage in "${SKIPPED_STAGES[@]}"; do echo "  skipped: $stage"; done
+  echo
+  echo "This invocation (--deep or --all) is the one that is supposed to leave nothing"
+  echo "out, so a skipped stage is a failure here rather than a note. Install what is"
+  echo "missing, or use the narrower invocation that does not claim to run it."
+  exit 1
+else
+  step "all requested checks passed, apart from ${#SKIPPED_STAGES[@]} skipped stage(s)"
+  for stage in "${SKIPPED_STAGES[@]}"; do echo "  skipped: $stage"; done
+fi
