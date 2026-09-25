@@ -298,8 +298,13 @@ jobs:
       - name: coverage over the suite
         run: |
           set -euo pipefail
-          cargo llvm-cov --all-features --release --lcov --output-path lcov.info
-          cargo llvm-cov report --summary-only
+          # Same feature set and profile in both invocations: `report` locates the
+          # instrumented artefacts by re-resolving the cargo arguments, and the
+          # first version of this job passed `--all-features --release` to the run
+          # but not to the report, which failed with "not found object files" after
+          # every test had already passed.
+          cargo llvm-cov --all-features --release --summary-only
+          cargo llvm-cov report --all-features --release --lcov --output-path lcov.info
 
       # An inventory, deliberately not labelled an SBOM: a CycloneDX or SPDX
       # document needs a generator that is not installed here, and calling
