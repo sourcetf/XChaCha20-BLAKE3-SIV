@@ -291,50 +291,70 @@ Measured head-to-head against RustCrypto's `chacha20poly1305` — the natural
 reference point, since `XChaCha20Poly1305` has the same 24-byte nonce and the same
 ChaCha20 core. Reproduce with `cargo bench --bench compare`, which drives both
 sides through `aead`'s in-place interface so neither pays for an API shape the
-other does not have.
+other does not have. Every figure below comes from one run of that harness; the
+12-byte-nonce `ChaCha20Poly1305` is measured too and tracks `XChaCha20Poly1305`
+within about 4%, so it is not tabulated. Release profile as shipped (`lto`,
+`codegen-units = 1`), AMD Ryzen 9 7945HX under WSL2, 3 bytes of AAD, and both
+sides on their native SIMD backends (BLAKE3's C/assembly kernels, Poly1305's AVX2
+four-block path).
 
-Ratios are the stable signal. Within a run the spread across criterion's samples
-is 1–2%; *between* runs this host (WSL2) drifts by up to 2x, so the absolute
-figures below are indicative and the ratios are not. Release profile as shipped
-(`lto`, `codegen-units = 1`), AMD Ryzen 9 7945HX, 3 bytes of AAD:
+Throughput, ratio against `XChaCha20Poly1305` (> 1 means this crate is faster):
 
 | Message | encrypt | decrypt | round trip |
 | --- | --- | --- | --- |
-| 64 B | **1.56x** | **1.25x** | **1.45x** |
-| 256 B | **1.33x** | **1.19x** | **1.24x** |
-| 1 KiB | 0.97x | 0.93x | 0.92x |
-| 4 KiB | **1.11x** | 1.00x | **1.08x** |
-| 16 KiB | **1.26x** | **1.40x** | **1.15x** |
-| 64 KiB | **1.21x** | **1.08x** | **1.16x** |
-| 1 MiB | **1.34x** | **1.39x** | **1.34x** |
+| 64 B | **1.54x** | **1.41x** | **1.56x** |
+| 256 B | **1.21x** | **1.28x** | **1.35x** |
+| 1 KiB | 0.99x | 0.85x | 0.88x |
+| 4 KiB | **1.16x** | **1.06x** | **1.16x** |
+| 16 KiB | **1.38x** | **1.25x** | **1.11x** |
+| 64 KiB | **1.27x** | **1.15x** | **1.19x** |
+| 1 MiB | **1.36x** | **1.43x** | **1.38x** |
 
-Ratio > 1 means this crate is faster. At 1 MiB that is 2.6 GiB/s against 1.9 GiB/s
-encrypting and 2.4 GiB/s against 1.8 GiB/s decrypting. The 12-byte-nonce
-`ChaCha20Poly1305` is included in the harness and tracks `XChaCha20Poly1305` within
-about 4%, so it is not tabulated separately. Both sides run their native SIMD
-backends: BLAKE3 through its C/assembly kernels, Poly1305 through its AVX2
-four-block path.
+Per-message latency, microseconds, median of criterion's samples; the ratio is
+again against `XChaCha20Poly1305`, and below 1 means this crate answers sooner:
 
-Read the table as: this crate pays more *per message* (two key derivations, a
+| Message | encrypt | decrypt | round trip |
+| --- | --- | --- | --- |
+| 64 B | 0.87 vs 1.27 (**0.68x**) | 0.90 vs 1.35 (**0.67x**) | 1.80 vs 2.70 (**0.67x**) |
+| 256 B | 1.10 vs 1.30 (**0.85x**) | 1.10 vs 1.40 (**0.78x**) | 2.07 vs 2.86 (**0.72x**) |
+| 1 KiB | 1.89 vs 1.86 (1.02x) | 2.00 vs 1.70 (1.18x) | 3.85 vs 3.37 (1.14x) |
+| 4 KiB | 2.97 vs 3.59 (**0.83x**) | 3.37 vs 3.56 (**0.95x**) | 5.98 vs 6.48 (**0.92x**) |
+| 16 KiB | 7.46 vs 10.43 (**0.72x**) | 7.93 vs 9.73 (**0.81x**) | 16.53 vs 18.65 (**0.89x**) |
+| 64 KiB | 30.5 vs 37.0 (**0.82x**) | 28.5 vs 34.6 (**0.83x**) | 55.9 vs 67.4 (**0.83x**) |
+| 1 MiB | 393 vs 554 (**0.71x**) | 408 vs 567 (**0.72x**) | 826 vs 1134 (**0.73x**) |
+
+Read both tables as: this crate pays more *per message* (two key derivations, a
 65-byte tag, and wiping all of it) and less *per byte* (BLAKE3 beats Poly1305 once
-there is enough data to batch). So it wins at both ends and is closest in the
-middle — the only place Poly1305 is ahead is around 1 KiB, by 3–8%, which is the
-fixed per-message cost against ~1.7 us of total work.
+there is enough data to batch). Latency is not throughput divided by size, because
+the fixed per-message cost dominates at the small end — at 64 bytes this crate is
+0.4 us cheaper *per call*, and it has the lower latency at every size except
+around 1 KiB, where `Poly1305`'s four-block AVX2 path is at its best and BLAKE3
+has little to batch (decrypt 1.18x, round trip 1.14x).
 
-Decryption is where the two differ in *structure*, and the decrypt column is why
-it is measured separately: SIV has to decrypt before it can verify, because the tag
-depends on the plaintext, so this crate pays a second full ChaCha20 pass plus a
-recomputation of the whole tag. Poly1305 verifies a running MAC while it decrypts
-and pays neither. That is the cost of misuse resistance and key/context
-commitment, and it is why decrypt is 7% behind encrypt around 1 KiB; from 16 KiB
-the tag recomputation is cheap enough that this crate is ahead again (1.40x).
+Two structural properties bound what a caller can do with that latency, and both
+follow from the construction rather than from this implementation:
 
-The allocating `encrypt`/`decrypt` API costs 5–13% over the in-place API on the
-same round trip — two allocations and three copies per iteration at a megabyte —
-measured in the same group and labelled there.
+* **Encryption cannot produce its first ciphertext byte until the whole message has
+  been hashed.** The tag covers the plaintext, the encryption key is derived from
+  the tag, and only then does the ChaCha20 pass start: two serialized passes, no
+  early output, and a single message's latency does not shrink with more cores.
+  It is still faster end to end — 393 us against 554 us at 1 MiB — because BLAKE3
+  hashes faster than ChaCha20 streams, but a caller cannot overlap the work with
+  its own processing the way a one-pass AEAD allows.
+* **Decryption starts immediately but decides late.** The encryption key depends
+  only on the tag, which the caller supplies, so the ChaCha20 pass runs at once;
+  authentication then hashes the recovered plaintext in full. The plaintext
+  therefore exists in the buffer before it is verified, which is why the API wipes
+  it and never returns it on failure, and why an application must not act on it
+  until `decrypt` returns.
 
-Two implementation choices dominate the numbers above, both verified to leave the
-wire format byte-identical (the KATs, the differential fixture and
+The percentiles in the latency table are per *sample*, each averaging hundreds of
+calls, so they do not show per-call jitter: this host's clock alone costs ~40 us
+per `Instant::now()` against ~25 ns on bare metal, so a genuine tail-latency
+measurement needs bare-metal Linux, not this container.
+
+Two implementation choices dominate the throughput numbers, both verified to leave
+the wire format byte-identical (the KATs, the differential fixture and
 `test_all_accelerated_paths_agree_on_a_boundary_corpus` pin every byte, and they
 run against both):
 
