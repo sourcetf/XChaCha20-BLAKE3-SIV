@@ -124,14 +124,14 @@ jobs:
       # and the suite fails to compile. See the src/proofs.rs module docs for
       # the cost model behind that decision.
       #
-      # Deliberately *not* `--extra-pointer-checks` here, and the reason is
-      # measured rather than stylistic: with those checks on, the heaviest
-      # harness (`tag_is_keyed_hash_of_the_whole_context`) needs ~20 GB of CBMC
-      # formula on this corpus, which is more than a hosted runner has. The
-      # symptom is not a proof failure -- the other three harnesses in the shard
-      # print VERIFICATION:- SUCCESSFUL and then the runner agent is killed
-      # ("The runner has received a shutdown signal"). `verify.sh --kani` keeps
-      # the flag on, because a development machine has the memory for it.
+      # `--extra-pointer-checks` costs memory, and that is why this job ran with
+      # it off: the heaviest harness then needed ~20 GB of CBMC formula, which is
+      # past what a hosted runner has. That turned out to be a property of the
+      # harness rather than of the flag -- with its input shapes written as
+      # separate call sites (see src/proofs.rs) the whole tag shard verifies in
+      # 3:11 with a 2.1 GB peak *with* the checks on, so they are on here. They
+      # ask CBMC about pointer validity and same-allocation on every access,
+      # which is the class of bug this shard exists to catch.
       - name: prove this shard
         shell: bash
         run: |
@@ -142,14 +142,13 @@ jobs:
           # exist. So a typo or a renamed harness fails loudly here rather than
           # quietly reducing what was proven.
           # `-j`: Kani's default is one harness at a time, which leaves the
-          # runner's cores idle. The harnesses in a shard are independent.
-          # Parallelism is per shard, from the planner: the tag harnesses need
-          # several GB of CBMC formula each, so that shard runs sequentially or
-          # the runner agent is killed (see tools/kani_shards.py). `--output-format=terse`
-          # is required by `-j` for more than one job, and dropped for one so a
-          # failure keeps its detail.
+          # runner's cores idle. The harnesses in a shard are independent, and
+          # the per-shard job count is in tools/kani_shards.py along with the
+          # memory measurement behind it. `--output-format=terse` is required by
+          # `-j` for more than one job, and dropped for one so a failure keeps
+          # its detail.
           jobs="${{ matrix.jobs }}"
-          args=(-j "$jobs" -Z stubbing --features pure)
+          args=(-j "$jobs" -Z stubbing --features pure -Z unstable-options --extra-pointer-checks)
           if [ "$jobs" -gt 1 ]; then args+=(--output-format=terse); fi
           n=0
           for h in ${{ matrix.harnesses }}; do

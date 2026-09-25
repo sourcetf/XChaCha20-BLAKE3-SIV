@@ -2925,4 +2925,52 @@ mod tests {
         let t2 = derive_tag(&mac_key, &key, &nonce, b"abc", b"de");
         assert_ne!(t1, t2, "A||M must not be ambiguous");
     }
+
+    /// `derive_tag` hashes the tag input either as three `update` calls or as one
+    /// contiguous buffer, whichever BLAKE3 is faster on (see the comment there).
+    /// That is a performance decision, so it must not be observable — and this
+    /// pins the two shapes to each other at the four totals where the choice
+    /// flips: one byte either side of `TAG_CONCAT_MIN` and of `TAG_CONCAT_LIMIT`.
+    ///
+    /// A one-byte message and a large AAD reach all four totals, so the buffers
+    /// stay small while AAD and message both stay non-empty (an empty part is the
+    /// case the two shapes could most easily disagree on, and the in-crate KATs
+    /// cover those separately).
+    #[test]
+    fn test_both_tag_call_shapes_hash_the_same_bytes() {
+        let mac_key = [0x5Au8; 32];
+        let key = [0x11u8; 32];
+        let nonce = [0x22u8; NONCE_LEN];
+        let head_len = 8 + 32 + NONCE_LEN + 16;
+        let msg = [0xA5u8];
+
+        for total in [
+            TAG_CONCAT_MIN - 1,
+            TAG_CONCAT_MIN,
+            TAG_CONCAT_LIMIT,
+            TAG_CONCAT_LIMIT + 1,
+        ] {
+            let aad = vec![0x5Au8; total - head_len - msg.len()];
+            assert_eq!(head_len + aad.len() + msg.len(), total);
+
+            // The expected tag always comes from the three-update shape, so this
+            // compares the two shapes rather than one with itself.
+            let mut want = [0u8; TAG_LEN];
+            let mut hasher = blake3::Hasher::new_keyed(&mac_key);
+            hasher.update(&DOM_TAG);
+            hasher.update(&key);
+            hasher.update(&nonce);
+            hasher.update(&(aad.len() as u64).to_le_bytes());
+            hasher.update(&(msg.len() as u64).to_le_bytes());
+            hasher.update(&aad);
+            hasher.update(&msg);
+            hasher.finalize_xof().fill(&mut want);
+
+            let got = derive_tag(&mac_key, &key, &nonce, &aad, &msg);
+            assert_eq!(
+                got, want,
+                "the tag depends on which hash call shape was chosen (total={total})"
+            );
+        }
+    }
 }

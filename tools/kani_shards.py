@@ -33,22 +33,29 @@ PROOFS = os.path.join(ROOT, "src", "proofs.rs")
 # that matched nothing would otherwise be silently unproven.
 # (shard, prefix list, jobs to run in parallel inside the shard).
 #
-# `jobs` is per shard because the shards differ in *memory*, not in count. The
-# tag harnesses make CBMC build a formula over a symbolic key and a symbolic MAC
-# model, several GB each; running all four at once on a hosted runner exhausts it
-# and the runner agent is killed, which surfaces as
+# `jobs` is per shard because the shards differ in *memory*, not in count: CBMC
+# builds a formula over a symbolic key and a symbolic MAC model.  The tag shard
+# used to exhaust a hosted runner -- the agent is killed, which surfaces as
 #
 #     ##[error]The runner has received a shutdown signal.
 #
-# with the other harnesses in the shard reporting SUCCESSFUL first -- measured
-# over four consecutive runs. So that shard stays sequential, while the small
-# harnesses in the other shards run concurrently.
+# with the other harnesses in the shard reporting SUCCESSFUL first, measured over
+# four consecutive runs. The cause turned out to be in the harness rather than in
+# the runner: its input shapes were a loop, so CBMC could not bound the stub's
+# per-byte fold statically and unwound it to the harness's unwind bound with a
+# symbolic accumulator index -- >30 GB of formula for one harness. Written as
+# four separate call sites the same harness needs ~2 GB, so the tag shard can now
+# run two at a time. The permutation harness stays sequential: it is the one that
+# executes all 20 rounds. All of these figures are with `--extra-pointer-checks`
+# on, which CI passes: the flag was never what this shard could not afford.
 SHARDS = [
-    # The only harness that executes the full 20-round permutation. Measured in
-    # the tens of minutes on a 16-core machine; a CI runner is far slower.
+    # The only harness that executes the full 20-round permutation, so it is the
+    # one whose cost cannot be argued away by stubbing. Measured here: 1:01 with a
+    # 1.3 GB peak, pointer checks on. Sequential because it is the single most
+    # expensive harness in the suite, while the others are small enough to pair up.
     ("permutation", ["hchacha20_"], 1),
     # The MAC and the tag: what the keyed hash is fed, and what it returns.
-    ("tag", ["tag_", "every_tag_byte", "derive_enc_", "every_aad_"], 1),
+    ("tag", ["tag_", "every_tag_byte", "derive_enc_", "every_aad_"], 2),
     ("zeroize-and-limits", ["zeroize_", "check_lengths_", "max_msg_size_"], 4),
     ("stream", ["chacha20_"], 2),
 ]

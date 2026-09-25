@@ -466,6 +466,21 @@ fn max_msg_size_boundary_matches_counter_capacity() {
 //     secret fed into the key parameter — is caught only because the model now
 //     folds `key` into its output; before that fix it was invisible.
 
+/// Fixed width of the tag input's head: domain word, key, nonce, and the two
+/// little-endian lengths.  Must match `derive_tag`.
+const HEAD_LEN: usize = 8 + 32 + NONCE_LEN + 16;
+
+/// The two length fields at their fixed offsets in that head.
+///
+/// Only call after establishing `head.len() >= HEAD_LEN`.
+fn head_lengths(head: &[u8]) -> (u64, u64) {
+    let mut aad_len = [0u8; 8];
+    aad_len.copy_from_slice(&head[40 + NONCE_LEN..48 + NONCE_LEN]);
+    let mut msg_len = [0u8; 8];
+    msg_len.copy_from_slice(&head[48 + NONCE_LEN..56 + NONCE_LEN]);
+    (u64::from_le_bytes(aad_len), u64::from_le_bytes(msg_len))
+}
+
 /// A stand-in for `blake3_keyed_multi` whose output depends on the key and on
 /// every input byte.
 ///
@@ -511,21 +526,52 @@ fn model_blake3_keyed_multi(key: &[u8; 32], parts: &[&[u8]], out: &mut [u8]) {
     // fails with a spurious "unwinding assertion" rather than a real
     // counterexample.
     //
-    // Only the tag path has the three-part shape; the encryption-material path
-    // passes one part, so the two are distinguished by arity.
+    // The fold below is still a loop, so it is only as cheap as CBMC's ability to
+    // bound it.  With constant-length parts at the call site it unwinds to the
+    // real length; a call site inside a loop hands it slice values CBMC cannot
+    // resolve, and the fold is then unwound to the harness's unwind bound with a
+    // *symbolic* accumulator index -- measured as a factor of 30 in memory.  See
+    // `tag_is_keyed_hash_of_the_whole_context` for the numbers.
+    //
+    // Arity is itself an assertion: one part comes from `derive_enc` (through
+    // `blake3_keyed_xof`) or from `derive_tag`'s contiguous path, three from
+    // `derive_tag`'s three-update path. Nothing else exists, so a future call
+    // site cannot quietly slip past every branch below by using a fourth shape.
+    assert!(parts.len() == 1 || parts.len() == 3);
+
     if parts.len() == 3 {
         // The fixed-width head, then AAD, then the message.
-        assert!(parts[0].len() == 8 + 32 + NONCE_LEN + 16);
+        assert!(parts[0].len() == HEAD_LEN);
         assert!(parts[0][0..8] == DOM_TAG[..]);
 
         // Both lengths are encoded, and they are the *actual* lengths -- this is
         // what makes `A || M` unambiguous.
-        let mut aad_len = [0u8; 8];
-        aad_len.copy_from_slice(&parts[0][40 + NONCE_LEN..48 + NONCE_LEN]);
-        let mut msg_len = [0u8; 8];
-        msg_len.copy_from_slice(&parts[0][48 + NONCE_LEN..56 + NONCE_LEN]);
-        assert!(u64::from_le_bytes(aad_len) == parts[1].len() as u64);
-        assert!(u64::from_le_bytes(msg_len) == parts[2].len() as u64);
+        let (aad_len, msg_len) = head_lengths(parts[0]);
+        assert!(aad_len == parts[1].len() as u64);
+        assert!(msg_len == parts[2].len() as u64);
+    } else {
+        // One part.  Both one-part call sites start with an 8-byte domain word,
+        // so that is what tells them apart.
+        assert!(parts[0].len() >= 8);
+        if parts[0][0..8] == DOM_ENC[..] {
+            // `derive_enc`: the domain word and the whole tag, nothing else, so
+            // a truncated tag cannot reach the encryption key derivation.
+            assert!(parts[0].len() == 8 + TAG_LEN);
+        } else {
+            // `derive_tag`'s contiguous path: byte-for-byte the same input as the
+            // three-part shape above, so the head's own length fields must account
+            // for the remaining bytes exactly -- no more, no less.  (Which of the
+            // two shapes a given message takes is a performance decision, never a
+            // semantic one: the differential vectors hash the concatenated input
+            // on both sides of the threshold, and
+            // `test_both_tag_call_shapes_hash_the_same_bytes` compares the two
+            // shapes at the four totals where the choice flips.)
+            assert!(parts[0].len() >= HEAD_LEN);
+            assert!(parts[0][0..8] == DOM_TAG[..]);
+            let (aad_len, msg_len) = head_lengths(parts[0]);
+            let total = (HEAD_LEN as u64).wrapping_add(aad_len).wrapping_add(msg_len);
+            assert!(parts[0].len() as u64 == total);
+        }
     }
 
     // ── Produce the output ──
@@ -567,13 +613,20 @@ fn model_blake3_keyed_multi(key: &[u8; 32], parts: &[&[u8]], out: &mut [u8]) {
 /// dropped from the hasher — the key, either length, the domain separator —
 /// changes the result and fails the assertion.
 ///
-/// Two shapes of input: all-zero lengths, and both non-empty. The second is the
-/// one that matters for the length encoding, because the two encoded lengths
-/// differ there (4 vs 8) and so a mix-up between the two length fields cannot
-/// hide. Four shapes were tried and exceeded a 15-minute budget, so the
-/// "AAD only" and "message only" cases are **not** run here; the stub's shape
-/// assertions still check both length fields against the real part lengths for
-/// whichever shapes do run.
+/// Four shapes of input: all-zero lengths, both non-empty (where the two encoded
+/// lengths differ, 4 vs 8, so a mix-up between the length fields cannot hide),
+/// AAD only, and message only.
+///
+/// They are four **separate call sites**, and that is load-bearing rather than a
+/// stylistic choice.  Written as a loop over `[(empty, empty), (aad, msg)]` the
+/// two iterations are merged, the `&[&[u8]]` handed to the stub becomes a value
+/// CBMC can no longer bound statically, and it unwinds the stub's per-byte fold
+/// to this harness's unwind bound instead: 130 iterations writing through a
+/// *symbolic* index into the 65-byte accumulator, which measured >30 GB of CBMC
+/// formula — more than any hosted runner has, and the reason the tag shard never
+/// completed in CI.  Split, each call site's parts are constants, the fold
+/// unwinds to its real length (81), and all four shapes verify in 2:08 with a
+/// 2.1 GB peak.
 ///
 /// `assert!` carries no format arguments: a `"...{}"` message pulls `core::fmt`
 /// into the verification scope, which dominates the run time.  The comparison is
@@ -582,8 +635,9 @@ fn model_blake3_keyed_multi(key: &[u8; 32], parts: &[&[u8]], out: &mut [u8]) {
 #[kani::proof]
 #[kani::stub(blake3_keyed_multi, model_blake3_keyed_multi)]
 #[kani::stub(zeroize_array, noop_zeroize_array)]
-// The comparison loop runs TAG_LEN (65) times, and `copy_from_slice` on the
-// head buffer once more, so the default bound is too low.
+// The longest loop to unwind is the stub's fold over the 80-byte head (81
+// iterations), then the tag-byte smoke check (65).  The unwinding assertions
+// fire if a bound is ever too low, so the headroom here is safe.
 #[kani::unwind(130)]
 fn tag_is_keyed_hash_of_the_whole_context() {
     let mac_key: [u8; 32] = kani::any();
@@ -598,20 +652,29 @@ fn tag_is_keyed_hash_of_the_whole_context() {
     // then AAD, then message) at every call.  So reaching the end of this
     // harness means the layout was right; no separate reconstruction is needed,
     // and none is possible without an expensive loop over the input.
-    for (a, m) in [(empty, empty), (aad, msg)] {
-        let tag = derive_tag(&mac_key, &key, &nonce, a, m);
-        let mut nz = 0u8;
-        for b in tag.iter() {
-            nz |= *b;
-        }
-        // A smoke check on the stub and the output buffer: a tag of all zeros
-        // would mean the model's fold produced nothing. Note this is a property
-        // of the model, not of the hash — an earlier comment justified it with an
-        // "odd addend" that the model no longer contains. It is left in place
-        // because it is what CI verified; the substantive assertions of this
-        // harness are the layout ones in the stub.
-        assert!(nz != 0);
+    //
+    // A macro rather than a loop or a helper function: each shape has to be its
+    // own call site (see the doc comment), and a helper would take the slices as
+    // symbolic parameters, which is the same merge by another route.
+    macro_rules! shape {
+        ($a:expr, $m:expr) => {{
+            let tag = derive_tag(&mac_key, &key, &nonce, $a, $m);
+            let mut nz = 0u8;
+            for b in tag.iter() {
+                nz |= *b;
+            }
+            // A smoke check on the stub and the output buffer: a tag of all
+            // zeros would mean the model's fold produced nothing.  This is a
+            // property of the model, not of the hash -- the substantive
+            // assertions of this harness are the layout ones in the stub.
+            assert!(nz != 0);
+        }};
     }
+
+    shape!(empty, empty);
+    shape!(aad, msg);
+    shape!(aad, empty);
+    shape!(empty, msg);
 }
 
 /// A change to the key must change the tag.
