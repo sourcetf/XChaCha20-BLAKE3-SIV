@@ -3031,11 +3031,11 @@ mod tests {
     /// case the two shapes could most easily disagree on, and the in-crate KATs
     /// The length guard, tested directly.
     ///
-    /// No test can allocate `MAX_MSG_SIZE` (256 GiB), which is why the guard had
-    /// **zero** coverage in `cargo test` until this existed: deleting it changed
-    /// nothing in the suite, while the Kani harnesses in `src/proofs.rs` did catch it
-    /// (verified -- two of the three limits harnesses fail without it). Testing the
-    /// guard itself, rather than a message of that size, is what makes it observable.
+    /// **64-bit only, and that is the point**: on a 32-bit target every possible
+    /// `usize` is below `MAX_MSG_SIZE` (2^38), so the guard cannot fire at all and
+    /// there is nothing to test -- which the first version of this test got wrong by
+    /// casting the constant to `usize` and truncating it to zero on i686.
+    #[cfg(target_pointer_width = "64")]
     #[test]
     fn test_length_guard_rejects_oversized_inputs() {
         let max = MAX_MSG_SIZE as usize;
@@ -3055,6 +3055,17 @@ mod tests {
             Err(Error::MessageTooLong),
             "the message is checked first"
         );
+    }
+
+    /// On a 32-bit target the guard is unreachable rather than untested.
+    #[cfg(target_pointer_width = "32")]
+    #[test]
+    fn test_length_guard_cannot_fire_on_32_bit() {
+        assert!(
+            MAX_MSG_SIZE > usize::MAX as u64,
+            "the maximum exceeds usize here"
+        );
+        assert!(check_lengths(usize::MAX, usize::MAX).is_ok());
     }
 
     /// cover those separately).
