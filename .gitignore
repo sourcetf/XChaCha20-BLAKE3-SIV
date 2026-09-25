@@ -9,6 +9,10 @@ __pycache__/
 # Cargo's own backup files.
 **/*.rs.bk
 
+# `cargo fuzz run -workers=N` writes one log per worker into the working
+# directory; they are run artefacts, not sources.
+/fuzz-*.log
+
 # Editor / OS noise.
 .DS_Store
 .idea/
