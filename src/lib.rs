@@ -176,6 +176,10 @@
 //! which of those stubs are honest abstractions rather than placeholders.
 
 #![no_std]
+// Public API items are documented; this keeps it that way under CI's `-D warnings`.
+// Scoped to the library deliberately: `criterion_group!`/`criterion_main!` expand to
+// public items in the benches, which cannot carry docs.
+#![warn(missing_docs)]
 
 extern crate alloc;
 
@@ -551,15 +555,21 @@ fn zeroize_slice(slice: &mut [u8]) {
     // written: starting the loop at the aligned offset instead would silently
     // leave `align - 1` bytes of secret material un-wiped.
     while i < len && (ptr as usize).wrapping_add(i) % align != 0 {
+        // SAFETY: `i < len` and `ptr` is the base of a slice of `len` bytes, so
+        // `ptr.add(i)` is in bounds and writable for the whole loop.
         unsafe { core::ptr::write_volatile(ptr.add(i), 0) };
         i += 1;
     }
     while i + chunk <= len {
+        // SAFETY: `i + size_of::<usize>() <= len` keeps the store in bounds, and
+        // the loop above left the pointer `usize`-aligned, which `write_volatile`
+        // on a `*mut usize` requires.
         unsafe { core::ptr::write_volatile(ptr.add(i) as *mut usize, 0) };
         i += chunk;
     }
     // Trailing bytes.
     while i < len {
+        // SAFETY: as in the leading loop: `i < len`, so the store is in bounds.
         unsafe { core::ptr::write_volatile(ptr.add(i), 0) };
         i += 1;
     }
@@ -2224,6 +2234,9 @@ mod tests {
                 // SAFETY: `off + 16 <= 64`, and `[u8; 16]` has alignment 1, so
                 // any offset within the array is a valid `[u8; 16]` pointer.
                 let p = unsafe { backing.as_mut_ptr().add(off) as *mut [u8; 16] };
+                // SAFETY: as above; `p` came from a live `&mut` to `backing` and
+                // 16 initialised bytes from it, so the reference is valid and
+                // uniquely borrowed for the rest of this block.
                 let arr: &mut [u8; 16] = unsafe { &mut *p };
                 zeroize_array(arr);
             }

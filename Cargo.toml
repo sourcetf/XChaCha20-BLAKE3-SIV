@@ -127,6 +127,17 @@ harness = false
 [lints.rust]
 # `kani` is the cfg Kani injects when building verification harnesses.
 unexpected_cfgs = { level = "warn", check-cfg = ["cfg(kani)"] }
+# Not enabled: `unsafe_op_in_unsafe_fn` fires inside the SIMD kernels, whose bodies
+# call other `unsafe fn`s (the transpose helpers) and intrinsics without inner
+# `unsafe {}` blocks. Wrapping them is mechanical and behaviour-preserving -- the
+# SIMD-vs-scalar tests would confirm it -- but it is a change to security-critical
+# code, so it is a separate piece of work rather than a footnote to this one.
+
+[lints.clippy]
+# Every `unsafe` block carries a `// SAFETY:` comment saying why it is sound. Five
+# were missing one when this was enabled -- three in `zeroize_slice`, two in tests --
+# which is exactly the drift this gate exists to stop.
+undocumented_unsafe_blocks = "deny"
 
 [profile.release]
 lto = true

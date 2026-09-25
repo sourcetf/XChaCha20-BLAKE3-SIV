@@ -218,6 +218,46 @@ jobs:
       - name: plant bugs and require the checks to fail
         run: ./tools/mutation_check.sh
 
+  wide:
+    name: wide audit (scheduled)
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    # The checks that are too slow or too noisy to gate every push, run every night
+    # instead of never: the 4000-vector differential against the reference
+    # implementation, AddressSanitizer over the whole suite (the fuzz job only
+    # covers the fuzz target), and the full Miri suite under Tree Borrows -- the
+    # aliasing model that is *not* the default, so nothing else exercises it at
+    # this scale.
+    if: github.event_name == 'schedule'
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: wide
+
+      - name: install the blake3 module for the reference implementation
+        run: python3 -m pip install --quiet blake3
+
+      # `examples/xsiv_stdin.rs` is the batch interface it drives, so this exercises
+      # the crate's real encryption path over thousands of random inputs.
+      - name: 4000 random vectors against the independent reference
+        run: python3 tools/broad_differential.py 4000
+
+      - name: AddressSanitizer over the whole suite
+        run: |
+          set -euo pipefail
+          rustup toolchain install nightly --profile minimal
+          RUSTFLAGS="-Zsanitizer=address" cargo +nightly test --release --features pure \
+            --target x86_64-unknown-linux-gnu
+
+      - name: Miri, full library suite under Tree Borrows
+        run: |
+          set -euo pipefail
+          rustup component add miri --toolchain nightly
+          MIRIFLAGS="-Zmiri-disable-isolation -Zmiri-strict-provenance -Zmiri-tree-borrows" \
+            cargo +nightly miri test --release --features pure --lib
+
   fuzz:
     name: fuzzing (libFuzzer + ASAN)
     runs-on: ubuntu-latest

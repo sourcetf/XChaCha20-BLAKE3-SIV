@@ -71,6 +71,8 @@ fn deliberate_race_is_detected() {
     for h in handles {
         h.join().expect("thread");
     }
+    // SAFETY: deliberately unsound -- the race is the defect this test exists to
+    // hand to the sanitizer, and the volatile read is what keeps the value live.
     core::hint::black_box(unsafe { core::ptr::read_volatile(core::ptr::addr_of!(COUNTER)) });
 }
 
