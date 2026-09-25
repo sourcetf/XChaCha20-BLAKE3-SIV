@@ -36,6 +36,15 @@ fn bytes_strategy(max: usize) -> impl Strategy<Value = Vec<u8>> {
     prop::collection::vec(any::<u8>(), 0..max)
 }
 
+/// The same, but never empty. Tests that cannot do anything with an empty input
+/// used to filter it with `prop_assume!`, which proptest counts as a *global
+/// reject*: at the default 256 cases the ~6% reject rate is invisible, but a run
+/// with `PROPTEST_CASES=20000` aborts with "Too many global rejects" long before
+/// it finishes the cases it was asked for.
+fn nonempty_bytes_strategy(max: usize) -> impl Strategy<Value = Vec<u8>> {
+    prop::collection::vec(any::<u8>(), 1..max)
+}
+
 /// Lengths chosen to straddle every internal boundary: ChaCha20 blocks, the
 /// SIMD widths, and BLAKE3's chunk boundary.
 const BOUNDARY_LENS: &[usize] = &[
@@ -88,12 +97,11 @@ proptest! {
         key in key_strategy(),
         nonce in nonce_strategy(),
         aad in bytes_strategy(64),
-        pt in bytes_strategy(64),
+        pt in nonempty_bytes_strategy(64),
         pos in any::<prop::sample::Index>(),
         bit in 0u8..8,
     ) {
         let (mut ct, tag) = encrypt(&key, &nonce, &aad, &pt).unwrap();
-        prop_assume!(!ct.is_empty());
         let i = pos.index(ct.len());
         ct[i] ^= 1u8 << bit;
         prop_assert_eq!(
@@ -127,13 +135,12 @@ proptest! {
     fn prop_aad_bit_flip_rejected(
         key in key_strategy(),
         nonce in nonce_strategy(),
-        aad in bytes_strategy(64),
+        aad in nonempty_bytes_strategy(64),
         pt in bytes_strategy(64),
         pos in any::<prop::sample::Index>(),
         bit in 0u8..8,
     ) {
         let (ct, tag) = encrypt(&key, &nonce, &aad, &pt).unwrap();
-        prop_assume!(!aad.is_empty());
         let mut bad = aad.clone();
         let i = pos.index(bad.len());
         bad[i] ^= 1u8 << bit;
@@ -208,10 +215,9 @@ proptest! {
     fn prop_aad_message_split_is_bound(
         key in key_strategy(),
         nonce in nonce_strategy(),
-        a in bytes_strategy(32),
-        b in bytes_strategy(32),
+        a in nonempty_bytes_strategy(32),
+        b in nonempty_bytes_strategy(32),
     ) {
-        prop_assume!(!a.is_empty() && !b.is_empty());
         // Move one byte from the AAD into the message: the concatenation is
         // unchanged, only the split differs.
         let mut a2 = a.clone();
