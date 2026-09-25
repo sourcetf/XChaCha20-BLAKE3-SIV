@@ -289,30 +289,49 @@ and on using them as specified.
 
 Measured head-to-head against RustCrypto's `chacha20poly1305` — the natural
 reference point, since `XChaCha20Poly1305` has the same 24-byte nonce and the same
-ChaCha20 core. Reproduce with `cargo bench --bench compare` (criterion; the table
-below is from `benches/compare.rs`'s sibling harness, which interleaves the
-candidates per iteration and reports the best of five, because this host's
-throughput drifts and the *ratio* is the stable signal).
+ChaCha20 core. Reproduce with `cargo bench --bench compare`, which drives both
+sides through `aead`'s in-place interface so neither pays for an API shape the
+other does not have.
 
-Release profile as shipped (`lto`, `codegen-units = 1`), AMD Ryzen 9 7945HX,
-in-place encryption with 3 bytes of AAD:
+Ratios are the stable signal. Within a run the spread across criterion's samples
+is 1–2%; *between* runs this host (WSL2) drifts by up to 2x, so the absolute
+figures below are indicative and the ratios are not. Release profile as shipped
+(`lto`, `codegen-units = 1`), AMD Ryzen 9 7945HX, 3 bytes of AAD:
 
-| Message | this crate | XChaCha20-Poly1305 | ChaCha20-Poly1305 | vs XChaCha20-Poly1305 |
-| --- | --- | --- | --- | --- |
-| 64 B | 80.5 MB/s | 52.1 MB/s | 55.1 MB/s | **1.55x faster** |
-| 256 B | 257.2 MB/s | 197.3 MB/s | 208.5 MB/s | **1.31x faster** |
-| 1 KiB | 520.8 MB/s | 606.5 MB/s | 634.2 MB/s | 1.16x slower |
-| 4 KiB | 1303.6 MB/s | 1270.0 MB/s | 1303.4 MB/s | 1.02x faster |
-| 16 KiB | 2128.0 MB/s | 1750.7 MB/s | 1765.5 MB/s | **1.22x faster** |
-| 64 KiB | 2283.2 MB/s | 1923.4 MB/s | 1927.8 MB/s | **1.19x faster** |
-| 256 KiB | 2523.2 MB/s | 1989.9 MB/s | 1979.0 MB/s | **1.27x faster** |
-| 1 MiB | 2581.1 MB/s | 1983.6 MB/s | 1985.4 MB/s | **1.30x faster** |
+| Message | encrypt | decrypt | round trip |
+| --- | --- | --- | --- |
+| 64 B | **1.56x** | **1.25x** | **1.45x** |
+| 256 B | **1.33x** | **1.19x** | **1.24x** |
+| 1 KiB | 0.97x | 0.93x | 0.92x |
+| 4 KiB | **1.11x** | 1.00x | **1.08x** |
+| 16 KiB | **1.26x** | **1.40x** | **1.15x** |
+| 64 KiB | **1.21x** | **1.08x** | **1.16x** |
+| 1 MiB | **1.34x** | **1.39x** | **1.34x** |
 
-Read that as: this crate pays more per message (it derives two keys, hashes the
-context twice and wipes all of it) and less per byte (BLAKE3 in tree mode beats
-Poly1305 once there is enough data to batch). So it wins at both ends and is
-closest in the middle, with the remaining 1 KiB gap being the fixed cost of the
-extra key derivation and wiping — about 250 ns, against ~1.7 µs of total work.
+Ratio > 1 means this crate is faster. At 1 MiB that is 2.6 GiB/s against 1.9 GiB/s
+encrypting and 2.4 GiB/s against 1.8 GiB/s decrypting. The 12-byte-nonce
+`ChaCha20Poly1305` is included in the harness and tracks `XChaCha20Poly1305` within
+about 4%, so it is not tabulated separately. Both sides run their native SIMD
+backends: BLAKE3 through its C/assembly kernels, Poly1305 through its AVX2
+four-block path.
+
+Read the table as: this crate pays more *per message* (two key derivations, a
+65-byte tag, and wiping all of it) and less *per byte* (BLAKE3 beats Poly1305 once
+there is enough data to batch). So it wins at both ends and is closest in the
+middle — the only place Poly1305 is ahead is around 1 KiB, by 3–8%, which is the
+fixed per-message cost against ~1.7 us of total work.
+
+Decryption is where the two differ in *structure*, and the decrypt column is why
+it is measured separately: SIV has to decrypt before it can verify, because the tag
+depends on the plaintext, so this crate pays a second full ChaCha20 pass plus a
+recomputation of the whole tag. Poly1305 verifies a running MAC while it decrypts
+and pays neither. That is the cost of misuse resistance and key/context
+commitment, and it is why decrypt is 7% behind encrypt around 1 KiB; from 16 KiB
+the tag recomputation is cheap enough that this crate is ahead again (1.40x).
+
+The allocating `encrypt`/`decrypt` API costs 5–13% over the in-place API on the
+same round trip — two allocations and three copies per iteration at a megabyte —
+measured in the same group and labelled there.
 
 Two implementation choices dominate the numbers above, both verified to leave the
 wire format byte-identical (the KATs, the differential fixture and
