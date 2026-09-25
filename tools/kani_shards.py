@@ -31,14 +31,26 @@ PROOFS = os.path.join(ROOT, "src", "proofs.rs")
 # deliberately broad so a new harness lands with the work it belongs to instead
 # of failing the "no shard matched" check.  That check is the point: a harness
 # that matched nothing would otherwise be silently unproven.
+# (shard, prefix list, jobs to run in parallel inside the shard).
+#
+# `jobs` is per shard because the shards differ in *memory*, not in count. The
+# tag harnesses make CBMC build a formula over a symbolic key and a symbolic MAC
+# model, several GB each; running all four at once on a hosted runner exhausts it
+# and the runner agent is killed, which surfaces as
+#
+#     ##[error]The runner has received a shutdown signal.
+#
+# with the other harnesses in the shard reporting SUCCESSFUL first -- measured
+# over four consecutive runs. So that shard stays sequential, while the small
+# harnesses in the other shards run concurrently.
 SHARDS = [
     # The only harness that executes the full 20-round permutation. Measured in
     # the tens of minutes on a 16-core machine; a CI runner is far slower.
-    ("permutation", ["hchacha20_"]),
+    ("permutation", ["hchacha20_"], 1),
     # The MAC and the tag: what the keyed hash is fed, and what it returns.
-    ("tag", ["tag_", "every_tag_byte", "derive_enc_", "every_aad_"]),
-    ("zeroize-and-limits", ["zeroize_", "check_lengths_", "max_msg_size_"]),
-    ("stream", ["chacha20_"]),
+    ("tag", ["tag_", "every_tag_byte", "derive_enc_", "every_aad_"], 1),
+    ("zeroize-and-limits", ["zeroize_", "check_lengths_", "max_msg_size_"], 4),
+    ("stream", ["chacha20_"], 2),
 ]
 
 
@@ -88,10 +100,10 @@ def harnesses():
 
 def assign(names):
     """Group harness names into shards, preserving discovery order."""
-    buckets = {name: [] for name, _ in SHARDS}
+    buckets = {name: [] for name, _, _ in SHARDS}
     unassigned = []
     for harness in names:
-        for name, prefixes in SHARDS:
+        for name, prefixes, _ in SHARDS:
             if any(harness.startswith(p) for p in prefixes):
                 buckets[name].append(harness)
                 break
@@ -125,8 +137,9 @@ def main():
             # Space-separated: consumed with a plain shell loop.
             "harnesses": " ".join(buckets[name]),
             "count": len(buckets[name]),
+            "jobs": jobs,
         }
-        for name, _ in SHARDS
+        for name, _, jobs in SHARDS
         if buckets[name]
     ]
 
