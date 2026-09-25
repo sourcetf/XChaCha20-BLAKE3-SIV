@@ -88,6 +88,23 @@ subtle = { version = "2.6.1", default-features = false }
 # failure is reproducible from a seed without a third-party RNG in the tree.
 
 [features]
+# Opt-in fault-injection hardening of the accept/reject decision (see the
+# `hardened` section in the crate documentation, and "What is not defended
+# against" in README.md). It makes the decision two independently *recomputed*
+# checks, each with its own branch, so a single skipped instruction reaches the
+# other gate instead of accepting a forgery.
+#
+# Measured cost, in-place round trip, AMD Ryzen 9 7945HX: +10.8% at 64 bytes,
+# +8.9% at 256, +3.6% at 1 KiB, +4.1% at 4 KiB, +2.5% at 16 KiB, +1.0% at 64 KiB,
+# +0.4% at 1 MiB (the added work is four 65-byte constant-time comparisons, so it
+# does not scale with the message).
+#
+# This is not a claim of fault-injection resistance. It defends against a single
+# fault on the decision only; two faults, a targeted fault in the tag computation
+# itself, key recovery by differential fault analysis, and availability attacks are
+# all outside what it can do. Nothing here has been validated on a real
+# fault-injection bench.
+hardened = []
 # Opt-in OS randomness for `generate_key` / `generate_nonce`.  Off by default:
 # `no_std` builds and users who already have an entropy source pay nothing.
 rng = ["dep:getrandom"]

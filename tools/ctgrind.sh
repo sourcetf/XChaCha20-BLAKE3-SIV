@@ -16,7 +16,13 @@
 # It is a separate script because it needs three things verify.sh should not
 # assume: valgrind, a statically linked test binary, and a suppression file.
 #
-# Usage:  tools/ctgrind.sh          # run the check (exit 0 = clean)
+# Usage:  tools/ctgrind.sh                      # run the check (exit 0 = clean)
+#         tools/ctgrind.sh --features hardened  # ...against an opt-in feature set
+#
+# Extra arguments are passed to `cargo test`, so the constant-time check can be run
+# against any feature combination -- the `hardened` build adds a second, recomputed
+# tag comparison to each decrypt, and that is exactly the kind of addition that
+# could introduce a content-dependent branch.
 #         tools/ctgrind.sh --setup  # print how to obtain valgrind here
 #
 # Exit codes: 0 clean; 1 clean but the harness failed its own sanity checks;
@@ -74,7 +80,7 @@ SUPP=tests/ctgrind.supp
 # function names, so the file silently stops suppressing anything.
 echo "building a static test binary..."
 RUSTFLAGS="-C target-feature=+crt-static -C strip=none" \
-  cargo test --release --target "$TARGET" --test ctgrind --no-run >/dev/null
+  cargo test --release --target "$TARGET" --test ctgrind --no-run "$@" >/dev/null
 
 BIN=$(ls -t "target/$TARGET/release/deps/"ctgrind-* 2>/dev/null \
       | grep -vE '\.(d|o)$' | head -1)

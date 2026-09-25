@@ -7,6 +7,7 @@
 | `tests/vectors_differential_large.txt` | 6 sizes from 2 KiB to 1 MiB as `BLAKE3(ciphertext \|\| tag)` digests — a megabyte of message is two megabytes of hex, so the full fixture stops at 2 KiB and this one exists to put the sizes *above* the tag's contiguous-buffer threshold (64 KiB, and 65 537) in front of the reference implementation instead of in front of themselves |
 | `tests/security.rs` | security properties: property-based and fuzz |
 | `tests/timing.rs` | the dudect-style timing screen — **release builds only** (`#![cfg(not(debug_assertions))]`) |
+| `tests/decision.rs` | the accept/reject decision — the detector `tools/fi_check.sh` uses to show that one skipped gate accepts a forgery on the default build and does not on the `hardened` one |
 | `src/proofs.rs` | Kani harnesses (proofs, not tests) |
 | `tests/threads.rs` | concurrent use: 32 threads racing the first call, then agreeing on every ciphertext and tag |
 
@@ -29,7 +30,7 @@ so a green run is not read as more than it is.
 | Dependency advisories | **run** (`cargo-audit` and `cargo-deny`) | 108 dependencies against 1269 advisories: 0 vulnerabilities. `cargo deny check` covers advisories, licences, bans and sources: all four pass. |
 | `cargo-deny` | **run** | See `deny.toml`. The licence allow-list was derived from what the tree actually uses, not copied from the template. |
 | `ctgrind` C macro / crate | **reimplemented** | Neither is available; the valgrind *client request* underneath is a documented ABI and is reimplemented in `tests/ctgrind.rs`, with the instruction sequence and request codes taken verbatim from valgrind 3.24.0's headers rather than recalled. |
-| Checks that are not vacuous | **run**: `tools/mutation_check.sh` |
+| Checks that are not vacuous | **run**: `tools/mutation_check.sh`, plus `tools/fi_check.sh` for the `hardened` feature (it requires the *default* build to fail under a written-down fault and the hardened one to pass) |
 | Fault injection | **not covered, and not claimed** | No tool in this suite models a glitch — Miri, Kani, ctgrind, TSAN and libFuzzer all assume correct execution. The accept/reject decision is one branch on one comparison, so a single skipped instruction is an accepted forgery; encryption-side faults, by contrast, degrade to rejection, because the tag is computed over the plaintext. A hardened implementation would need a validated countermeasure set and a fault-injection bench — see README's "What is not defended against". |
 | `semgrep` / `codeql` | **not run** | Neither is available here. The branch classification above and the ctgrind run cover the same question (secret-dependent control flow); no automated pattern scanner was used. |
 

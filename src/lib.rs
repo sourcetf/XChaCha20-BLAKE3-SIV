@@ -60,6 +60,13 @@
 //!   (CMT-3) at **2^260**.  Read the "Security level" section below before
 //!   relying on a number.
 //! - SIV mode: tag computed before encryption, nonce-misuse resistant
+//! - Fault-injection hardening, opt-in via the `hardened` feature: the
+//!   accept/reject decision becomes two independently recomputed checks with
+//!   separate branches, so a single skipped instruction cannot accept a forgery.
+//!   It defends the decision and nothing else, it is not validated on a
+//!   fault-injection bench, and it costs ~4-11% below 4 KiB and under 2.5% above. See
+//!   README.md ("The opt-in `hardened` feature") for the table of what it covers
+//!   and what it does not.
 //! - Constant-time operations: the tag is compared with `subtle::ConstantTimeEq`
 //!   and decryption is decrypt-then-verify (SIV requires the plaintext to
 //!   recompute the tag, so verify-then-decrypt is not possible).  See the
@@ -856,6 +863,12 @@ pub fn decrypt(
     chacha20_keystream(&enc_key, 0, &enc_nonce, ciphertext, &mut plaintext);
 
     let mut computed_tag = derive_tag(&mac_key, key, nonce, aad, &plaintext);
+    #[cfg(feature = "hardened")]
+    let gates = (
+        computed_tag.ct_eq(tag) & tag.ct_eq(&computed_tag),
+        computed_tag.ct_eq(tag) & tag.ct_eq(&computed_tag),
+    );
+    #[cfg(not(feature = "hardened"))]
     let auth_ok = computed_tag.ct_eq(tag);
 
     zeroize_array(&mut mac_key);
@@ -867,12 +880,34 @@ pub fn decrypt(
     zeroize_array(&mut enc_nonce);
     zeroize_array(&mut computed_tag);
 
+    #[cfg(not(feature = "hardened"))]
     if bool::from(auth_ok) {
         Ok(Plaintext(plaintext))
     } else {
         // Per spec, MUST NOT expose unverified plaintext.
         zeroize_slice(&mut plaintext);
         Err(Error::AuthenticationFailed)
+    }
+
+    #[cfg(feature = "hardened")]
+    {
+        // Fault-injection hardening (opt-in `hardened` feature): two *recomputed*
+        // checks, each with its own branch, so a single skipped instruction reaches the
+        // other gate instead of accepting. `&` and never `&&`: both comparisons always
+        // run, so the time this takes does not reveal which gate failed. No `unwrap_u8`
+        // and no early exit inside the comparisons -- `bool::from` is the conversion
+        // subtle documents for exactly this place (the end of a verification).
+        // What it does and does not defend against: see README "What is not defended
+        // against".
+        if !bool::from(gates.0) {
+            zeroize_slice(&mut plaintext);
+            return Err(Error::AuthenticationFailed);
+        }
+        if !bool::from(gates.1) {
+            zeroize_slice(&mut plaintext);
+            return Err(Error::AuthenticationFailed);
+        }
+        Ok(Plaintext(plaintext))
     }
 }
 
@@ -895,6 +930,12 @@ pub fn decrypt_in_place_detached(
     chacha20_apply(&enc_key, 0, &enc_nonce, &Input::InPlace, buffer);
 
     let mut computed_tag = derive_tag(&mac_key, key, nonce, aad, buffer);
+    #[cfg(feature = "hardened")]
+    let gates = (
+        computed_tag.ct_eq(tag) & tag.ct_eq(&computed_tag),
+        computed_tag.ct_eq(tag) & tag.ct_eq(&computed_tag),
+    );
+    #[cfg(not(feature = "hardened"))]
     let auth_ok = computed_tag.ct_eq(tag);
 
     zeroize_array(&mut mac_key);
@@ -906,11 +947,33 @@ pub fn decrypt_in_place_detached(
     zeroize_array(&mut enc_nonce);
     zeroize_array(&mut computed_tag);
 
+    #[cfg(not(feature = "hardened"))]
     if bool::from(auth_ok) {
         Ok(())
     } else {
         zeroize_slice(buffer);
         Err(Error::AuthenticationFailed)
+    }
+
+    #[cfg(feature = "hardened")]
+    {
+        // Fault-injection hardening (opt-in `hardened` feature): two *recomputed*
+        // checks, each with its own branch, so a single skipped instruction reaches the
+        // other gate instead of accepting. `&` and never `&&`: both comparisons always
+        // run, so the time this takes does not reveal which gate failed. No `unwrap_u8`
+        // and no early exit inside the comparisons -- `bool::from` is the conversion
+        // subtle documents for exactly this place (the end of a verification).
+        // What it does and does not defend against: see README "What is not defended
+        // against".
+        if !bool::from(gates.0) {
+            zeroize_slice(buffer);
+            return Err(Error::AuthenticationFailed);
+        }
+        if !bool::from(gates.1) {
+            zeroize_slice(buffer);
+            return Err(Error::AuthenticationFailed);
+        }
+        Ok(())
     }
 }
 

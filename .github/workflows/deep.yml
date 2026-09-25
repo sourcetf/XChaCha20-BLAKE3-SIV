@@ -155,6 +155,12 @@ jobs:
       - name: run ctgrind
         run: ./tools/ctgrind.sh
 
+      # The `hardened` decision adds two recomputed tag comparisons and a branch,
+      # which is exactly the shape that could introduce a content-dependent timing
+      # difference. Same check, same build flags, different feature set.
+      - name: run ctgrind with the hardened decision
+        run: ./tools/ctgrind.sh --features hardened
+
   deny:
     name: cargo-deny
     runs-on: ubuntu-latest
@@ -202,6 +208,12 @@ jobs:
           sudo apt-get update
           sudo apt-get install --no-install-recommends -y valgrind
           valgrind --version
+
+      # The fault-injection counterpart: it writes a fault down as a source change,
+      # requires the *default* build to accept a forgery with it (so the fault is
+      # real), and requires the `hardened` build to reject it anyway.
+      - name: fault-injection check of the decision
+        run: ./tools/fi_check.sh
 
       - name: plant bugs and require the checks to fail
         run: ./tools/mutation_check.sh

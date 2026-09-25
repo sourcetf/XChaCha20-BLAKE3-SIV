@@ -156,11 +156,37 @@ ciphertext, tag and AAD is rejected by the tests, and 115 million fuzz execution
 found no acceptance — but those are *non-physical* analogues: they show the
 acceptance predicate is exact, not that the decision survives a glitch.
 
-If your adversary can glitch silicon, this crate is not the component to use. A
-fault-hardened implementation needs a countermeasure set validated on a
-fault-injection bench — a double-checked decision, redundant computation,
-verify-by-re-encryption, canaries — and the bench is what makes the countermeasures
-mean anything, not the code alone.
+### The opt-in `hardened` feature
+
+For deployments where the cheap end of that threat model is real, the crate has an
+opt-in `hardened` feature that hardens exactly one thing: **the accept/reject
+decision**, which is the single-fault point where a forgery is accepted. It makes
+the decision two independently *recomputed* checks, each with its own branch, so
+one skipped instruction reaches the other gate instead of accepting. Both
+combinations use `&` and never `&&`, so both comparisons always run and the time
+taken does not reveal which gate failed; `bool::from` is the conversion `subtle`
+documents for the end of a verification, so no new content-dependent branch is
+introduced. `tools/ctgrind.sh --features hardened` checks that mechanically, and
+`tools/fi_check.sh` writes the fault down as a source change and requires the
+default build to *fail* the decision test with it while the hardened build passes.
+
+| Single fault on the decision | **defended** (`tools/fi_check.sh` demonstrates it) |
+| Two independent faults | not defended — this is where the attacker's cost moves to a synchronized two-glitch bench |
+| A targeted fault inside the tag computation, making it produce the attacker's tag | not defended — precision injection, laboratory grade |
+| Key recovery by differential fault analysis of ChaCha20 | not defended — laboratory grade, and harder against ARX than against AES |
+| Extracting unverified plaintext by skipping the failure-path wipe | not defended — needs a read primitive as well as the fault |
+| Availability (any single glitch causes a rejection or a crash) | not defended, by anything |
+
+Measured cost, in-place round trip on the host above: **+10.8% at 64 bytes, +8.9% at 256, +3.6% at 1 KiB, +4.1% at 4 KiB, +2.5% at 16 KiB, +1.0% at 64 KiB, +0.4% at 1 MiB** — the added work
+is four 65-byte constant-time comparisons, so it does not scale with the message. The hardened build is byte-for-byte identical on the wire (the KATs and
+both differential fixtures replay unchanged), which is what keeps every other piece
+of evidence in this file valid for it.
+
+**None of that is a claim of fault-injection resistance**, and nothing here has been
+validated on a real fault-injection bench. If your adversary can glitch silicon, a
+software AEAD is the wrong component: use a secure element or an HSM, whose
+protection is a hardware property, and whose per-operation latency is orders of
+magnitude worse than what the table above describes.
 
 ## Nonces, and where randomness comes from
 
