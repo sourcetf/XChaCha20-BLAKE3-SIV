@@ -294,6 +294,7 @@ jobs:
     # the report is rejected outright ("invalid option '--all-features' for
     # subcommand 'report'"). So it is a *single* invocation -- the lcov file is the
     # artifact -- and a failure here is a signal to look, not a gate.
+    continue-on-error: true
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
