@@ -15,7 +15,8 @@
 # Usage:
 #   ./check.sh                 provision, build, verify (fast stages only)
 #   ./check.sh --fast          skip all cross-target work
-#   ./check.sh --cross-exec    also execute the aarch64/i686 suites under qemu
+#   ./check.sh --cross-exec    also execute the aarch64/i686 suites under qemu,
+                             plus big-endian powerpc64 via qemu-ppc64
 #   ./check.sh --kani          also run Kani bounded model checking (slow)
 #   ./check.sh --all           both of the above
 #   ./check.sh --no-provision  never touch the network or modify the toolchain
@@ -46,7 +47,8 @@ One-command build + verification for XChaCha20-BLAKE3-SIV.
 Usage:
   ./check.sh                 provision, build, verify (fast stages only)
   ./check.sh --fast          skip all cross-target work
-  ./check.sh --cross-exec    also execute the aarch64/i686 suites under qemu
+  ./check.sh --cross-exec    also execute the aarch64/i686 suites under qemu,
+                             plus big-endian powerpc64 via qemu-ppc64
   ./check.sh --kani          also run Kani bounded model checking (slow)
   ./check.sh --all           both of the above
   ./check.sh --no-provision  never touch the network or modify the toolchain
@@ -137,7 +139,7 @@ find_qemu() {
   return 1
 }
 
-# Install qemu-aarch64 into ~/.local/bin without root.
+# Install the emulators into ~/.local/bin without root.
 #
 # `qemu-user-static` is only a small metapackage pointing at `qemu-user`, which
 # is where the actual (statically linked) binaries live -- so `qemu-user` is
@@ -154,7 +156,7 @@ provision_qemu() {
   fi
 
   note "fetching qemu-user (no root required)"
-  local tmp dest
+  local tmp dest em
   tmp="$(mktemp -d)" || { skip "mktemp failed"; return 1; }
   dest="$HOME/.local/bin/qemu-aarch64"
 
@@ -171,7 +173,10 @@ provision_qemu() {
        [ -n "$deb" ]
        dpkg-deb -x "$deb" ./x
        mkdir -p "$(dirname "$dest")"
-       cp ./x/usr/bin/qemu-aarch64 "$dest"
+       for em in qemu-aarch64 qemu-i386 qemu-ppc64; do
+         cp "./x/usr/bin/$em" "$HOME/.local/bin/$em"
+         chmod +x "$HOME/.local/bin/$em"
+       done
      ); then
     chmod +x "$dest"
     rm -rf "$tmp"
@@ -214,7 +219,7 @@ if [ "$PROVISION" -eq 1 ]; then
     # musl is what gets built and *executed* under qemu (aarch64 for the NEON
     # kernel, i686 for the 32-bit paths); gnu is type-checked only.  All are
     # attempted so `verify.sh` can use whichever is available.
-    for t in aarch64-unknown-linux-musl i686-unknown-linux-musl aarch64-unknown-linux-gnu; do
+    for t in aarch64-unknown-linux-musl i686-unknown-linux-musl powerpc64-unknown-linux-musl aarch64-unknown-linux-gnu; do
       if ensure_target "$t"; then
         ok "target $t"
       else

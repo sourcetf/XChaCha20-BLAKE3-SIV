@@ -234,14 +234,17 @@ works unprivileged, and the emulator is extracted into `~/.local/bin`.
 - **Concurrency** — `tests/threads.rs` starts 32 threads that all make their
   first call from cold, so they race the cached AVX2 detection, and requires them
   to agree on every ciphertext and tag; the detached API runs in the same loop.
-  The suite also runs under AddressSanitizer. ThreadSanitizer would be the sharper
-  tool for the race and is *not* run — it cannot compile this crate's
-  dev-dependencies — which `tests/README.md` records rather than leaving implied.
-- **Cross-architecture execution** — two configurations are *executed* under
+  `tools/tsan.sh` runs it under ThreadSanitizer, after proving the sanitizer can
+  see a race at all: a deliberately racy `#[ignore]`d test must be reported before
+  the clean run is allowed to mean anything. The suite also runs under
+  AddressSanitizer.
+- **Cross-architecture execution** — three configurations are *executed* under
   qemu, not merely type-checked. On x86 the aarch64 (NEON) backend is compiled
-  out entirely, so `qemu-aarch64` is the only thing that ever runs it; and
-  `qemu-i386` is the only place the 32-bit code paths run, where `usize` is 32
-  bits and every length calculation takes a different route. `--aarch64-exec` is
+  out entirely, so `qemu-aarch64` is the only thing that ever runs it; `qemu-i386`
+  is the only place the 32-bit code paths run, where `usize` is 32 bits and every
+  length calculation takes a different route; and `qemu-ppc64` is the only place
+  the code runs on a **big-endian** machine, where the `from_le_bytes`/
+  `to_le_bytes` conversions are no longer identity functions. `--aarch64-exec` is
   still accepted as an alias of `--cross-exec`.
 - **Every accelerated path under Miri** — the SSE2 and scalar paths in a default
   build, the AVX2 kernel with `-C target-feature=+avx2` (Miri refuses a

@@ -183,6 +183,8 @@ jobs:
           - target: aarch64-unknown-linux-musl
             qemu: qemu-aarch64
           - target: i686-unknown-linux-musl
+          - target: powerpc64-unknown-linux-musl
+            qemu: qemu-ppc64
             qemu: qemu-i386
     steps:
       - uses: actions/checkout@v7
@@ -208,6 +210,23 @@ jobs:
       # Rust backends need nothing. BLAKE3's backend is irrelevant to what this
       # job tests (the crate's own SIMD code), and the wire format is identical
       # either way -- the KATs and the equivalence corpus pin it.
+      # Big-endian needs no cross toolchain: rust-std ships the self-contained crt
+      # objects and musl's libc, so rust-lld can link it.  Three details: an alias
+      # for `libgcc_s.a` (the unwinder ships as `libunwind.a`), a non-PIE relocation
+      # model (the shipped `libc.a` is non-PIC), and a search path for the alias.
+      - name: extra setup for the big-endian target
+        if: matrix.target == 'powerpc64-unknown-linux-musl'
+        run: |
+          set -euo pipefail
+          sysroot="$(rustc --print sysroot)"
+          host="$(rustc -vV | sed -n 's/^host: //p')"
+          alias_dir="$HOME/.local/share/xsiv-cross"
+          mkdir -p "$alias_dir"
+          ln -sf "$sysroot/lib/rustlib/powerpc64-unknown-linux-musl/lib/self-contained/libunwind.a" "$alias_dir/libgcc_s.a"
+          {
+            echo "CARGO_TARGET_POWERPC64_UNKNOWN_LINUX_MUSL_LINKER=$sysroot/lib/rustlib/$host/bin/rust-lld"
+            echo "CARGO_TARGET_POWERPC64_UNKNOWN_LINUX_MUSL_RUSTFLAGS=-C linker-flavor=ld.lld -C link-self-contained=yes -C relocation-model=static -L native=$alias_dir"
+          } >> "$GITHUB_ENV"
       - name: build ${{ matrix.target }} test binaries
         run: cargo test --target ${{ matrix.target }} --release --no-run --features pure
 
@@ -216,7 +235,7 @@ jobs:
           set -euo pipefail
           deps=target/${{ matrix.target }}/release/deps
           ran=0
-          for bin in "$deps"/xchacha20_blake3_siv-* "$deps"/differential_reference-* "$deps"/security-*; do
+          for bin in "$deps"/xchacha20_blake3_siv-* "$deps"/differential_reference-* "$deps"/security-* "$deps"/threads-*; do
             case "$bin" in *.d|*.rlib|*.rmeta) continue ;; esac
             [ -x "$bin" ] || continue
             # The security binary runs too (property tests + deterministic fuzz),

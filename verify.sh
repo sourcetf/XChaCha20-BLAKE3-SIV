@@ -15,6 +15,11 @@
 #   ./verify.sh --kani       # everything, including Kani
 #   ./verify.sh --kani-only  # just Kani (after a code change, to re-prove)
 #
+# Stage switches, all off by default: --cross-exec (aarch64, i686 and
+# powerpc64 big-endian, under qemu), --miri, --ctgrind, --deny, --fuzz,
+# --tsan, --kani.
+#   ./verify.sh --deep       # all of them
+
 set -euo pipefail
 
 cd "$(dirname "$0")"
@@ -30,6 +35,7 @@ RUN_MIRI=0
 RUN_CTGRIND=0
 RUN_DENY=0
 RUN_FUZZ=0
+RUN_TSAN=0
 for arg in "$@"; do
   case "$arg" in
     --kani) RUN_KANI=1 ;;
@@ -41,7 +47,8 @@ for arg in "$@"; do
     --ctgrind) RUN_CTGRIND=1 ;;
     --deny) RUN_DENY=1 ;;
     --fuzz) RUN_FUZZ=1 ;;
-    --deep) RUN_KANI=1; RUN_CROSS_EXEC=1; RUN_MIRI=1; RUN_CTGRIND=1; RUN_DENY=1; RUN_FUZZ=1 ;;
+    --tsan) RUN_TSAN=1 ;;
+    --deep) RUN_KANI=1; RUN_CROSS_EXEC=1; RUN_MIRI=1; RUN_CTGRIND=1; RUN_DENY=1; RUN_FUZZ=1; RUN_TSAN=1 ;;
     --all) RUN_KANI=1; RUN_CROSS_EXEC=1; RUN_MIRI=1 ;;
     *) echo "unknown option: $arg" >&2; exit 1 ;;
   esac
@@ -131,7 +138,7 @@ if [ "$KANI_ONLY" -eq 0 ]; then
 fi
 
 if [ "$RUN_CROSS_EXEC" -eq 1 ]; then
-  step "5. cross-architecture execution under qemu (aarch64 NEON, i686 32-bit)"
+  step "5. cross-architecture execution under qemu (aarch64 NEON, i686 32-bit, powerpc64 big-endian)"
   # Two configurations that cannot be exercised natively here:
   #
   #   * aarch64 -- the only way the NEON kernel is ever *executed*.  On x86 it is
@@ -141,10 +148,16 @@ if [ "$RUN_CROSS_EXEC" -eq 1 ]; then
   #   * i686 -- the only way the 32-bit code paths run.  `usize` is 32 bits
   #     there, so `check_lengths`, the length fields fed to the tag and every
   #     loop bound take a different route through the same source.
+  #   * powerpc64 -- the only way any of this runs on a **big-endian** machine,
+  #     where the 35 `from_le_bytes`/`to_le_bytes` call sites in lib.rs have to do
+  #     real work instead of being identity functions, and where a four-byte load
+  #     is not the `u32` the code assumes.  Miri's s390x cross-interpretation
+  #     covers the same question by interpretation; this executes compiled
+  #     big-endian machine code.
   #
   # qemu-user closes both gaps for everything except throughput.
   # `--aarch64-exec` is accepted as an alias of `--cross-exec`.
-  pair_list="aarch64-unknown-linux-musl:qemu-aarch64 i686-unknown-linux-musl:qemu-i386"
+  pair_list="aarch64-unknown-linux-musl:qemu-aarch64 i686-unknown-linux-musl:qemu-i386 powerpc64-unknown-linux-musl:qemu-ppc64"
   total=0
   for pair in $pair_list; do
     target="${pair%%:*}"
@@ -163,6 +176,42 @@ if [ "$RUN_CROSS_EXEC" -eq 1 ]; then
     # `--features pure`: BLAKE3 needs a *target* C toolchain for its C kernels on
     # x86_64/aarch64, and this stage exists to execute *this crate's* SIMD code,
     # not BLAKE3's; the wire format is identical either way.
+    if ! rustup target list --installed 2>/dev/null | grep -qx "$target"; then
+      echo "SKIPPED ($target): the target is not installed.  Add it with:"
+      echo "           rustup target add $target"
+      continue
+    fi
+
+    # Big-endian needs no cross toolchain: powerpc64-unknown-linux-musl is tier-2,
+    # so `rustup target add` brings prebuilt std, and rust-std ships the
+    # self-contained crt objects *and* musl's libc, so rust-lld can link it.  Three
+    # details are needed, all of them found by making this work:
+    #
+    #   * `libgcc_s.a` -- rustc asks for the unwinder under that name, and rust-std
+    #     ships the very same library as `libunwind.a`, so this stage makes an
+    #     alias instead of demanding a toolchain;
+    #   * `-C relocation-model=static` -- the shipped `libc.a` is non-PIC, so a PIE
+    #     link dies with "R_PPC64_ADDR64 ... recompile with -fPIC";
+    #   * `-L native=` -- a search path for that alias.
+    #
+    # The flags are target-scoped so host crates (proc macros, build scripts) keep
+    # the ordinary host linker.
+    unset CARGO_TARGET_POWERPC64_UNKNOWN_LINUX_MUSL_LINKER CARGO_TARGET_POWERPC64_UNKNOWN_LINUX_MUSL_RUSTFLAGS
+    case "$target" in
+      powerpc64-unknown-linux-musl)
+        sysroot="$(rustc --print sysroot)"
+        host="$(rustc -vV | sed -n 's/^host: //p')"
+        alias_dir="$HOME/.local/share/xsiv-cross"
+        mkdir -p "$alias_dir"
+        ln -sf "$sysroot/lib/rustlib/$target/lib/self-contained/libunwind.a" "$alias_dir/libgcc_s.a"
+        export CARGO_TARGET_POWERPC64_UNKNOWN_LINUX_MUSL_LINKER="$sysroot/lib/rustlib/$host/bin/rust-lld"
+        export CARGO_TARGET_POWERPC64_UNKNOWN_LINUX_MUSL_RUSTFLAGS="-C linker-flavor=ld.lld -C link-self-contained=yes -C relocation-model=static -L native=$alias_dir"
+        ;;
+    esac
+
+    # `--features pure`: BLAKE3 needs a *target* C toolchain for its C kernels on
+    # x86_64/aarch64, and this stage exists to execute *this crate's* SIMD code,
+    # not BLAKE3's; the wire format is identical either way.
     cargo test --target "$target" --release --no-run --features pure
 
     # Run the built test executables directly rather than through
@@ -170,7 +219,7 @@ if [ "$RUN_CROSS_EXEC" -eq 1 ]; then
     # config cannot silently fall back to executing the target code natively.
     deps="target/$target/release/deps"
     ran=0
-    for bin in "$deps"/xchacha20_blake3_siv-* "$deps"/differential_reference-* "$deps"/security-*; do
+    for bin in "$deps"/xchacha20_blake3_siv-* "$deps"/differential_reference-* "$deps"/security-* "$deps"/threads-*; do
       case "$bin" in *.d|*.rlib|*.rmeta) continue ;; esac
       [ -x "$bin" ] || continue
       # The security binary runs too -- its property tests and deterministic fuzz
@@ -259,6 +308,23 @@ if [ "$RUN_DENY" -eq 1 ]; then
   else
     echo "SKIPPED: cargo-deny not installed"
     echo "         (cargo install cargo-deny --locked)"
+  fi
+fi
+
+if [ "$RUN_TSAN" -eq 1 ]; then
+  step "7b. ThreadSanitizer over the concurrency test"
+  # `tools/tsan.sh` runs its own negative control first: a deliberately racy test
+  # must be *reported* before the crate's own run is allowed to mean anything.
+  # It needs nightly and the rust-src component, because std is shipped
+  # uninstrumented and mixing it with an instrumented crate is an ABI mismatch
+  # ("`-Zsanitizer=thread` in this crate is incompatible with `-Zsanitizer` being
+  # unset in dependency `panic_unwind`"), so the run rebuilds std with
+  # `-Zbuild-std`.
+  if cargo +nightly --version >/dev/null 2>&1 && rustup component list --installed 2>/dev/null | grep -q '^rust-src'; then
+    tools/tsan.sh
+  else
+    echo "SKIPPED: ThreadSanitizer needs the nightly toolchain and rust-src:"
+    echo "           rustup component add rust-src"
   fi
 fi
 

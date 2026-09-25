@@ -31,6 +31,49 @@ use xchacha20_blake3_siv::{
 const THREADS: usize = 32;
 const ROUNDS: usize = 64;
 
+/// **Negative control.** Deliberately races, and `tools/tsan.sh` requires
+/// ThreadSanitizer to *report* it — the same idea as the ctgrind control in
+/// `tests/ctgrind.rs`, and for the same reason: a "clean" run from a sanitizer
+/// whose flag was dropped somewhere looks exactly like a clean run from a working
+/// one.
+///
+/// Never run this outside a sanitizer run.  An unsynchronised write to a shared
+/// `static` *is* a data race, which is the point — it is what TSAN is asked to
+/// find — and it must not run under any other configuration.  It is `#[ignore]`d
+/// so that a plain `cargo test` cannot reach it.
+#[test]
+#[ignore = "deliberately races; run under ThreadSanitizer, which tools/tsan.sh does"]
+fn deliberate_race_is_detected() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    static mut COUNTER: u64 = 0;
+    static START: AtomicBool = AtomicBool::new(false);
+
+    let handles: Vec<_> = (0..2)
+        .map(|_| {
+            thread::spawn(|| {
+                while !START.load(Ordering::Acquire) {
+                    std::hint::spin_loop();
+                }
+                for _ in 0..1_000 {
+                    // SAFETY: deliberately unsound. This is the defect under test.
+                    unsafe {
+                        let p = core::ptr::addr_of_mut!(COUNTER);
+                        let v = core::ptr::read_volatile(p);
+                        core::ptr::write_volatile(p, v.wrapping_add(1));
+                    }
+                }
+            })
+        })
+        .collect();
+
+    START.store(true, Ordering::Release);
+    for h in handles {
+        h.join().expect("thread");
+    }
+    core::hint::black_box(unsafe { core::ptr::read_volatile(core::ptr::addr_of!(COUNTER)) });
+}
+
 #[test]
 fn concurrent_use_agrees_across_threads() {
     let key = [0x42u8; 32];
