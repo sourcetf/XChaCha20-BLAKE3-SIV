@@ -138,7 +138,9 @@ jobs:
           # "Failed to match the following harness(es)" if a name does not
           # exist. So a typo or a renamed harness fails loudly here rather than
           # quietly reducing what was proven.
-          args=(-Z stubbing -Z unstable-options --extra-pointer-checks)
+          # `-j`: Kani's default is one harness at a time, which leaves the
+          # runner's cores idle. The harnesses in a shard are independent.
+          args=(-j --output-format=terse -Z stubbing -Z unstable-options --extra-pointer-checks)
           n=0
           for h in ${{ matrix.harnesses }}; do
             args+=(--harness "$h")

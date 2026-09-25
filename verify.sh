@@ -283,7 +283,11 @@ if [ "$RUN_KANI" -eq 1 ]; then
   # `--extra-pointer-checks` adds CBMC's pointer-safety checks on top of the
   # harness assertions; it is unstable, hence `-Z unstable-options`.  CI uses the
   # same pair (the Kani version is pinned there so neither can drift).
-  cargo kani --features pure -Z stubbing -Z unstable-options --extra-pointer-checks
+  # `-j` (the thread pool's default width) is not cosmetic: without it Kani
+  # verifies one harness at a time, so the suite spends its life on a single
+  # core. With it, the independent harnesses run concurrently.
+  cargo kani -j --output-format=terse --features pure -Z stubbing -Z unstable-options \
+    --extra-pointer-checks
 fi
 
 # Each hint is printed only for the step that was actually skipped.
