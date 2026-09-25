@@ -88,9 +88,11 @@ unsafe fn client_request(default: usize, args: &mut [usize; 6]) -> usize {
 /// VG_USERREQ__MAKE_MEM_UNDEFINED,
 /// VG_USERREQ__MAKE_MEM_DEFINED,
 /// ```
-/// The client-request codes are only reached through the x86_64 `asm!` path; on
-/// other targets `poison`/`unpoison` are no-ops, so these two would otherwise be
-/// dead code and `cargo check --target ...` reports them as warnings.
+/// The client-request codes are only reached through the x86_64 `asm!` path: on
+/// other targets `poison`/`unpoison`/`all_bytes_undefined`/`count_errors` are
+/// no-ops or absent, so all four of these would otherwise be dead code and every
+/// non-x86_64 build prints a `dead_code` warning for them -- which is what a
+/// cross-interpreted Miri run and `cargo check --target ...` both did.
 #[cfg_attr(not(target_arch = "x86_64"), allow(dead_code))]
 const MAKE_MEM_UNDEFINED: usize = 0x4d43_0001;
 #[cfg_attr(not(target_arch = "x86_64"), allow(dead_code))]
@@ -98,9 +100,11 @@ const MAKE_MEM_DEFINED: usize = 0x4d43_0002;
 /// `VG_USERREQ__GET_VBITS` — read back the definedness bitmap, so a test can
 /// check that the poisoning above actually took effect instead of trusting that
 /// memcheck will report something later.
+#[cfg_attr(not(target_arch = "x86_64"), allow(dead_code))]
 const GET_VBITS: usize = 0x4d43_0008;
 /// `VG_USERREQ__COUNT_ERRORS` (a core request, not tool-specific) — how many
 /// errors the tool has recorded so far.
+#[cfg_attr(not(target_arch = "x86_64"), allow(dead_code))]
 const COUNT_ERRORS: usize = 0x1201;
 
 /// Mark `len` bytes at `ptr` as undefined, so valgrind reports any branch or

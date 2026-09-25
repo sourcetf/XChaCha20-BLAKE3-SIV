@@ -221,6 +221,22 @@ works unprivileged, and the emulator is extracted into `~/.local/bin`.
   `tests/differential_reference.rs` across every internal length boundary. The
   Python and Rust keyed-BLAKE3 paths were verified byte-identical before relying
   on them.
+- **Random differential testing** — `tools/broad_differential.py` drives
+  thousands of vectors with arbitrary keys, nonces, AADs and messages, sized to
+  straddle every dispatch boundary and with ~5% large enough to take the tag's
+  contiguous hash path, and compares each one with that same independent
+  reference. It runs the crate through `examples/xsiv_stdin.rs` rather than
+  committing a generated fixture — which is the point, because the committed
+  fixture reconstructs its inputs from their lengths, and so can never test an
+  arbitrary key or an arbitrary byte. The same script with and without
+  `--features pure` compares BLAKE3's two backends over identical vectors, and
+  both match the reference.
+- **Concurrency** — `tests/threads.rs` starts 32 threads that all make their
+  first call from cold, so they race the cached AVX2 detection, and requires them
+  to agree on every ciphertext and tag; the detached API runs in the same loop.
+  The suite also runs under AddressSanitizer. ThreadSanitizer would be the sharper
+  tool for the race and is *not* run — it cannot compile this crate's
+  dev-dependencies — which `tests/README.md` records rather than leaving implied.
 - **Cross-architecture execution** — two configurations are *executed* under
   qemu, not merely type-checked. On x86 the aarch64 (NEON) backend is compiled
   out entirely, so `qemu-aarch64` is the only thing that ever runs it; and
@@ -230,14 +246,18 @@ works unprivileged, and the emulator is extracted into `~/.local/bin`.
 - **Every accelerated path under Miri** — the SSE2 and scalar paths in a default
   build, the AVX2 kernel with `-C target-feature=+avx2` (Miri refuses a
   `#[target_feature]` call whose feature is not enabled, which is why it is a
-  separate run), and the NEON kernel by cross-interpreting the aarch64 target.
+  separate run), the NEON kernel by cross-interpreting the aarch64 target, and
+  big-endian execution by cross-interpreting s390x.
 - **Kani** — bounded model checking of the construction shape: that the domain,
   key, nonce and both lengths reach the hash in the specified layout; that every
   output byte comes from the hash; that every AAD and message byte reaches the
   tag; and that `derive_enc` consumes all 65 tag bytes (so the ciphertext
   commits to all 520 bits). Plus the ChaCha20 counter sequencing, zeroization
   and length-limit harnesses. `-Z stubbing` is required, and the MAC is stubbed
-  through a single seam so no call site can escape the model.
+  through a single seam so no call site can escape the model. The suite runs with
+  CBMC's extra pointer checks, in parallel shards — those checks were
+  unaffordable on a hosted runner until the tag harness's input shapes became
+  separate call sites, which was a harness bug rather than a runner limit.
 - **Constant-time, mechanically** — `tools/ctgrind.sh` marks secrets as undefined
   in valgrind's shadow memory and requires memcheck to report no branch depending
   on them, apart from the two documented SIV accept/reject decisions. Reports are
