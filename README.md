@@ -187,6 +187,16 @@ comparisons inside a gate always agree, because they compare the same two arrays
 they differ *only* when a fault makes them disagree. That case cannot be reached by
 any fault-free test, which is why it is a row of the fault campaign instead.
 
+The same question at the level of the *compiled* code: `tools/fi_instruction.sh`
+replaces every byte of the decision's machine code with `NOP`, one at a time, and
+re-runs the decision test. Both builds answer **zero** — 3428 single-byte faults in the
+default build and 4690 in the hardened one, none of which turns a rejected forgery into
+an accepted one; most of the rest merely crash. Two caveats are in that script's header
+and matter here: `NOP` is the *neutralise an instruction* fault, which biases towards
+rejection, so it says nothing about a bit flip that turns a comparison into an
+acceptance — that symmetric case is what the second gate is for, and what the
+campaign's `gate0-value-forced` row covers. And the map is of machine code, so a
+different host and toolchain will produce a different one.
 One more thing the campaign turned up, which is worth knowing before trusting a
 green suite here: the failure-path wipe of the *allocating* `decrypt` is not
 observable from a test at all — the plaintext is wiped and then freed, so a skipped
