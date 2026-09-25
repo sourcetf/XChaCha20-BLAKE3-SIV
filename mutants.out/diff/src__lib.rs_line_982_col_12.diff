@@ -1,0 +1,21 @@
+--- src/lib.rs
++++ delete ! in decrypt_in_place_detached
+@@ -974,17 +974,17 @@
+         // and no early exit inside the comparisons -- `bool::from` is the conversion
+         // subtle documents for exactly this place (the end of a verification).
+         // What it does and does not defend against: see README "What is not defended
+         // against".
+         if !bool::from(gates.0) {
+             zeroize_slice(buffer);
+             return Err(Error::AuthenticationFailed);
+         }
+-        if !bool::from(gates.1) {
++        if  /* ~ changed by cargo-mutants ~ */bool::from(gates.1) {
+             zeroize_slice(buffer);
+             return Err(Error::AuthenticationFailed);
+         }
+         Ok(())
+     }
+ }
+ 
+ // ── ChaCha20 Primitive ────────────────────────────────────────────────

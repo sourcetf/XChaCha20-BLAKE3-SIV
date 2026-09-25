@@ -1,0 +1,4 @@
+src/lib.rs:878:33: replace & with | in decrypt
+src/lib.rs:879:33: replace & with | in decrypt
+src/lib.rs:945:33: replace & with | in decrypt_in_place_detached
+src/lib.rs:946:33: replace & with | in decrypt_in_place_detached

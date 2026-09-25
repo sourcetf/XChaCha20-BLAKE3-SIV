@@ -1,0 +1,1 @@
+src/lib.rs:867:5: replace decrypt -> Result<Plaintext, Error> with Ok(Default::default())

@@ -1,0 +1,232 @@
+
+*** src/lib.rs:946:33: replace & with | in decrypt_in_place_detached
+
+*** mutation diff:
+--- src/lib.rs
++++ replace & with | in decrypt_in_place_detached
+@@ -938,17 +938,17 @@
+     let (mut enc_key, mut enc_nonce) = derive_enc(&enc_seed, tag);
+ 
+     chacha20_apply(&enc_key, 0, &enc_nonce, &Input::InPlace, buffer);
+ 
+     let mut computed_tag = derive_tag(&mac_key, key, nonce, aad, buffer);
+     #[cfg(feature = "hardened")]
+     let gates = (
+         computed_tag.ct_eq(tag) & tag.ct_eq(&computed_tag),
+-        computed_tag.ct_eq(tag) & tag.ct_eq(&computed_tag),
++        computed_tag.ct_eq(tag) | /* ~ changed by cargo-mutants ~ */ tag.ct_eq(&computed_tag),
+     );
+     #[cfg(not(feature = "hardened"))]
+     let auth_ok = computed_tag.ct_eq(tag);
+ 
+     zeroize_array(&mut mac_key);
+     zeroize_array(&mut enc_seed);
+     zeroize_array(&mut enc_key);
+     // The per-message ChaCha20 nonce is secret-derived too (it comes out of
+
+
+*** /home/dev123/.rustup/toolchains/stable-x86_64-unknown-linux-gnu/bin/cargo test --no-run --verbose --package=xchacha20-blake3-siv@0.1.0 --features=hardened
+       Fresh cfg-if v1.0.5
+       Fresh unicode-ident v1.0.26
+       Fresh version_check v0.9.5
+       Fresh typenum v1.20.1
+       Fresh autocfg v1.5.1
+       Fresh zeroize v1.9.0
+       Fresh find-msvc-tools v0.1.13
+       Fresh shlex v2.0.1
+       Fresh either v1.18.0
+       Fresh regex-syntax v0.8.11
+       Fresh subtle v2.6.1
+       Fresh anstyle v1.0.14
+       Fresh cpufeatures v0.2.17
+       Fresh itoa v1.0.18
+       Fresh plotters-backend v0.3.7
+       Fresh ciborium-io v0.2.2
+       Fresh clap_lex v1.1.1
+       Fresh memchr v2.8.3
+       Fresh cpufeatures v0.3.1
+       Fresh bit-vec v0.8.0
+       Fresh constant_time_eq v0.4.2
+       Fresh libc v0.2.189
+       Fresh cc v1.4.7
+       Fresh regex-automata v0.4.18
+       Fresh plotters-svg v0.3.7
+       Fresh arrayvec v0.7.8
+       Fresh itertools v0.10.5
+       Fresh clap_builder v4.6.7
+       Fresh opaque-debug v0.3.1
+       Fresh same-file v1.0.6
+       Fresh cast v0.3.0
+       Fresh bit-set v0.8.0
+       Fresh oorandom v11.1.5
+       Fresh bitflags v2.13.2
+       Fresh unarray v0.1.4
+       Fresh anes v0.1.6
+       Fresh once_cell v1.21.4
+       Fresh proc-macro2 v1.0.107
+       Fresh getrandom v0.2.17
+       Fresh getrandom v0.3.4
+       Fresh crossbeam-utils v0.8.23
+       Fresh serde_core v1.0.229
+       Fresh zmij v1.0.23
+       Fresh criterion-plot v0.5.0
+       Fresh walkdir v2.5.0
+       Fresh clap v4.6.7
+       Fresh is-terminal v0.4.17
+       Fresh regex v1.13.1
+       Fresh quote v1.0.47
+       Fresh generic-array v0.14.7
+       Fresh rand_core v0.6.4
+       Fresh crossbeam-epoch v0.9.21
+       Fresh rand_core v0.9.5
+       Fresh num-traits v0.2.19
+       Fresh serde_json v1.0.151
+       Fresh syn v2.0.119
+       Fresh crypto-common v0.1.7
+       Fresh syn v3.0.6
+       Fresh inout v0.1.4
+       Fresh crossbeam-deque v0.8.8
+       Fresh rand_xorshift v0.4.0
+       Fresh blake3 v1.8.7
+       Fresh rand v0.9.5
+       Fresh plotters v0.3.7
+       Fresh zerocopy-derive v0.8.57
+       Fresh serde_derive v1.0.229
+       Fresh cipher v0.4.4
+       Fresh rayon-core v1.13.0
+       Fresh universal-hash v0.5.1
+       Fresh aead v0.5.2
+       Dirty xchacha20-blake3-siv v0.1.0 (/tmp/cargo-mutants-XChaCha20-BLAKE3-SIV-RO2Eco.tmp): the file `src/lib.rs` has changed (1790346267.064290295s, 1s after last build at 1790346266.516290391s)
+   Compiling xchacha20-blake3-siv v0.1.0 (/tmp/cargo-mutants-XChaCha20-BLAKE3-SIV-RO2Eco.tmp)
+       Fresh zerocopy v0.8.57
+       Fresh serde v1.0.229
+       Fresh poly1305 v0.8.0
+       Fresh rayon v1.12.0
+       Fresh chacha20 v0.9.1
+       Fresh half v2.7.1
+       Fresh ppv-lite86 v0.2.21
+       Fresh tinytemplate v1.2.1
+       Fresh chacha20poly1305 v0.10.1
+       Fresh ciborium-ll v0.2.2
+       Fresh rand_chacha v0.9.0
+       Fresh ciborium v0.2.2
+       Fresh proptest v1.11.0
+       Fresh criterion v0.5.1
+     Running `/home/dev123/.rustup/toolchains/stable-x86_64-unknown-linux-gnu/bin/rustc --crate-name xchacha20_blake3_siv --edition=2021 src/lib.rs --error-format=json --json=diagnostic-rendered-ansi,artifacts,future-incompat --emit=dep-info,link -C embed-bitcode=no -C debuginfo=2 --warn=unexpected_cfgs '--deny=clippy::undocumented_unsafe_blocks' --check-cfg 'cfg(kani)' --test --cfg 'feature="hardened"' --check-cfg 'cfg(docsrs,test)' --check-cfg 'cfg(feature, values("hardened", "pure", "rng"))' -C metadata=950c5203e00bfaec -C extra-filename=-bf774737df67b035 --out-dir /home/dev123/.audit/mut-t3/debug/deps -C incremental=/home/dev123/.audit/mut-t3/debug/incremental -L dependency=/home/dev123/.audit/mut-t3/debug/deps --extern aead=/home/dev123/.audit/mut-t3/debug/deps/libaead-15f867564fd89215.rlib --extern blake3=/home/dev123/.audit/mut-t3/debug/deps/libblake3-f8715a0be2228f6c.rlib --extern chacha20poly1305=/home/dev123/.audit/mut-t3/debug/deps/libchacha20poly1305-4bd1b2516f5448bb.rlib --extern criterion=/home/dev123/.audit/mut-t3/debug/deps/libcriterion-7a3675e7698ab10d.rlib --extern proptest=/home/dev123/.audit/mut-t3/debug/deps/libproptest-35af120c880ec346.rlib --extern subtle=/home/dev123/.audit/mut-t3/debug/deps/libsubtle-55f702608e37091d.rlib --extern zeroize=/home/dev123/.audit/mut-t3/debug/deps/libzeroize-5087b20aec4f24d3.rlib -L native=/home/dev123/.audit/mut-t3/debug/build/blake3-db6c4b796fede836/out -L native=/home/dev123/.audit/mut-t3/debug/build/blake3-db6c4b796fede836/out`
+     Running `/home/dev123/.rustup/toolchains/stable-x86_64-unknown-linux-gnu/bin/rustc --crate-name xchacha20_blake3_siv --edition=2021 src/lib.rs --error-format=json --json=diagnostic-rendered-ansi,artifacts,future-incompat --crate-type lib --emit=dep-info,metadata,link -C embed-bitcode=no -C debuginfo=2 --warn=unexpected_cfgs '--deny=clippy::undocumented_unsafe_blocks' --check-cfg 'cfg(kani)' --cfg 'feature="hardened"' --check-cfg 'cfg(docsrs,test)' --check-cfg 'cfg(feature, values("hardened", "pure", "rng"))' -C metadata=b247ba3bf813dc04 -C extra-filename=-2745143b601a872d --out-dir /home/dev123/.audit/mut-t3/debug/deps -C incremental=/home/dev123/.audit/mut-t3/debug/incremental -L dependency=/home/dev123/.audit/mut-t3/debug/deps --extern blake3=/home/dev123/.audit/mut-t3/debug/deps/libblake3-f8715a0be2228f6c.rmeta --extern subtle=/home/dev123/.audit/mut-t3/debug/deps/libsubtle-55f702608e37091d.rmeta --extern zeroize=/home/dev123/.audit/mut-t3/debug/deps/libzeroize-5087b20aec4f24d3.rmeta -L native=/home/dev123/.audit/mut-t3/debug/build/blake3-db6c4b796fede836/out -L native=/home/dev123/.audit/mut-t3/debug/build/blake3-db6c4b796fede836/out`
+     Running `/home/dev123/.rustup/toolchains/stable-x86_64-unknown-linux-gnu/bin/rustc --crate-name security --edition=2021 tests/security.rs --error-format=json --json=diagnostic-rendered-ansi,artifacts,future-incompat --emit=dep-info,link -C embed-bitcode=no -C debuginfo=2 --warn=unexpected_cfgs '--deny=clippy::undocumented_unsafe_blocks' --check-cfg 'cfg(kani)' --test --cfg 'feature="hardened"' --check-cfg 'cfg(docsrs,test)' --check-cfg 'cfg(feature, values("hardened", "pure", "rng"))' -C metadata=d3b8ddfcb91c3b50 -C extra-filename=-f442725a1ed2505a --out-dir /home/dev123/.audit/mut-t3/debug/deps -C incremental=/home/dev123/.audit/mut-t3/debug/incremental -L dependency=/home/dev123/.audit/mut-t3/debug/deps --extern aead=/home/dev123/.audit/mut-t3/debug/deps/libaead-15f867564fd89215.rlib --extern blake3=/home/dev123/.audit/mut-t3/debug/deps/libblake3-f8715a0be2228f6c.rlib --extern chacha20poly1305=/home/dev123/.audit/mut-t3/debug/deps/libchacha20poly1305-4bd1b2516f5448bb.rlib --extern criterion=/home/dev123/.audit/mut-t3/debug/deps/libcriterion-7a3675e7698ab10d.rlib --extern proptest=/home/dev123/.audit/mut-t3/debug/deps/libproptest-35af120c880ec346.rlib --extern subtle=/home/dev123/.audit/mut-t3/debug/deps/libsubtle-55f702608e37091d.rlib --extern xchacha20_blake3_siv=/home/dev123/.audit/mut-t3/debug/deps/libxchacha20_blake3_siv-2745143b601a872d.rlib --extern zeroize=/home/dev123/.audit/mut-t3/debug/deps/libzeroize-5087b20aec4f24d3.rlib -L native=/home/dev123/.audit/mut-t3/debug/build/blake3-db6c4b796fede836/out -L native=/home/dev123/.audit/mut-t3/debug/build/blake3-db6c4b796fede836/out`
+     Running `/home/dev123/.rustup/toolchains/stable-x86_64-unknown-linux-gnu/bin/rustc --crate-name xsiv_stdin --edition=2021 examples/xsiv_stdin.rs --error-format=json --json=diagnostic-rendered-ansi,artifacts,future-incompat --crate-type bin --emit=dep-info,link -C embed-bitcode=no -C debuginfo=2 --warn=unexpected_cfgs '--deny=clippy::undocumented_unsafe_blocks' --check-cfg 'cfg(kani)' --cfg 'feature="hardened"' --check-cfg 'cfg(docsrs,test)' --check-cfg 'cfg(feature, values("hardened", "pure", "rng"))' -C metadata=fa26cb91f9e110f9 -C extra-filename=-255afc585759df06 --out-dir /home/dev123/.audit/mut-t3/debug/examples -C incremental=/home/dev123/.audit/mut-t3/debug/incremental -L dependency=/home/dev123/.audit/mut-t3/debug/deps --extern aead=/home/dev123/.audit/mut-t3/debug/deps/libaead-15f867564fd89215.rlib --extern blake3=/home/dev123/.audit/mut-t3/debug/deps/libblake3-f8715a0be2228f6c.rlib --extern chacha20poly1305=/home/dev123/.audit/mut-t3/debug/deps/libchacha20poly1305-4bd1b2516f5448bb.rlib --extern criterion=/home/dev123/.audit/mut-t3/debug/deps/libcriterion-7a3675e7698ab10d.rlib --extern proptest=/home/dev123/.audit/mut-t3/debug/deps/libproptest-35af120c880ec346.rlib --extern subtle=/home/dev123/.audit/mut-t3/debug/deps/libsubtle-55f702608e37091d.rlib --extern xchacha20_blake3_siv=/home/dev123/.audit/mut-t3/debug/deps/libxchacha20_blake3_siv-2745143b601a872d.rlib --extern zeroize=/home/dev123/.audit/mut-t3/debug/deps/libzeroize-5087b20aec4f24d3.rlib -L native=/home/dev123/.audit/mut-t3/debug/build/blake3-db6c4b796fede836/out -L native=/home/dev123/.audit/mut-t3/debug/build/blake3-db6c4b796fede836/out`
+     Running `/home/dev123/.rustup/toolchains/stable-x86_64-unknown-linux-gnu/bin/rustc --crate-name differential_reference --edition=2021 tests/differential_reference.rs --error-format=json --json=diagnostic-rendered-ansi,artifacts,future-incompat --emit=dep-info,link -C embed-bitcode=no -C debuginfo=2 --warn=unexpected_cfgs '--deny=clippy::undocumented_unsafe_blocks' --check-cfg 'cfg(kani)' --test --cfg 'feature="hardened"' --check-cfg 'cfg(docsrs,test)' --check-cfg 'cfg(feature, values("hardened", "pure", "rng"))' -C metadata=a32fe430f39ac063 -C extra-filename=-284229bb6078a162 --out-dir /home/dev123/.audit/mut-t3/debug/deps -C incremental=/home/dev123/.audit/mut-t3/debug/incremental -L dependency=/home/dev123/.audit/mut-t3/debug/deps --extern aead=/home/dev123/.audit/mut-t3/debug/deps/libaead-15f867564fd89215.rlib --extern blake3=/home/dev123/.audit/mut-t3/debug/deps/libblake3-f8715a0be2228f6c.rlib --extern chacha20poly1305=/home/dev123/.audit/mut-t3/debug/deps/libchacha20poly1305-4bd1b2516f5448bb.rlib --extern criterion=/home/dev123/.audit/mut-t3/debug/deps/libcriterion-7a3675e7698ab10d.rlib --extern proptest=/home/dev123/.audit/mut-t3/debug/deps/libproptest-35af120c880ec346.rlib --extern subtle=/home/dev123/.audit/mut-t3/debug/deps/libsubtle-55f702608e37091d.rlib --extern xchacha20_blake3_siv=/home/dev123/.audit/mut-t3/debug/deps/libxchacha20_blake3_siv-2745143b601a872d.rlib --extern zeroize=/home/dev123/.audit/mut-t3/debug/deps/libzeroize-5087b20aec4f24d3.rlib -L native=/home/dev123/.audit/mut-t3/debug/build/blake3-db6c4b796fede836/out -L native=/home/dev123/.audit/mut-t3/debug/build/blake3-db6c4b796fede836/out`
+     Running `/home/dev123/.rustup/toolchains/stable-x86_64-unknown-linux-gnu/bin/rustc --crate-name ctgrind --edition=2021 tests/ctgrind.rs --error-format=json --json=diagnostic-rendered-ansi,artifacts,future-incompat --emit=dep-info,link -C embed-bitcode=no -C debuginfo=2 --warn=unexpected_cfgs '--deny=clippy::undocumented_unsafe_blocks' --check-cfg 'cfg(kani)' --test --cfg 'feature="hardened"' --check-cfg 'cfg(docsrs,test)' --check-cfg 'cfg(feature, values("hardened", "pure", "rng"))' -C metadata=ff7b5ddd5f7b42cb -C extra-filename=-3c355a7e5ee4474d --out-dir /home/dev123/.audit/mut-t3/debug/deps -C incremental=/home/dev123/.audit/mut-t3/debug/incremental -L dependency=/home/dev123/.audit/mut-t3/debug/deps --extern aead=/home/dev123/.audit/mut-t3/debug/deps/libaead-15f867564fd89215.rlib --extern blake3=/home/dev123/.audit/mut-t3/debug/deps/libblake3-f8715a0be2228f6c.rlib --extern chacha20poly1305=/home/dev123/.audit/mut-t3/debug/deps/libchacha20poly1305-4bd1b2516f5448bb.rlib --extern criterion=/home/dev123/.audit/mut-t3/debug/deps/libcriterion-7a3675e7698ab10d.rlib --extern proptest=/home/dev123/.audit/mut-t3/debug/deps/libproptest-35af120c880ec346.rlib --extern subtle=/home/dev123/.audit/mut-t3/debug/deps/libsubtle-55f702608e37091d.rlib --extern xchacha20_blake3_siv=/home/dev123/.audit/mut-t3/debug/deps/libxchacha20_blake3_siv-2745143b601a872d.rlib --extern zeroize=/home/dev123/.audit/mut-t3/debug/deps/libzeroize-5087b20aec4f24d3.rlib -L native=/home/dev123/.audit/mut-t3/debug/build/blake3-db6c4b796fede836/out -L native=/home/dev123/.audit/mut-t3/debug/build/blake3-db6c4b796fede836/out`
+     Running `/home/dev123/.rustup/toolchains/stable-x86_64-unknown-linux-gnu/bin/rustc --crate-name profile_probe --edition=2021 examples/profile_probe.rs --error-format=json --json=diagnostic-rendered-ansi,artifacts,future-incompat --crate-type bin --emit=dep-info,link -C embed-bitcode=no -C debuginfo=2 --warn=unexpected_cfgs '--deny=clippy::undocumented_unsafe_blocks' --check-cfg 'cfg(kani)' --cfg 'feature="hardened"' --check-cfg 'cfg(docsrs,test)' --check-cfg 'cfg(feature, values("hardened", "pure", "rng"))' -C metadata=15fde9d5266d5ea2 -C extra-filename=-037d0bed203479c1 --out-dir /home/dev123/.audit/mut-t3/debug/examples -C incremental=/home/dev123/.audit/mut-t3/debug/incremental -L dependency=/home/dev123/.audit/mut-t3/debug/deps --extern aead=/home/dev123/.audit/mut-t3/debug/deps/libaead-15f867564fd89215.rlib --extern blake3=/home/dev123/.audit/mut-t3/debug/deps/libblake3-f8715a0be2228f6c.rlib --extern chacha20poly1305=/home/dev123/.audit/mut-t3/debug/deps/libchacha20poly1305-4bd1b2516f5448bb.rlib --extern criterion=/home/dev123/.audit/mut-t3/debug/deps/libcriterion-7a3675e7698ab10d.rlib --extern proptest=/home/dev123/.audit/mut-t3/debug/deps/libproptest-35af120c880ec346.rlib --extern subtle=/home/dev123/.audit/mut-t3/debug/deps/libsubtle-55f702608e37091d.rlib --extern xchacha20_blake3_siv=/home/dev123/.audit/mut-t3/debug/deps/libxchacha20_blake3_siv-2745143b601a872d.rlib --extern zeroize=/home/dev123/.audit/mut-t3/debug/deps/libzeroize-5087b20aec4f24d3.rlib -L native=/home/dev123/.audit/mut-t3/debug/build/blake3-db6c4b796fede836/out -L native=/home/dev123/.audit/mut-t3/debug/build/blake3-db6c4b796fede836/out`
+     Running `/home/dev123/.rustup/toolchains/stable-x86_64-unknown-linux-gnu/bin/rustc --crate-name decision --edition=2021 tests/decision.rs --error-format=json --json=diagnostic-rendered-ansi,artifacts,future-incompat --emit=dep-info,link -C embed-bitcode=no -C debuginfo=2 --warn=unexpected_cfgs '--deny=clippy::undocumented_unsafe_blocks' --check-cfg 'cfg(kani)' --test --cfg 'feature="hardened"' --check-cfg 'cfg(docsrs,test)' --check-cfg 'cfg(feature, values("hardened", "pure", "rng"))' -C metadata=b0ae64b2bb017d9a -C extra-filename=-9ca86fe0dd893810 --out-dir /home/dev123/.audit/mut-t3/debug/deps -C incremental=/home/dev123/.audit/mut-t3/debug/incremental -L dependency=/home/dev123/.audit/mut-t3/debug/deps --extern aead=/home/dev123/.audit/mut-t3/debug/deps/libaead-15f867564fd89215.rlib --extern blake3=/home/dev123/.audit/mut-t3/debug/deps/libblake3-f8715a0be2228f6c.rlib --extern chacha20poly1305=/home/dev123/.audit/mut-t3/debug/deps/libchacha20poly1305-4bd1b2516f5448bb.rlib --extern criterion=/home/dev123/.audit/mut-t3/debug/deps/libcriterion-7a3675e7698ab10d.rlib --extern proptest=/home/dev123/.audit/mut-t3/debug/deps/libproptest-35af120c880ec346.rlib --extern subtle=/home/dev123/.audit/mut-t3/debug/deps/libsubtle-55f702608e37091d.rlib --extern xchacha20_blake3_siv=/home/dev123/.audit/mut-t3/debug/deps/libxchacha20_blake3_siv-2745143b601a872d.rlib --extern zeroize=/home/dev123/.audit/mut-t3/debug/deps/libzeroize-5087b20aec4f24d3.rlib -L native=/home/dev123/.audit/mut-t3/debug/build/blake3-db6c4b796fede836/out -L native=/home/dev123/.audit/mut-t3/debug/build/blake3-db6c4b796fede836/out`
+     Running `/home/dev123/.rustup/toolchains/stable-x86_64-unknown-linux-gnu/bin/rustc --crate-name threads --edition=2021 tests/threads.rs --error-format=json --json=diagnostic-rendered-ansi,artifacts,future-incompat --emit=dep-info,link -C embed-bitcode=no -C debuginfo=2 --warn=unexpected_cfgs '--deny=clippy::undocumented_unsafe_blocks' --check-cfg 'cfg(kani)' --test --cfg 'feature="hardened"' --check-cfg 'cfg(docsrs,test)' --check-cfg 'cfg(feature, values("hardened", "pure", "rng"))' -C metadata=7726508dff626c23 -C extra-filename=-e001592f162af788 --out-dir /home/dev123/.audit/mut-t3/debug/deps -C incremental=/home/dev123/.audit/mut-t3/debug/incremental -L dependency=/home/dev123/.audit/mut-t3/debug/deps --extern aead=/home/dev123/.audit/mut-t3/debug/deps/libaead-15f867564fd89215.rlib --extern blake3=/home/dev123/.audit/mut-t3/debug/deps/libblake3-f8715a0be2228f6c.rlib --extern chacha20poly1305=/home/dev123/.audit/mut-t3/debug/deps/libchacha20poly1305-4bd1b2516f5448bb.rlib --extern criterion=/home/dev123/.audit/mut-t3/debug/deps/libcriterion-7a3675e7698ab10d.rlib --extern proptest=/home/dev123/.audit/mut-t3/debug/deps/libproptest-35af120c880ec346.rlib --extern subtle=/home/dev123/.audit/mut-t3/debug/deps/libsubtle-55f702608e37091d.rlib --extern xchacha20_blake3_siv=/home/dev123/.audit/mut-t3/debug/deps/libxchacha20_blake3_siv-2745143b601a872d.rlib --extern zeroize=/home/dev123/.audit/mut-t3/debug/deps/libzeroize-5087b20aec4f24d3.rlib -L native=/home/dev123/.audit/mut-t3/debug/build/blake3-db6c4b796fede836/out -L native=/home/dev123/.audit/mut-t3/debug/build/blake3-db6c4b796fede836/out`
+     Running `/home/dev123/.rustup/toolchains/stable-x86_64-unknown-linux-gnu/bin/rustc --crate-name bench_aead --edition=2021 examples/bench_aead.rs --error-format=json --json=diagnostic-rendered-ansi,artifacts,future-incompat --crate-type bin --emit=dep-info,link -C embed-bitcode=no -C debuginfo=2 --warn=unexpected_cfgs '--deny=clippy::undocumented_unsafe_blocks' --check-cfg 'cfg(kani)' --cfg 'feature="hardened"' --check-cfg 'cfg(docsrs,test)' --check-cfg 'cfg(feature, values("hardened", "pure", "rng"))' -C metadata=4bab3a623a477eda -C extra-filename=-bf19070c9103afa1 --out-dir /home/dev123/.audit/mut-t3/debug/examples -C incremental=/home/dev123/.audit/mut-t3/debug/incremental -L dependency=/home/dev123/.audit/mut-t3/debug/deps --extern aead=/home/dev123/.audit/mut-t3/debug/deps/libaead-15f867564fd89215.rlib --extern blake3=/home/dev123/.audit/mut-t3/debug/deps/libblake3-f8715a0be2228f6c.rlib --extern chacha20poly1305=/home/dev123/.audit/mut-t3/debug/deps/libchacha20poly1305-4bd1b2516f5448bb.rlib --extern criterion=/home/dev123/.audit/mut-t3/debug/deps/libcriterion-7a3675e7698ab10d.rlib --extern proptest=/home/dev123/.audit/mut-t3/debug/deps/libproptest-35af120c880ec346.rlib --extern subtle=/home/dev123/.audit/mut-t3/debug/deps/libsubtle-55f702608e37091d.rlib --extern xchacha20_blake3_siv=/home/dev123/.audit/mut-t3/debug/deps/libxchacha20_blake3_siv-2745143b601a872d.rlib --extern zeroize=/home/dev123/.audit/mut-t3/debug/deps/libzeroize-5087b20aec4f24d3.rlib -L native=/home/dev123/.audit/mut-t3/debug/build/blake3-db6c4b796fede836/out -L native=/home/dev123/.audit/mut-t3/debug/build/blake3-db6c4b796fede836/out`
+     Running `/home/dev123/.rustup/toolchains/stable-x86_64-unknown-linux-gnu/bin/rustc --crate-name timing --edition=2021 tests/timing.rs --error-format=json --json=diagnostic-rendered-ansi,artifacts,future-incompat --emit=dep-info,link -C embed-bitcode=no -C debuginfo=2 --warn=unexpected_cfgs '--deny=clippy::undocumented_unsafe_blocks' --check-cfg 'cfg(kani)' --test --cfg 'feature="hardened"' --check-cfg 'cfg(docsrs,test)' --check-cfg 'cfg(feature, values("hardened", "pure", "rng"))' -C metadata=465c593629f530da -C extra-filename=-6b6c9eea360738ff --out-dir /home/dev123/.audit/mut-t3/debug/deps -C incremental=/home/dev123/.audit/mut-t3/debug/incremental -L dependency=/home/dev123/.audit/mut-t3/debug/deps --extern aead=/home/dev123/.audit/mut-t3/debug/deps/libaead-15f867564fd89215.rlib --extern blake3=/home/dev123/.audit/mut-t3/debug/deps/libblake3-f8715a0be2228f6c.rlib --extern chacha20poly1305=/home/dev123/.audit/mut-t3/debug/deps/libchacha20poly1305-4bd1b2516f5448bb.rlib --extern criterion=/home/dev123/.audit/mut-t3/debug/deps/libcriterion-7a3675e7698ab10d.rlib --extern proptest=/home/dev123/.audit/mut-t3/debug/deps/libproptest-35af120c880ec346.rlib --extern subtle=/home/dev123/.audit/mut-t3/debug/deps/libsubtle-55f702608e37091d.rlib --extern xchacha20_blake3_siv=/home/dev123/.audit/mut-t3/debug/deps/libxchacha20_blake3_siv-2745143b601a872d.rlib --extern zeroize=/home/dev123/.audit/mut-t3/debug/deps/libzeroize-5087b20aec4f24d3.rlib -L native=/home/dev123/.audit/mut-t3/debug/build/blake3-db6c4b796fede836/out -L native=/home/dev123/.audit/mut-t3/debug/build/blake3-db6c4b796fede836/out`
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.44s
+  Executable `/home/dev123/.audit/mut-t3/debug/deps/xchacha20_blake3_siv-bf774737df67b035`
+  Executable `/home/dev123/.audit/mut-t3/debug/deps/ctgrind-3c355a7e5ee4474d`
+  Executable `/home/dev123/.audit/mut-t3/debug/deps/decision-9ca86fe0dd893810`
+  Executable `/home/dev123/.audit/mut-t3/debug/deps/differential_reference-284229bb6078a162`
+  Executable `/home/dev123/.audit/mut-t3/debug/deps/security-f442725a1ed2505a`
+  Executable `/home/dev123/.audit/mut-t3/debug/deps/threads-e001592f162af788`
+  Executable `/home/dev123/.audit/mut-t3/debug/deps/timing-6b6c9eea360738ff`
+
+*** result: Success
+
+*** /home/dev123/.rustup/toolchains/stable-x86_64-unknown-linux-gnu/bin/cargo test --verbose --package=xchacha20-blake3-siv@0.1.0 --features=hardened --test decision
+       Fresh cfg-if v1.0.5
+       Fresh libc v0.2.189
+       Fresh unicode-ident v1.0.26
+       Fresh version_check v0.9.5
+       Fresh typenum v1.20.1
+       Fresh getrandom v0.2.17
+       Fresh autocfg v1.5.1
+       Fresh proc-macro2 v1.0.107
+       Fresh rand_core v0.6.4
+       Fresh zeroize v1.9.0
+       Fresh find-msvc-tools v0.1.13
+       Fresh shlex v2.0.1
+       Fresh either v1.18.0
+       Fresh regex-syntax v0.8.11
+       Fresh subtle v2.6.1
+       Fresh cpufeatures v0.2.17
+       Fresh memchr v2.8.3
+       Fresh ciborium-io v0.2.2
+       Fresh anstyle v1.0.14
+       Fresh clap_lex v1.1.1
+       Fresh itoa v1.0.18
+       Fresh plotters-backend v0.3.7
+       Fresh constant_time_eq v0.4.2
+       Fresh same-file v1.0.6
+       Fresh opaque-debug v0.3.1
+       Fresh cpufeatures v0.3.1
+       Fresh bit-vec v0.8.0
+       Fresh quote v1.0.47
+       Fresh crossbeam-utils v0.8.23
+       Fresh getrandom v0.3.4
+       Fresh serde_core v1.0.229
+       Fresh cc v1.4.7
+       Fresh plotters-svg v0.3.7
+       Fresh itertools v0.10.5
+       Fresh clap_builder v4.6.7
+       Fresh regex-automata v0.4.18
+       Fresh arrayvec v0.7.8
+       Fresh cast v0.3.0
+       Fresh bit-set v0.8.0
+       Fresh walkdir v2.5.0
+       Fresh is-terminal v0.4.17
+       Fresh anes v0.1.6
+       Fresh unarray v0.1.4
+       Fresh oorandom v11.1.5
+       Fresh bitflags v2.13.2
+       Fresh once_cell v1.21.4
+       Fresh syn v2.0.119
+       Fresh generic-array v0.14.7
+       Fresh syn v3.0.6
+       Fresh crossbeam-epoch v0.9.21
+       Fresh rand_core v0.9.5
+       Fresh num-traits v0.2.19
+       Fresh zmij v1.0.23
+       Fresh regex v1.13.1
+       Fresh clap v4.6.7
+       Fresh criterion-plot v0.5.0
+       Fresh zerocopy-derive v0.8.57
+       Fresh crypto-common v0.1.7
+       Fresh serde_derive v1.0.229
+       Fresh crossbeam-deque v0.8.8
+       Fresh inout v0.1.4
+       Fresh serde_json v1.0.151
+       Fresh plotters v0.3.7
+       Fresh rand v0.9.5
+       Fresh rand_xorshift v0.4.0
+       Fresh zerocopy v0.8.57
+       Fresh serde v1.0.229
+       Fresh universal-hash v0.5.1
+       Fresh rayon-core v1.13.0
+       Fresh cipher v0.4.4
+       Fresh blake3 v1.8.7
+       Fresh aead v0.5.2
+       Fresh half v2.7.1
+       Fresh ppv-lite86 v0.2.21
+       Fresh poly1305 v0.8.0
+       Fresh tinytemplate v1.2.1
+       Fresh rayon v1.12.0
+       Fresh chacha20 v0.9.1
+       Fresh ciborium-ll v0.2.2
+       Fresh rand_chacha v0.9.0
+       Fresh chacha20poly1305 v0.10.1
+       Fresh ciborium v0.2.2
+       Fresh proptest v1.11.0
+       Fresh criterion v0.5.1
+       Fresh xchacha20-blake3-siv v0.1.0 (/tmp/cargo-mutants-XChaCha20-BLAKE3-SIV-RO2Eco.tmp)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.04s
+     Running `/home/dev123/.audit/mut-t3/debug/deps/decision-9ca86fe0dd893810`
+
+running 1 test
+test a_forged_tag_must_not_be_accepted ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.04s
+
+
+*** result: Success

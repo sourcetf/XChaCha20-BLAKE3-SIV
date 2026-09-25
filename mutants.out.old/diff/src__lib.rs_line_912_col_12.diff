@@ -1,0 +1,21 @@
+--- src/lib.rs
++++ delete ! in decrypt
+@@ -904,17 +904,17 @@
+         // Fault-injection hardening (opt-in `hardened` feature): two *recomputed*
+         // checks, each with its own branch, so a single skipped instruction reaches the
+         // other gate instead of accepting. `&` and never `&&`: both comparisons always
+         // run, so the time this takes does not reveal which gate failed. No `unwrap_u8`
+         // and no early exit inside the comparisons -- `bool::from` is the conversion
+         // subtle documents for exactly this place (the end of a verification).
+         // What it does and does not defend against: see README "What is not defended
+         // against".
+-        if !bool::from(gates.0) {
++        if  /* ~ changed by cargo-mutants ~ */bool::from(gates.0) {
+             zeroize_slice(&mut plaintext);
+             return Err(Error::AuthenticationFailed);
+         }
+         if !bool::from(gates.1) {
+             zeroize_slice(&mut plaintext);
+             return Err(Error::AuthenticationFailed);
+         }
+         Ok(Plaintext(plaintext))

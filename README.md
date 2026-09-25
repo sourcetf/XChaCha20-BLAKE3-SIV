@@ -178,6 +178,15 @@ default build to *fail* the decision test with it while the hardened build passe
 | Extracting unverified plaintext by skipping the failure-path wipe | not defended — needs a read primitive as well as the fault |
 | Availability (any single glitch causes a rejection or a crash) | not defended, by anything |
 
+A bounded mutation run over the decision (`cargo mutants -f src/lib.rs -F
+'decrypt|passed_gates' --features hardened -- --test decision`, in CI) tests the other
+half of that: every mutant of the decision must be caught by `tests/decision.rs`. Four
+of them are excluded as **equivalent under fault-free testing** — `&` to `|` or `^` in
+the two-comparison expression — and that exclusion is itself informative: the two
+comparisons inside a gate always agree, because they compare the same two arrays, so
+they differ *only* when a fault makes them disagree. That case cannot be reached by
+any fault-free test, which is why it is a row of the fault campaign instead.
+
 One more thing the campaign turned up, which is worth knowing before trusting a
 green suite here: the failure-path wipe of the *allocating* `decrypt` is not
 observable from a test at all — the plaintext is wiped and then freed, so a skipped

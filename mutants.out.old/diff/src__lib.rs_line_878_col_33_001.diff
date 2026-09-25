@@ -1,0 +1,21 @@
+--- src/lib.rs
++++ replace & with ^ in decrypt
+@@ -870,17 +870,17 @@
+     let (mut enc_key, mut enc_nonce) = derive_enc(&enc_seed, tag);
+ 
+     let mut plaintext = vec![0u8; ciphertext.len()];
+     chacha20_keystream(&enc_key, 0, &enc_nonce, ciphertext, &mut plaintext);
+ 
+     let mut computed_tag = derive_tag(&mac_key, key, nonce, aad, &plaintext);
+     #[cfg(feature = "hardened")]
+     let gates = (
+-        computed_tag.ct_eq(tag) & tag.ct_eq(&computed_tag),
++        computed_tag.ct_eq(tag) ^ /* ~ changed by cargo-mutants ~ */ tag.ct_eq(&computed_tag),
+         computed_tag.ct_eq(tag) & tag.ct_eq(&computed_tag),
+     );
+     #[cfg(not(feature = "hardened"))]
+     let auth_ok = computed_tag.ct_eq(tag);
+ 
+     zeroize_array(&mut mac_key);
+     zeroize_array(&mut enc_seed);
+     zeroize_array(&mut enc_key);

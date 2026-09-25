@@ -1,0 +1,5 @@
+src/lib.rs:912:12: delete ! in decrypt
+src/lib.rs:916:12: delete ! in decrypt
+src/lib.rs:935:5: replace decrypt_in_place_detached -> Result<(), Error> with Ok(())
+src/lib.rs:978:12: delete ! in decrypt_in_place_detached
+src/lib.rs:982:12: delete ! in decrypt_in_place_detached

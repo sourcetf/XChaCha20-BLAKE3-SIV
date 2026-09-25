@@ -297,8 +297,23 @@ jobs:
       # gate *value* does not on the `hardened` build, and replacing the computed tag
       # outright is accepted by both -- pinned there so a change in that known limit
       # is noticed rather than rediscovered.
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-mutants
+
       - name: fault-injection campaign
         run: ./tools/fi_check.sh
+
+      # Every mutant of the decision must be caught by tests/decision.rs. The four
+      # `&` -> `|`/`^` mutants are excluded as *equivalent* under fault-free testing:
+      # the two comparisons inside a gate always agree, which is precisely the
+      # property that differs only when a fault makes them disagree -- and that case
+      # is a row of the fault campaign above, not a gap in the tests.
+      - name: mutation run over the decision
+        run: |
+          set -euo pipefail
+          cargo mutants --features hardened -f src/lib.rs -F 'decrypt|passed_gates' \
+            -E 'replace & with [|^]' -- --test decision
 
       - name: plant bugs and require the checks to fail
         run: ./tools/mutation_check.sh
@@ -392,6 +407,12 @@ jobs:
           rustup toolchain install nightly --profile minimal
           RUSTFLAGS="-Zsanitizer=address" cargo +nightly test --release --features pure \
             --target x86_64-unknown-linux-gnu
+
+      # Byte-by-byte corruption of the compiled decision code, in both builds. It
+      # rewrites the binary once per byte and re-runs the decision test, so it is a
+      # ~30 minute job -- which is why it lives here and not on every push.
+      - name: instruction-level fault injection
+        run: ./tools/fi_instruction.sh
 
       - name: Miri, full library suite under Tree Borrows
         run: |

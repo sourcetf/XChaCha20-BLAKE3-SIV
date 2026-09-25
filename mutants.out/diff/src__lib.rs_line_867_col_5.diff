@@ -1,0 +1,75 @@
+--- src/lib.rs
++++ replace decrypt -> Result<Plaintext, Error> with Ok(Default::default())
+@@ -859,71 +859,17 @@
+ #[must_use = "the returned plaintext must be handled"]
+ pub fn decrypt(
+     key: &[u8; 32],
+     nonce: &[u8; NONCE_LEN],
+     aad: &[u8],
+     ciphertext: &[u8],
+     tag: &[u8; TAG_LEN],
+ ) -> Result<Plaintext, Error> {
+-    check_lengths(ciphertext.len(), aad.len())?;
+-
+-    let (mut mac_key, mut enc_seed) = derive_material(key, nonce);
+-    let (mut enc_key, mut enc_nonce) = derive_enc(&enc_seed, tag);
+-
+-    let mut plaintext = vec![0u8; ciphertext.len()];
+-    chacha20_keystream(&enc_key, 0, &enc_nonce, ciphertext, &mut plaintext);
+-
+-    let mut computed_tag = derive_tag(&mac_key, key, nonce, aad, &plaintext);
+-    #[cfg(feature = "hardened")]
+-    let gates = (
+-        computed_tag.ct_eq(tag) & tag.ct_eq(&computed_tag),
+-        computed_tag.ct_eq(tag) & tag.ct_eq(&computed_tag),
+-    );
+-    #[cfg(not(feature = "hardened"))]
+-    let auth_ok = computed_tag.ct_eq(tag);
+-
+-    zeroize_array(&mut mac_key);
+-    zeroize_array(&mut enc_seed);
+-    zeroize_array(&mut enc_key);
+-    // The per-message ChaCha20 nonce is secret-derived too (it comes out of
+-    // the same XOF call as `enc_key`), so it is wiped with the rest rather
+-    // than left on the stack.
+-    zeroize_array(&mut enc_nonce);
+-    zeroize_array(&mut computed_tag);
+-
+-    #[cfg(not(feature = "hardened"))]
+-    if bool::from(auth_ok) {
+-        Ok(Plaintext(plaintext))
+-    } else {
+-        // Per spec, MUST NOT expose unverified plaintext.
+-        zeroize_slice(&mut plaintext);
+-        Err(Error::AuthenticationFailed)
+-    }
+-
+-    #[cfg(feature = "hardened")]
+-    {
+-        // Fault-injection hardening (opt-in `hardened` feature): two *recomputed*
+-        // checks, each with its own branch, so a single skipped instruction reaches the
+-        // other gate instead of accepting. `&` and never `&&`: both comparisons always
+-        // run, so the time this takes does not reveal which gate failed. No `unwrap_u8`
+-        // and no early exit inside the comparisons -- `bool::from` is the conversion
+-        // subtle documents for exactly this place (the end of a verification).
+-        // What it does and does not defend against: see README "What is not defended
+-        // against".
+-        if !bool::from(gates.0) {
+-            zeroize_slice(&mut plaintext);
+-            return Err(Error::AuthenticationFailed);
+-        }
+-        if !bool::from(gates.1) {
+-            zeroize_slice(&mut plaintext);
+-            return Err(Error::AuthenticationFailed);
+-        }
+-        Ok(Plaintext(plaintext))
+-    }
++    Ok(Default::default()) /* ~ changed by cargo-mutants ~ */
+ }
+ 
+ /// Decrypt `buffer` in place, verifying the detached tag.
+ ///
+ /// On failure the buffer is zeroized, so unverified plaintext is never left in
+ /// place. Note this destroys the caller's buffer on the failure path.
+ pub fn decrypt_in_place_detached(
+     key: &[u8; 32],
