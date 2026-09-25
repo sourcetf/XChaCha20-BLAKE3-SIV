@@ -106,20 +106,28 @@ if base != "rejected":
 accepted, crashed, untouched = [], 0, 0
 offs = [off + i for off, size in covered for i in range(0, size, stride)]
 for off in offs:
-    body = bytearray(original)
-    was = body[off]
-    if was == 0x90:
-        continue
-    body[off] = 0x90
-    with open(binpath, "wb") as fh:
-        fh.write(body)
+    # Two single-byte writes per fault rather than rewriting the whole binary: the
+    # first version rewrote it twice per byte, which is ~20 GB of I/O for this scan
+    # and was a large part of why it took so long.
+    # Two single-byte writes per fault instead of rewriting the binary twice, which
+    # was ~20 GB of I/O for this scan. The handle cannot stay open across the run --
+    # executing a file that is open for writing is ETXTBSY -- so it is written,
+    # closed, executed, reopened and restored.
+    with open(binpath, "r+b") as fh:
+        fh.seek(off)
+        was = fh.read(1)[0]
+        if was == 0x90:
+            continue
+        fh.seek(off)
+        fh.write(b"\x90")
     try:
         verdict = run()
     except subprocess.TimeoutExpired:
         verdict = "crashed"
     finally:
-        with open(binpath, "wb") as fh:
-            fh.write(original)
+        with open(binpath, "r+b") as fh:
+            fh.seek(off)
+            fh.write(bytes([was]))
     if verdict == "accepted":
         accepted.append(off)
     elif verdict == "crashed":
