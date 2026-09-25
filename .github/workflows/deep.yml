@@ -11,6 +11,10 @@
 name: Deep checks
 
 on:
+  # `workflow_dispatch` exists for the jobs that depend on runner availability or on
+  # someone deciding to spend the time -- the real-hardware ARM job, and re-running
+  # the wide audit on demand. Neither is gated on every push.
+  workflow_dispatch:
   push:
     branches: [main]
   pull_request:
@@ -18,7 +22,6 @@ on:
     # Weekly, so a toolchain or tool regression does not go unnoticed just
     # because the source is unchanged.
     - cron: "0 4 * * 1"
-  workflow_dispatch:
 
 concurrency:
   group: deep-${{ github.ref }}
@@ -161,6 +164,25 @@ jobs:
       - name: run ctgrind with the hardened decision
         run: ./tools/ctgrind.sh --features hardened
 
+  audit:
+    name: cargo-audit
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: audit
+      # cargo-deny (next job) also checks advisories, but through its own engine and
+      # its own pinned database; running both is deliberate rather than redundant --
+      # a miss in one is not a miss in the other.
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-audit
+      - name: audit the dependency tree
+        run: cargo audit --deny warnings
+
   deny:
     name: cargo-deny
     runs-on: ubuntu-latest
@@ -191,6 +213,41 @@ jobs:
   # report, and the "must exit 99" guard was being satisfied by unrelated startup
   # noise, so the harness was green while proving nothing. A mutation check is
   # what catches that class: plant a known bug and require the check to fail.
+  reproducible:
+    name: deterministic build
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: reproducible
+
+      # Two clean builds of the same source in different directories, with the
+      # source and registry paths normalised, must produce byte-identical files.
+      # What this establishes is determinism for one toolchain and one dependency
+      # set (`--locked`): the recipe is path-normalised on purpose, because absolute
+      # build paths are the usual reason two builds differ. What it does *not*
+      # establish is reproducibility across machines and toolchains -- that needs
+      # the same compiler version, and the C toolchain as well, since BLAKE3's
+      # kernels are compiled by `cc`.
+      - name: build twice and compare
+        run: |
+          set -euo pipefail
+          remap="--remap-path-prefix=$PWD=/build --remap-path-prefix=$HOME/.cargo=/cargo"
+          for d in a b; do
+            RUSTFLAGS="$remap" CARGO_TARGET_DIR="$PWD/target-$d" \
+              cargo build --release --locked --example xsiv_stdin
+          done
+          sha256sum target-a/release/examples/xsiv_stdin target-b/release/examples/xsiv_stdin
+          if cmp -s target-a/release/examples/xsiv_stdin target-b/release/examples/xsiv_stdin; then
+            echo "OK: the two builds are byte-identical"
+          else
+            echo "FAIL: the build is not deterministic under path normalisation" >&2
+            exit 1
+          fi
+
   mutation:
     name: verify the verifier (mutation check)
     runs-on: ubuntu-latest
@@ -217,6 +274,51 @@ jobs:
 
       - name: plant bugs and require the checks to fail
         run: ./tools/mutation_check.sh
+
+  coverage:
+    name: coverage and dependency inventory
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    # Informational, not a gate. A percentage threshold on this crate would be a
+    # guess: the aarch64, big-endian and AVX2 kernels cannot all be executed on one
+    # runner (the cross-exec jobs cover them under qemu, where the profiler cannot
+    # follow), so a defensible floor would need per-target exclusions and would
+    # reward editing the exclusions. What is useful is the artifact: it shows which
+    # paths a change stopped exercising.
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: coverage
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-llvm-cov
+
+      - name: coverage over the suite
+        run: |
+          set -euo pipefail
+          cargo llvm-cov --all-features --release --lcov --output-path lcov.info
+          cargo llvm-cov report --summary-only
+
+      # An inventory, deliberately not labelled an SBOM: a CycloneDX or SPDX
+      # document needs a generator that is not installed here, and calling
+      # `cargo metadata` output an SBOM would be using the word for something it is
+      # not. This still answers "what is in the tree" for a given commit.
+      - name: dependency inventory
+        run: |
+          set -euo pipefail
+          cargo metadata --format-version 1 > dependencies.json
+          cargo tree --edges normal > dependencies.txt
+          cargo tree --edges normal | sort -u | wc -l
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: coverage-and-dependencies
+          path: |
+            lcov.info
+            dependencies.json
+            dependencies.txt
 
   wide:
     name: wide audit (scheduled)
@@ -257,6 +359,54 @@ jobs:
           rustup component add miri --toolchain nightly
           MIRIFLAGS="-Zmiri-disable-isolation -Zmiri-strict-provenance -Zmiri-tree-borrows" \
             cargo +nightly miri test --release --features pure --lib
+
+      # 15 minutes across every core the runner has, versus the two the push-time
+      # job spends. The scheduled run is where coverage-of-time is affordable.
+      - name: fifteen minutes of fuzzing on every core
+        run: |
+          set -euo pipefail
+          rustup toolchain install nightly --profile minimal
+          workers="$(nproc)"
+          cargo +nightly fuzz run roundtrip --target x86_64-unknown-linux-gnu -- \
+            "-workers=$workers" "-jobs=$workers" -max_total_time=900 -print_final_stats=1
+
+  arm64:
+    name: real aarch64 hardware (dispatch only)
+    # `ubuntu-24.04-arm` is a hosted ARM64 runner, and its availability is not
+    # something this repository controls -- so this job runs only when someone
+    # dispatches the workflow, which is also the only honest moment to spend ten
+    # minutes of runner time on numbers that are informational.
+    #
+    # Why it exists: every other aarch64 check in this repository *executes* the
+    # NEON kernel under qemu (correctness), and qemu cannot model aarch64
+    # performance -- so the README has always said the NEON figures need real
+    # hardware. This is where they come from.
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: arm64
+
+      - name: what is this machine
+        run: |
+          uname -m
+          grep -m1 "model name\|CPU part\|Features" /proc/cpuinfo || true
+          nproc
+
+      # `blake3` uses its C kernels here (a compiler is available), which is what
+      # the crate ships by default.
+      - name: round trip against XChaCha20-Poly1305, in one process
+        run: |
+          for size in 64 256 1024 4096 16384 65536 1048576; do
+            cargo run --release --quiet --example profile_probe "$size" 2000
+          done
+
+      - name: the head-to-head criterion table as well
+        run: cargo bench --bench compare -- --noplot
 
   fuzz:
     name: fuzzing (libFuzzer + ASAN)
