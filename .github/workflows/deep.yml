@@ -285,6 +285,15 @@ jobs:
     # follow), so a defensible floor would need per-target exclusions and would
     # reward editing the exclusions. What is useful is the artifact: it shows which
     # paths a change stopped exercising.
+    #
+    # `continue-on-error` because this is the one job in the suite whose exact
+    # invocation could not be verified locally -- the tool would not install here,
+    # network blocked -- and two attempts already showed how sharp its edges are: a
+    # run with `--all-features` left `cargo llvm-cov report` looking for artefacts it
+    # could not address ("not found object files"), and adding `--all-features` to
+    # the report is rejected outright ("invalid option '--all-features' for
+    # subcommand 'report'"). So it is a *single* invocation -- the lcov file is the
+    # artifact -- and a failure here is a signal to look, not a gate.
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
@@ -298,13 +307,10 @@ jobs:
       - name: coverage over the suite
         run: |
           set -euo pipefail
-          # Same feature set and profile in both invocations: `report` locates the
-          # instrumented artefacts by re-resolving the cargo arguments, and the
-          # first version of this job passed `--all-features --release` to the run
-          # but not to the report, which failed with "not found object files" after
-          # every test had already passed.
-          cargo llvm-cov --all-features --release --summary-only
-          cargo llvm-cov report --all-features --release --lcov --output-path lcov.info
+          # One invocation, default features: the run and the report cannot be split
+          # across different feature sets, and `report` takes no feature flags, so a
+          # single call is the combination that cannot go inconsistent.
+          cargo llvm-cov --release --lcov --output-path lcov.info
 
       # An inventory, deliberately not labelled an SBOM: a CycloneDX or SPDX
       # document needs a generator that is not installed here, and calling
