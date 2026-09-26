@@ -469,8 +469,21 @@ fn kat_regression_lock() {
 #[test]
 fn max_msg_size_is_public_and_is_the_documented_limit() {
     assert_eq!(xchacha20_blake3_siv::MAX_MSG_SIZE, 1u64 << 38);
+
+    // On a 64-bit target the limit is a length a slice could have; on a 32-bit one it
+    // is *above* `usize::MAX`, so the guard cannot fire there and a length can never
+    // be rejected as too long (the crate's own `test_length_guard_cannot_fire_on_32_bit`
+    // records the same asymmetry). Getting this backwards is a compile-time-valid
+    // assertion that fails only on the target the tests are least often run on, which
+    // is how the first version of this test passed here and failed in the i686 job.
+    #[cfg(target_pointer_width = "64")]
     assert!(
         xchacha20_blake3_siv::MAX_MSG_SIZE <= usize::MAX as u64,
-        "the limit must be expressible as a length on a 64-bit target"
+        "on 64-bit the limit must be expressible as a length"
+    );
+    #[cfg(target_pointer_width = "32")]
+    assert!(
+        xchacha20_blake3_siv::MAX_MSG_SIZE > usize::MAX as u64,
+        "on 32-bit the format's limit is above every possible length"
     );
 }

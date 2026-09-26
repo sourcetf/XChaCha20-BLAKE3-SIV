@@ -44,12 +44,15 @@ const ALLOWED: &[(&str, &str)] = &[(
 /// and update this table, `README.md` and `SECURITY.md` together.
 ///
 /// The two `if`s added by the fail-closed decision shape (`if decision.is_ok()` in
-/// each decrypt entry point) are the most recent entry: they branch on a
-/// discriminant the *caller* wrote as a constant, so they depend on nothing secret
-/// -- which is what makes them constant-time, and why they are listed rather than
-/// suppressed.
+/// each decrypt entry point) are one recent entry: they branch on a discriminant the
+/// *caller* wrote as a constant, so they depend on nothing secret -- which is what
+/// makes them constant-time, and why they are listed rather than suppressed. The
+/// other is the decision function itself: one body with the first gate and, under
+/// `#[cfg(feature = "hardened")]`, the second. When the two `#[cfg]`-selected
+/// definitions were merged into that one body this count moved 15 -> 14, which is
+/// this tripwire doing exactly what it is for.
 const CONTROL_FLOW: &[(&str, usize)] = &[
-    ("if", 15),
+    ("if", 14),
     ("while", 7),
     ("for", 27),
     ("loop", 0),
