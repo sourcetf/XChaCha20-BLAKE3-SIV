@@ -159,6 +159,30 @@ defended or measured:
   computation, i.e. a second MAC pass per message) rather than implying the gates
   cover it.
 
+### The length limit and the counter, and the allocating API
+
+- **`MAX_MSG_SIZE` is now bound to the ChaCha20 block counter by a `const` assertion**:
+  2^38 bytes is 2^32 blocks, exactly the counter's capacity, and every keystream path
+  increments with `ctr.wrapping_add(1)` — so raising the limit by even one block would
+  wrap the counter to 0 *inside a single message* and reuse keystream, silently. The
+  binding makes that a compile error (verified by changing the constant to `2^38 + 64`
+  and watching the build fail, then reverting), and `tests/counter_range.rs` adds the
+  run-time arithmetic plus the property the bound rests on: every call site starts the
+  counter at zero or forwards its own, so the reachable range is `0 ..= blocks - 1`.
+  Before this, the only check was a Kani harness in the Formal job.
+- **`encrypt` allocates fallibly too.** It still had a `vec![0u8; plaintext.len()]`,
+  which calls the allocation-error handler and aborts the process: an unlucky length
+  was a kill no application can catch, on the *encryption* side as well as the
+  decryption one. Both entry points now go through one fallible helper, and with that
+  change `use alloc::vec` became unused in the library — every allocation in the
+  non-test source is fallible by construction, which the lint now says out loud.
+- The allocation story is documented where the call is, not only in an error variant:
+  `decrypt` holds **twice** the message (the caller's ciphertext plus the plaintext it
+  allocates) for the duration of the call, `decrypt_bounded` bounds that second half,
+  and the README distinguishes what the crate fixed (an allocator refusal is an error)
+  from what no in-process library can (the OOM killer, which sends a signal a process
+  cannot intercept).
+
 ### Release policy
 
 - **The byte format is frozen at construction revision `v0.2`.** It will not change

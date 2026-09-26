@@ -21,13 +21,17 @@ A detached, in-place API is also available
 store the tag separately or want to avoid a second allocation.
 
 > **Bound your input before you decrypt.** `decrypt` allocates a buffer as large as
-> the ciphertext it is handed, and the format's ceiling (`MAX_MSG_SIZE`, 256 GiB) is
-> not a safe one — it is the largest message the *construction* supports, not the
-> largest a service should accept. A caller whose message length comes off the wire
-> must cap it itself: `decrypt_bounded(key, nonce, aad, ciphertext, tag, max_len)`
-> enforces the caller's limit *before* the allocation, and `MAX_MSG_SIZE` is public
-> so a length can be rejected before the body is even read. This is the misuse this
-> crate cannot catch on the caller's behalf.
+> the ciphertext it is handed, so the call holds ciphertext **and** plaintext — twice
+> the message in memory — and the format's ceiling (`MAX_MSG_SIZE`, 256 GiB) is not a
+> safe one: it is the largest message the *construction* supports, not the largest a
+> service should accept. A caller whose message length comes off the wire must cap it
+> itself: `decrypt_bounded(key, nonce, aad, ciphertext, tag, max_len)` enforces the
+> caller's limit *before* the allocation, and `MAX_MSG_SIZE` is public so a length can
+> be rejected before the body is even read. Both allocating entry points allocate
+> *fallibly* — a refusal is `Error::AllocationFailed`, not a process `abort` — but a
+> request the kernel accepts can still be killed when the buffer is written to, and no
+> in-process library can catch that. This is the misuse this crate cannot catch on the
+> caller's behalf.
 
 ## Not a standard
 
@@ -310,12 +314,15 @@ deployment.
   on an OS it does not own is not where they belong, and this one does not pretend
   otherwise.
 - **Bounding the input is the caller's job.** `decrypt` allocates a buffer as large
-  as its ciphertext argument, and the format's own ceiling is `MAX_MSG_SIZE`
-  (256 GiB, public now, so a caller can check before it trusts a length off the
-  wire). The allocation is fallible, so an allocator refusal arrives as
-  `Error::AllocationFailed` instead of aborting the process — but a request the
-  kernel *accepts* can still be OOM-killed while it is written to, and no in-process
-  library can prevent that. A service that reads unbounded input has to cap it.
+  as its ciphertext argument, so the peak for the call is twice the message — the
+  ciphertext the caller already holds, plus the plaintext — and the format's own
+  ceiling is `MAX_MSG_SIZE` (256 GiB, public, so a caller can check before it trusts a
+  length off the wire; `decrypt_bounded` enforces a policy limit before the
+  allocation). Both allocating entry points are fallible, so an allocator refusal
+  arrives as `Error::AllocationFailed` rather than as an `abort` the application
+  cannot catch — but a request the kernel *accepts* can still be OOM-killed while the
+  buffer is written to, and no in-process library can prevent that. A service that
+  reads unbounded input has to cap it.
 - **A failed in-place decryption destroys the caller's buffer.** By design: the
   unverified plaintext must not be readable out of it, so it is wiped to zeros
   before the error is returned. Retry logic needs the ciphertext again; `decrypt`
@@ -325,6 +332,13 @@ deployment.
   information, so the distinction reveals nothing that was not already known, and a
   protocol needs it to report a usable failure instead of "something went wrong"; a
   caller that must not distinguish them can collapse the variants itself.
+- **`MAX_MSG_SIZE` is exactly the block counter's capacity, and that is enforced.**
+  2^38 bytes is 2^32 ChaCha20 blocks — the number of values a `u32` counter has, with
+  no margin — so a maximum-length message ends on counter `u32::MAX` and one block more
+  would wrap to 0 and reuse keystream *inside one message*. A `const` assertion binds
+  the constant to the counter arithmetic, so raising it is a **build** failure rather
+  than a silent wrap, and `tests/counter_range.rs` checks the arithmetic at run time
+  and that every call site either starts at zero or forwards its own counter.
 - **The wire format is not frozen** ("Wire format is not frozen" above), and it is
   not interoperable with any standard — a consumer on the other end must be this
   crate, or a reimplementation of the same three domain strings and the same tag

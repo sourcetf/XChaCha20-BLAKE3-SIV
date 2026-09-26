@@ -1,6 +1,6 @@
 --- src/lib.rs
 +++ replace & with ^ in decrypt_in_place_detached
-@@ -1251,17 +1251,17 @@
+@@ -1282,17 +1282,17 @@
      chacha20_apply(&enc_key, 0, &enc_nonce, &Input::InPlace, buffer);
  
      let mut computed_tag = derive_tag(&mac_key, key, nonce, aad, buffer);

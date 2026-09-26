@@ -1,6 +1,6 @@
 --- src/lib.rs
 +++ replace decrypt -> Result<Plaintext, Error> with Ok(Default::default())
-@@ -1099,97 +1099,17 @@
+@@ -1130,97 +1130,17 @@
  #[must_use = "the returned plaintext must be handled"]
  pub fn decrypt(
      key: &[u8; 32],
@@ -14,7 +14,7 @@
 -    let (mut mac_key, mut enc_seed) = derive_material(key, nonce);
 -    let (mut enc_key, mut enc_nonce) = derive_enc(&enc_seed, tag);
 -
--    let mut plaintext = alloc_plaintext(ciphertext.len())?;
+-    let mut plaintext = alloc_zeroed(ciphertext.len())?;
 -    chacha20_keystream(&enc_key, 0, &enc_nonce, ciphertext, &mut plaintext);
 -
 -    let mut computed_tag = derive_tag(&mac_key, key, nonce, aad, &plaintext);

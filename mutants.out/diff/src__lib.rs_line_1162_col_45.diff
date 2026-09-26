@@ -1,6 +1,6 @@
 --- src/lib.rs
 +++ replace & with ^ in decrypt
-@@ -1123,17 +1123,17 @@
+@@ -1154,17 +1154,17 @@
          //
          // The volatile re-read is what forbids that merge, and it is here rather
          // than `black_box` on purpose: whether `black_box` defeats CSE is a

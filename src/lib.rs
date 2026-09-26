@@ -188,6 +188,9 @@
 
 extern crate alloc;
 
+// `vec!` is only used by the tests: every allocation in the library goes through
+// `alloc_zeroed`, which is fallible on purpose (see there).
+#[cfg(test)]
 use alloc::vec;
 use alloc::vec::Vec;
 use subtle::ConstantTimeEq;
@@ -206,6 +209,26 @@ use zeroize::Zeroize;
 /// Checking the length against this constant, before reading the body, is the
 /// cheap place to stop that.
 pub const MAX_MSG_SIZE: u64 = 1u64 << 38;
+
+// The limit and the block counter are two halves of one fact, so they are bound by a
+// `const` assertion: this fails to *compile* if either side is changed without the
+// other. `MAX_MSG_SIZE` is exactly 2^32 ChaCha20 blocks, so the last block of a
+// maximum-length message uses counter `u32::MAX` -- and one block more would wrap it
+// (`ctr = ctr.wrapping_add(1)` in every keystream path, SIMD included) and reuse the
+// keystream inside a single message, silently. `src/proofs.rs` proves the same
+// arithmetic with Kani, but a proof in the Formal job is a different thing from a build
+// that refuses to happen.
+const _: () = {
+    assert!(
+        MAX_MSG_SIZE % CHACHA20_BLOCK as u64 == 0,
+        "the length limit must be a whole number of ChaCha20 blocks"
+    );
+    assert!(
+        MAX_MSG_SIZE / CHACHA20_BLOCK as u64 <= u32::MAX as u64 + 1,
+        "the length limit needs more blocks than the ChaCha20 counter has values: the \
+         last block would wrap to counter 0 and reuse keystream within one message"
+    );
+};
 
 /// ChaCha20 block size (64 bytes).
 const CHACHA20_BLOCK: usize = 64;
@@ -914,19 +937,25 @@ fn check_lengths(msg_len: usize, aad_len: usize) -> Result<(), Error> {
     Ok(())
 }
 
-/// Allocate the buffer the recovered plaintext is written into.
+/// Allocate a zeroed buffer of `len` bytes for an allocating entry point.
 ///
-/// Fallible on purpose.  `vec![0u8; n]` calls the allocation-error handler, which
-/// aborts the process, and `n` here is the caller's ciphertext length — so an
-/// unlucky size turns a request into a process kill instead of an error the caller
-/// can report and move past.
+/// Fallible on purpose, and **both** allocating entry points go through it: [`decrypt`]
+/// for the recovered plaintext and [`encrypt`] for the ciphertext.  `vec![0u8; n]` calls
+/// the allocation-error handler, which aborts the process — so with a plain `vec!` an
+/// unlucky size turns a request into a kill the application cannot catch, instead of an
+/// [`Error::AllocationFailed`] it can report and move past.
 ///
-/// This is not a substitute for bounding the input: a request the kernel *accepts*
-/// can still be OOM-killed when the buffer is written to, and that half belongs to
-/// the deployment (a cgroup limit, an accept-size policy).  [`MAX_MSG_SIZE`] is
-/// public for the caller-side check.  What this removes is the case where the
-/// allocator says no and the process dies for it.
-fn alloc_plaintext(len: usize) -> Result<Vec<u8>, Error> {
+/// What this does **not** remove, and what no in-process library can: a request the
+/// kernel *accepts* can still be killed later, when the buffer is written to — the OOM
+/// killer sends a signal a process cannot intercept.  That half belongs to the
+/// deployment (a cgroup limit, an accept-size policy, a maximum request size), and
+/// [`MAX_MSG_SIZE`] is public for the caller-side check.  What is fixed here is the case
+/// where the allocator itself says no and the process dies for it.
+///
+/// Note the peak this implies for [`decrypt`]: the caller already holds the ciphertext,
+/// so the call holds ciphertext **and** plaintext — twice the message — for its
+/// duration.  [`decrypt_bounded`] bounds the second half; the first is the caller's.
+fn alloc_zeroed(len: usize) -> Result<Vec<u8>, Error> {
     let mut buf = Vec::new();
     buf.try_reserve_exact(len)
         .map_err(|_| Error::AllocationFailed)?;
@@ -952,7 +981,9 @@ pub fn encrypt(
     let tag = derive_tag(&mac_key, key, nonce, aad, plaintext);
     let (mut enc_key, mut enc_nonce) = derive_enc(&enc_seed, &tag);
 
-    let mut ciphertext = vec![0u8; plaintext.len()];
+    // Fallible for the same reason `decrypt` is: this length is the caller's, and a
+    // plain `vec!` aborts the process when the allocator refuses.
+    let mut ciphertext = alloc_zeroed(plaintext.len())?;
     chacha20_keystream(&enc_key, 0, &enc_nonce, plaintext, &mut ciphertext);
 
     zeroize_array(&mut mac_key);
@@ -1109,7 +1140,7 @@ pub fn decrypt(
     let (mut mac_key, mut enc_seed) = derive_material(key, nonce);
     let (mut enc_key, mut enc_nonce) = derive_enc(&enc_seed, tag);
 
-    let mut plaintext = alloc_plaintext(ciphertext.len())?;
+    let mut plaintext = alloc_zeroed(ciphertext.len())?;
     chacha20_keystream(&enc_key, 0, &enc_nonce, ciphertext, &mut plaintext);
 
     let mut computed_tag = derive_tag(&mac_key, key, nonce, aad, &plaintext);
@@ -3479,6 +3510,61 @@ mod tests {
         assert!(check_lengths(usize::MAX, usize::MAX).is_ok());
     }
 
+    /// The ChaCha20 counter range, exercised rather than asserted in prose.
+    ///
+    /// `MAX_MSG_SIZE` is exactly 2^32 blocks, so the last block of a maximum-length
+    /// message uses counter `u32::MAX` and one block more would wrap to 0 — reusing
+    /// keystream inside one message. The `const` assertion on `MAX_MSG_SIZE` binds the
+    /// two at build time; this checks the arithmetic at run time, on every target, and
+    /// exercises the primitive at the boundary itself.
+    #[test]
+    fn test_counter_range_covers_the_maximum_message_and_stops_there() {
+        let capacity = (u32::MAX as u64) + 1;
+
+        // The limit is a whole number of blocks, and exactly the counter's capacity.
+        assert_eq!(
+            MAX_MSG_SIZE % CHACHA20_BLOCK as u64,
+            0,
+            "a maximum-length message must be a whole number of blocks"
+        );
+        assert_eq!(
+            MAX_MSG_SIZE / CHACHA20_BLOCK as u64,
+            capacity,
+            "the limit must be exactly the counter's capacity: less wastes range, more \
+             wraps the counter inside one message"
+        );
+
+        // One more block than the counter can express is refused, and the refusal is
+        // the length guard's, not a wrap.
+        let one_block_over = MAX_MSG_SIZE + CHACHA20_BLOCK as u64;
+        #[cfg(target_pointer_width = "64")]
+        assert_eq!(
+            check_lengths(one_block_over as usize, 0),
+            Err(Error::MessageTooLong),
+            "a message needing one block more than the counter has values must be refused"
+        );
+        // On 32-bit targets no `usize` reaches the limit at all, so the guard cannot
+        // fire there — `test_length_guard_cannot_fire_on_32_bit` records that.
+
+        // The primitive itself: the highest counter a message can reach produces a
+        // different keystream from counter 0, so nothing wraps where it should not.
+        let key = [0x37u8; 32];
+        let nonce = [0x11u8; 12];
+        let input = [0u8; CHACHA20_BLOCK];
+        let mut last = [0u8; CHACHA20_BLOCK];
+        let mut first = [0u8; CHACHA20_BLOCK];
+        chacha20_keystream(&key, u32::MAX, &nonce, &input, &mut last);
+        chacha20_keystream(&key, 0, &nonce, &input, &mut first);
+        assert_ne!(
+            last, first,
+            "counter u32::MAX must not produce the counter-0 keystream"
+        );
+        // And two consecutive blocks differ, so the counter really advances.
+        let mut second = [0u8; CHACHA20_BLOCK];
+        chacha20_keystream(&key, 1, &nonce, &input, &mut second);
+        assert_ne!(first, second, "the counter must advance between blocks");
+    }
+
     /// The plaintext buffer is allocated fallibly, so a length the allocator
     /// refuses is an error rather than a process abort.
     ///
@@ -3491,13 +3577,13 @@ mod tests {
     #[test]
     fn test_plaintext_allocation_is_fallible() {
         assert_eq!(
-            alloc_plaintext(usize::MAX),
+            alloc_zeroed(usize::MAX),
             Err(Error::AllocationFailed),
             "an impossible allocation must come back as an error, not abort"
         );
 
-        assert_eq!(alloc_plaintext(0).unwrap().len(), 0);
-        let buf = alloc_plaintext(1024).unwrap();
+        assert_eq!(alloc_zeroed(0).unwrap().len(), 0);
+        let buf = alloc_zeroed(1024).unwrap();
         assert_eq!(buf.len(), 1024, "the buffer must be `len` bytes long");
         assert!(
             buf.iter().all(|&b| b == 0),

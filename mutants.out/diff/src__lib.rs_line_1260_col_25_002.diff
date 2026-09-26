@@ -1,6 +1,6 @@
 --- src/lib.rs
 +++ replace > with >= in decrypt_bounded
-@@ -1221,17 +1221,17 @@
+@@ -1252,17 +1252,17 @@
  pub fn decrypt_bounded(
      key: &[u8; 32],
      nonce: &[u8; NONCE_LEN],

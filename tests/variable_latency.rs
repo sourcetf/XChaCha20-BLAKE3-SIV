@@ -25,11 +25,24 @@
 use std::collections::BTreeSet;
 
 /// `(trimmed source line, why it is not a secret-dependent latency)`.
-const ALLOWED: &[(&str, &str)] = &[(
-    "while i < len && (ptr as usize).wrapping_add(i) % align != 0 {",
-    "divides by the *alignment* of `usize`, a compile-time constant, not by anything \
-     derived from a key, nonce, AAD or message",
-)];
+const ALLOWED: &[(&str, &str)] = &[
+    (
+        "while i < len && (ptr as usize).wrapping_add(i) % align != 0 {",
+        "divides by the *alignment* of `usize`, a compile-time constant, not by anything \
+         derived from a key, nonce, AAD or message",
+    ),
+    (
+        "MAX_MSG_SIZE % CHACHA20_BLOCK as u64 == 0,",
+        "both operands are constants: this is the build-time binding between the length \
+         limit and the ChaCha20 block counter, evaluated by the compiler inside a `const` \
+         assertion, so no run-time value -- secret or otherwise -- reaches it",
+    ),
+    (
+        "MAX_MSG_SIZE / CHACHA20_BLOCK as u64 <= u32::MAX as u64 + 1,",
+        "the same binding, same reason: `const` context, constant operands, no run-time \
+         division at all",
+    ),
+];
 
 /// `(keyword, occurrences in the non-test source)`.
 ///

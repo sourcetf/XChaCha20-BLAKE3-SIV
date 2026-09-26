@@ -1,0 +1,26 @@
+--- src/lib.rs
++++ replace alloc_zeroed -> Result<Vec<u8>, Error> with Ok(vec![1])
+@@ -951,22 +951,17 @@
+ /// deployment (a cgroup limit, an accept-size policy, a maximum request size), and
+ /// [`MAX_MSG_SIZE`] is public for the caller-side check.  What is fixed here is the case
+ /// where the allocator itself says no and the process dies for it.
+ ///
+ /// Note the peak this implies for [`decrypt`]: the caller already holds the ciphertext,
+ /// so the call holds ciphertext **and** plaintext — twice the message — for its
+ /// duration.  [`decrypt_bounded`] bounds the second half; the first is the caller's.
+ fn alloc_zeroed(len: usize) -> Result<Vec<u8>, Error> {
+-    let mut buf = Vec::new();
+-    buf.try_reserve_exact(len)
+-        .map_err(|_| Error::AllocationFailed)?;
+-    // Cannot reallocate: `len` bytes are already reserved.
+-    buf.resize(len, 0u8);
+-    Ok(buf)
++    Ok(vec![1]) /* ~ changed by cargo-mutants ~ */
+ }
+ 
+ /// Encrypt `plaintext` under `(key, nonce, aad)`, returning `(ciphertext, tag)`.
+ ///
+ /// SIV construction: the tag is computed first, and the per-message encryption
+ /// key and nonce are derived from it.
+ #[must_use = "the returned ciphertext and tag must be handled"]
+ pub fn encrypt(

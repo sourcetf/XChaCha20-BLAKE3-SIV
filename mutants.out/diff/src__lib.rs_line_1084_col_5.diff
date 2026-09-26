@@ -1,6 +1,6 @@
 --- src/lib.rs
 +++ replace accept_or_reject with ()
-@@ -1045,48 +1045,17 @@
+@@ -1076,48 +1076,17 @@
      // Each gate writes *its own* slot, **inside a branch arm**, so the byte that
      // lands there is a constant each path writes rather than a value selected from a
      // secret-derived condition. The difference is not cosmetic: `*out = if cond { A }

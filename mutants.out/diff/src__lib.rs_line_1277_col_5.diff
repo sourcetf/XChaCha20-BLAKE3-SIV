@@ -1,6 +1,6 @@
 --- src/lib.rs
 +++ replace decrypt_in_place_detached -> Result<(), Error> with Ok(())
-@@ -1238,79 +1238,17 @@
+@@ -1269,79 +1269,17 @@
  /// place. Note this destroys the caller's buffer on the failure path.
  pub fn decrypt_in_place_detached(
      key: &[u8; 32],

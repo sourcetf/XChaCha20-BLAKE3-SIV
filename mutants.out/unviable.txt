@@ -1,2 +1,5 @@
-src/lib.rs:1107:5: replace decrypt -> Result<Plaintext, Error> with Ok(Default::default())
-src/lib.rs:1229:5: replace decrypt_bounded -> Result<Plaintext, Error> with Ok(Default::default())
+src/lib.rs:959:5: replace alloc_zeroed -> Result<Vec<u8>, Error> with Ok(vec![])
+src/lib.rs:959:5: replace alloc_zeroed -> Result<Vec<u8>, Error> with Ok(vec![0])
+src/lib.rs:959:5: replace alloc_zeroed -> Result<Vec<u8>, Error> with Ok(vec![1])
+src/lib.rs:1138:5: replace decrypt -> Result<Plaintext, Error> with Ok(Default::default())
+src/lib.rs:1260:5: replace decrypt_bounded -> Result<Plaintext, Error> with Ok(Default::default())

@@ -1,0 +1,337 @@
+
+*** src/lib.rs:1084:5: replace accept_or_reject with ()
+
+*** mutation diff:
+--- src/lib.rs
++++ replace accept_or_reject with ()
+@@ -1076,48 +1076,17 @@
+     // Each gate writes *its own* slot, **inside a branch arm**, so the byte that
+     // lands there is a constant each path writes rather than a value selected from a
+     // secret-derived condition. The difference is not cosmetic: `*out = if cond { A }
+     // else { B }` compiles to a `setcc`/`cmov` on the tainted condition, which makes
+     // the discriminant itself secret-derived -- and then the *caller's* check on it is
+     // a secret-dependent branch outside the function `tests/ctgrind.supp` permits
+     // (measured: six reports against `decrypt` when this was written as an if-
+     // expression, none as arms).
+-    if bool::from(gate0) {
+-        *out0 = Ok(());
+-    } else {
+-        *out0 = Err(Error::AuthenticationFailed);
+-        // `out1` keeps the rejection the caller wrote: a message the first gate
+-        // rejects does not need the second gate evaluated.
+-        return;
+-    }
+-
+-    // Fault-injection hardening (the `hardened` feature, on by default): a second
+-    // *recomputed* check with its own branch, so a single skipped instruction reaches
+-    // this gate instead of accepting. `&` and never `&&`: both comparisons always run
+-    // in the caller, so the time this takes does not reveal which gate failed. No
+-    // `unwrap_u8` and no early exit inside the comparisons -- `bool::from` is the
+-    // conversion `subtle` documents for exactly this place (the end of a
+-    // verification). What it does and does not defend against: see README "What is
+-    // not defended against".
+-    #[cfg(feature = "hardened")]
+-    if bool::from(gate1) {
+-        *out1 = Ok(());
+-    } else {
+-        *out1 = Err(Error::AuthenticationFailed);
+-    }
+-
+-    // The opt-out build has one gate, so both slots carry its answer: the caller's
+-    // two checks are then one check written twice, which is honest for a build whose
+-    // promise is the single gate.
+-    #[cfg(not(feature = "hardened"))]
+-    {
+-        let _ = gate1;
+-        *out1 = *out0;
+-    }
++    () /* ~ changed by cargo-mutants ~ */
+ }
+ 
+ /// Decrypt `ciphertext`, verifying the tag.
+ ///
+ /// **This allocates a buffer as large as `ciphertext`.** Bound untrusted input
+ /// before calling it: [`MAX_MSG_SIZE`] (256 GiB) is the format's ceiling, not a safe
+ /// one, and a service that trusts a length field off the wire can be made to
+ /// allocate that much per request. [`decrypt_bounded`] takes a policy limit and
+
+
+*** /home/dev123/.rustup/toolchains/stable-x86_64-unknown-linux-gnu/bin/cargo test --no-run --verbose --package=xchacha20-blake3-siv@0.1.0 --features=hardened
+       Fresh cfg-if v1.0.5
+       Fresh unicode-ident v1.0.26
+       Fresh version_check v0.9.5
+       Fresh typenum v1.20.1
+       Fresh autocfg v1.5.1
+       Fresh zeroize v1.9.0
+       Fresh shlex v2.0.1
+       Fresh find-msvc-tools v0.1.13
+       Fresh subtle v2.6.1
+       Fresh regex-syntax v0.8.11
+       Fresh either v1.18.0
+       Fresh clap_lex v1.1.1
+       Fresh itoa v1.0.18
+       Fresh memchr v2.8.3
+       Fresh anstyle v1.0.14
+       Fresh cpufeatures v0.2.17
+       Fresh ciborium-io v0.2.2
+       Fresh plotters-backend v0.3.7
+       Fresh constant_time_eq v0.4.2
+       Fresh bit-vec v0.8.0
+       Fresh cast v0.3.0
+       Fresh cpufeatures v0.3.1
+       Fresh libc v0.2.189
+       Fresh proc-macro2 v1.0.107
+       Fresh cc v1.4.7
+       Fresh clap_builder v4.6.7
+       Fresh regex-automata v0.4.18
+       Fresh itertools v0.10.5
+       Fresh plotters-svg v0.3.7
+       Fresh arrayvec v0.7.8
+       Fresh same-file v1.0.6
+       Fresh opaque-debug v0.3.1
+       Fresh bit-set v0.8.0
+       Fresh bitflags v2.13.2
+       Fresh unarray v0.1.4
+       Fresh once_cell v1.21.4
+       Fresh anes v0.1.6
+       Fresh oorandom v11.1.5
+       Fresh quote v1.0.47
+       Fresh getrandom v0.2.17
+       Fresh getrandom v0.3.4
+       Fresh serde_core v1.0.229
+       Fresh crossbeam-utils v0.8.23
+       Fresh zmij v1.0.23
+       Fresh walkdir v2.5.0
+       Fresh is-terminal v0.4.17
+       Fresh clap v4.6.7
+       Fresh regex v1.13.1
+       Fresh criterion-plot v0.5.0
+       Fresh syn v2.0.119
+       Fresh generic-array v0.14.7
+       Fresh rand_core v0.6.4
+       Fresh syn v3.0.6
+       Fresh rand_core v0.9.5
+       Fresh crossbeam-epoch v0.9.21
+       Fresh num-traits v0.2.19
+       Fresh serde_json v1.0.151
+       Fresh zerocopy-derive v0.8.57
+       Fresh crypto-common v0.1.7
+       Fresh serde_derive v1.0.229
+       Fresh inout v0.1.4
+       Fresh crossbeam-deque v0.8.8
+       Fresh blake3 v1.8.7
+       Fresh rand v0.9.5
+       Fresh rand_xorshift v0.4.0
+       Fresh plotters v0.3.7
+       Fresh zerocopy v0.8.57
+       Fresh serde v1.0.229
+       Fresh universal-hash v0.5.1
+       Fresh cipher v0.4.4
+       Fresh rayon-core v1.13.0
+       Fresh aead v0.5.2
+       Dirty xchacha20-blake3-siv v0.1.0 (/tmp/cargo-mutants-XChaCha20-BLAKE3-SIV-AcAq62.tmp): couldn't read metadata for file `target/debug/deps/libxchacha20_blake3_siv-10b0469e57c0fbf3.rlib`
+   Compiling xchacha20-blake3-siv v0.1.0 (/tmp/cargo-mutants-XChaCha20-BLAKE3-SIV-AcAq62.tmp)
+       Fresh half v2.7.1
+       Fresh ppv-lite86 v0.2.21
+       Fresh tinytemplate v1.2.1
+       Fresh rayon v1.12.0
+       Fresh poly1305 v0.8.0
+       Fresh chacha20 v0.9.1
+     Running `/home/dev123/.rustup/toolchains/stable-x86_64-unknown-linux-gnu/bin/rustc --crate-name xchacha20_blake3_siv --edition=2021 src/lib.rs --error-format=json --json=diagnostic-rendered-ansi,artifacts,future-incompat --crate-type lib --emit=dep-info,metadata,link -C embed-bitcode=no -C debuginfo=2 --warn=unexpected_cfgs '--deny=clippy::undocumented_unsafe_blocks' --check-cfg 'cfg(kani)' --cfg 'feature="default"' --cfg 'feature="hardened"' --check-cfg 'cfg(docsrs,test)' --check-cfg 'cfg(feature, values("default", "hardened", "pure", "rng"))' -C metadata=ba4b5fbb4fee2cd0 -C extra-filename=-10b0469e57c0fbf3 --out-dir /tmp/cargo-mutants-XChaCha20-BLAKE3-SIV-AcAq62.tmp/target/debug/deps -C incremental=/tmp/cargo-mutants-XChaCha20-BLAKE3-SIV-AcAq62.tmp/target/debug/incremental -L dependency=/tmp/cargo-mutants-XChaCha20-BLAKE3-SIV-AcAq62.tmp/target/debug/deps --extern blake3=/tmp/cargo-mutants-XChaCha20-BLAKE3-SIV-AcAq62.tmp/target/debug/deps/libblake3-f8715a0be2228f6c.rmeta --extern subtle=/tmp/cargo-mutants-XChaCha20-BLAKE3-SIV-AcAq62.tmp/target/debug/deps/libsubtle-55f702608e37091d.rmeta --extern zeroize=/tmp/cargo-mutants-XChaCha20-BLAKE3-SIV-AcAq62.tmp/target/debug/deps/libzeroize-5087b20aec4f24d3.rmeta -L native=/tmp/cargo-mutants-XChaCha20-BLAKE3-SIV-AcAq62.tmp/target/debug/build/blake3-db6c4b796fede836/out -L native=/tmp/cargo-mutants-XChaCha20-BLAKE3-SIV-AcAq62.tmp/target/debug/build/blake3-db6c4b796fede836/out`
+       Fresh ciborium-ll v0.2.2
+       Fresh rand_chacha v0.9.0
+       Fresh chacha20poly1305 v0.10.1
+       Fresh ciborium v0.2.2
+       Fresh proptest v1.11.0
+       Fresh criterion v0.5.1
+     Running `/home/dev123/.rustup/toolchains/stable-x86_64-unknown-linux-gnu/bin/rustc --crate-name xchacha20_blake3_siv --edition=2021 src/lib.rs --error-format=json --json=diagnostic-rendered-ansi,artifacts,future-incompat --emit=dep-info,link -C embed-bitcode=no -C debuginfo=2 --warn=unexpected_cfgs '--deny=clippy::undocumented_unsafe_blocks' --check-cfg 'cfg(kani)' --test --cfg 'feature="default"' --cfg 'feature="hardened"' --check-cfg 'cfg(docsrs,test)' --check-cfg 'cfg(feature, values("default", "hardened", "pure", "rng"))' -C metadata=bfc4d0ed8b4ade13 -C extra-filename=-37033d2b0be6e653 --out-dir /tmp/cargo-mutants-XChaCha20-BLAKE3-SIV-AcAq62.tmp/target/debug/deps -C incremental=/tmp/cargo-mutants-XChaCha20-BLAKE3-SIV-AcAq62.tmp/target/debug/incremental -L dependency=/tmp/cargo-mutants-XChaCha20-BLAKE3-SIV-AcAq62.tmp/target/debug/deps --extern aead=/tmp/cargo-mutants-XChaCha20-BLAKE3-SIV-AcAq62.tmp/target/debug/deps/libaead-15f867564fd89215.rlib --extern blake3=/tmp/cargo-mutants-XChaCha20-BLAKE3-SIV-AcAq62.tmp/target/debug/deps/libblake3-f8715a0be2228f6c.rlib --extern chacha20poly1305=/tmp/cargo-mutants-XChaCha20-BLAKE3-SIV-AcAq62.tmp/target/debug/deps/libchacha20poly1305-4bd1b2516f5448bb.rlib --extern criterion=/tmp/cargo-mutants-XChaCha20-BLAKE3-SIV-AcAq62.tmp/target/debug/deps/libcriterion-7a3675e7698ab10d.rlib --extern proptest=/tmp/cargo-mutants-XChaCha20-BLAKE3-SIV-AcAq62.tmp/target/debug/deps/libproptest-35af120c880ec346.rlib --extern subtle=/tmp/cargo-mutants-XChaCha20-BLAKE3-SIV-AcAq62.tmp/target/debug/deps/libsubtle-55f702608e37091d.rlib --extern zeroize=/tmp/cargo-mutants-XChaCha20-BLAKE3-SIV-AcAq62.tmp/target/debug/deps/libzeroize-5087b20aec4f24d3.rlib -L native=/tmp/cargo-mutants-XChaCha20-BLAKE3-SIV-AcAq62.tmp/target/debug/build/blake3-db6c4b796fede836/out -L native=/tmp/cargo-mutants-XChaCha20-BLAKE3-SIV-AcAq62.tmp/target/debug/build/blake3-db6c4b796fede836/out`
+warning: unused variable: `gate0`
+    --> src/lib.rs:1071:5
+     |
+1071 |     gate0: subtle::Choice,
+     |     ^^^^^ help: if this is intentional, prefix it with an underscore: `_gate0`
+     |
+     = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `gate1`
+    --> src/lib.rs:1072:5
+     |
+1072 |     gate1: subtle::Choice,
+     |     ^^^^^ help: if this is intentional, prefix it with an underscore: `_gate1`
+
+warning: unused variable: `out0`
+    --> src/lib.rs:1073:5
+     |
+1073 |     out0: &mut Result<(), Error>,
+     |     ^^^^ help: if this is intentional, prefix it with an underscore: `_out0`
+
+warning: unused variable: `out1`
+    --> src/lib.rs:1074:5
+     |
+1074 |     out1: &mut Result<(), Error>,
+     |     ^^^^ help: if this is intentional, prefix it with an underscore: `_out1`
+
+warning: `xchacha20-blake3-siv` (lib) generated 4 warnings (run `cargo fix --lib -p xchacha20-blake3-siv` to apply 4 suggestions)
+     Running `/home/dev123/.rustup/toolchains/stable-x86_64-unknown-linux-gnu/bin/rustc --crate-name security --edition=2021 tests/security.rs --error-format=json --json=diagnostic-rendered-ansi,artifacts,future-incompat --emit=dep-info,link -C embed-bitcode=no -C debuginfo=2 --warn=unexpected_cfgs '--deny=clippy::undocumented_unsafe_blocks' --check-cfg 'cfg(kani)' --test --cfg 'feature="default"' --cfg 'feature="hardened"' --check-cfg 'cfg(docsrs,test)' --check-cfg 'cfg(feature, values("default", "hardened", "pure", "rng"))' -C metadata=fb3d0fdde2a185a4 -C extra-filename=-e4611eef8fe6205a --out-dir /tmp/cargo-mutants-XChaCha20-BLAKE3-SIV-AcAq62.tmp/target/debug/deps -C incremental=/tmp/cargo-mutants-XChaCha20-BLAKE3-SIV-AcAq62.tmp/target/debug/incremental -L dependency=/tmp/cargo-mutants-XChaCha20-BLAKE3-SIV-AcAq62.tmp/target/debug/deps --extern aead=/tmp/cargo-mutants-XChaCha20-BLAKE3-SIV-AcAq62.tmp/target/debug/deps/libaead-15f867564fd89215.rlib --extern blake3=/tmp/cargo-mutants-XChaCha20-BLAKE3-SIV-AcAq62.tmp/target/debug/deps/libblake3-f8715a0be2228f6c.rlib --extern chacha20poly1305=/tmp/cargo-mutants-XChaCha20-BLAKE3-SIV-AcAq62.tmp/target/debug/deps/libchacha20poly1305-4bd1b2516f5448bb.rlib --extern criterion=/tmp/cargo-mutants-XChaCha20-BLAKE3-SIV-AcAq62.tmp/target/debug/deps/libcriterion-7a3675e7698ab10d.rlib --extern proptest=/tmp/cargo-mutants-XChaCha20-BLAKE3-SIV-AcAq62.tmp/target/debug/deps/libproptest-35af120c880ec346.rlib --extern subtle=/tmp/cargo-mutants-XChaCha20-BLAKE3-SIV-AcAq62.tmp/target/debug/deps/libsubtle-55f702608e37091d.rlib --extern xchacha20_blake3_siv=/tmp/cargo-mutants-XChaCha20-BLAKE3-SIV-AcAq62.tmp/target/debug/deps/libxchacha20_blake3_siv-10b0469e57c0fbf3.rlib --extern zeroize=/tmp/cargo-mutants-XChaCha20-BLAKE3-SIV-AcAq62.tmp/target/debug/deps/libzeroize-5087b20aec4f24d3.rlib -L native=/tmp/cargo-mutants-XChaCha20-BLAKE3-SIV-AcAq62.tmp/target/debug/build/blake3-db6c4b796fede836/out -L native=/tmp/cargo-mutants-XChaCha20-BLAKE3-SIV-AcAq62.tmp/target/debug/build/blake3-db6c4b796fede836/out`
+     Running `/home/dev123/.rustup/toolchains/stable-x86_64-unknown-linux-gnu/bin/rustc --crate-name decision_scope --edition=2021 tests/decision_scope.rs --error-format=json --json=diagnostic-rendered-ansi,artifacts,future-incompat --emit=dep-info,link -C embed-bitcode=no -C debuginfo=2 --warn=unexpected_cfgs '--deny=clippy::undocumented_unsafe_blocks' --check-cfg 'cfg(kani)' --test --cfg 'feature="default"' --cfg 'feature="hardened"' --check-cfg 'cfg(docsrs,test)' --check-cfg 'cfg(feature, values("default", "hardened", "pure", "rng"))' -C metadata=d8de80681ecd0b7d -C extra-filename=-7327613b6e84fa10 --out-dir /tmp/cargo-mutants-XChaCha20-BLAKE3-SIV-AcAq62.tmp/target/debug/deps -C incremental=/tmp/cargo-mutants-XChaCha20-BLAKE3-SIV-AcAq62.tmp/target/debug/incremental -L dependency=/tmp/cargo-mutants-XChaCha20-BLAKE3-SIV-AcAq62.tmp/target/debug/deps --extern aead=/tmp/cargo-mutants-XChaCha20-BLAKE3-SIV-AcAq62.tmp/target/debug/deps/libaead-15f867564fd89215.rlib --extern blake3=/tmp/cargo-mutants-XChaCha20-BLAKE3-SIV-AcAq62.tmp/target/debug/deps/libblake3-f8715a0be2228f6c.rlib --extern chacha20poly1305=/tmp/cargo-mutants-XChaCha20-BLAKE3-SIV-AcAq62.tmp/target/debug/deps/libchacha20poly1305-4bd1b2516f5448bb.rlib --extern criterion=/tmp/cargo-mutants-XChaCha20-BLAKE3-SIV-AcAq62.tmp/target/debug/deps/libcriterion-7a3675e7698ab10d.rlib --extern proptest=/tmp/cargo-mutants-XChaCha20-BLAKE3-SIV-AcAq62.tmp/target/debug/deps/libproptest-35af120c880ec346.rlib --extern subtle=/tmp/cargo-mutants-XChaCha20-BLAKE3-SIV-AcAq62.tmp/target/debug/deps/libsubtle-55f702608e37091d.rlib --extern xchacha20_blake3_siv=/tmp/cargo-mutants-XChaCha20-BLAKE3-SIV-AcAq62.tmp/target/debug/deps/libxchacha20_blake3_siv-10b0469e57c0fbf3.rlib --extern zeroize=/tmp/cargo-mutants-XChaCha20-BLAKE3-SIV-AcAq62.tmp/target/debug/deps/libzeroize-5087b20aec4f24d3.rlib -L native=/tmp/cargo-mutants-XChaCha20-BLAKE3-SIV-AcAq62.tmp/target/debug/build/blake3-db6c4b796fede836/out -L native=/tmp/cargo-mutants-XChaCha20-BLAKE3-SIV-AcAq62.tmp/target/debug/build/blake3-db6c4b796fede836/out`
+     Running `/home/dev123/.rustup/toolchains/stable-x86_64-unknown-linux-gnu/bin/rustc --crate-name differential_reference --edition=2021 tests/differential_reference.rs --error-format=json --json=diagnostic-rendered-ansi,artifacts,future-incompat --emit=dep-info,link -C embed-bitcode=no -C debuginfo=2 --warn=unexpected_cfgs '--deny=clippy::undocumented_unsafe_blocks' --check-cfg 'cfg(kani)' --test --cfg 'feature="default"' --cfg 'feature="hardened"' --check-cfg 'cfg(docsrs,test)' --check-cfg 'cfg(feature, values("default", "hardened", "pure", "rng"))' -C metadata=88c3c1a9f07b708d -C extra-filename=-3417a425511ab235 --out-dir /tmp/cargo-mutants-XChaCha20-BLAKE3-SIV-AcAq62.tmp/target/debug/deps -C incremental=/tmp/cargo-mutants-XChaCha20-BLAKE3-SIV-AcAq62.tmp/target/debug/incremental -L dependency=/tmp/cargo-mutants-XChaCha20-BLAKE3-SIV-AcAq62.tmp/target/debug/deps --extern aead=/tmp/cargo-mutants-XChaCha20-BLAKE3-SIV-AcAq62.tmp/target/debug/deps/libaead-15f867564fd89215.rlib --extern blake3=/tmp/cargo-mutants-XChaCha20-BLAKE3-SIV-AcAq62.tmp/target/debug/deps/libblake3-f8715a0be2228f6c.rlib --extern chacha20poly1305=/tmp/cargo-mutants-XChaCha20-BLAKE3-SIV-AcAq62.tmp/target/debug/deps/libchacha20poly1305-4bd1b2516f5448bb.rlib --extern criterion=/tmp/cargo-mutants-XChaCha20-BLAKE3-SIV-AcAq62.tmp/target/debug/deps/libcriterion-7a3675e7698ab10d.rlib --extern proptest=/tmp/cargo-mutants-XChaCha20-BLAKE3-SIV-AcAq62.tmp/target/debug/deps/libproptest-35af120c880ec346.rlib --extern subtle=/tmp/cargo-mutants-XChaCha20-BLAKE3-SIV-AcAq62.tmp/target/debug/deps/libsubtle-55f702608e37091d.rlib --extern xchacha20_blake3_siv=/tmp/cargo-mutants-XChaCha20-BLAKE3-SIV-AcAq62.tmp/target/debug/deps/libxchacha20_blake3_siv-10b0469e57c0fbf3.rlib --extern zeroize=/tmp/cargo-mutants-XChaCha20-BLAKE3-SIV-AcAq62.tmp/target/debug/deps/libzeroize-5087b20aec4f24d3.rlib -L native=/tmp/cargo-mutants-XChaCha20-BLAKE3-SIV-AcAq62.tmp/target/debug/build/blake3-db6c4b796fede836/out -L native=/tmp/cargo-mutants-XChaCha20-BLAKE3-SIV-AcAq62.tmp/target/debug/build/blake3-db6c4b796fede836/out`
+     Running `/home/dev123/.rustup/toolchains/stable-x86_64-unknown-linux-gnu/bin/rustc --crate-name counter_range --edition=2021 tests/counter_range.rs --error-format=json --json=diagnostic-rendered-ansi,artifacts,future-incompat --emit=dep-info,link -C embed-bitcode=no -C debuginfo=2 --warn=unexpected_cfgs '--deny=clippy::undocumented_unsafe_blocks' --check-cfg 'cfg(kani)' --test --cfg 'feature="default"' --cfg 'feature="hardened"' --check-cfg 'cfg(docsrs,test)' --check-cfg 'cfg(feature, values("default", "hardened", "pure", "rng"))' -C metadata=11d2392f6683b643 -C extra-filename=-4e7e22ce8eb1f17b --out-dir /tmp/cargo-mutants-XChaCha20-BLAKE3-SIV-AcAq62.tmp/target/debug/deps -C incremental=/tmp/cargo-mutants-XChaCha20-BLAKE3-SIV-AcAq62.tmp/target/debug/incremental -L dependency=/tmp/cargo-mutants-XChaCha20-BLAKE3-SIV-AcAq62.tmp/target/debug/deps --extern aead=/tmp/cargo-mutants-XChaCha20-BLAKE3-SIV-AcAq62.tmp/target/debug/deps/libaead-15f867564fd89215.rlib --extern blake3=/tmp/cargo-mutants-XChaCha20-BLAKE3-SIV-AcAq62.tmp/target/debug/deps/libblake3-f8715a0be2228f6c.rlib --extern chacha20poly1305=/tmp/cargo-mutants-XChaCha20-BLAKE3-SIV-AcAq62.tmp/target/debug/deps/libchacha20poly1305-4bd1b2516f5448bb.rlib --extern criterion=/tmp/cargo-mutants-XChaCha20-BLAKE3-SIV-AcAq62.tmp/target/debug/deps/libcriterion-7a3675e7698ab10d.rlib --extern proptest=/tmp/cargo-mutants-XChaCha20-BLAKE3-SIV-AcAq62.tmp/target/debug/deps/libproptest-35af120c880ec346.rlib --extern subtle=/tmp/cargo-mutants-XChaCha20-BLAKE3-SIV-AcAq62.tmp/target/debug/deps/libsubtle-55f702608e37091d.rlib --extern xchacha20_blake3_siv=/tmp/cargo-mutants-XChaCha20-BLAKE3-SIV-AcAq62.tmp/target/debug/deps/libxchacha20_blake3_siv-10b0469e57c0fbf3.rlib --extern zeroize=/tmp/cargo-mutants-XChaCha20-BLAKE3-SIV-AcAq62.tmp/target/debug/deps/libzeroize-5087b20aec4f24d3.rlib -L native=/tmp/cargo-mutants-XChaCha20-BLAKE3-SIV-AcAq62.tmp/target/debug/build/blake3-db6c4b796fede836/out -L native=/tmp/cargo-mutants-XChaCha20-BLAKE3-SIV-AcAq62.tmp/target/debug/build/blake3-db6c4b796fede836/out`
+     Running `/home/dev123/.rustup/toolchains/stable-x86_64-unknown-linux-gnu/bin/rustc --crate-name variable_latency --edition=2021 tests/variable_latency.rs --error-format=json --json=diagnostic-rendered-ansi,artifacts,future-incompat --emit=dep-info,link -C embed-bitcode=no -C debuginfo=2 --warn=unexpected_cfgs '--deny=clippy::undocumented_unsafe_blocks' --check-cfg 'cfg(kani)' --test --cfg 'feature="default"' --cfg 'feature="hardened"' --check-cfg 'cfg(docsrs,test)' --check-cfg 'cfg(feature, values("default", "hardened", "pure", "rng"))' -C metadata=1882881643d82df7 -C extra-filename=-3076e91dfa758307 --out-dir /tmp/cargo-mutants-XChaCha20-BLAKE3-SIV-AcAq62.tmp/target/debug/deps -C incremental=/tmp/cargo-mutants-XChaCha20-BLAKE3-SIV-AcAq62.tmp/target/debug/incremental -L dependency=/tmp/cargo-mutants-XChaCha20-BLAKE3-SIV-AcAq62.tmp/target/debug/deps --extern aead=/tmp/cargo-mutants-XChaCha20-BLAKE3-SIV-AcAq62.tmp/target/debug/deps/libaead-15f867564fd89215.rlib --extern blake3=/tmp/cargo-mutants-XChaCha20-BLAKE3-SIV-AcAq62.tmp/target/debug/deps/libblake3-f8715a0be2228f6c.rlib --extern chacha20poly1305=/tmp/cargo-mutants-XChaCha20-BLAKE3-SIV-AcAq62.tmp/target/debug/deps/libchacha20poly1305-4bd1b2516f5448bb.rlib --extern criterion=/tmp/cargo-mutants-XChaCha20-BLAKE3-SIV-AcAq62.tmp/target/debug/deps/libcriterion-7a3675e7698ab10d.rlib --extern proptest=/tmp/cargo-mutants-XChaCha20-BLAKE3-SIV-AcAq62.tmp/target/debug/deps/libproptest-35af120c880ec346.rlib --extern subtle=/tmp/cargo-mutants-XChaCha20-BLAKE3-SIV-AcAq62.tmp/target/debug/deps/libsubtle-55f702608e37091d.rlib --extern xchacha20_blake3_siv=/tmp/cargo-mutants-XChaCha20-BLAKE3-SIV-AcAq62.tmp/target/debug/deps/libxchacha20_blake3_siv-10b0469e57c0fbf3.rlib --extern zeroize=/tmp/cargo-mutants-XChaCha20-BLAKE3-SIV-AcAq62.tmp/target/debug/deps/libzeroize-5087b20aec4f24d3.rlib -L native=/tmp/cargo-mutants-XChaCha20-BLAKE3-SIV-AcAq62.tmp/target/debug/build/blake3-db6c4b796fede836/out -L native=/tmp/cargo-mutants-XChaCha20-BLAKE3-SIV-AcAq62.tmp/target/debug/build/blake3-db6c4b796fede836/out`
+     Running `/home/dev123/.rustup/toolchains/stable-x86_64-unknown-linux-gnu/bin/rustc --crate-name bench_aead --edition=2021 examples/bench_aead.rs --error-format=json --json=diagnostic-rendered-ansi,artifacts,future-incompat --crate-type bin --emit=dep-info,link -C embed-bitcode=no -C debuginfo=2 --warn=unexpected_cfgs '--deny=clippy::undocumented_unsafe_blocks' --check-cfg 'cfg(kani)' --cfg 'feature="default"' --cfg 'feature="hardened"' --check-cfg 'cfg(docsrs,test)' --check-cfg 'cfg(feature, values("default", "hardened", "pure", "rng"))' -C metadata=31a857ff764af76d -C extra-filename=-f0643974e61b6e7e --out-dir /tmp/cargo-mutants-XChaCha20-BLAKE3-SIV-AcAq62.tmp/target/debug/examples -C incremental=/tmp/cargo-mutants-XChaCha20-BLAKE3-SIV-AcAq62.tmp/target/debug/incremental -L dependency=/tmp/cargo-mutants-XChaCha20-BLAKE3-SIV-AcAq62.tmp/target/debug/deps --extern aead=/tmp/cargo-mutants-XChaCha20-BLAKE3-SIV-AcAq62.tmp/target/debug/deps/libaead-15f867564fd89215.rlib --extern blake3=/tmp/cargo-mutants-XChaCha20-BLAKE3-SIV-AcAq62.tmp/target/debug/deps/libblake3-f8715a0be2228f6c.rlib --extern chacha20poly1305=/tmp/cargo-mutants-XChaCha20-BLAKE3-SIV-AcAq62.tmp/target/debug/deps/libchacha20poly1305-4bd1b2516f5448bb.rlib --extern criterion=/tmp/cargo-mutants-XChaCha20-BLAKE3-SIV-AcAq62.tmp/target/debug/deps/libcriterion-7a3675e7698ab10d.rlib --extern proptest=/tmp/cargo-mutants-XChaCha20-BLAKE3-SIV-AcAq62.tmp/target/debug/deps/libproptest-35af120c880ec346.rlib --extern subtle=/tmp/cargo-mutants-XChaCha20-BLAKE3-SIV-AcAq62.tmp/target/debug/deps/libsubtle-55f702608e37091d.rlib --extern xchacha20_blake3_siv=/tmp/cargo-mutants-XChaCha20-BLAKE3-SIV-AcAq62.tmp/target/debug/deps/libxchacha20_blake3_siv-10b0469e57c0fbf3.rlib --extern zeroize=/tmp/cargo-mutants-XChaCha20-BLAKE3-SIV-AcAq62.tmp/target/debug/deps/libzeroize-5087b20aec4f24d3.rlib -L native=/tmp/cargo-mutants-XChaCha20-BLAKE3-SIV-AcAq62.tmp/target/debug/build/blake3-db6c4b796fede836/out -L native=/tmp/cargo-mutants-XChaCha20-BLAKE3-SIV-AcAq62.tmp/target/debug/build/blake3-db6c4b796fede836/out`
+     Running `/home/dev123/.rustup/toolchains/stable-x86_64-unknown-linux-gnu/bin/rustc --crate-name xsiv_stdin --edition=2021 examples/xsiv_stdin.rs --error-format=json --json=diagnostic-rendered-ansi,artifacts,future-incompat --crate-type bin --emit=dep-info,link -C embed-bitcode=no -C debuginfo=2 --warn=unexpected_cfgs '--deny=clippy::undocumented_unsafe_blocks' --check-cfg 'cfg(kani)' --cfg 'feature="default"' --cfg 'feature="hardened"' --check-cfg 'cfg(docsrs,test)' --check-cfg 'cfg(feature, values("default", "hardened", "pure", "rng"))' -C metadata=763063ab7465c7ba -C extra-filename=-f0d85b7b984b4012 --out-dir /tmp/cargo-mutants-XChaCha20-BLAKE3-SIV-AcAq62.tmp/target/debug/examples -C incremental=/tmp/cargo-mutants-XChaCha20-BLAKE3-SIV-AcAq62.tmp/target/debug/incremental -L dependency=/tmp/cargo-mutants-XChaCha20-BLAKE3-SIV-AcAq62.tmp/target/debug/deps --extern aead=/tmp/cargo-mutants-XChaCha20-BLAKE3-SIV-AcAq62.tmp/target/debug/deps/libaead-15f867564fd89215.rlib --extern blake3=/tmp/cargo-mutants-XChaCha20-BLAKE3-SIV-AcAq62.tmp/target/debug/deps/libblake3-f8715a0be2228f6c.rlib --extern chacha20poly1305=/tmp/cargo-mutants-XChaCha20-BLAKE3-SIV-AcAq62.tmp/target/debug/deps/libchacha20poly1305-4bd1b2516f5448bb.rlib --extern criterion=/tmp/cargo-mutants-XChaCha20-BLAKE3-SIV-AcAq62.tmp/target/debug/deps/libcriterion-7a3675e7698ab10d.rlib --extern proptest=/tmp/cargo-mutants-XChaCha20-BLAKE3-SIV-AcAq62.tmp/target/debug/deps/libproptest-35af120c880ec346.rlib --extern subtle=/tmp/cargo-mutants-XChaCha20-BLAKE3-SIV-AcAq62.tmp/target/debug/deps/libsubtle-55f702608e37091d.rlib --extern xchacha20_blake3_siv=/tmp/cargo-mutants-XChaCha20-BLAKE3-SIV-AcAq62.tmp/target/debug/deps/libxchacha20_blake3_siv-10b0469e57c0fbf3.rlib --extern zeroize=/tmp/cargo-mutants-XChaCha20-BLAKE3-SIV-AcAq62.tmp/target/debug/deps/libzeroize-5087b20aec4f24d3.rlib -L native=/tmp/cargo-mutants-XChaCha20-BLAKE3-SIV-AcAq62.tmp/target/debug/build/blake3-db6c4b796fede836/out -L native=/tmp/cargo-mutants-XChaCha20-BLAKE3-SIV-AcAq62.tmp/target/debug/build/blake3-db6c4b796fede836/out`
+     Running `/home/dev123/.rustup/toolchains/stable-x86_64-unknown-linux-gnu/bin/rustc --crate-name profile_probe --edition=2021 examples/profile_probe.rs --error-format=json --json=diagnostic-rendered-ansi,artifacts,future-incompat --crate-type bin --emit=dep-info,link -C embed-bitcode=no -C debuginfo=2 --warn=unexpected_cfgs '--deny=clippy::undocumented_unsafe_blocks' --check-cfg 'cfg(kani)' --cfg 'feature="default"' --cfg 'feature="hardened"' --check-cfg 'cfg(docsrs,test)' --check-cfg 'cfg(feature, values("default", "hardened", "pure", "rng"))' -C metadata=92522396af8cf8e2 -C extra-filename=-d826e6b7bd6d60c4 --out-dir /tmp/cargo-mutants-XChaCha20-BLAKE3-SIV-AcAq62.tmp/target/debug/examples -C incremental=/tmp/cargo-mutants-XChaCha20-BLAKE3-SIV-AcAq62.tmp/target/debug/incremental -L dependency=/tmp/cargo-mutants-XChaCha20-BLAKE3-SIV-AcAq62.tmp/target/debug/deps --extern aead=/tmp/cargo-mutants-XChaCha20-BLAKE3-SIV-AcAq62.tmp/target/debug/deps/libaead-15f867564fd89215.rlib --extern blake3=/tmp/cargo-mutants-XChaCha20-BLAKE3-SIV-AcAq62.tmp/target/debug/deps/libblake3-f8715a0be2228f6c.rlib --extern chacha20poly1305=/tmp/cargo-mutants-XChaCha20-BLAKE3-SIV-AcAq62.tmp/target/debug/deps/libchacha20poly1305-4bd1b2516f5448bb.rlib --extern criterion=/tmp/cargo-mutants-XChaCha20-BLAKE3-SIV-AcAq62.tmp/target/debug/deps/libcriterion-7a3675e7698ab10d.rlib --extern proptest=/tmp/cargo-mutants-XChaCha20-BLAKE3-SIV-AcAq62.tmp/target/debug/deps/libproptest-35af120c880ec346.rlib --extern subtle=/tmp/cargo-mutants-XChaCha20-BLAKE3-SIV-AcAq62.tmp/target/debug/deps/libsubtle-55f702608e37091d.rlib --extern xchacha20_blake3_siv=/tmp/cargo-mutants-XChaCha20-BLAKE3-SIV-AcAq62.tmp/target/debug/deps/libxchacha20_blake3_siv-10b0469e57c0fbf3.rlib --extern zeroize=/tmp/cargo-mutants-XChaCha20-BLAKE3-SIV-AcAq62.tmp/target/debug/deps/libzeroize-5087b20aec4f24d3.rlib -L native=/tmp/cargo-mutants-XChaCha20-BLAKE3-SIV-AcAq62.tmp/target/debug/build/blake3-db6c4b796fede836/out -L native=/tmp/cargo-mutants-XChaCha20-BLAKE3-SIV-AcAq62.tmp/target/debug/build/blake3-db6c4b796fede836/out`
+     Running `/home/dev123/.rustup/toolchains/stable-x86_64-unknown-linux-gnu/bin/rustc --crate-name ctgrind --edition=2021 tests/ctgrind.rs --error-format=json --json=diagnostic-rendered-ansi,artifacts,future-incompat --emit=dep-info,link -C embed-bitcode=no -C debuginfo=2 --warn=unexpected_cfgs '--deny=clippy::undocumented_unsafe_blocks' --check-cfg 'cfg(kani)' --test --cfg 'feature="default"' --cfg 'feature="hardened"' --check-cfg 'cfg(docsrs,test)' --check-cfg 'cfg(feature, values("default", "hardened", "pure", "rng"))' -C metadata=aa2b19a269a6fe43 -C extra-filename=-cce0e131e0548bf4 --out-dir /tmp/cargo-mutants-XChaCha20-BLAKE3-SIV-AcAq62.tmp/target/debug/deps -C incremental=/tmp/cargo-mutants-XChaCha20-BLAKE3-SIV-AcAq62.tmp/target/debug/incremental -L dependency=/tmp/cargo-mutants-XChaCha20-BLAKE3-SIV-AcAq62.tmp/target/debug/deps --extern aead=/tmp/cargo-mutants-XChaCha20-BLAKE3-SIV-AcAq62.tmp/target/debug/deps/libaead-15f867564fd89215.rlib --extern blake3=/tmp/cargo-mutants-XChaCha20-BLAKE3-SIV-AcAq62.tmp/target/debug/deps/libblake3-f8715a0be2228f6c.rlib --extern chacha20poly1305=/tmp/cargo-mutants-XChaCha20-BLAKE3-SIV-AcAq62.tmp/target/debug/deps/libchacha20poly1305-4bd1b2516f5448bb.rlib --extern criterion=/tmp/cargo-mutants-XChaCha20-BLAKE3-SIV-AcAq62.tmp/target/debug/deps/libcriterion-7a3675e7698ab10d.rlib --extern proptest=/tmp/cargo-mutants-XChaCha20-BLAKE3-SIV-AcAq62.tmp/target/debug/deps/libproptest-35af120c880ec346.rlib --extern subtle=/tmp/cargo-mutants-XChaCha20-BLAKE3-SIV-AcAq62.tmp/target/debug/deps/libsubtle-55f702608e37091d.rlib --extern xchacha20_blake3_siv=/tmp/cargo-mutants-XChaCha20-BLAKE3-SIV-AcAq62.tmp/target/debug/deps/libxchacha20_blake3_siv-10b0469e57c0fbf3.rlib --extern zeroize=/tmp/cargo-mutants-XChaCha20-BLAKE3-SIV-AcAq62.tmp/target/debug/deps/libzeroize-5087b20aec4f24d3.rlib -L native=/tmp/cargo-mutants-XChaCha20-BLAKE3-SIV-AcAq62.tmp/target/debug/build/blake3-db6c4b796fede836/out -L native=/tmp/cargo-mutants-XChaCha20-BLAKE3-SIV-AcAq62.tmp/target/debug/build/blake3-db6c4b796fede836/out`
+     Running `/home/dev123/.rustup/toolchains/stable-x86_64-unknown-linux-gnu/bin/rustc --crate-name timing --edition=2021 tests/timing.rs --error-format=json --json=diagnostic-rendered-ansi,artifacts,future-incompat --emit=dep-info,link -C embed-bitcode=no -C debuginfo=2 --warn=unexpected_cfgs '--deny=clippy::undocumented_unsafe_blocks' --check-cfg 'cfg(kani)' --test --cfg 'feature="default"' --cfg 'feature="hardened"' --check-cfg 'cfg(docsrs,test)' --check-cfg 'cfg(feature, values("default", "hardened", "pure", "rng"))' -C metadata=526ef8c43a4f191b -C extra-filename=-cf5d313f6f279cc1 --out-dir /tmp/cargo-mutants-XChaCha20-BLAKE3-SIV-AcAq62.tmp/target/debug/deps -C incremental=/tmp/cargo-mutants-XChaCha20-BLAKE3-SIV-AcAq62.tmp/target/debug/incremental -L dependency=/tmp/cargo-mutants-XChaCha20-BLAKE3-SIV-AcAq62.tmp/target/debug/deps --extern aead=/tmp/cargo-mutants-XChaCha20-BLAKE3-SIV-AcAq62.tmp/target/debug/deps/libaead-15f867564fd89215.rlib --extern blake3=/tmp/cargo-mutants-XChaCha20-BLAKE3-SIV-AcAq62.tmp/target/debug/deps/libblake3-f8715a0be2228f6c.rlib --extern chacha20poly1305=/tmp/cargo-mutants-XChaCha20-BLAKE3-SIV-AcAq62.tmp/target/debug/deps/libchacha20poly1305-4bd1b2516f5448bb.rlib --extern criterion=/tmp/cargo-mutants-XChaCha20-BLAKE3-SIV-AcAq62.tmp/target/debug/deps/libcriterion-7a3675e7698ab10d.rlib --extern proptest=/tmp/cargo-mutants-XChaCha20-BLAKE3-SIV-AcAq62.tmp/target/debug/deps/libproptest-35af120c880ec346.rlib --extern subtle=/tmp/cargo-mutants-XChaCha20-BLAKE3-SIV-AcAq62.tmp/target/debug/deps/libsubtle-55f702608e37091d.rlib --extern xchacha20_blake3_siv=/tmp/cargo-mutants-XChaCha20-BLAKE3-SIV-AcAq62.tmp/target/debug/deps/libxchacha20_blake3_siv-10b0469e57c0fbf3.rlib --extern zeroize=/tmp/cargo-mutants-XChaCha20-BLAKE3-SIV-AcAq62.tmp/target/debug/deps/libzeroize-5087b20aec4f24d3.rlib -L native=/tmp/cargo-mutants-XChaCha20-BLAKE3-SIV-AcAq62.tmp/target/debug/build/blake3-db6c4b796fede836/out -L native=/tmp/cargo-mutants-XChaCha20-BLAKE3-SIV-AcAq62.tmp/target/debug/build/blake3-db6c4b796fede836/out`
+     Running `/home/dev123/.rustup/toolchains/stable-x86_64-unknown-linux-gnu/bin/rustc --crate-name decision --edition=2021 tests/decision.rs --error-format=json --json=diagnostic-rendered-ansi,artifacts,future-incompat --emit=dep-info,link -C embed-bitcode=no -C debuginfo=2 --warn=unexpected_cfgs '--deny=clippy::undocumented_unsafe_blocks' --check-cfg 'cfg(kani)' --test --cfg 'feature="default"' --cfg 'feature="hardened"' --check-cfg 'cfg(docsrs,test)' --check-cfg 'cfg(feature, values("default", "hardened", "pure", "rng"))' -C metadata=838a38c55424fc06 -C extra-filename=-752a741c671fa3b7 --out-dir /tmp/cargo-mutants-XChaCha20-BLAKE3-SIV-AcAq62.tmp/target/debug/deps -C incremental=/tmp/cargo-mutants-XChaCha20-BLAKE3-SIV-AcAq62.tmp/target/debug/incremental -L dependency=/tmp/cargo-mutants-XChaCha20-BLAKE3-SIV-AcAq62.tmp/target/debug/deps --extern aead=/tmp/cargo-mutants-XChaCha20-BLAKE3-SIV-AcAq62.tmp/target/debug/deps/libaead-15f867564fd89215.rlib --extern blake3=/tmp/cargo-mutants-XChaCha20-BLAKE3-SIV-AcAq62.tmp/target/debug/deps/libblake3-f8715a0be2228f6c.rlib --extern chacha20poly1305=/tmp/cargo-mutants-XChaCha20-BLAKE3-SIV-AcAq62.tmp/target/debug/deps/libchacha20poly1305-4bd1b2516f5448bb.rlib --extern criterion=/tmp/cargo-mutants-XChaCha20-BLAKE3-SIV-AcAq62.tmp/target/debug/deps/libcriterion-7a3675e7698ab10d.rlib --extern proptest=/tmp/cargo-mutants-XChaCha20-BLAKE3-SIV-AcAq62.tmp/target/debug/deps/libproptest-35af120c880ec346.rlib --extern subtle=/tmp/cargo-mutants-XChaCha20-BLAKE3-SIV-AcAq62.tmp/target/debug/deps/libsubtle-55f702608e37091d.rlib --extern xchacha20_blake3_siv=/tmp/cargo-mutants-XChaCha20-BLAKE3-SIV-AcAq62.tmp/target/debug/deps/libxchacha20_blake3_siv-10b0469e57c0fbf3.rlib --extern zeroize=/tmp/cargo-mutants-XChaCha20-BLAKE3-SIV-AcAq62.tmp/target/debug/deps/libzeroize-5087b20aec4f24d3.rlib -L native=/tmp/cargo-mutants-XChaCha20-BLAKE3-SIV-AcAq62.tmp/target/debug/build/blake3-db6c4b796fede836/out -L native=/tmp/cargo-mutants-XChaCha20-BLAKE3-SIV-AcAq62.tmp/target/debug/build/blake3-db6c4b796fede836/out`
+     Running `/home/dev123/.rustup/toolchains/stable-x86_64-unknown-linux-gnu/bin/rustc --crate-name threads --edition=2021 tests/threads.rs --error-format=json --json=diagnostic-rendered-ansi,artifacts,future-incompat --emit=dep-info,link -C embed-bitcode=no -C debuginfo=2 --warn=unexpected_cfgs '--deny=clippy::undocumented_unsafe_blocks' --check-cfg 'cfg(kani)' --test --cfg 'feature="default"' --cfg 'feature="hardened"' --check-cfg 'cfg(docsrs,test)' --check-cfg 'cfg(feature, values("default", "hardened", "pure", "rng"))' -C metadata=d15945d3c3bc30b2 -C extra-filename=-61a7b7aecfe0c2ad --out-dir /tmp/cargo-mutants-XChaCha20-BLAKE3-SIV-AcAq62.tmp/target/debug/deps -C incremental=/tmp/cargo-mutants-XChaCha20-BLAKE3-SIV-AcAq62.tmp/target/debug/incremental -L dependency=/tmp/cargo-mutants-XChaCha20-BLAKE3-SIV-AcAq62.tmp/target/debug/deps --extern aead=/tmp/cargo-mutants-XChaCha20-BLAKE3-SIV-AcAq62.tmp/target/debug/deps/libaead-15f867564fd89215.rlib --extern blake3=/tmp/cargo-mutants-XChaCha20-BLAKE3-SIV-AcAq62.tmp/target/debug/deps/libblake3-f8715a0be2228f6c.rlib --extern chacha20poly1305=/tmp/cargo-mutants-XChaCha20-BLAKE3-SIV-AcAq62.tmp/target/debug/deps/libchacha20poly1305-4bd1b2516f5448bb.rlib --extern criterion=/tmp/cargo-mutants-XChaCha20-BLAKE3-SIV-AcAq62.tmp/target/debug/deps/libcriterion-7a3675e7698ab10d.rlib --extern proptest=/tmp/cargo-mutants-XChaCha20-BLAKE3-SIV-AcAq62.tmp/target/debug/deps/libproptest-35af120c880ec346.rlib --extern subtle=/tmp/cargo-mutants-XChaCha20-BLAKE3-SIV-AcAq62.tmp/target/debug/deps/libsubtle-55f702608e37091d.rlib --extern xchacha20_blake3_siv=/tmp/cargo-mutants-XChaCha20-BLAKE3-SIV-AcAq62.tmp/target/debug/deps/libxchacha20_blake3_siv-10b0469e57c0fbf3.rlib --extern zeroize=/tmp/cargo-mutants-XChaCha20-BLAKE3-SIV-AcAq62.tmp/target/debug/deps/libzeroize-5087b20aec4f24d3.rlib -L native=/tmp/cargo-mutants-XChaCha20-BLAKE3-SIV-AcAq62.tmp/target/debug/build/blake3-db6c4b796fede836/out -L native=/tmp/cargo-mutants-XChaCha20-BLAKE3-SIV-AcAq62.tmp/target/debug/build/blake3-db6c4b796fede836/out`
+warning: `xchacha20-blake3-siv` (lib test) generated 4 warnings (4 duplicates)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.57s
+  Executable `/tmp/cargo-mutants-XChaCha20-BLAKE3-SIV-AcAq62.tmp/target/debug/deps/xchacha20_blake3_siv-37033d2b0be6e653`
+  Executable `/tmp/cargo-mutants-XChaCha20-BLAKE3-SIV-AcAq62.tmp/target/debug/deps/counter_range-4e7e22ce8eb1f17b`
+  Executable `/tmp/cargo-mutants-XChaCha20-BLAKE3-SIV-AcAq62.tmp/target/debug/deps/ctgrind-cce0e131e0548bf4`
+  Executable `/tmp/cargo-mutants-XChaCha20-BLAKE3-SIV-AcAq62.tmp/target/debug/deps/decision-752a741c671fa3b7`
+  Executable `/tmp/cargo-mutants-XChaCha20-BLAKE3-SIV-AcAq62.tmp/target/debug/deps/decision_scope-7327613b6e84fa10`
+  Executable `/tmp/cargo-mutants-XChaCha20-BLAKE3-SIV-AcAq62.tmp/target/debug/deps/differential_reference-3417a425511ab235`
+  Executable `/tmp/cargo-mutants-XChaCha20-BLAKE3-SIV-AcAq62.tmp/target/debug/deps/security-e4611eef8fe6205a`
+  Executable `/tmp/cargo-mutants-XChaCha20-BLAKE3-SIV-AcAq62.tmp/target/debug/deps/threads-61a7b7aecfe0c2ad`
+  Executable `/tmp/cargo-mutants-XChaCha20-BLAKE3-SIV-AcAq62.tmp/target/debug/deps/timing-cf5d313f6f279cc1`
+  Executable `/tmp/cargo-mutants-XChaCha20-BLAKE3-SIV-AcAq62.tmp/target/debug/deps/variable_latency-3076e91dfa758307`
+
+*** result: Success
+
+*** /home/dev123/.rustup/toolchains/stable-x86_64-unknown-linux-gnu/bin/cargo test --verbose --package=xchacha20-blake3-siv@0.1.0 --features=hardened --test decision --test security
+       Fresh cfg-if v1.0.5
+       Fresh unicode-ident v1.0.26
+       Fresh version_check v0.9.5
+       Fresh typenum v1.20.1
+       Fresh zeroize v1.9.0
+       Fresh autocfg v1.5.1
+       Fresh shlex v2.0.1
+       Fresh find-msvc-tools v0.1.13
+       Fresh either v1.18.0
+       Fresh subtle v2.6.1
+       Fresh regex-syntax v0.8.11
+       Fresh anstyle v1.0.14
+       Fresh plotters-backend v0.3.7
+       Fresh clap_lex v1.1.1
+       Fresh memchr v2.8.3
+       Fresh cpufeatures v0.2.17
+       Fresh ciborium-io v0.2.2
+       Fresh itoa v1.0.18
+       Fresh same-file v1.0.6
+       Fresh cast v0.3.0
+       Fresh opaque-debug v0.3.1
+       Fresh libc v0.2.189
+       Fresh cc v1.4.7
+       Fresh regex-automata v0.4.18
+       Fresh clap_builder v4.6.7
+       Fresh itertools v0.10.5
+       Fresh plotters-svg v0.3.7
+       Fresh arrayvec v0.7.8
+       Fresh constant_time_eq v0.4.2
+       Fresh bit-vec v0.8.0
+       Fresh cpufeatures v0.3.1
+       Fresh walkdir v2.5.0
+       Fresh anes v0.1.6
+       Fresh oorandom v11.1.5
+       Fresh once_cell v1.21.4
+       Fresh unarray v0.1.4
+       Fresh bitflags v2.13.2
+       Fresh proc-macro2 v1.0.107
+       Fresh getrandom v0.2.17
+       Fresh serde_core v1.0.229
+       Fresh crossbeam-utils v0.8.23
+       Fresh getrandom v0.3.4
+       Fresh zmij v1.0.23
+       Fresh clap v4.6.7
+       Fresh bit-set v0.8.0
+       Fresh is-terminal v0.4.17
+       Fresh criterion-plot v0.5.0
+       Fresh regex v1.13.1
+       Fresh quote v1.0.47
+       Fresh generic-array v0.14.7
+       Fresh rand_core v0.6.4
+       Fresh crossbeam-epoch v0.9.21
+       Fresh rand_core v0.9.5
+       Fresh num-traits v0.2.19
+       Fresh serde_json v1.0.151
+       Fresh syn v2.0.119
+       Fresh crypto-common v0.1.7
+       Fresh syn v3.0.6
+       Fresh inout v0.1.4
+       Fresh crossbeam-deque v0.8.8
+       Fresh rand_xorshift v0.4.0
+       Fresh blake3 v1.8.7
+       Fresh rand v0.9.5
+       Fresh plotters v0.3.7
+       Fresh zerocopy-derive v0.8.57
+       Fresh serde_derive v1.0.229
+       Fresh universal-hash v0.5.1
+       Fresh rayon-core v1.13.0
+       Fresh cipher v0.4.4
+       Fresh aead v0.5.2
+warning: unused variable: `gate0`
+    --> src/lib.rs:1071:5
+     |
+1071 |     gate0: subtle::Choice,
+     |     ^^^^^ help: if this is intentional, prefix it with an underscore: `_gate0`
+     |
+     = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `gate1`
+    --> src/lib.rs:1072:5
+     |
+1072 |     gate1: subtle::Choice,
+     |     ^^^^^ help: if this is intentional, prefix it with an underscore: `_gate1`
+
+warning: unused variable: `out0`
+    --> src/lib.rs:1073:5
+     |
+1073 |     out0: &mut Result<(), Error>,
+     |     ^^^^ help: if this is intentional, prefix it with an underscore: `_out0`
+
+warning: unused variable: `out1`
+    --> src/lib.rs:1074:5
+     |
+1074 |     out1: &mut Result<(), Error>,
+     |     ^^^^ help: if this is intentional, prefix it with an underscore: `_out1`
+
+warning: `xchacha20-blake3-siv` (lib) generated 4 warnings (run `cargo fix --lib -p xchacha20-blake3-siv` to apply 4 suggestions)
+       Fresh zerocopy v0.8.57
+       Fresh serde v1.0.229
+       Fresh chacha20 v0.9.1
+       Fresh poly1305 v0.8.0
+       Fresh rayon v1.12.0
+       Fresh half v2.7.1
+       Fresh ppv-lite86 v0.2.21
+       Fresh tinytemplate v1.2.1
+       Fresh chacha20poly1305 v0.10.1
+       Fresh ciborium-ll v0.2.2
+       Fresh rand_chacha v0.9.0
+       Fresh ciborium v0.2.2
+       Fresh proptest v1.11.0
+       Fresh criterion v0.5.1
+       Fresh xchacha20-blake3-siv v0.1.0 (/tmp/cargo-mutants-XChaCha20-BLAKE3-SIV-AcAq62.tmp)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.05s
+     Running `/tmp/cargo-mutants-XChaCha20-BLAKE3-SIV-AcAq62.tmp/target/debug/deps/decision-752a741c671fa3b7`
+
+running 1 test
+test a_forged_tag_must_not_be_accepted ... FAILED
+
+failures:
+
+---- a_forged_tag_must_not_be_accepted stdout ----
+
+thread 'a_forged_tag_must_not_be_accepted' (1449313) panicked at tests/decision.rs:26:51:
+called `Result::unwrap()` on an `Err` value: AuthenticationFailed
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    a_forged_tag_must_not_be_accepted
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `-p xchacha20-blake3-siv --test decision`
+
+*** result: Failure(101)
