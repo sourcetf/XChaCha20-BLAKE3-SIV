@@ -43,7 +43,9 @@ export PATH="$HOME/.cargo/bin:$PATH"
 VALGRIND="${VALGRIND:-$HOME/valgrind/usr/bin/valgrind}"
 if [ ! -x "$VALGRIND" ]; then
   echo "SKIPPED: no valgrind at $VALGRIND (tools/ctgrind.sh --setup can fetch one)" >&2
-  exit 0
+  # 3 = could not run; see the exit-code list in this file's header and the
+  # convention `tools/gate_selftest.sh` checks.
+  exit 3
 fi
 export VALGRIND_LIB="${VALGRIND_LIB:-$HOME/valgrind/usr/libexec/valgrind}"
 

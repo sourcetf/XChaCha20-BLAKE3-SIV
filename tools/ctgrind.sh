@@ -40,7 +40,8 @@
 #         tools/ctgrind.sh --setup  # print how to obtain valgrind here
 #
 # Exit codes: 0 clean; 1 clean but the harness failed its own sanity checks;
-#             99 a leak was detected.
+#             3 could not run (no valgrind -- the caller must report that as a
+#             skipped stage, not as a pass); 99 a leak was detected.
 set -euo pipefail
 
 SELFTEST=1
@@ -82,7 +83,10 @@ for c in "${VALGRIND:-}" "$HOME/valgrind/usr/bin/valgrind" \
 done
 if [ -z "$VG" ]; then
   echo "SKIPPED: valgrind not found.  Run 'tools/ctgrind.sh --setup'." >&2
-  exit 0
+  # Exit 3, not 0: "could not run" has to be distinguishable from "ran and passed",
+  # or a caller that only looks at the status counts this as a green check (which is
+  # exactly what `verify.sh` did before it learned to map 3 to a skipped stage).
+  exit 3
 fi
 # An extracted valgrind needs its own library directory, and it must be set
 # *before* valgrind is invoked — otherwise even `--version` fails to start.

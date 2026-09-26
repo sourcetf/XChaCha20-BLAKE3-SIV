@@ -2605,35 +2605,81 @@ mod tests {
         assert_eq!(decrypt(&key, &nonce, aad, &ct, &tag).unwrap(), plaintext);
     }
 
+    /// Ciphertexts must not be transplantable between messages that share a
+    /// `(key, nonce)`.
+    ///
+    /// This is the property "nonce-misuse resistant" actually names, and the one a
+    /// test can check: SIV derives the per-message key from the tag, so a ciphertext
+    /// authenticates only under the tag that was computed for it. The previous
+    /// version of this test asserted that two *nonces* give two tags -- nonce
+    /// sensitivity, which every correct AEAD has and which says nothing about what
+    /// happens when a nonce is reused.
     #[test]
-    fn test_nonce_misuse_resistance() {
-        // SIV mode: same (key, aad, plaintext) with different nonces
-        // should produce DIFFERENT tags (nonce-misuse resistant)
+    fn test_message_swap_under_a_reused_nonce_is_rejected() {
         let key = [0u8; 32];
-        let nonce1 = [0u8; 24];
-        let nonce2 = [1u8; 24];
-        let plaintext = b"Same message";
+        let nonce = [0u8; 24];
         let aad = b"same aad";
 
-        let (tag1, _) = encrypt(&key, &nonce1, aad, plaintext).unwrap();
-        let (tag2, _) = encrypt(&key, &nonce2, aad, plaintext).unwrap();
+        let (ct_a, tag_a) = encrypt(&key, &nonce, aad, b"first message").unwrap();
+        let (ct_b, tag_b) = encrypt(&key, &nonce, aad, b"second message").unwrap();
+        assert_ne!(tag_a, tag_b, "different messages must give different tags");
 
-        assert_ne!(tag1, tag2);
+        // The transplant an attacker with a reused nonce would attempt: one
+        // message's ciphertext under the other's tag (and the reverse).
+        for (label, ct, tag) in [
+            ("A's ciphertext under B's tag", &ct_a, &tag_b),
+            ("B's ciphertext under A's tag", &ct_b, &tag_a),
+        ] {
+            assert_eq!(
+                decrypt(&key, &nonce, aad, ct, tag).unwrap_err(),
+                Error::AuthenticationFailed,
+                "{label} must not authenticate"
+            );
+        }
+
+        // The genuine pairs still round-trip, so the rejections above are the
+        // transplant and not a broken harness.
+        assert_eq!(
+            decrypt(&key, &nonce, aad, &ct_a, &tag_a).unwrap(),
+            b"first message"
+        );
+        assert_eq!(
+            decrypt(&key, &nonce, aad, &ct_b, &tag_b).unwrap(),
+            b"second message"
+        );
     }
 
+    /// The tag must change when *only* the key changes.
+    ///
+    /// Key commitment itself is a security argument from the tag's width (2^260, see
+    /// the README) and cannot be established by sampling; what is testable is that
+    /// the tag is not indifferent to the key, and the mechanism it rests on -- the
+    /// key reaching the tag *directly*, not only through `mac_key` -- is what
+    /// `test_tag_binds_the_key_directly` checks. The old name claimed the property
+    /// rather than the sampling.
     #[test]
-    fn test_key_commitment() {
-        // Key-committing: different keys with same nonce/aad/pt should produce different tags
+    fn test_tag_changes_when_only_the_key_changes() {
         let key1 = [0u8; 32];
         let key2 = [1u8; 32];
         let nonce = [0u8; 24];
         let plaintext = b"Key commitment test";
         let aad = b"";
 
-        let (_, tag1) = encrypt(&key1, &nonce, aad, plaintext).unwrap();
-        let (_, tag2) = encrypt(&key2, &nonce, aad, plaintext).unwrap();
+        let (ct1, tag1) = encrypt(&key1, &nonce, aad, plaintext).unwrap();
+        let (ct2, tag2) = encrypt(&key2, &nonce, aad, plaintext).unwrap();
 
-        assert_ne!(tag1, tag2);
+        assert_ne!(tag1, tag2, "the tag must depend on the key");
+        // And a tag from one key must not authenticate under the other, in either
+        // direction -- the consequence a caller would notice if the key were not
+        // bound in.
+        assert_eq!(
+            decrypt(&key2, &nonce, aad, &ct1, &tag1).unwrap_err(),
+            Error::AuthenticationFailed
+        );
+        assert_eq!(
+            decrypt(&key1, &nonce, aad, &ct2, &tag2).unwrap_err(),
+            Error::AuthenticationFailed
+        );
     }
 
     #[test]

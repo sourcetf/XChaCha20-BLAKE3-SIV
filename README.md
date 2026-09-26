@@ -233,15 +233,19 @@ A bounded mutation run over the decision (`cargo mutants -f src/lib.rs -F
 'decrypt|accept_or_reject' --features hardened -- --test decision --test security`, in
 CI) tests the other half of that: every mutant of the decision and of its
 caller-visible limits must be caught, by the decision detector and by the security
-suite. The `&` → `|` or `^` mutants in the two-comparison expression are
-excluded as **equivalent under fault-free testing**, and that exclusion is itself
-informative: the two comparisons inside a gate always agree, because they compare the
-same two arrays, so they differ *only* when a fault makes them disagree. That case
-cannot be reached by any fault-free test, which is why it is a row of the fault
-campaign instead. The run uses `--features hardened` on purpose — the hardened
-decision contains every mutatable line the default one has, and `cargo mutants` does
-not evaluate `cfg`, so a second run without the feature would report the cfg'd-out
-second gate as an uncaught mutant rather than as code the build does not contain.
+suite. The `&` → `|` mutants in the two-comparison expression are excluded as
+**equivalent under fault-free testing**, and that exclusion is itself informative: the
+two comparisons inside a gate always agree, because they compare the same two arrays,
+so `x | x == x & x`. The exclusion is deliberately *only* `|`: an earlier version also
+excluded `&` → `^`, and since `x ^ x == 0` that mutant makes the gate reject
+everything, which the decision test kills — so the exclusion discarded killable
+mutants and the reason given for it was wrong for half of them. The case where a
+gate's two comparisons *disagree* cannot be reached by any fault-free test, which is
+why it is a row of the fault campaign instead. The run uses `--features hardened` on
+purpose — the hardened decision contains every mutatable line the default one has, and
+`cargo mutants` does not evaluate `cfg`, so a second run without the feature would
+report the cfg'd-out second gate as an uncaught mutant rather than as code the build
+does not contain.
 
 The same question at the level of the *compiled* code: `tools/fi_instruction.sh`
 replaces every byte of the decision's machine code with `NOP`, one at a time, and

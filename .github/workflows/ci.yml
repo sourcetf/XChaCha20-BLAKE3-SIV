@@ -53,6 +53,12 @@ jobs:
       - name: clippy (all features)
         run: cargo clippy --all-targets --all-features -- -D warnings
 
+      # The tools' contract: "could not run" is exit 3, never 0, and the caller that
+      # invokes them reports it as a skipped stage. A gate that regresses to exit 0
+      # here fails this step rather than a summary line somewhere else.
+      - name: gate contract (a gate that could not run must not exit 0)
+        run: ./tools/gate_selftest.sh
+
       # Catches broken intra-doc links, which are invisible to `cargo test`.
       - name: rustdoc
         run: cargo doc --no-deps --all-features
@@ -101,6 +107,26 @@ jobs:
       - name: cargo test
         run: cargo test ${{ matrix.args }} -- --skip timing
 
+  timing-instrument:
+    name: timing instrument (blocking)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    # The split matters: the *instrument* is gated, the two leak *screens* are not.
+    # `timing_screen_can_detect_a_real_difference` plants a ~67 ns/op difference and
+    # requires the Welch t to see it (asserted `t > 10`; measured t = 3244 on a
+    # runner), so hosted-VM bias cannot make it lie -- and it is the assertion that
+    # keeps the two screens from being vacuous. Blocking, because a screen whose
+    # instrument has rotted is a green check that means nothing, which is the failure
+    # mode this repository keeps finding in other gates.
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: timing
+      - name: the screen can detect a real difference
+        run: cargo test --release --test timing -- timing_screen_can_detect_a_real_difference
+
   timing:
     name: timing screen (advisory)
     runs-on: ubuntu-latest
@@ -112,8 +138,11 @@ jobs:
     # possible cause reported t = 10.96 (release) and t = 11.89 (debug). Those
     # runs were not short of precision -- 41 ns/op -- they were biased by ~0.8%
     # between the classes, which is what a hosted VM does. A 3x window between
-    # noise and signal cannot be gated on, so this job is advisory; the same
-    # tests run strictly in `./verify.sh --deep`, where they report t < 0.4.
+    # noise and signal cannot be gated on, so the two leak screens are advisory --
+    # the instrument they rest on is blocked by `timing-instrument` above, the
+    # deterministic constant-time evidence is `tools/ctgrind.sh` (and
+    # `tools/cache_profile.sh`) in Deep checks, and these same tests run strictly in
+    # `./verify.sh --deep`, where they report t < 0.4.
     continue-on-error: true
     steps:
       - uses: actions/checkout@v7

@@ -52,6 +52,72 @@ tags have been cut yet.
   revision** (the bytes, `v0.2`) and **crate version** (the Rust API, `0.1.0`), with
   the freeze and pinning policy stated in both places.
 
+### Gates that were weaker than they claimed
+
+- **The mutation run now covers the decision, and stops discarding killable mutants.**
+  Its filter was `decrypt|passed_gates` — `passed_gates` does not exist in the tree, and
+  the part that still matched (`decrypt`) had stopped containing the branches when the
+  decision moved into `accept_or_reject`. The filter names the decision now, and the
+  exclusion is `&` → `|` only: `x | x == x & x` is equivalent, but `x ^ x == 0` makes a
+  gate reject everything, which the decision test kills — so the old `[|^]` exclusion
+  discarded four killable mutants and the reason given in the README was wrong for half
+  of them. Measured after the fix: 13 mutants, 11 caught, 2 unviable, 0 uncaught.
+- **`tools/gate_selftest.sh`, and the exit-3 convention it checks.** `tools/ctgrind.sh`
+  answered `SKIPPED: valgrind not found` with exit 0, and `verify.sh` — which only
+  skipped when the script file was missing — counted the stage as *run and passed*, so
+  `--deep` could report a complete run without the constant-time check having executed.
+  "Could not run" is now exit 3 in every tool that can say it (ctgrind, cache_profile,
+  mutation_check), `verify.sh` maps it to a skipped stage, and the new self-test proves
+  it by hiding the tooling (a non-executable `valgrind` stub first on `PATH`, so it
+  works on runners that do have a system valgrind).
+- **The instruction-level scan's criterion is absolute**: it required
+  `hardened ≤ plain`, so 50 accepting bytes in each build would have passed as "no
+  worse than". It now requires **zero** accepting bytes in both, which is what the
+  README claims.
+- **The timing screen is split**: `timing-instrument` blocks on the detectability
+  control (`timing_screen_can_detect_a_real_difference`, asserted `t > 10`, measured
+  3244) on every push, and the two statistical *screens* stay advisory — the same
+  measurements as before still rule out gating them on a shared runner, but an
+  instrument that has rotted no longer passes silently.
+- **The coverage job is a gate**: `--all-features` (the `hardened` and `rng` paths were
+  absent from the statistics entirely), a **95%** line floor against a measured 97.46%
+  (1458/1496 on the development host), and no `continue-on-error`. The floor is global
+  on purpose — a per-target threshold would need exclusions, and a gate satisfiable by
+  editing its exclusions is not a gate.
+- **`--quick` instruction-level sweep on every push.** The CHANGELOG promised "branches
+  on every push" and the tool's header claimed it ran in the mutation job; it only ran
+  in the weekly `wide` job. Now it runs in both.
+
+### Claims that did not match the implementation
+
+- `tools/gen_test_vectors.py` now calls `ref_impl.self_check()` before emitting
+  anything. Its docstring, `tests/differential_reference.rs` and `tests/README.md` all
+  said the reference is self-checked before vectors are produced; only `verify.sh`
+  arranged that, so a direct run of the generator produced a fixture from an unanchored
+  reference.
+- **Two tests are renamed to what they assert.** `test_nonce_misuse_resistance` checked
+  that two nonces give two tags (nonce *sensitivity*, not misuse resistance) and
+  `test_key_commitment` that two keys give two tags (not commitment). The first is now
+  `test_message_swap_under_a_reused_nonce_is_rejected`, which checks the property SIV
+  actually provides — a ciphertext must not authenticate under another message's tag —
+  and the second is `test_tag_changes_when_only_the_key_changes`, with a pointer to
+  `test_tag_binds_the_key_directly` for the mechanism commitment rests on.
+- **`kat_regression_lock` is described as a lock, not a witness.** It is a second copy
+  from the same generator: it catches an expectation edited in-crate, and its
+  independence ends there; the independent witness is the differential fixture against
+  `tools/ref_impl.py`.
+- **The fuzz loop asserts its own docstring.** `Ok(_) => {}` in the unstructured branch
+  is now `panic!("a random tag authenticated")` (2^-520, so it is unreachable), and in
+  the structured branch an `Ok` must equal the plaintext that was encrypted.
+
+### Coverage ceilings, written down
+
+`tests/README.md` now records what the checks do not reach: the exhaustive
+byte-position scans stop at msg_len ≤ 300 and aad_len ≤ 130 (above that the coverage is
+sampling), the differential fixture is 55 vectors and a lock rather than a sample (the
+sampling is the scheduled 4000-vector differential and the fuzzing), there is no
+performance gate (and why), and the coverage floor is global rather than per-path.
+
 ### Release policy
 
 - **The byte format is frozen at construction revision `v0.2`.** It will not change

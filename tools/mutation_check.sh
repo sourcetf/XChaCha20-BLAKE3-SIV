@@ -17,7 +17,9 @@
 # Usage:  tools/mutation_check.sh            # all mutations
 #         tools/mutation_check.sh ctgrind    # one of them
 #
-# Exit codes: 0 all mutations were caught; 1 one was not (or could not be applied).
+# Exit codes: 0 all mutations were caught; 1 one was not (or could not be applied);
+#             3 a mutation could not be *run* (no valgrind), which is not the same as
+#             caught and must not be reported as "all mutations were caught".
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
@@ -123,7 +125,10 @@ check_one() {
   set -e
   case "$status" in
     1) echo "    ok: caught" ;;
-    3) echo "    SKIPPED (tooling unavailable)" ;;
+    # `return 3`, not a bare `echo`: the driver distinguishes "not caught" from
+    # "could not run", and a skip that returns 0 makes the whole tool report
+    # "all mutations were caught" without having tested anything.
+    3) echo "    could not run (tooling unavailable)"; return 3 ;;
     *) echo "FAIL: $name was NOT caught by $check. Either the mutation no longer" >&2
        echo "      applies or $check stopped working -- both need a human." >&2
        return 1 ;;
@@ -132,12 +137,30 @@ check_one() {
 
 want="${1:-all}"
 rc=0
+skipped=0
 if [ "$want" = "all" ] || [ "$want" = "ctgrind" ]; then
+  set +e
   check_one ctgrind mutate_ctgrind run_ctgrind \
-    "ct_eq -> == in both decrypt paths" || rc=1
+    "ct_eq -> == in both decrypt paths"
+  status=$?
+  set -e
+  # `check_one` answers 1 for "not caught" and 3 for "could not run": the first is a
+  # finding about the check, the second is a gap in it, and collapsing them into one
+  # exit status is how a skipped run becomes a green one.
+  if [ "$status" -eq 3 ]; then skipped=$((skipped + 1)); elif [ "$status" -ne 0 ]; then rc=1; fi
 fi
 if [ "$want" = "all" ] || [ "$want" = "kat" ]; then
-  check_one kat mutate_kat run_kat "SUBKEY_DOMAIN XSIV -> XSIX" || rc=1
+  set +e
+  check_one kat mutate_kat run_kat "SUBKEY_DOMAIN XSIV -> XSIX"
+  status=$?
+  set -e
+  if [ "$status" -eq 3 ]; then skipped=$((skipped + 1)); elif [ "$status" -ne 0 ]; then rc=1; fi
+fi
+if [ "$skipped" -gt 0 ]; then
+  echo
+  echo "$skipped mutation(s) could not be run (tooling unavailable): that is a gap" >&2
+  echo "in this check, not a pass." >&2
+  exit 3
 fi
 if [ "$rc" -eq 0 ]; then
   echo

@@ -9,6 +9,13 @@ The message and AAD bytes are deterministic functions of their lengths, so the
 fixture only needs to store the lengths; `tests/differential_reference.rs`
 reconstructs the inputs with the same formula and compares.
 
+The reference implementation is self-checked (against the drafts' published vectors,
+BLAKE3's official vectors and the crate's own KATs) *before* anything is emitted, so a
+fixture cannot be produced by a reference implementation that has drifted -- the
+docstring said so before the call existed, and a direct run of this script was the one
+path that skipped it (`verify.sh` runs `ref_impl.py` first, which is not something this
+script can rely on).
+
 Usage:
     python3 tools/gen_test_vectors.py            # write the fixture
     python3 tools/gen_test_vectors.py --check    # verify it is current
@@ -69,6 +76,13 @@ def load_ref():
     spec = importlib.util.spec_from_file_location("ref", os.path.join(HERE, "ref_impl.py"))
     ref = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(ref)
+    # This is what makes the docstring's claim true. It checks the reference against
+    # the published vectors (RFC 8439, draft-irtf-cfrg-xchacha-03, BLAKE3's official
+    # file) and this crate's KATs before a single vector is emitted, and it raises on
+    # the first mismatch. `verify.sh` runs `ref_impl.py` before this script, but the
+    # script is also run directly, and that path used to produce a fixture from a
+    # reference implementation nothing had anchored.
+    ref.self_check()
     return ref
 
 

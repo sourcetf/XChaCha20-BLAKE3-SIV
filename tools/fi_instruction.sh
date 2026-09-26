@@ -22,8 +22,10 @@
 # forgery still be rejected?" -- with no bench, on ordinary hardware.
 #
 # One mode: every byte of the decision code, replaced with `NOP` in turn, in both
-# builds. Measured at about seven minutes, which is why it runs in the mutation job
-# (once per push) and not in the fast ones -- an earlier estimate of half an hour was
+# builds. Measured at about seven minutes for the full sweep and about one for
+# `--quick` (every seventh byte), which is why the full one runs in the scheduled
+# `wide` job and `--quick` runs in the mutation job on every push -- an earlier
+# estimate of half an hour was
 # really the per-patch *timeout* being hit by branches whose NOP turns a loop into a
 # spin, and a five-second timeout fixed that.
 #
@@ -167,9 +169,20 @@ scan "hardened (default)"   "--features hardened"
 default_n="$(cat "$WORK/plain (no hardened).count")"
 hardened_n="$(cat "$WORK/hardened (default).count")"
 echo
-if [ "$hardened_n" -le "$default_n" ]; then
-  echo "instruction-level FI: hardened is no worse than plain ($hardened_n vs $default_n accepting bytes)"
+# Absolute, not relative. The earlier criterion was `hardened_n <= default_n`, which
+# passes when *both* builds accept faults -- 50 accepting bytes in each would have
+# been reported as "no worse than", and the README's "none accepting" would have been
+# a printed fact rather than an enforced one. A single accepting byte is a finding.
+if [ "$hardened_n" -eq 0 ] && [ "$default_n" -eq 0 ]; then
+  echo "instruction-level FI: no single-byte fault accepts a forgery in either build"
   exit 0
+fi
+if [ "$hardened_n" -ne 0 ] || [ "$default_n" -ne 0 ]; then
+  echo "FAIL: $default_n accepting byte(s) in the plain build, $hardened_n in the" >&2
+  echo "      hardened one. This scan's claim is zero in both: a fault that turns a" >&2
+  echo "      rejected forgery into an accepted one is a finding, and the README says" >&2
+  echo "      so. Look at \$WORK/*.accepted (paths printed above) for the bytes." >&2
+  exit 1
 fi
 echo "FAIL: the hardened build has *more* single-byte accepting faults ($hardened_n) than the plain onne ($default_n)" >&2
 exit 1

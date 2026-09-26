@@ -1,0 +1,21 @@
+--- src/lib.rs
++++ replace & with ^ in decrypt
+@@ -1103,17 +1103,17 @@
+         //
+         // The volatile re-read is what forbids that merge, and it is here rather
+         // than `black_box` on purpose: whether `black_box` defeats CSE is a
+         // property of the optimizer's choices, not of the program, and this
+         // hardening must not rest on the difference between two compilers.  A
+         // volatile access is one the language requires to happen.
+         //
+         // Cost: two 65-byte copies and two wipes, only under this feature.
+-        let first = computed_tag.ct_eq(tag) & tag.ct_eq(&computed_tag);
++        let first = computed_tag.ct_eq(tag) ^ /* ~ changed by cargo-mutants ~ */ tag.ct_eq(&computed_tag);
+ 
+         // SAFETY: `computed_tag` is a live local, initialised and aligned for a
+         // `[u8; TAG_LEN]` read for the whole statement; nothing writes through the
+         // pointer, and a volatile read of live memory has no effect beyond being
+         // the read itself.
+         let mut computed_tag_copy = unsafe { core::ptr::read_volatile(&computed_tag) };
+         // SAFETY: as above, for the caller's reference: `tag` is a live `&[u8;
+         // TAG_LEN]` and this only reads through it, so aliasing rules hold.

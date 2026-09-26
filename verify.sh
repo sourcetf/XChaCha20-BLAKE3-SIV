@@ -100,6 +100,12 @@ if [ "$KANI_ONLY" -eq 0 ]; then
   # warning there would only surface once someone enabled the feature.
   cargo clippy --all-targets --features rng -- -D warnings
 
+  # The tools' contract with this script: a gate that could not run answers exit 3,
+  # and this script reports that as a skipped stage. Both halves are checked here
+  # (seconds), because "a skip counted as a pass" is the failure this script has
+  # twice reported as a green run.
+  tools/gate_selftest.sh
+
   step "3. test suite"
   cargo test --release
   # `rng` gates the `random` module and its tests.
@@ -308,7 +314,19 @@ if [ "$RUN_CTGRIND" -eq 1 ]; then
   # check fail -- so neither a poisoning that never took effect nor a suppression
   # wider than the decision can turn into a clean result.
   if [ -x tools/ctgrind.sh ]; then
+    # Exit 3 means the tool could not run at all (no valgrind). Until this was
+    # handled, `tools/ctgrind.sh` answered "SKIPPED: valgrind not found" with exit 0
+    # and this stage was counted as *run and passed* -- the same defect as the skip
+    # handling above, one level down, and the reason every tool here now answers 3.
+    set +e
     tools/ctgrind.sh
+    ctgrind_rc=$?
+    set -e
+    if [ "$ctgrind_rc" -eq 3 ]; then
+      skip "ctgrind" "tools/ctgrind.sh could not run (it needs valgrind; its output above says why)"
+    elif [ "$ctgrind_rc" -ne 0 ]; then
+      exit "$ctgrind_rc"
+    fi
   else
     skip "ctgrind" "tools/ctgrind.sh missing"
   fi

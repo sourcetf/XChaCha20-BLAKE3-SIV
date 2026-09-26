@@ -332,38 +332,59 @@ jobs:
       # that filter kept matching the two entry points and silently stopped covering
       # the branches the hardening is about. A filter that still matches *something*
       # is exactly the failure mode this file exists to avoid.
+      #
+      # The exclusion is `&` -> `|` only. Both operands of a gate compare the same two
+      # arrays, so `x | x == x & x` and that mutant is genuinely equivalent -- but
+      # `x ^ x == 0`, which makes the gate reject everything and is killed by the
+      # decision test. Excluding `[|^]` therefore discarded four killable mutants and
+      # the reason printed in the README was wrong for half of them.
       - name: mutation run over the decision
         run: |
           set -euo pipefail
           cargo mutants --features hardened -f src/lib.rs -F 'decrypt|accept_or_reject' \
-            -E 'replace & with [|^]' -- --test decision --test security
+            -E 'replace & with \|' -- --test decision --test security
 
       - name: plant bugs and require the checks to fail
         run: ./tools/mutation_check.sh
+
+      # The instruction-level scan is what turns "one skipped instruction accepts a
+      # forgery" from a claim into a measurement, and it is cheap enough in `--quick`
+      # mode (every seventh byte, both builds, about a minute) to run on every push.
+      # The full sweep is in the scheduled `wide` job; a version of this that ran
+      # only weekly was promised as "branches on every push" and was not.
+      - name: instruction-level faults, quick sweep
+        run: ./tools/fi_instruction.sh --quick
 
   coverage:
     name: coverage and dependency inventory
     runs-on: ubuntu-latest
     timeout-minutes: 60
-    # Informational, not a gate. A percentage threshold on this crate would be a
-    # guess: the aarch64, big-endian and AVX2 kernels cannot all be executed on one
-    # runner (the cross-exec jobs cover them under qemu, where the profiler cannot
-    # follow), so a defensible floor would need per-target exclusions and would
-    # reward editing the exclusions. What is useful is the artifact: it shows which
-    # paths a change stopped exercising.
+    # A *global* line-coverage floor, and a gate. The objection that rules out a
+    # per-target threshold does not apply to this one: the aarch64, big-endian and
+    # AVX2 kernels cannot all be executed on one runner (the cross-exec jobs cover
+    # them under qemu, where the profiler cannot follow), so a floor that ignored
+    # them would need per-target *exclusions* -- and a gate you can satisfy by editing
+    # its exclusions is not a gate. A single number over everything measured here is
+    # not editable that way: it falls when code is added that nothing runs, which is
+    # the change worth stopping.
     #
-    # `continue-on-error` because this is the one job in the suite whose exact
-    # invocation could not be verified locally -- the tool would not install here,
-    # network blocked -- and two attempts already showed how sharp its edges are: a
-    # run with `--all-features` left `cargo llvm-cov report` looking for artefacts it
-    # could not address ("not found object files"), and adding `--all-features` to
-    # the report is rejected outright ("invalid option '--all-features' for
-    # subcommand 'report'"). So it is a *single* invocation -- the lcov file is the
-    # artifact -- and a failure here is a signal to look, not a gate.
-    continue-on-error: true
+    # 95 is deliberately loose against the measured 97.46% (1458/1496 lines, this
+    # command, `--all-features`, on the development host). It is not there to be
+    # approached; it is there so that dropping a whole path -- a feature combination
+    # that stops being tested, a module that loses its tests -- fails here instead of
+    # showing up as a few points in an artifact nobody diffs.
+    #
+    # `--all-features`, in the *one* invocation: the previous version ran default
+    # features only, so the `hardened` and `rng` code paths were absent from the
+    # statistics entirely, and it tried to add features at the `report` stage, which
+    # rejects them ("invalid option '--all-features' for subcommand 'report'"). One
+    # call to `llvm-cov` avoids both, and the invocation is now verified locally
+    # rather than guessed, which is what the removed `continue-on-error` was about.
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: coverage
@@ -371,13 +392,13 @@ jobs:
         with:
           tool: cargo-llvm-cov
 
-      - name: coverage over the suite
+      - name: coverage over the suite, with the line floor
         run: |
           set -euo pipefail
-          # One invocation, default features: the run and the report cannot be split
-          # across different feature sets, and `report` takes no feature flags, so a
-          # single call is the combination that cannot go inconsistent.
-          cargo llvm-cov --release --lcov --output-path lcov.info
+          # One invocation, all features: the run and the report cannot be split
+          # across different feature sets, and `report` takes no feature flags.
+          cargo llvm-cov --all-features --release --lcov --output-path lcov.info \
+            --fail-under-lines 95
 
       # An inventory, deliberately not labelled an SBOM: a CycloneDX or SPDX
       # document needs a generator that is not installed here, and calling

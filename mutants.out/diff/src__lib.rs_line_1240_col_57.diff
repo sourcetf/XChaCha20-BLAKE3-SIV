@@ -1,0 +1,21 @@
+--- src/lib.rs
++++ replace & with ^ in decrypt_in_place_detached
+@@ -1232,17 +1232,17 @@
+         // SAFETY: `computed_tag` is a live local, initialised and aligned for a
+         // `[u8; TAG_LEN]` read for the whole statement; nothing writes through the
+         // pointer, and a volatile read of live memory has no effect beyond being
+         // the read itself.
+         let mut computed_tag_copy = unsafe { core::ptr::read_volatile(&computed_tag) };
+         // SAFETY: as above, for the caller's reference: `tag` is a live `&[u8;
+         // TAG_LEN]` and this only reads through it, so aliasing rules hold.
+         let mut tag_copy = unsafe { core::ptr::read_volatile(tag) };
+-        let second = computed_tag_copy.ct_eq(&tag_copy) & tag_copy.ct_eq(&computed_tag_copy);
++        let second = computed_tag_copy.ct_eq(&tag_copy) ^ /* ~ changed by cargo-mutants ~ */ tag_copy.ct_eq(&computed_tag_copy);
+ 
+         // The copies are secret-derived (they are the computed MAC), so they are
+         // wiped like every other copy in this function rather than left in the
+         // frame of the `hardened` build.
+         zeroize_array(&mut computed_tag_copy);
+         zeroize_array(&mut tag_copy);
+ 
+         (first, second)

@@ -364,17 +364,30 @@ fn fuzz_decrypt_never_panics_and_never_returns_plaintext() {
                 }
             }
             // Whatever happened, the call must return rather than panic, and
-            // must never hand back the plaintext when the tag does not match.
+            // must never hand back the plaintext when the tag does not match. "Never
+            // returns plaintext" is asserted rather than assumed: an `Ok` here is
+            // legitimate only when this round left the input intact (the empty-AAD
+            // branch above can), and then it has to be exactly the plaintext that was
+            // encrypted -- a wrong plaintext under a matching tag would be a far
+            // worse finding than a panic.
             match decrypt(&key, &nonce, &aad, &real_ct, &t) {
-                Ok(_) => {}
+                Ok(pt) => assert_eq!(
+                    pt.as_slice(),
+                    ct.as_slice(),
+                    "round {round}: decrypt returned a plaintext that was never encrypted"
+                ),
                 Err(e) => assert_eq!(e, Error::AuthenticationFailed),
             }
             continue;
         }
 
-        // Unstructured: arbitrary bytes.
+        // Unstructured: arbitrary bytes, including the key and nonce, so the tag is
+        // a random 520-bit value under a key that was never used to make it. `Ok` is
+        // impossible -- it would take a 2^-520 coincidence -- so it is asserted away
+        // rather than ignored: an "Ok(_) => {}" here is how a check that never fires
+        // reads as a check that passes.
         match decrypt(&key, &nonce, &aad, &ct, &tag) {
-            Ok(_) => {}
+            Ok(_) => panic!("round {round}: a random tag authenticated"),
             Err(e) => assert_eq!(e, Error::AuthenticationFailed),
         }
 
@@ -382,7 +395,9 @@ fn fuzz_decrypt_never_panics_and_never_returns_plaintext() {
         // leave the caller's buffer zeroed (never the "plaintext").
         let mut buf = ct.clone();
         match decrypt_in_place_detached(&key, &nonce, &aad, &mut buf, &tag) {
-            Ok(()) => {}
+            // As above: the same random tag cannot authenticate. The failure path's
+            // wipe is asserted because it is the caller's buffer.
+            Ok(()) => panic!("round {round}: a random tag authenticated (in place)"),
             Err(e) => {
                 assert_eq!(e, Error::AuthenticationFailed);
                 assert!(

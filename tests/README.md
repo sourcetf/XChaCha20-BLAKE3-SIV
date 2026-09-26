@@ -22,7 +22,7 @@ so a green run is not read as more than it is.
 | Check | Status | What it found / how it runs |
 | --- | --- | --- |
 | Constant-time comparison | **verified mechanically** by ctgrind | `tests/ctgrind.rs` + `tools/ctgrind.sh`: secrets are marked undefined in valgrind's shadow memory, so any branch or index depending on them is reported. Clean apart from the one documented SIV accept/reject decision, which lives in `accept_or_reject` — the only function a suppression entry may name, and `tools/ctgrind.sh` plants a leak inside `decrypt` to prove the entry does not cover more than that. The crate's control flow is inventoried by `tests/variable_latency.rs` (13 `if`, 7 `while`, 27 `for`, 3 `match` in non-test code), which fails when any count changes so that each branch is re-audited; on that audit every one depends on a length, an alignment, a CPU feature, an enum variant, or the decision — never on the content of a key, nonce, AAD or message. |
-| Statistical timing test | **run**, strictly by `verify.sh --deep`; **advisory** in CI | `dudect-bencher` is unavailable, so `tests/timing.rs` implements the Welch t-test directly. It compares two input classes whose work is identical, so on a shared runner a *systematic* bias between the classes reads as a signal: two CI runs with no possible cause reported `t = 10.96` (release) and `t = 11.89` (debug) at a resolution of 41 ns/op or better, while a **real** order artefact in this harness measured `t = 35.6`. A 3x window cannot be gated on, so CI runs the screen as its own non-blocking job and the strict assertion (t < 10) applies where the host is quiet — `verify.sh --deep` reports `t < 0.4`. Each test prints its own resolution because it varies with load and build: ~0.16 µs/op in a quiet release run here, 41 ns/op on a GitHub runner, ~10 µs in CI's debug job. A `ct_eq` → `==` regression is tens of ns — below all of those — which is why ctgrind, not this, is the evidence. `timing_screen_can_detect_a_real_difference` keeps the detectability floor visible: a deliberate 67 ns/op difference measures `t = 3244`. |
+| Statistical timing test | **instrument gated on every push**, the two leak screens **advisory** in CI (strict under `verify.sh --deep`) | `dudect-bencher` is unavailable, so `tests/timing.rs` implements the Welch t-test directly. It compares two input classes whose work is identical, so on a shared runner a *systematic* bias between the classes reads as a signal: two CI runs with no possible cause reported `t = 10.96` (release) and `t = 11.89` (debug) at a resolution of 41 ns/op or better, while a **real** order artefact in this harness measured `t = 35.6`. A 3x window cannot be gated on, so CI runs the screen as its own non-blocking job and the strict assertion (t < 10) applies where the host is quiet — `verify.sh --deep` reports `t < 0.4`. Each test prints its own resolution because it varies with load and build: ~0.16 µs/op in a quiet release run here, 41 ns/op on a GitHub runner, ~10 µs in CI's debug job. A `ct_eq` → `==` regression is tens of ns — below all of those — which is why ctgrind, not this, is the evidence. `timing_screen_can_detect_a_real_difference` keeps the detectability floor visible: a deliberate 67 ns/op difference measures `t = 3244`. |
 | Accelerated paths agree | **enforced**: `test_all_accelerated_paths_agree_on_a_boundary_corpus` |
 | Big-endian execution | **run**: the whole suite under `qemu-ppc64` | `powerpc64-unknown-linux-musl` is tier-2 (so `rustup target add` brings prebuilt std) and big-endian, which makes it the one configuration where the 35 `from_le_bytes`/`to_le_bytes` call sites in `lib.rs` are not identity functions and a four-byte load is not the `u32` the code assumes. It needs no cross toolchain: rust-std ships the self-contained crt objects *and* musl's libc, so `rust-lld` links it — with an alias for `libgcc_s.a` (rust-std ships that same unwinder as `libunwind.a`) and `-C relocation-model=static` (the shipped `libc.a` is non-PIC, so a PIE link fails). Miri's s390x cross-interpretation asks the same question by interpretation; this executes compiled code. |
 | Runtime UB detection (`miri`) | **run** on the unsafe paths, under **both** aliasing models (`-Zmiri-strict-provenance`, plus a `-Zmiri-tree-borrows` pass) | Miri cannot execute `__cpuid_count` (inline asm), so `detect_avx2` returns `false` under `cfg(miri)` and the run exercises the SSE2, transpose and zeroization paths — where the alignment-sensitive `unsafe` is. The AVX2 kernel is held byte-identical to scalar by the differential tests. |
@@ -32,9 +32,42 @@ so a green run is not read as more than it is.
 | `cargo-deny` | **run** | See `deny.toml`. The licence allow-list was derived from what the tree actually uses, not copied from the template. |
 | `ctgrind` C macro / crate | **reimplemented** | Neither is available; the valgrind *client request* underneath is a documented ABI and is reimplemented in `tests/ctgrind.rs`, with the instruction sequence and request codes taken verbatim from valgrind 3.24.0's headers rather than recalled. |
 | Skips in `verify.sh` | **counted, and fatal in the modes that claim completeness** | A stage that did not run is listed in the summary line rather than absorbed by it, and `--deep` / `--all` exit non-zero while anything was skipped. This was a real defect: with `python3`'s `blake3` missing, step 1 (the reference implementation's self-check against the published vectors) was skipped, and the script still printed "all requested checks passed" and exited 0. On a development machine that module is not on the default path, so those runs were skipping the anchor the whole fixture rests on — CI installs it, which is why the committed evidence was never affected. |
-| Checks that are not vacuous | **run**: `tools/mutation_check.sh`, plus `tools/fi_check.sh`, an eight-row fault campaign over the decision, `cargo mutants` over the decision, one `--features hardened` run because the hardened body contains every mutatable line the default one has (`cargo mutants` does not evaluate `cfg`), with the equivalent `&`/`|`/`^` mutants excluded and the reason recorded, and `tools/fi_instruction.sh`, which corrupts the compiled decision code one byte at a time and maps which bytes accept a forgery: 3920 faults in the default build and 5680 in the hardened one, none of them accepting — the decision's own bytes are in a symbol of their own, so the sweep covers it explicitly. `tools/ctgrind.sh` also plants a secret-dependent branch inside `decrypt` and requires its own check to fail, which is the control for the suppression's scope. Summary: one skipped branch accepts a forgery on the default build, one skipped gate or corrupted gate value does not on the `hardened` build, replacing the computed tag is accepted by both (a pinned known limit), and a skipped in-place wipe is caught by `tests/security.rs` |
+| Checks that are not vacuous | **run, and gated**: `tools/gate_selftest.sh` (a gate that could not run must answer exit 3, never 0 -- checked by hiding the tooling), `tools/mutation_check.sh`, `tools/fi_check.sh`'s eight-row fault campaign, `cargo mutants` over the decision and its caller-visible limits (13 mutants, 0 uncaught, with the killable `&`→`^` mutants no longer excluded), `tools/fi_instruction.sh` (`--quick` on every push, the full sweep nightly), the `timing-instrument` job (the screen's detectability control, blocking), and the coverage floor (95% lines, blocking, `--all-features`). Rest of the row: **run**: `tools/mutation_check.sh`, plus `tools/fi_check.sh`, an eight-row fault campaign over the decision, `cargo mutants` over the decision, one `--features hardened` run because the hardened body contains every mutatable line the default one has (`cargo mutants` does not evaluate `cfg`), with the equivalent `&`/`|`/`^` mutants excluded and the reason recorded, and `tools/fi_instruction.sh`, which corrupts the compiled decision code one byte at a time and maps which bytes accept a forgery: 3920 faults in the default build and 5680 in the hardened one, none of them accepting — the decision's own bytes are in a symbol of their own, so the sweep covers it explicitly. `tools/ctgrind.sh` also plants a secret-dependent branch inside `decrypt` and requires its own check to fail, which is the control for the suppression's scope. Summary: one skipped branch accepts a forgery on the default build, one skipped gate or corrupted gate value does not on the `hardened` build, replacing the computed tag is accepted by both (a pinned known limit), and a skipped in-place wipe is caught by `tests/security.rs` |
 | Fault injection | **not covered, and not claimed** | No tool in this suite models a glitch — Miri, Kani, ctgrind, TSAN and libFuzzer all assume correct execution. The accept/reject decision is one branch on one comparison, so a single skipped instruction is an accepted forgery; encryption-side faults, by contrast, degrade to rejection, because the tag is computed over the plaintext. A hardened implementation would need a validated countermeasure set and a fault-injection bench — see README's "What is not defended against". |
 | `semgrep` / `codeql` | **not run** | Neither is available here. The branch classification above and the ctgrind run cover the same question (secret-dependent control flow); no automated pattern scanner was used. |
+
+### What these checks do not reach
+
+Every gate above has an edge, and an edge that is written down is a limit rather than a
+surprise:
+
+- **The exhaustive byte-position scans stop at msg_len ≤ 300 and aad_len ≤ 130**
+  (`tests/differential_reference.rs:210`, `:241`). Every position of a corrupted
+  ciphertext or tag within those sizes is tried; above them the coverage is random
+  sampling, and the sizes that matter most (the SIMD widths, the 4 KiB tag-buffer
+  switch, 1 MiB) are checked at *boundaries* rather than exhaustively. An exhaustive
+  scan at 1 MiB would be 2^20 signature verifications per position class, which is why
+  the fixture holds digests for the large sizes instead.
+- **The differential fixture is 55 vectors** (49 full + 6 digests). It is a lock, not a
+  sample: its job is to pin specific sizes against the independent reference so a
+  format change cannot pass unnoticed. The *sampling* evidence is elsewhere -- the
+  scheduled 4000-random-vector differential (`tools/broad_differential.py`) and the
+  fuzzing, neither of which is committed as a fixture because neither is stable.
+- **There is no performance gate.** The numbers in `README.md` are measured on a named
+  host, with the method stated; a threshold that runs on a shared runner would gate
+  CPU noise, and the same measurement that rules out a timing gate (t ≈ 11 with no
+  possible cause) rules out this one. What *is* enforced is the correctness side: the
+  accelerated paths are held byte-identical to the scalar one, so a "faster" change
+  that alters output fails the KATs, the differential fixtures and
+  `test_all_accelerated_paths_agree_on_a_boundary_corpus`.
+- **The statistical timing screens cannot gate on a shared runner** (see the
+  `timing-instrument` row), and **the deterministic constant-time gate is ctgrind**,
+  which by construction cannot see a leak with no branch and no index -- that class is
+  `tools/cache_profile.sh`'s, whose counts mode is deterministic and whose trace mode
+  needs a valgrind that can start `lackey`.
+- **The coverage floor is global, not per-path.** 95% over everything measured here
+  cannot be satisfied by editing exclusions, but it also cannot tell *which* path was
+  lost -- it fails, and the answer is in the lcov artifact and the diff.
 
 ### Tooling notes
 
@@ -97,11 +130,14 @@ cargo deny --offline check
 
 ## Notes on specific tests
 
-- **`kat_regression_lock`** deliberately duplicates the in-crate KATs with values
-  taken from `tools/ref_impl.py`, so a change that silently alters the wire
-  format fails even if someone "fixes" the in-crate expectation to match. It
-  caught a real mistake during development — the first version was hand-typed
-  from an older construction — which is exactly its purpose.
+- **`kat_regression_lock`** duplicates the in-crate KATs with values from
+  `tools/gen_test_vectors.py`, so a change that silently alters the wire format fails
+  even if someone "fixes" the in-crate expectation to match. It is a *lock* — a copy
+  from the same generator, catching an edited expectation — and not a second
+  implementation: its independence is bounded by that, and the independent witness is
+  the differential fixture, which is produced by `tools/ref_impl.py` and replayed
+  against it. It caught a real mistake during development (the first version was
+  hand-typed from an older construction), which is exactly its purpose.
 - **`prop_ciphertext_bit_flip_rejected`** and its tag/AAD siblings are quantified
   over every bit position rather than sampled, which is the property a truncated
   or prefix-comparing MAC would violate.

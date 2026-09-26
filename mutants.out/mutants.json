@@ -128,6 +128,70 @@
     }
   },
   {
+    "diff": "--- src/lib.rs\n+++ replace & with ^ in decrypt\n@@ -1103,17 +1103,17 @@\n         //\n         // The volatile re-read is what forbids that merge, and it is here rather\n         // than `black_box` on purpose: whether `black_box` defeats CSE is a\n         // property of the optimizer's choices, not of the program, and this\n         // hardening must not rest on the difference between two compilers.  A\n         // volatile access is one the language requires to happen.\n         //\n         // Cost: two 65-byte copies and two wipes, only under this feature.\n-        let first = computed_tag.ct_eq(tag) & tag.ct_eq(&computed_tag);\n+        let first = computed_tag.ct_eq(tag) ^ /* ~ changed by cargo-mutants ~ */ tag.ct_eq(&computed_tag);\n \n         // SAFETY: `computed_tag` is a live local, initialised and aligned for a\n         // `[u8; TAG_LEN]` read for the whole statement; nothing writes through the\n         // pointer, and a volatile read of live memory has no effect beyond being\n         // the read itself.\n         let mut computed_tag_copy = unsafe { core::ptr::read_volatile(&computed_tag) };\n         // SAFETY: as above, for the caller's reference: `tag` is a live `&[u8;\n         // TAG_LEN]` and this only reads through it, so aliasing rules hold.\n",
+    "file": "src/lib.rs",
+    "function": {
+      "function_name": "decrypt",
+      "return_type": "-> Result<Plaintext, Error>",
+      "span": {
+        "end": {
+          "column": 2,
+          "line": 1159
+        },
+        "start": {
+          "column": 1,
+          "line": 1067
+        }
+      }
+    },
+    "genre": "BinaryOperator",
+    "name": "src/lib.rs:1111:45: replace & with ^ in decrypt",
+    "package": "xchacha20-blake3-siv",
+    "replacement": "^",
+    "span": {
+      "end": {
+        "column": 46,
+        "line": 1111
+      },
+      "start": {
+        "column": 45,
+        "line": 1111
+      }
+    }
+  },
+  {
+    "diff": "--- src/lib.rs\n+++ replace & with ^ in decrypt\n@@ -1113,17 +1113,17 @@\n         // SAFETY: `computed_tag` is a live local, initialised and aligned for a\n         // `[u8; TAG_LEN]` read for the whole statement; nothing writes through the\n         // pointer, and a volatile read of live memory has no effect beyond being\n         // the read itself.\n         let mut computed_tag_copy = unsafe { core::ptr::read_volatile(&computed_tag) };\n         // SAFETY: as above, for the caller's reference: `tag` is a live `&[u8;\n         // TAG_LEN]` and this only reads through it, so aliasing rules hold.\n         let mut tag_copy = unsafe { core::ptr::read_volatile(tag) };\n-        let second = computed_tag_copy.ct_eq(&tag_copy) & tag_copy.ct_eq(&computed_tag_copy);\n+        let second = computed_tag_copy.ct_eq(&tag_copy) ^ /* ~ changed by cargo-mutants ~ */ tag_copy.ct_eq(&computed_tag_copy);\n \n         // The copies are secret-derived (they are the computed MAC), so they are\n         // wiped like every other copy in this function rather than left in the\n         // frame of the `hardened` build.\n         zeroize_array(&mut computed_tag_copy);\n         zeroize_array(&mut tag_copy);\n \n         (first, second)\n",
+    "file": "src/lib.rs",
+    "function": {
+      "function_name": "decrypt",
+      "return_type": "-> Result<Plaintext, Error>",
+      "span": {
+        "end": {
+          "column": 2,
+          "line": 1159
+        },
+        "start": {
+          "column": 1,
+          "line": 1067
+        }
+      }
+    },
+    "genre": "BinaryOperator",
+    "name": "src/lib.rs:1121:57: replace & with ^ in decrypt",
+    "package": "xchacha20-blake3-siv",
+    "replacement": "^",
+    "span": {
+      "end": {
+        "column": 58,
+        "line": 1121
+      },
+      "start": {
+        "column": 57,
+        "line": 1121
+      }
+    }
+  },
+  {
     "diff": "--- src/lib.rs\n+++ replace decrypt_bounded -> Result<Plaintext, Error> with Ok(Default::default())\n@@ -1192,20 +1192,17 @@\n pub fn decrypt_bounded(\n     key: &[u8; 32],\n     nonce: &[u8; NONCE_LEN],\n     aad: &[u8],\n     ciphertext: &[u8],\n     tag: &[u8; TAG_LEN],\n     max_len: usize,\n ) -> Result<Plaintext, Error> {\n-    if ciphertext.len() > max_len {\n-        return Err(Error::MessageTooLong);\n-    }\n-    decrypt(key, nonce, aad, ciphertext, tag)\n+    Ok(Default::default()) /* ~ changed by cargo-mutants ~ */\n }\n \n /// Decrypt `buffer` in place, verifying the detached tag.\n ///\n /// On failure the buffer is zeroized, so unverified plaintext is never left in\n /// place. Note this destroys the caller's buffer on the failure path.\n pub fn decrypt_in_place_detached(\n     key: &[u8; 32],\n",
     "file": "src/lib.rs",
     "function": {
@@ -284,6 +348,70 @@
       "start": {
         "column": 5,
         "line": 1217
+      }
+    }
+  },
+  {
+    "diff": "--- src/lib.rs\n+++ replace & with ^ in decrypt_in_place_detached\n@@ -1222,17 +1222,17 @@\n     chacha20_apply(&enc_key, 0, &enc_nonce, &Input::InPlace, buffer);\n \n     let mut computed_tag = derive_tag(&mac_key, key, nonce, aad, buffer);\n     #[cfg(feature = \"hardened\")]\n     let gates = {\n         // See the matching block in `decrypt`: identical reasoning, and the same\n         // volatile re-read, so both entry points get a second gate that is a\n         // recomputation rather than a copy of the first.\n-        let first = computed_tag.ct_eq(tag) & tag.ct_eq(&computed_tag);\n+        let first = computed_tag.ct_eq(tag) ^ /* ~ changed by cargo-mutants ~ */ tag.ct_eq(&computed_tag);\n \n         // SAFETY: `computed_tag` is a live local, initialised and aligned for a\n         // `[u8; TAG_LEN]` read for the whole statement; nothing writes through the\n         // pointer, and a volatile read of live memory has no effect beyond being\n         // the read itself.\n         let mut computed_tag_copy = unsafe { core::ptr::read_volatile(&computed_tag) };\n         // SAFETY: as above, for the caller's reference: `tag` is a live `&[u8;\n         // TAG_LEN]` and this only reads through it, so aliasing rules hold.\n",
+    "file": "src/lib.rs",
+    "function": {
+      "function_name": "decrypt_in_place_detached",
+      "return_type": "-> Result<(), Error>",
+      "span": {
+        "end": {
+          "column": 2,
+          "line": 1277
+        },
+        "start": {
+          "column": 1,
+          "line": 1206
+        }
+      }
+    },
+    "genre": "BinaryOperator",
+    "name": "src/lib.rs:1230:45: replace & with ^ in decrypt_in_place_detached",
+    "package": "xchacha20-blake3-siv",
+    "replacement": "^",
+    "span": {
+      "end": {
+        "column": 46,
+        "line": 1230
+      },
+      "start": {
+        "column": 45,
+        "line": 1230
+      }
+    }
+  },
+  {
+    "diff": "--- src/lib.rs\n+++ replace & with ^ in decrypt_in_place_detached\n@@ -1232,17 +1232,17 @@\n         // SAFETY: `computed_tag` is a live local, initialised and aligned for a\n         // `[u8; TAG_LEN]` read for the whole statement; nothing writes through the\n         // pointer, and a volatile read of live memory has no effect beyond being\n         // the read itself.\n         let mut computed_tag_copy = unsafe { core::ptr::read_volatile(&computed_tag) };\n         // SAFETY: as above, for the caller's reference: `tag` is a live `&[u8;\n         // TAG_LEN]` and this only reads through it, so aliasing rules hold.\n         let mut tag_copy = unsafe { core::ptr::read_volatile(tag) };\n-        let second = computed_tag_copy.ct_eq(&tag_copy) & tag_copy.ct_eq(&computed_tag_copy);\n+        let second = computed_tag_copy.ct_eq(&tag_copy) ^ /* ~ changed by cargo-mutants ~ */ tag_copy.ct_eq(&computed_tag_copy);\n \n         // The copies are secret-derived (they are the computed MAC), so they are\n         // wiped like every other copy in this function rather than left in the\n         // frame of the `hardened` build.\n         zeroize_array(&mut computed_tag_copy);\n         zeroize_array(&mut tag_copy);\n \n         (first, second)\n",
+    "file": "src/lib.rs",
+    "function": {
+      "function_name": "decrypt_in_place_detached",
+      "return_type": "-> Result<(), Error>",
+      "span": {
+        "end": {
+          "column": 2,
+          "line": 1277
+        },
+        "start": {
+          "column": 1,
+          "line": 1206
+        }
+      }
+    },
+    "genre": "BinaryOperator",
+    "name": "src/lib.rs:1240:57: replace & with ^ in decrypt_in_place_detached",
+    "package": "xchacha20-blake3-siv",
+    "replacement": "^",
+    "span": {
+      "end": {
+        "column": 58,
+        "line": 1240
+      },
+      "start": {
+        "column": 57,
+        "line": 1240
       }
     }
   }
