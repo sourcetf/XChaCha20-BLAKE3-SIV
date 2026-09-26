@@ -884,6 +884,11 @@ fn derive_tag(
     // dropped, which is what keeps this consistent with the rest of the crate.
     let total = head.len() + aad.len() + msg.len();
     if (TAG_CONCAT_MIN..=TAG_CONCAT_LIMIT).contains(&total) {
+        // The one infallible allocation outside the entry points, and it is bounded by
+        // construction: this branch is only taken for a total within
+        // `TAG_CONCAT_MIN..=TAG_CONCAT_LIMIT`, so `total <= 65_536` whatever the input
+        // length is. A refusal here would mean the process has no memory left at all,
+        // which is why it is not threaded through `derive_tag`'s array return type.
         let mut cat = Vec::with_capacity(total);
         cat.extend_from_slice(&head);
         cat.extend_from_slice(aad);
