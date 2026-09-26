@@ -639,6 +639,29 @@ pub mod random {
 
     use crate::{Key, KEY_LEN, NONCE_LEN};
 
+    /// Fill `dest` from `source`, wiping `dest` if the source fails.
+    ///
+    /// Crate-internal, and shaped this way so the guarantee can be *tested*: the
+    /// platform entropy source cannot be made to fail on demand, and a guarantee
+    /// nothing exercises is a comment.
+    pub(crate) fn fill_from(
+        dest: &mut [u8],
+        source: impl FnOnce(&mut [u8]) -> Result<(), Error>,
+    ) -> Result<(), Error> {
+        match source(dest) {
+            Ok(()) => Ok(()),
+            Err(e) => {
+                // `getrandom`'s own contract: "This function returns an error on any
+                // failure, including partial reads. We make no guarantees regarding the
+                // contents of `dest` on error." A prefix of real entropy, stale bytes or
+                // zeros are all permitted, and a caller that ignores the `Result` would
+                // take whichever arrived as a key or a nonce.
+                crate::zeroize_slice(dest);
+                Err(e)
+            }
+        }
+    }
+
     /// Fill `dest` with bytes from the operating system's CSPRNG.
     ///
     /// Returns an error if the OS entropy source is unavailable.  That can
@@ -646,19 +669,28 @@ pub mod random {
     /// failed `RDRAND` on `no_std` — which is why this returns a `Result`
     /// instead of panicking.
     ///
+    /// **On error `dest` is zeroed**, rather than left as `getrandom` left it: that
+    /// crate makes no promise about the buffer when it fails, so an error can leave a
+    /// *prefix* of genuine entropy behind, and a caller that ignores the `Result` — which
+    /// is `#[must_use]`, but a warning is not a guarantee — would use those bytes as a
+    /// key or a nonce. All zeros are not a usable key either, but they fail the same way
+    /// every time instead of working sometimes, which is what makes the failure visible.
+    ///
     /// There is deliberately **no userspace fallback PRNG**.  A predictable
     /// nonce is a real attack (see the module documentation), and a silent
     /// fallback would turn "the OS had no entropy" into "your messages are
     /// forgeable" without anyone noticing.
     pub fn fill(dest: &mut [u8]) -> Result<(), Error> {
-        getrandom::fill(dest)
+        fill_from(dest, getrandom::fill)
     }
 
     /// Generate a fresh 256-bit key from the OS CSPRNG.
     ///
     /// The key comes back in a [`Key`], which zeroizes it on drop.  A generated key
     /// is the one secret in this API with no other copy anywhere, so it is the one
-    /// case where bytes left behind afterwards are purely this crate's doing.
+    /// case where bytes left behind afterwards are purely this crate's doing.  On
+    /// failure nothing escapes: the intermediate buffer is wiped ([`fill`]'s
+    /// guarantee) and the `Key` is dropped.
     ///
     /// A caller that needs a bare array can copy one out of it (`*key`), but then
     /// that copy is the caller's to wipe.
@@ -3128,6 +3160,47 @@ mod tests {
         // A zero-length request must succeed rather than error.
         crate::random::fill(&mut []).expect("empty fill must succeed");
         crate::random::fill(&mut nonce.clone()).expect("plain fill must succeed");
+    }
+
+    /// A failed fill must not leave a partial buffer behind.
+    ///
+    /// `getrandom` makes no guarantee about `dest` when it errors — its own words are
+    /// "including partial reads ... no guarantees regarding the contents of `dest`" — so
+    /// the crate wipes the buffer on the error path. A caller that ignores the `Result`
+    /// then gets zeros, which fails the same way every time, instead of a prefix of real
+    /// entropy that would work *sometimes* as a key.
+    ///
+    /// The failing source here is the reason `fill_from` exists: the real entropy source
+    /// cannot be made to fail portably, and a guarantee that is never exercised is a
+    /// comment.
+    #[cfg(feature = "rng")]
+    #[test]
+    fn test_failed_fill_zeroizes_the_buffer() {
+        let mut buf = [0xAAu8; 48];
+        let result = crate::random::fill_from(&mut buf, |dest| {
+            // The worst case the contract permits: a partial write, then a failure.
+            for (i, b) in dest.iter_mut().enumerate().take(8) {
+                *b = i as u8;
+            }
+            Err(getrandom::Error::UNSUPPORTED)
+        });
+        assert!(result.is_err(), "the failing source must be reported");
+        assert_eq!(
+            buf, [0u8; 48],
+            "a failed fill left bytes behind; a caller ignoring the Result would take \
+             them as a key"
+        );
+
+        // And the success path still fills the buffer.
+        let mut ok = [0xAAu8; 48];
+        crate::random::fill_from(&mut ok, |dest| {
+            for (i, b) in dest.iter_mut().enumerate() {
+                *b = i as u8;
+            }
+            Ok(())
+        })
+        .unwrap();
+        assert!(ok.iter().any(|&b| b != 0xAA), "the success path must fill");
     }
 
     /// A generated key wipes itself on drop, and `Debug` never prints it.

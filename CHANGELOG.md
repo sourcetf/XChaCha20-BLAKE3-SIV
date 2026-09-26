@@ -183,6 +183,22 @@ defended or measured:
   from what no in-process library can (the OOM killer, which sends a signal a process
   cannot intercept).
 
+### `random::fill` no longer leaves a partial buffer on error
+
+`getrandom`'s contract is explicit: "This function returns an error on any failure,
+including partial reads. We make no guarantees regarding the contents of `dest` on
+error." `random::fill` forwarded that verbatim, so an error could leave a *prefix* of
+genuine entropy in the caller's buffer — and a caller that ignores the `Result` (which is
+`#[must_use]`, but a warning is not a guarantee) would take those bytes as a key or a
+nonce. That is precisely the situation it happens in: early boot and
+entropy-blocked sandboxes, where the source does fail. All zeros are not a usable key
+either, but they fail the same way every time instead of working *sometimes*, which is
+what makes the failure visible. The wipe lives in `fill_from`, a crate-internal function
+that takes the source as a parameter — because the platform entropy source cannot be
+made to fail on demand, and a guarantee nothing exercises is a comment. The test drives a
+source that writes eight bytes and then fails, which is the worst case the contract
+permits.
+
 ### Release policy
 
 - **The byte format is frozen at construction revision `v0.2`.** It will not change

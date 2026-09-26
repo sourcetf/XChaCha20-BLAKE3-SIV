@@ -69,13 +69,16 @@ const ALLOWED: &[(&str, &str)] = &[
 /// that took the call site's accept decision from one corrupted branch away from a
 /// forgery. All four caller branches test a discriminant the caller wrote as a
 /// constant, so they depend on nothing secret, which is what makes them constant-time
-/// and why they are listed rather than suppressed.
+/// and why they are listed rather than suppressed. The fourth `match` is
+/// `random::fill`'s: it branches on whether the OS entropy source *succeeded*, which is
+/// a public fact about the environment, not content — and its arms are what zero the
+/// buffer on the error path.
 const CONTROL_FLOW: &[(&str, usize)] = &[
     ("if", 17),
     ("while", 7),
     ("for", 27),
     ("loop", 0),
-    ("match", 3),
+    ("match", 4),
 ];
 
 /// Every `/` or `%` in `line` that is code rather than a comment or a doc comment.
