@@ -1,11 +1,9 @@
-src/lib.rs:1037:5: replace accept_or_reject with ()
-src/lib.rs:1037:8: delete ! in accept_or_reject
-src/lib.rs:1053:8: delete ! in accept_or_reject
-src/lib.rs:1111:45: replace & with ^ in decrypt
-src/lib.rs:1121:57: replace & with ^ in decrypt
-src/lib.rs:1200:25: replace > with == in decrypt_bounded
-src/lib.rs:1200:25: replace > with < in decrypt_bounded
-src/lib.rs:1200:25: replace > with >= in decrypt_bounded
-src/lib.rs:1217:5: replace decrypt_in_place_detached -> Result<(), Error> with Ok(())
-src/lib.rs:1230:45: replace & with ^ in decrypt_in_place_detached
-src/lib.rs:1240:57: replace & with ^ in decrypt_in_place_detached
+src/lib.rs:1053:5: replace accept_or_reject with ()
+src/lib.rs:1131:45: replace & with ^ in decrypt
+src/lib.rs:1141:57: replace & with ^ in decrypt
+src/lib.rs:1229:25: replace > with == in decrypt_bounded
+src/lib.rs:1229:25: replace > with < in decrypt_bounded
+src/lib.rs:1229:25: replace > with >= in decrypt_bounded
+src/lib.rs:1246:5: replace decrypt_in_place_detached -> Result<(), Error> with Ok(())
+src/lib.rs:1259:45: replace & with ^ in decrypt_in_place_detached
+src/lib.rs:1269:57: replace & with ^ in decrypt_in_place_detached

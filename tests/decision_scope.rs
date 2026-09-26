@@ -163,6 +163,19 @@ fn the_suppressed_function_contains_only_the_decision() {
          this count is what \"exactly\" means -- if the decision needs another branch, \
          the suppression entry needs re-reviewing:\n{def}"
     );
+    // Two writes per gate -- one per arm, so the byte that lands in a slot is a
+    // constant each path writes rather than a value selected from a tainted condition
+    // -- plus the opt-out build's copy of slot 0 into slot 1.
+    assert_eq!(
+        code.matches("*out0 = ").count(),
+        2,
+        "gate 0 must write its slot in both arms:\n{def}"
+    );
+    assert_eq!(
+        code.matches("*out1 = ").count(),
+        3,
+        "gate 1 must write its slot in both arms, plus the opt-out copy:\n{def}"
+    );
     assert_eq!(
         code.matches("#[cfg(feature = \"hardened\")]").count(),
         1,
@@ -251,36 +264,55 @@ fn the_hardened_second_gate_is_recomputed() {
 /// ordering is what is pinned here.
 #[test]
 fn the_decision_outcome_is_fail_closed() {
-    let init = "let mut decision: Result<(), Error> = Err(Error::AuthenticationFailed);";
-    assert_eq!(
-        LIB.matches(init).count(),
-        2,
-        "each decrypt entry point must initialise the decision to a rejection"
-    );
+    let init = "let mut decision0: Result<(), Error> = Err(Error::AuthenticationFailed);\n    \
+                let mut decision1: Result<(), Error> = Err(Error::AuthenticationFailed);";
 
     // The initialisation immediately before the call, then the `hardened` call right
     // after it: the whole sequence, per entry point, is what makes the outcome
     // fail-closed. Asserted as one string so a reordering -- write the decision after
     // the call, or move one variant elsewhere -- cannot pass.
-    for (default_call, hardened_call) in [
-        (
+    //
+    // Two slots, not one: a single corrupted outcome must not be able to accept, so
+    // the caller rejects if *either* slot does and the slots are written by separate
+    // gate flows (see the assertion above).
+    assert_eq!(
+        LIB.matches("let mut decision0: Result<(), Error> = Err(Error::AuthenticationFailed);")
+            .count(),
+        2,
+        "each entry point must start slot 0 as a rejection"
+    );
+    assert_eq!(
+        LIB.matches("let mut decision1: Result<(), Error> = Err(Error::AuthenticationFailed);")
+            .count(),
+        2,
+        "each entry point must start slot 1 as a rejection"
+    );
+    // The two checks sit in series, each jumping to the rejection, so accepting is the
+    // fall-through of both: a single corrupted branch lands on a rejection.
+    assert_eq!(
+        LIB.matches("if decision0.is_err() {").count(),
+        2,
+        "one first check per entry point"
+    );
+    assert_eq!(
+        LIB.matches("if decision1.is_err() {").count(),
+        2,
+        "one second check per entry point"
+    );
+    {
+        let default_call =
             "    #[cfg(not(feature = \"hardened\"))]\n    accept_or_reject(auth_ok, \
-             auth_ok, &mut plaintext, &mut decision);",
-            "    #[cfg(feature = \"hardened\")]\n    accept_or_reject(gates.0, \
-             gates.1, &mut plaintext, &mut decision);",
-        ),
-        (
-            "    #[cfg(not(feature = \"hardened\"))]\n    accept_or_reject(auth_ok, \
-             auth_ok, buffer, &mut decision);",
-            "    #[cfg(feature = \"hardened\")]\n    accept_or_reject(gates.0, \
-             gates.1, buffer, &mut decision);",
-        ),
-    ] {
+                            auth_ok, &mut decision0, &mut decision1);";
+        let hardened_call = "    #[cfg(feature = \"hardened\")]\n    accept_or_reject(gates.0, \
+                             gates.1, &mut decision0, &mut decision1);";
+        // Two, not one: since the decision no longer touches the buffer, both entry
+        // points carry the same three lines, so one pattern covers both -- and a count
+        // of 2 is what says so.
         let sequence = format!("{init}\n{default_call}\n{hardened_call}");
         assert_eq!(
             LIB.matches(sequence.as_str()).count(),
-            1,
-            "one entry point is missing the fail-closed sequence:\n{sequence}"
+            2,
+            "both entry points must carry the fail-closed sequence:\n{sequence}"
         );
     }
 
@@ -297,8 +329,8 @@ fn the_decision_outcome_is_fail_closed() {
     // returned value is what a skipped call loses.
     for signature in [
         "fn accept_or_reject(\n    gate0: subtle::Choice,\n    gate1: subtle::Choice,\n    \
-         buffer: &mut [u8],\n    out: &mut Result<(), Error>,\n) {",
-        "    *out = Ok(());",
+         out0: &mut Result<(), Error>,\n    out1: &mut Result<(), Error>,\n) {",
+        "    *out1 = *out0;",
     ] {
         assert!(
             LIB.contains(signature),
@@ -306,13 +338,45 @@ fn the_decision_outcome_is_fail_closed() {
         );
     }
 
-    // And the accept path has to be the branch *taken away*, with the wipe and the
-    // error on the fall-through: a neutralised branch then lands on the rejection
-    // rather than past it. `fi_instruction` is what measures this in the compiled
-    // code; the shape is asserted here so it is not refactored by accident.
+    // And the wipe lives in the *caller*, on the path every rejection takes -- the
+    // decision function no longer touches the buffer, so a skipped call still wipes.
     assert_eq!(
-        LIB.matches("if decision.is_ok() {").count(),
-        2,
-        "each entry point must take the accept path conditionally"
+        LIB.matches("if decision0.is_err() {\n        zeroize_slice(")
+            .count()
+            + LIB
+                .matches("if decision1.is_err() {\n        zeroize_slice(")
+                .count(),
+        4,
+        "each of the four reject checks must wipe before returning"
     );
+    // There must be no conditional jump *to the accept path*: accepting is the
+    // fall-through of the two reject checks, so a corrupted branch lands on a
+    // rejection instead of on `Ok`. An `if <decision>.is_ok() { .. Ok(..) }` shape is
+    // exactly what the two-slot rewrite removed, and it is one opcode bit from
+    // accepting a forgery.
+    assert_eq!(
+        LIB.matches("if decision0.is_ok()").count() + LIB.matches("if decision1.is_ok()").count(),
+        0,
+        "the accept path must not be reached by a conditional jump"
+    );
+    // Both entry points, one pattern each: the second check's rejection block followed
+    // immediately by the accept, which is what "fall-through" means in the source.
+    for (place, accept) in [
+        ("zeroize_slice(&mut plaintext);", "Ok(Plaintext(plaintext))"),
+        ("zeroize_slice(buffer);", "Ok(())"),
+    ] {
+        let tail = [
+            "    if decision1.is_err() {",
+            &format!("        {place}"),
+            "        return Err(Error::AuthenticationFailed);",
+            "    }",
+            &format!("    {accept}"),
+        ]
+        .join("\n");
+        assert_eq!(
+            LIB.matches(tail.as_str()).count(),
+            1,
+            "the accept must be the fall-through of both reject checks:\n{tail}"
+        );
+    }
 }

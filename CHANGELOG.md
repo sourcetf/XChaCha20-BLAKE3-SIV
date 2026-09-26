@@ -118,6 +118,47 @@ sampling), the differential fixture is 55 vectors and a lock rather than a sampl
 sampling is the scheduled 4000-vector differential and the fuzzing), there is no
 performance gate (and why), and the coverage floor is global rather than per-path.
 
+### The call site, and the strongest fault model
+
+Two single-fault attacks that the previous hardening did not cover, both now either
+defended or measured:
+
+- **The caller's accept decision was one branch on one value.** Disassembly of the
+  previous revision shows exactly what that means: `call accept_or_reject`,
+  `cmpb $0xff,0x20(%rsp)`, `je` — one corrupted value, or one flipped bit in that
+  jump's opcode (`je` 0x84 / `jne` 0x85), and a forgery is accepted. The decision now
+  writes **two slots, one per gate, each written by its own gate's flow**, and the
+  caller has **two checks in series that each jump to the rejection**: accepting is
+  the fall-through of both. A corrupted value leaves the other slot saying "rejected";
+  a corrupted branch opcode lands on the other check; `tools/fi_check.sh`'s new
+  `one-check-neutralised` row is that attack and it is rejected, while
+  `both-checks-neutralised` (two faults) is accepted and pinned. The wipe moved to the
+  caller, so a skipped call still wipes the plaintext it never verified.
+- **What is left is measured, not claimed away.** `tools/fi_instruction.sh --bits`
+  flips every bit of the decision and its call sites instead of neutralising bytes —
+  the symmetric fault model, which the header and the README used to wave at the
+  second gate. It runs `--quick` on every push and in full in the scheduled job.
+  Result, full sweep: the **default (hardened) build accepts none of 44856** single-bit
+  faults; the **opt-out build accepts exactly one**, on the opcode of the decision's own
+  arm selection (the `je`/`jne` adjacency), because a single gate has nothing behind it.
+  The tool pins that count at 1 — a change that makes it two fails — and the README's
+  table records the site. Until this ran, the README *claimed* the second gate covered
+  the symmetric case; now the claim is a number, and the number says the claim was right
+  for the default build and wrong for the opt-out one.
+- The decision's slots are written **inside branch arms**, not selected from a
+  tainted condition: `*out = if cond { Ok } else { Err }` compiles to a
+  `setcc`/`cmov` on the secret-derived condition, which makes the discriminant
+  secret-derived itself — and then the caller's check on it is a secret-dependent
+  branch *outside* the one function `tests/ctgrind.supp` permits (measured: six
+  memcheck reports against `decrypt`). Written as arms, the byte that lands in a slot
+  is a constant each path writes, and ctgrind stays clean in both configurations.
+- **`computed_tag` replaced by a constant or by the received tag** is the strongest
+  model in the table and it defeats the two gates *together* — they compare the same
+  two values, so making them equal satisfies both. The README's row now says that
+  plainly, and says what would be needed instead (a second, independent tag
+  computation, i.e. a second MAC pass per message) rather than implying the gates
+  cover it.
+
 ### Release policy
 
 - **The byte format is frozen at construction revision `v0.2`.** It will not change

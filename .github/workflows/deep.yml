@@ -352,8 +352,16 @@ jobs:
       # mode (every seventh byte, both builds, about a minute) to run on every push.
       # The full sweep is in the scheduled `wide` job; a version of this that ran
       # only weekly was promised as "branches on every push" and was not.
-      - name: instruction-level faults, quick sweep
+      - name: instruction-level faults, quick sweep (neutralised byte)
         run: ./tools/fi_instruction.sh --quick
+
+      # The symmetric model: one *flipped bit* rather than one neutralised byte. It
+      # is the one that finds what no source-level shape can remove (a conditional
+      # jump's opcode is one bit from its inverse), so it is measured rather than
+      # argued about. Eight times the `nop` sweep, hence `--quick` here and the full
+      # run in the scheduled `wide` job.
+      - name: instruction-level faults, quick bit-flip sweep
+        run: ./tools/fi_instruction.sh --quick --bits
 
   coverage:
     name: coverage and dependency inventory

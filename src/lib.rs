@@ -1006,17 +1006,25 @@ pub fn encrypt_in_place_detached(
 //    suppressed whole and which therefore hid one -- is reported by memcheck and
 //    fails `tools/ctgrind.sh`. That script plants exactly such a branch in a
 //    throwaway copy and requires it to be caught before it reports a clean run.
-//  * the outcome is written through `out`, which the *caller* initialises to a
-//    rejection before the call, rather than returned by value. A returned value
-//    can be lost by never making the call: `tools/fi_instruction.sh` measured six
-//    single-byte faults in `decrypt` that skipped the call and accepted a forgery,
-//    because the ABI then hands back whatever the return slot happened to hold. A
-//    check whose outcome can be dropped by not running it is not a check. This
-//    ordering is also what makes the `hardened` gates reachable at all: one
-//    skipped call used to bypass both of them at once.
-//  * the rejection path wipes the buffer here, and the caller wipes again on the
-//    rejection it starts with -- because that path is exactly the one a skipped
-//    call leaves behind, and the unverified plaintext must not survive it.
+//  * the outcome is written through **two slots**, each initialised to a rejection by
+//    the caller before the call and each written by *its own* gate's flow, rather
+//    than returned by value. Two properties follow, and both are measured:
+//      - a returned value can be lost by never making the call. `tools/fi_instruction.sh`
+//        measured six single-byte faults in `decrypt` that skipped the call and
+//        accepted a forgery, because the ABI then hands back whatever the return slot
+//        held; with the slots pre-initialised, skipping the call leaves rejections.
+//      - a *corrupted* outcome cannot accept either: one fault would have to corrupt
+//        both slots, which is two faults. The caller therefore rejects if *either*
+//        slot says so, and the two checks sit in series so that no single corrupted
+//        branch can accept -- accepting is the fall-through of both.
+//    What none of this removes is a fault inside the *encoding* of the caller's own
+//    accept decision: a conditional jump's opcode is one bit from its inverse
+//    (`je` 0x84 / `jne` 0x85) and its target is a few bits away from any address in
+//    the function. That residual is measured with `tools/fi_instruction.sh --bits`
+//    and published in the README's table rather than claimed away.
+//  * the *caller* wipes the buffer on any rejection, not this function. One wipe
+//    site, on the path every rejection takes -- including the one a skipped call
+//    leaves behind, which this function would never see.
 //  * there is exactly one body, with the `hardened` gates *inside* it rather than a
 //    second `#[cfg]`-selected definition of the same function. Two bodies would be
 //    two functions to a mutation campaign that does not evaluate `cfg`
@@ -1031,37 +1039,49 @@ pub fn encrypt_in_place_detached(
 fn accept_or_reject(
     gate0: subtle::Choice,
     gate1: subtle::Choice,
-    buffer: &mut [u8],
-    out: &mut Result<(), Error>,
+    out0: &mut Result<(), Error>,
+    out1: &mut Result<(), Error>,
 ) {
-    if !bool::from(gate0) {
-        zeroize_slice(buffer);
-        *out = Err(Error::AuthenticationFailed);
+    // Each gate writes *its own* slot, **inside a branch arm**, so the byte that
+    // lands there is a constant each path writes rather than a value selected from a
+    // secret-derived condition. The difference is not cosmetic: `*out = if cond { A }
+    // else { B }` compiles to a `setcc`/`cmov` on the tainted condition, which makes
+    // the discriminant itself secret-derived -- and then the *caller's* check on it is
+    // a secret-dependent branch outside the function `tests/ctgrind.supp` permits
+    // (measured: six reports against `decrypt` when this was written as an if-
+    // expression, none as arms).
+    if bool::from(gate0) {
+        *out0 = Ok(());
+    } else {
+        *out0 = Err(Error::AuthenticationFailed);
+        // `out1` keeps the rejection the caller wrote: a message the first gate
+        // rejects does not need the second gate evaluated.
         return;
     }
 
     // Fault-injection hardening (the `hardened` feature, on by default): a second
-    // *recomputed*
-    // check with its own branch, so a single skipped instruction reaches this gate
-    // instead of accepting. `&` and never `&&`: both comparisons always run in the
-    // caller, so the time this takes does not reveal which gate failed. No
+    // *recomputed* check with its own branch, so a single skipped instruction reaches
+    // this gate instead of accepting. `&` and never `&&`: both comparisons always run
+    // in the caller, so the time this takes does not reveal which gate failed. No
     // `unwrap_u8` and no early exit inside the comparisons -- `bool::from` is the
     // conversion `subtle` documents for exactly this place (the end of a
     // verification). What it does and does not defend against: see README "What is
     // not defended against".
     #[cfg(feature = "hardened")]
-    if !bool::from(gate1) {
-        zeroize_slice(buffer);
-        *out = Err(Error::AuthenticationFailed);
-        return;
+    if bool::from(gate1) {
+        *out1 = Ok(());
+    } else {
+        *out1 = Err(Error::AuthenticationFailed);
     }
 
-    // Without the feature the caller passes `gate0` twice, and the parameter is
-    // unused rather than compiled away silently.
+    // The opt-out build has one gate, so both slots carry its answer: the caller's
+    // two checks are then one check written twice, which is honest for a build whose
+    // promise is the single gate.
     #[cfg(not(feature = "hardened"))]
-    let _ = gate1;
-
-    *out = Ok(());
+    {
+        let _ = gate1;
+        *out1 = *out0;
+    }
 }
 
 /// Decrypt `ciphertext`, verifying the tag.
@@ -1140,22 +1160,31 @@ pub fn decrypt(
     zeroize_array(&mut enc_nonce);
     zeroize_array(&mut computed_tag);
 
-    // A rejection until the decision proves otherwise, written *before* the call:
-    // a fault that skips the call leaves this rejection standing instead of
-    // accepting. See the comment on `accept_or_reject`.
-    let mut decision: Result<(), Error> = Err(Error::AuthenticationFailed);
+    // Two rejections until the decision proves otherwise, written *before* the call:
+    // a fault that skips the call leaves both standing, and a fault that corrupts one
+    // outcome leaves the other -- so accepting would take two faults. See the comment
+    // on `accept_or_reject`.
+    let mut decision0: Result<(), Error> = Err(Error::AuthenticationFailed);
+    let mut decision1: Result<(), Error> = Err(Error::AuthenticationFailed);
     #[cfg(not(feature = "hardened"))]
-    accept_or_reject(auth_ok, auth_ok, &mut plaintext, &mut decision);
+    accept_or_reject(auth_ok, auth_ok, &mut decision0, &mut decision1);
     #[cfg(feature = "hardened")]
-    accept_or_reject(gates.0, gates.1, &mut plaintext, &mut decision);
+    accept_or_reject(gates.0, gates.1, &mut decision0, &mut decision1);
 
-    if decision.is_ok() {
-        return Ok(Plaintext(plaintext));
+    // Two checks in series, each jumping *to the rejection*: accepting is the
+    // fall-through of both, so no single corrupted branch accepts -- whichever one is
+    // corrupted, the other still rejects. A corrupted jump *target* can skip both,
+    // and that residual is measured (`tools/fi_instruction.sh --bits`) and pinned in
+    // the README's table rather than claimed away.
+    if decision0.is_err() {
+        zeroize_slice(&mut plaintext);
+        return Err(Error::AuthenticationFailed);
     }
-    // Reached on rejection, and on a call that never happened -- in which case the
-    // helper never wiped, so the wipe is here, where both paths arrive.
-    zeroize_slice(&mut plaintext);
-    Err(Error::AuthenticationFailed)
+    if decision1.is_err() {
+        zeroize_slice(&mut plaintext);
+        return Err(Error::AuthenticationFailed);
+    }
+    Ok(Plaintext(plaintext))
 }
 
 /// [`decrypt`] with an allocation bound that is checked **before** the buffer is
@@ -1259,21 +1288,24 @@ pub fn decrypt_in_place_detached(
     zeroize_array(&mut enc_nonce);
     zeroize_array(&mut computed_tag);
 
-    // As in `decrypt`: the rejection is written first, so a fault that skips the
-    // call cannot accept.
-    let mut decision: Result<(), Error> = Err(Error::AuthenticationFailed);
+    // As in `decrypt`: two rejections written first, and two serial checks, so a fault
+    // that skips the call or corrupts one outcome cannot accept.
+    let mut decision0: Result<(), Error> = Err(Error::AuthenticationFailed);
+    let mut decision1: Result<(), Error> = Err(Error::AuthenticationFailed);
     #[cfg(not(feature = "hardened"))]
-    accept_or_reject(auth_ok, auth_ok, buffer, &mut decision);
+    accept_or_reject(auth_ok, auth_ok, &mut decision0, &mut decision1);
     #[cfg(feature = "hardened")]
-    accept_or_reject(gates.0, gates.1, buffer, &mut decision);
+    accept_or_reject(gates.0, gates.1, &mut decision0, &mut decision1);
 
-    if decision.is_ok() {
-        return Ok(());
+    if decision0.is_err() {
+        zeroize_slice(buffer);
+        return Err(Error::AuthenticationFailed);
     }
-    // Reached on rejection, and on a call that never happened -- in which case the
-    // caller's buffer still holds the unverified plaintext and is wiped here.
-    zeroize_slice(buffer);
-    Err(Error::AuthenticationFailed)
+    if decision1.is_err() {
+        zeroize_slice(buffer);
+        return Err(Error::AuthenticationFailed);
+    }
+    Ok(())
 }
 
 // ── ChaCha20 Primitive ────────────────────────────────────────────────

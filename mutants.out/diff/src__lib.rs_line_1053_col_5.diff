@@ -1,0 +1,52 @@
+--- src/lib.rs
++++ replace accept_or_reject with ()
+@@ -1045,48 +1045,17 @@
+     // Each gate writes *its own* slot, **inside a branch arm**, so the byte that
+     // lands there is a constant each path writes rather than a value selected from a
+     // secret-derived condition. The difference is not cosmetic: `*out = if cond { A }
+     // else { B }` compiles to a `setcc`/`cmov` on the tainted condition, which makes
+     // the discriminant itself secret-derived -- and then the *caller's* check on it is
+     // a secret-dependent branch outside the function `tests/ctgrind.supp` permits
+     // (measured: six reports against `decrypt` when this was written as an if-
+     // expression, none as arms).
+-    if bool::from(gate0) {
+-        *out0 = Ok(());
+-    } else {
+-        *out0 = Err(Error::AuthenticationFailed);
+-        // `out1` keeps the rejection the caller wrote: a message the first gate
+-        // rejects does not need the second gate evaluated.
+-        return;
+-    }
+-
+-    // Fault-injection hardening (the `hardened` feature, on by default): a second
+-    // *recomputed* check with its own branch, so a single skipped instruction reaches
+-    // this gate instead of accepting. `&` and never `&&`: both comparisons always run
+-    // in the caller, so the time this takes does not reveal which gate failed. No
+-    // `unwrap_u8` and no early exit inside the comparisons -- `bool::from` is the
+-    // conversion `subtle` documents for exactly this place (the end of a
+-    // verification). What it does and does not defend against: see README "What is
+-    // not defended against".
+-    #[cfg(feature = "hardened")]
+-    if bool::from(gate1) {
+-        *out1 = Ok(());
+-    } else {
+-        *out1 = Err(Error::AuthenticationFailed);
+-    }
+-
+-    // The opt-out build has one gate, so both slots carry its answer: the caller's
+-    // two checks are then one check written twice, which is honest for a build whose
+-    // promise is the single gate.
+-    #[cfg(not(feature = "hardened"))]
+-    {
+-        let _ = gate1;
+-        *out1 = *out0;
+-    }
++    () /* ~ changed by cargo-mutants ~ */
+ }
+ 
+ /// Decrypt `ciphertext`, verifying the tag.
+ ///
+ /// **This allocates a buffer as large as `ciphertext`.** Bound untrusted input
+ /// before calling it: [`MAX_MSG_SIZE`] (256 GiB) is the format's ceiling, not a safe
+ /// one, and a service that trusts a length field off the wire can be made to
+ /// allocate that much per request. [`decrypt_bounded`] takes a policy limit and

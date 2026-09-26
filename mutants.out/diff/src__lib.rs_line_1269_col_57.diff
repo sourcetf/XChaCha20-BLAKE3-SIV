@@ -1,6 +1,6 @@
 --- src/lib.rs
 +++ replace & with ^ in decrypt_in_place_detached
-@@ -1232,17 +1232,17 @@
+@@ -1261,17 +1261,17 @@
          // SAFETY: `computed_tag` is a live local, initialised and aligned for a
          // `[u8; TAG_LEN]` read for the whole statement; nothing writes through the
          // pointer, and a volatile read of live memory has no effect beyond being

@@ -16,30 +16,38 @@
 #
 # Why this and not only tools/fi_check.sh: that one writes faults down as *source*
 # changes, which is a model of the fault and nothing more. This walks the actual
-# machine code of `decrypt` and `decrypt_in_place_detached` in a built binary,
-# replaces one byte at a time with `NOP`, and runs the decision test. Every run
-# therefore answers the question a glitch asks: "if this byte were wrong, would a
-# forgery still be rejected?" -- with no bench, on ordinary hardware.
+# machine code of the decision and its call sites in a built binary, damages one
+# place at a time, and runs the decision test. Every run therefore answers the
+# question a glitch asks: "if this byte were wrong, would a forgery still be
+# rejected?" -- with no bench, on ordinary hardware.
 #
-# One mode: every byte of the decision code, replaced with `NOP` in turn, in both
-# builds. Measured at about seven minutes for the full sweep and about one for
-# `--quick` (every seventh byte), which is why the full one runs in the scheduled
-# `wide` job and `--quick` runs in the mutation job on every push -- an earlier
-# estimate of half an hour was
-# really the per-patch *timeout* being hit by branches whose NOP turns a loop into a
-# spin, and a five-second timeout fixed that.
+# Two models, because they fail differently:
 #
-# What this is not: a fault model. A real glitch can flip a bit rather than replace a
-# byte, can hit a register or a bus rather than the instruction stream, and can be
-# timed relative to the data it is meant to disturb. Replacing a byte with `NOP` is
-# the "neutralise this instruction" fault, which biases towards *rejection* (a
-# neutralised comparison or branch usually fails closed); the symmetric case, a bit
-# flip that turns a decision into an acceptance, is what the cheap tier's second gate
-# is for and what `tools/fi_check.sh`'s `gate0-value-forced` row covers.
+#   * `nop` (default) replaces one byte with `0x90`, the "neutralise this
+#     instruction" fault. It biases towards rejection, so it is the weaker question.
+#   * `--bits` flips one bit, the "corrupt this instruction" fault. This is the one
+#     that finds what the source cannot remove: a conditional jump's opcode is one bit
+#     from its inverse (`je` 0x84 / `jne` 0x85) and its target is a few bits from any
+#     address in the function. The count is published in the README's table as a
+#     pinned residual -- the accept decision of any branch-based implementation is one
+#     bit from being wrong -- rather than claimed away.
 #
-# Usage: tools/fi_instruction.sh
-# Exit codes: 0 = the maps came out with the hardened build no worse than the
-#             unhardened one; 1 = otherwise, or the machinery failed.
+# Cost: about seven minutes for the full `nop` sweep and about one for `--quick`
+# (every seventh byte), which is why the full one runs in the scheduled `wide` job and
+# `--quick` runs in the mutation job on every push. `--bits` is eight times its `nop`
+# counterpart, so it is run with `--quick` on every push and in full nightly. An
+# earlier estimate of half an hour for the `nop` sweep was really the per-patch
+# *timeout* being hit by branches whose NOP turns a loop into a spin, and a
+# five-second timeout fixed that.
+#
+# What this is still not: a fault model. A real glitch can hit a register or a bus
+# rather than the instruction stream, can be timed relative to the data it is meant to
+# disturb, and can be *targeted* rather than uniform. This enumerates two uniform
+# single-fault models over the instruction stream and nothing else.
+#
+# Usage: tools/fi_instruction.sh [--quick] [--bits]
+# Exit codes: 0 = both maps came out with zero accepting faults; 1 = otherwise, or the
+#             machinery failed.
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
@@ -51,7 +59,13 @@ trap 'rm -rf "$WORK"' EXIT
 export CARGO_TARGET_DIR="$WORK/target"
 
 quick=""
-[ "${1:-}" = "--quick" ] && quick="--quick"
+MODEL="nop"
+for arg in "$@"; do
+  case "$arg" in
+    --quick) quick="--quick" ;;
+    --bits) MODEL="bits" ;;
+  esac
+done
 
 scan() {  # label, features
   local label="$1" features="$2"
@@ -60,12 +74,12 @@ scan() {  # label, features
   local bin
   bin="$(ls -t "$CARGO_TARGET_DIR"/release/deps/decision-* | grep -v '\.d$' | head -1)"
   [ -n "$bin" ] || { echo "FAIL: no decision binary" >&2; exit 1; }
-  python3 - "$bin" "$label" "$quick" <<'PY'
+  python3 - "$bin" "$label" "$quick" "$MODEL" <<'PY'
 import re
 import subprocess
 import sys
 
-binpath, label, quick = sys.argv[1], sys.argv[2], sys.argv[3] == "--quick"
+binpath, label, quick, model = sys.argv[1], sys.argv[2], sys.argv[3] == "--quick", sys.argv[4]
 
 # Where `.text` lives in the file, so a virtual address from `nm` can be turned into
 # a file offset.
@@ -115,9 +129,15 @@ base = run()
 if base != "rejected":
     sys.exit(f"FAIL: the unpatched binary reports {base}, so nothing below is meaningful")
 
+# The fault, per model: `nop` writes 0x90 over a byte; `bits` flips one bit of it.
 accepted, crashed, untouched = [], 0, 0
 offs = [off + i for off, size in covered for i in range(0, size, stride)]
-for off in offs:
+faults = (
+    [(off, 0) for off in offs]
+    if model == "nop"
+    else [(off, 1 << bit) for off in offs for bit in range(8)]
+)
+for off, bit in faults:
     # Two single-byte writes per fault rather than rewriting the whole binary: the
     # first version rewrote it twice per byte, which is ~20 GB of I/O for this scan
     # and was a large part of why it took so long.
@@ -128,10 +148,14 @@ for off in offs:
     with open(binpath, "r+b") as fh:
         fh.seek(off)
         was = fh.read(1)[0]
-        if was == 0x90:
-            continue
+        if model == "nop":
+            if was == 0x90:
+                continue
+            damaged = b"\x90"
+        else:
+            damaged = bytes([was ^ bit])
         fh.seek(off)
-        fh.write(b"\x90")
+        fh.write(damaged)
     try:
         verdict = run()
     except subprocess.TimeoutExpired:
@@ -147,7 +171,7 @@ for off in offs:
     else:
         untouched += 1
 
-print(f"  {label:<26} scanned {len(offs):5d}  rejected {untouched:5d}  "
+print(f"  {label:<26} [{model}] scanned {len(faults):5d}  rejected {untouched:5d}  "
       f"crashed {crashed:5d}  ACCEPTED {len(accepted):3d}")
 if accepted:
     # One line of the file around each accepting byte, so the map is usable.
@@ -173,16 +197,27 @@ echo
 # passes when *both* builds accept faults -- 50 accepting bytes in each would have
 # been reported as "no worse than", and the README's "none accepting" would have been
 # a printed fact rather than an enforced one. A single accepting byte is a finding.
-if [ "$hardened_n" -eq 0 ] && [ "$default_n" -eq 0 ]; then
-  echo "instruction-level FI: no single-byte fault accepts a forgery in either build"
+# The hardened build must have *none*, in either model: that is the claim, and the
+# second gate is what makes it true. The opt-out build has a pinned residual under the
+# bit-flip model -- one bit, on the opcode of the decision's arm selection, where a
+# single gate has nothing behind it (measured; the site is recorded in the README
+# table). A pinned count, not an allowance: a change that makes it two fails here.
+PLAIN_PINNED=1
+if [ "$MODEL" = "nop" ]; then
+  plain_allowed=0
+else
+  plain_allowed=$PLAIN_PINNED
+fi
+if [ "$hardened_n" -eq 0 ] && [ "$default_n" -le "$plain_allowed" ]; then
+  case "$MODEL" in
+    nop) echo "instruction-level FI: no single neutralised byte accepts a forgery in either build" ;;
+    *)   echo "instruction-level FI: no single flipped bit accepts a forgery in the hardened" ;          echo "                      build ($hardened_n), and $default_n in the opt-out build," ;          echo "                      where $PLAIN_PINNED is the pinned residual" ;;
+  esac
   exit 0
 fi
-if [ "$hardened_n" -ne 0 ] || [ "$default_n" -ne 0 ]; then
-  echo "FAIL: $default_n accepting byte(s) in the plain build, $hardened_n in the" >&2
-  echo "      hardened one. This scan's claim is zero in both: a fault that turns a" >&2
-  echo "      rejected forgery into an accepted one is a finding, and the README says" >&2
-  echo "      so. Look at \$WORK/*.accepted (paths printed above) for the bytes." >&2
-  exit 1
-fi
+echo "FAIL: $default_n accepting fault(s) in the opt-out build (pinned: $plain_allowed for" >&2
+echo "      this model), $hardened_n in the hardened one (pinned: 0). Look at" >&2
+echo "      \$WORK/*.accepted for the bytes, and see the README's fault-model table." >&2
+exit 1
 echo "FAIL: the hardened build has *more* single-byte accepting faults ($hardened_n) than the plain onne ($default_n)" >&2
 exit 1

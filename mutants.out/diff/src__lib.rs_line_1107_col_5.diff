@@ -1,6 +1,6 @@
 --- src/lib.rs
 +++ replace decrypt -> Result<Plaintext, Error> with Ok(Default::default())
-@@ -1079,88 +1079,17 @@
+@@ -1099,97 +1099,17 @@
  #[must_use = "the returned plaintext must be handled"]
  pub fn decrypt(
      key: &[u8; 32],
@@ -65,22 +65,31 @@
 -    zeroize_array(&mut enc_nonce);
 -    zeroize_array(&mut computed_tag);
 -
--    // A rejection until the decision proves otherwise, written *before* the call:
--    // a fault that skips the call leaves this rejection standing instead of
--    // accepting. See the comment on `accept_or_reject`.
--    let mut decision: Result<(), Error> = Err(Error::AuthenticationFailed);
+-    // Two rejections until the decision proves otherwise, written *before* the call:
+-    // a fault that skips the call leaves both standing, and a fault that corrupts one
+-    // outcome leaves the other -- so accepting would take two faults. See the comment
+-    // on `accept_or_reject`.
+-    let mut decision0: Result<(), Error> = Err(Error::AuthenticationFailed);
+-    let mut decision1: Result<(), Error> = Err(Error::AuthenticationFailed);
 -    #[cfg(not(feature = "hardened"))]
--    accept_or_reject(auth_ok, auth_ok, &mut plaintext, &mut decision);
+-    accept_or_reject(auth_ok, auth_ok, &mut decision0, &mut decision1);
 -    #[cfg(feature = "hardened")]
--    accept_or_reject(gates.0, gates.1, &mut plaintext, &mut decision);
+-    accept_or_reject(gates.0, gates.1, &mut decision0, &mut decision1);
 -
--    if decision.is_ok() {
--        return Ok(Plaintext(plaintext));
+-    // Two checks in series, each jumping *to the rejection*: accepting is the
+-    // fall-through of both, so no single corrupted branch accepts -- whichever one is
+-    // corrupted, the other still rejects. A corrupted jump *target* can skip both,
+-    // and that residual is measured (`tools/fi_instruction.sh --bits`) and pinned in
+-    // the README's table rather than claimed away.
+-    if decision0.is_err() {
+-        zeroize_slice(&mut plaintext);
+-        return Err(Error::AuthenticationFailed);
 -    }
--    // Reached on rejection, and on a call that never happened -- in which case the
--    // helper never wiped, so the wipe is here, where both paths arrive.
--    zeroize_slice(&mut plaintext);
--    Err(Error::AuthenticationFailed)
+-    if decision1.is_err() {
+-        zeroize_slice(&mut plaintext);
+-        return Err(Error::AuthenticationFailed);
+-    }
+-    Ok(Plaintext(plaintext))
 +    Ok(Default::default()) /* ~ changed by cargo-mutants ~ */
  }
  

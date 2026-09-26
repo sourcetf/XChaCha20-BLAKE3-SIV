@@ -1,6 +1,6 @@
 --- src/lib.rs
 +++ replace decrypt_in_place_detached -> Result<(), Error> with Ok(())
-@@ -1209,76 +1209,17 @@
+@@ -1238,79 +1238,17 @@
  /// place. Note this destroys the caller's buffer on the failure path.
  pub fn decrypt_in_place_detached(
      key: &[u8; 32],
@@ -54,21 +54,24 @@
 -    zeroize_array(&mut enc_nonce);
 -    zeroize_array(&mut computed_tag);
 -
--    // As in `decrypt`: the rejection is written first, so a fault that skips the
--    // call cannot accept.
--    let mut decision: Result<(), Error> = Err(Error::AuthenticationFailed);
+-    // As in `decrypt`: two rejections written first, and two serial checks, so a fault
+-    // that skips the call or corrupts one outcome cannot accept.
+-    let mut decision0: Result<(), Error> = Err(Error::AuthenticationFailed);
+-    let mut decision1: Result<(), Error> = Err(Error::AuthenticationFailed);
 -    #[cfg(not(feature = "hardened"))]
--    accept_or_reject(auth_ok, auth_ok, buffer, &mut decision);
+-    accept_or_reject(auth_ok, auth_ok, &mut decision0, &mut decision1);
 -    #[cfg(feature = "hardened")]
--    accept_or_reject(gates.0, gates.1, buffer, &mut decision);
+-    accept_or_reject(gates.0, gates.1, &mut decision0, &mut decision1);
 -
--    if decision.is_ok() {
--        return Ok(());
+-    if decision0.is_err() {
+-        zeroize_slice(buffer);
+-        return Err(Error::AuthenticationFailed);
 -    }
--    // Reached on rejection, and on a call that never happened -- in which case the
--    // caller's buffer still holds the unverified plaintext and is wiped here.
--    zeroize_slice(buffer);
--    Err(Error::AuthenticationFailed)
+-    if decision1.is_err() {
+-        zeroize_slice(buffer);
+-        return Err(Error::AuthenticationFailed);
+-    }
+-    Ok(())
 +    Ok(()) /* ~ changed by cargo-mutants ~ */
  }
  

@@ -1,6 +1,6 @@
 --- src/lib.rs
-+++ replace > with >= in decrypt_bounded
-@@ -1192,17 +1192,17 @@
++++ replace > with == in decrypt_bounded
+@@ -1221,17 +1221,17 @@
  pub fn decrypt_bounded(
      key: &[u8; 32],
      nonce: &[u8; NONCE_LEN],
@@ -10,7 +10,7 @@
      max_len: usize,
  ) -> Result<Plaintext, Error> {
 -    if ciphertext.len() > max_len {
-+    if ciphertext.len() >= /* ~ changed by cargo-mutants ~ */ max_len {
++    if ciphertext.len() == /* ~ changed by cargo-mutants ~ */ max_len {
          return Err(Error::MessageTooLong);
      }
      decrypt(key, nonce, aad, ciphertext, tag)

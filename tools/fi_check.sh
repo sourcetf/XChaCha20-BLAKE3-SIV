@@ -85,9 +85,35 @@ patch_first_gate_neutralised() {
   python3 - "$1/src/lib.rs" <<'PY'
 import sys
 p = sys.argv[1]; s = open(p).read()
-old = "    if !bool::from(gate0) {"
+# "This gate passes whatever its comparison said" -- what a corrupted comparison or a
+# skipped branch amounts to. `true`, not `false &&`: the gate writes a slot now, so
+# forcing it to reject would prove nothing about a forgery getting through.
+old = "    if bool::from(gate0) {"
 assert s.count(old) == 1, f"gate0 sites: {s.count(old)}"
-open(p, "w").write(s.replace(old, "    if false && !bool::from(gate0) {", 1))
+open(p, "w").write(s.replace(old, "    if true {", 1))
+PY
+}
+
+# The call site's serial checks: one neutralised is not enough (the other still
+# rejects), both is (and that is two faults).
+patch_first_check_neutralised() {
+  python3 - "$1/src/lib.rs" <<'PY'
+import sys
+p = sys.argv[1]; s = open(p).read()
+old = "    if decision0.is_err() {"
+assert s.count(old) == 2, f"first-check sites: {s.count(old)}"
+open(p, "w").write(s.replace(old, "    if false && decision0.is_err() {", 1))
+PY
+}
+
+patch_both_checks_neutralised() {
+  python3 - "$1/src/lib.rs" <<'PY'
+import sys
+p = sys.argv[1]; s = open(p).read()
+for old in ("    if decision0.is_err() {", "    if decision1.is_err() {"):
+    assert s.count(old) == 2, f"{old!r}: {s.count(old)}"
+    s = s.replace(old, "    if false {")
+open(p, "w").write(s)
 PY
 }
 # The names the campaign rows below use; both are this one edit, because the source
@@ -207,6 +233,13 @@ run_row gates-shared         "--features hardened"      decision fail patch_gate
 # nothing better; a memory fault that achieves the same on real silicon is what the
 # README's "not defended" row is about.
 run_row computed-tag-replaced "--features hardened"     decision fail patch_tag_replaced
+
+# The call site, one check at a time and then both: the first row is what the two-slot
+# shape buys (the second check still rejects), the second is the same attack with two
+# faults, which no software measure defends against and which is pinned rather than
+# left implicit.
+run_row one-check-neutralised  "--features hardened"  decision pass patch_first_check_neutralised
+run_row both-checks-neutralised "--features hardened" decision fail patch_both_checks_neutralised
 
 # Defensive, not about forgery: a skipped wipe is a defect the security test catches.
 run_row wipe-skipped        "--no-default-features"    security fail patch_wipe_skipped

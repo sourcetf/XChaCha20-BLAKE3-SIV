@@ -1,6 +1,6 @@
 [
   {
-    "diff": "--- src/lib.rs\n+++ replace accept_or_reject with ()\n@@ -1029,44 +1029,17 @@\n // wasted computing a second one.\n #[inline(never)]\n fn accept_or_reject(\n     gate0: subtle::Choice,\n     gate1: subtle::Choice,\n     buffer: &mut [u8],\n     out: &mut Result<(), Error>,\n ) {\n-    if !bool::from(gate0) {\n-        zeroize_slice(buffer);\n-        *out = Err(Error::AuthenticationFailed);\n-        return;\n-    }\n-\n-    // Fault-injection hardening (the `hardened` feature, on by default): a second\n-    // *recomputed*\n-    // check with its own branch, so a single skipped instruction reaches this gate\n-    // instead of accepting. `&` and never `&&`: both comparisons always run in the\n-    // caller, so the time this takes does not reveal which gate failed. No\n-    // `unwrap_u8` and no early exit inside the comparisons -- `bool::from` is the\n-    // conversion `subtle` documents for exactly this place (the end of a\n-    // verification). What it does and does not defend against: see README \"What is\n-    // not defended against\".\n-    #[cfg(feature = \"hardened\")]\n-    if !bool::from(gate1) {\n-        zeroize_slice(buffer);\n-        *out = Err(Error::AuthenticationFailed);\n-        return;\n-    }\n-\n-    // Without the feature the caller passes `gate0` twice, and the parameter is\n-    // unused rather than compiled away silently.\n-    #[cfg(not(feature = \"hardened\"))]\n-    let _ = gate1;\n-\n-    *out = Ok(());\n+    () /* ~ changed by cargo-mutants ~ */\n }\n \n /// Decrypt `ciphertext`, verifying the tag.\n ///\n /// **This allocates a buffer as large as `ciphertext`.** Bound untrusted input\n /// before calling it: [`MAX_MSG_SIZE`] (256 GiB) is the format's ceiling, not a safe\n /// one, and a service that trusts a length field off the wire can be made to\n /// allocate that much per request. [`decrypt_bounded`] takes a policy limit and\n",
+    "diff": "--- src/lib.rs\n+++ replace accept_or_reject with ()\n@@ -1045,48 +1045,17 @@\n     // Each gate writes *its own* slot, **inside a branch arm**, so the byte that\n     // lands there is a constant each path writes rather than a value selected from a\n     // secret-derived condition. The difference is not cosmetic: `*out = if cond { A }\n     // else { B }` compiles to a `setcc`/`cmov` on the tainted condition, which makes\n     // the discriminant itself secret-derived -- and then the *caller's* check on it is\n     // a secret-dependent branch outside the function `tests/ctgrind.supp` permits\n     // (measured: six reports against `decrypt` when this was written as an if-\n     // expression, none as arms).\n-    if bool::from(gate0) {\n-        *out0 = Ok(());\n-    } else {\n-        *out0 = Err(Error::AuthenticationFailed);\n-        // `out1` keeps the rejection the caller wrote: a message the first gate\n-        // rejects does not need the second gate evaluated.\n-        return;\n-    }\n-\n-    // Fault-injection hardening (the `hardened` feature, on by default): a second\n-    // *recomputed* check with its own branch, so a single skipped instruction reaches\n-    // this gate instead of accepting. `&` and never `&&`: both comparisons always run\n-    // in the caller, so the time this takes does not reveal which gate failed. No\n-    // `unwrap_u8` and no early exit inside the comparisons -- `bool::from` is the\n-    // conversion `subtle` documents for exactly this place (the end of a\n-    // verification). What it does and does not defend against: see README \"What is\n-    // not defended against\".\n-    #[cfg(feature = \"hardened\")]\n-    if bool::from(gate1) {\n-        *out1 = Ok(());\n-    } else {\n-        *out1 = Err(Error::AuthenticationFailed);\n-    }\n-\n-    // The opt-out build has one gate, so both slots carry its answer: the caller's\n-    // two checks are then one check written twice, which is honest for a build whose\n-    // promise is the single gate.\n-    #[cfg(not(feature = \"hardened\"))]\n-    {\n-        let _ = gate1;\n-        *out1 = *out0;\n-    }\n+    () /* ~ changed by cargo-mutants ~ */\n }\n \n /// Decrypt `ciphertext`, verifying the tag.\n ///\n /// **This allocates a buffer as large as `ciphertext`.** Bound untrusted input\n /// before calling it: [`MAX_MSG_SIZE`] (256 GiB) is the format's ceiling, not a safe\n /// one, and a service that trusts a length field off the wire can be made to\n /// allocate that much per request. [`decrypt_bounded`] takes a policy limit and\n",
     "file": "src/lib.rs",
     "function": {
       "function_name": "accept_or_reject",
@@ -8,95 +8,31 @@
       "span": {
         "end": {
           "column": 2,
-          "line": 1065
+          "line": 1085
         },
         "start": {
           "column": 1,
-          "line": 1030
+          "line": 1038
         }
       }
     },
     "genre": "FnValue",
-    "name": "src/lib.rs:1037:5: replace accept_or_reject with ()",
+    "name": "src/lib.rs:1053:5: replace accept_or_reject with ()",
     "package": "xchacha20-blake3-siv",
     "replacement": "()",
     "span": {
       "end": {
-        "column": 19,
-        "line": 1064
+        "column": 6,
+        "line": 1084
       },
       "start": {
         "column": 5,
-        "line": 1037
-      }
-    }
-  },
-  {
-    "diff": "--- src/lib.rs\n+++ delete ! in accept_or_reject\n@@ -1029,17 +1029,17 @@\n // wasted computing a second one.\n #[inline(never)]\n fn accept_or_reject(\n     gate0: subtle::Choice,\n     gate1: subtle::Choice,\n     buffer: &mut [u8],\n     out: &mut Result<(), Error>,\n ) {\n-    if !bool::from(gate0) {\n+    if  /* ~ changed by cargo-mutants ~ */bool::from(gate0) {\n         zeroize_slice(buffer);\n         *out = Err(Error::AuthenticationFailed);\n         return;\n     }\n \n     // Fault-injection hardening (the `hardened` feature, on by default): a second\n     // *recomputed*\n     // check with its own branch, so a single skipped instruction reaches this gate\n",
-    "file": "src/lib.rs",
-    "function": {
-      "function_name": "accept_or_reject",
-      "return_type": "",
-      "span": {
-        "end": {
-          "column": 2,
-          "line": 1065
-        },
-        "start": {
-          "column": 1,
-          "line": 1030
-        }
-      }
-    },
-    "genre": "UnaryOperator",
-    "name": "src/lib.rs:1037:8: delete ! in accept_or_reject",
-    "package": "xchacha20-blake3-siv",
-    "replacement": "",
-    "span": {
-      "end": {
-        "column": 9,
-        "line": 1037
-      },
-      "start": {
-        "column": 8,
-        "line": 1037
-      }
-    }
-  },
-  {
-    "diff": "--- src/lib.rs\n+++ delete ! in accept_or_reject\n@@ -1045,17 +1045,17 @@\n     // check with its own branch, so a single skipped instruction reaches this gate\n     // instead of accepting. `&` and never `&&`: both comparisons always run in the\n     // caller, so the time this takes does not reveal which gate failed. No\n     // `unwrap_u8` and no early exit inside the comparisons -- `bool::from` is the\n     // conversion `subtle` documents for exactly this place (the end of a\n     // verification). What it does and does not defend against: see README \"What is\n     // not defended against\".\n     #[cfg(feature = \"hardened\")]\n-    if !bool::from(gate1) {\n+    if  /* ~ changed by cargo-mutants ~ */bool::from(gate1) {\n         zeroize_slice(buffer);\n         *out = Err(Error::AuthenticationFailed);\n         return;\n     }\n \n     // Without the feature the caller passes `gate0` twice, and the parameter is\n     // unused rather than compiled away silently.\n     #[cfg(not(feature = \"hardened\"))]\n",
-    "file": "src/lib.rs",
-    "function": {
-      "function_name": "accept_or_reject",
-      "return_type": "",
-      "span": {
-        "end": {
-          "column": 2,
-          "line": 1065
-        },
-        "start": {
-          "column": 1,
-          "line": 1030
-        }
-      }
-    },
-    "genre": "UnaryOperator",
-    "name": "src/lib.rs:1053:8: delete ! in accept_or_reject",
-    "package": "xchacha20-blake3-siv",
-    "replacement": "",
-    "span": {
-      "end": {
-        "column": 9,
-        "line": 1053
-      },
-      "start": {
-        "column": 8,
         "line": 1053
       }
     }
   },
   {
-    "diff": "--- src/lib.rs\n+++ replace decrypt -> Result<Plaintext, Error> with Ok(Default::default())\n@@ -1079,88 +1079,17 @@\n #[must_use = \"the returned plaintext must be handled\"]\n pub fn decrypt(\n     key: &[u8; 32],\n     nonce: &[u8; NONCE_LEN],\n     aad: &[u8],\n     ciphertext: &[u8],\n     tag: &[u8; TAG_LEN],\n ) -> Result<Plaintext, Error> {\n-    check_lengths(ciphertext.len(), aad.len())?;\n-\n-    let (mut mac_key, mut enc_seed) = derive_material(key, nonce);\n-    let (mut enc_key, mut enc_nonce) = derive_enc(&enc_seed, tag);\n-\n-    let mut plaintext = alloc_plaintext(ciphertext.len())?;\n-    chacha20_keystream(&enc_key, 0, &enc_nonce, ciphertext, &mut plaintext);\n-\n-    let mut computed_tag = derive_tag(&mac_key, key, nonce, aad, &plaintext);\n-    #[cfg(feature = \"hardened\")]\n-    let gates = {\n-        // Two *recomputations*, not one result read twice.  The two gate\n-        // expressions are identical, and an optimizer is entitled to\n-        // common-subexpression-eliminate them into a single comparison — at which\n-        // point one fault would carry both gates and the second gate would have\n-        // stopped being a second gate.\n-        //\n-        // The volatile re-read is what forbids that merge, and it is here rather\n-        // than `black_box` on purpose: whether `black_box` defeats CSE is a\n-        // property of the optimizer's choices, not of the program, and this\n-        // hardening must not rest on the difference between two compilers.  A\n-        // volatile access is one the language requires to happen.\n-        //\n-        // Cost: two 65-byte copies and two wipes, only under this feature.\n-        let first = computed_tag.ct_eq(tag) & tag.ct_eq(&computed_tag);\n-\n-        // SAFETY: `computed_tag` is a live local, initialised and aligned for a\n-        // `[u8; TAG_LEN]` read for the whole statement; nothing writes through the\n-        // pointer, and a volatile read of live memory has no effect beyond being\n-        // the read itself.\n-        let mut computed_tag_copy = unsafe { core::ptr::read_volatile(&computed_tag) };\n-        // SAFETY: as above, for the caller's reference: `tag` is a live `&[u8;\n-        // TAG_LEN]` and this only reads through it, so aliasing rules hold.\n-        let mut tag_copy = unsafe { core::ptr::read_volatile(tag) };\n-        let second = computed_tag_copy.ct_eq(&tag_copy) & tag_copy.ct_eq(&computed_tag_copy);\n-\n-        // The copies are secret-derived (they are the computed MAC), so they are\n-        // wiped like every other copy in this function rather than left in the\n-        // frame of the `hardened` build.\n-        zeroize_array(&mut computed_tag_copy);\n-        zeroize_array(&mut tag_copy);\n-\n-        (first, second)\n-    };\n-    #[cfg(not(feature = \"hardened\"))]\n-    let auth_ok = computed_tag.ct_eq(tag);\n-\n-    zeroize_array(&mut mac_key);\n-    zeroize_array(&mut enc_seed);\n-    zeroize_array(&mut enc_key);\n-    // The per-message ChaCha20 nonce is secret-derived too (it comes out of\n-    // the same XOF call as `enc_key`), so it is wiped with the rest rather\n-    // than left on the stack.\n-    zeroize_array(&mut enc_nonce);\n-    zeroize_array(&mut computed_tag);\n-\n-    // A rejection until the decision proves otherwise, written *before* the call:\n-    // a fault that skips the call leaves this rejection standing instead of\n-    // accepting. See the comment on `accept_or_reject`.\n-    let mut decision: Result<(), Error> = Err(Error::AuthenticationFailed);\n-    #[cfg(not(feature = \"hardened\"))]\n-    accept_or_reject(auth_ok, auth_ok, &mut plaintext, &mut decision);\n-    #[cfg(feature = \"hardened\")]\n-    accept_or_reject(gates.0, gates.1, &mut plaintext, &mut decision);\n-\n-    if decision.is_ok() {\n-        return Ok(Plaintext(plaintext));\n-    }\n-    // Reached on rejection, and on a call that never happened -- in which case the\n-    // helper never wiped, so the wipe is here, where both paths arrive.\n-    zeroize_slice(&mut plaintext);\n-    Err(Error::AuthenticationFailed)\n+    Ok(Default::default()) /* ~ changed by cargo-mutants ~ */\n }\n \n /// [`decrypt`] with an allocation bound that is checked **before** the buffer is\n /// allocated.\n ///\n /// `max_len` is the caller's policy, not the format's: a ciphertext longer than it\n /// is refused with [`Error::MessageTooLong`] and nothing is allocated. This exists\n /// because [`MAX_MSG_SIZE`] (256 GiB) is a format limit and does not bound a remote\n",
+    "diff": "--- src/lib.rs\n+++ replace decrypt -> Result<Plaintext, Error> with Ok(Default::default())\n@@ -1099,97 +1099,17 @@\n #[must_use = \"the returned plaintext must be handled\"]\n pub fn decrypt(\n     key: &[u8; 32],\n     nonce: &[u8; NONCE_LEN],\n     aad: &[u8],\n     ciphertext: &[u8],\n     tag: &[u8; TAG_LEN],\n ) -> Result<Plaintext, Error> {\n-    check_lengths(ciphertext.len(), aad.len())?;\n-\n-    let (mut mac_key, mut enc_seed) = derive_material(key, nonce);\n-    let (mut enc_key, mut enc_nonce) = derive_enc(&enc_seed, tag);\n-\n-    let mut plaintext = alloc_plaintext(ciphertext.len())?;\n-    chacha20_keystream(&enc_key, 0, &enc_nonce, ciphertext, &mut plaintext);\n-\n-    let mut computed_tag = derive_tag(&mac_key, key, nonce, aad, &plaintext);\n-    #[cfg(feature = \"hardened\")]\n-    let gates = {\n-        // Two *recomputations*, not one result read twice.  The two gate\n-        // expressions are identical, and an optimizer is entitled to\n-        // common-subexpression-eliminate them into a single comparison — at which\n-        // point one fault would carry both gates and the second gate would have\n-        // stopped being a second gate.\n-        //\n-        // The volatile re-read is what forbids that merge, and it is here rather\n-        // than `black_box` on purpose: whether `black_box` defeats CSE is a\n-        // property of the optimizer's choices, not of the program, and this\n-        // hardening must not rest on the difference between two compilers.  A\n-        // volatile access is one the language requires to happen.\n-        //\n-        // Cost: two 65-byte copies and two wipes, only under this feature.\n-        let first = computed_tag.ct_eq(tag) & tag.ct_eq(&computed_tag);\n-\n-        // SAFETY: `computed_tag` is a live local, initialised and aligned for a\n-        // `[u8; TAG_LEN]` read for the whole statement; nothing writes through the\n-        // pointer, and a volatile read of live memory has no effect beyond being\n-        // the read itself.\n-        let mut computed_tag_copy = unsafe { core::ptr::read_volatile(&computed_tag) };\n-        // SAFETY: as above, for the caller's reference: `tag` is a live `&[u8;\n-        // TAG_LEN]` and this only reads through it, so aliasing rules hold.\n-        let mut tag_copy = unsafe { core::ptr::read_volatile(tag) };\n-        let second = computed_tag_copy.ct_eq(&tag_copy) & tag_copy.ct_eq(&computed_tag_copy);\n-\n-        // The copies are secret-derived (they are the computed MAC), so they are\n-        // wiped like every other copy in this function rather than left in the\n-        // frame of the `hardened` build.\n-        zeroize_array(&mut computed_tag_copy);\n-        zeroize_array(&mut tag_copy);\n-\n-        (first, second)\n-    };\n-    #[cfg(not(feature = \"hardened\"))]\n-    let auth_ok = computed_tag.ct_eq(tag);\n-\n-    zeroize_array(&mut mac_key);\n-    zeroize_array(&mut enc_seed);\n-    zeroize_array(&mut enc_key);\n-    // The per-message ChaCha20 nonce is secret-derived too (it comes out of\n-    // the same XOF call as `enc_key`), so it is wiped with the rest rather\n-    // than left on the stack.\n-    zeroize_array(&mut enc_nonce);\n-    zeroize_array(&mut computed_tag);\n-\n-    // Two rejections until the decision proves otherwise, written *before* the call:\n-    // a fault that skips the call leaves both standing, and a fault that corrupts one\n-    // outcome leaves the other -- so accepting would take two faults. See the comment\n-    // on `accept_or_reject`.\n-    let mut decision0: Result<(), Error> = Err(Error::AuthenticationFailed);\n-    let mut decision1: Result<(), Error> = Err(Error::AuthenticationFailed);\n-    #[cfg(not(feature = \"hardened\"))]\n-    accept_or_reject(auth_ok, auth_ok, &mut decision0, &mut decision1);\n-    #[cfg(feature = \"hardened\")]\n-    accept_or_reject(gates.0, gates.1, &mut decision0, &mut decision1);\n-\n-    // Two checks in series, each jumping *to the rejection*: accepting is the\n-    // fall-through of both, so no single corrupted branch accepts -- whichever one is\n-    // corrupted, the other still rejects. A corrupted jump *target* can skip both,\n-    // and that residual is measured (`tools/fi_instruction.sh --bits`) and pinned in\n-    // the README's table rather than claimed away.\n-    if decision0.is_err() {\n-        zeroize_slice(&mut plaintext);\n-        return Err(Error::AuthenticationFailed);\n-    }\n-    if decision1.is_err() {\n-        zeroize_slice(&mut plaintext);\n-        return Err(Error::AuthenticationFailed);\n-    }\n-    Ok(Plaintext(plaintext))\n+    Ok(Default::default()) /* ~ changed by cargo-mutants ~ */\n }\n \n /// [`decrypt`] with an allocation bound that is checked **before** the buffer is\n /// allocated.\n ///\n /// `max_len` is the caller's policy, not the format's: a ciphertext longer than it\n /// is refused with [`Error::MessageTooLong`] and nothing is allocated. This exists\n /// because [`MAX_MSG_SIZE`] (256 GiB) is a format limit and does not bound a remote\n",
     "file": "src/lib.rs",
     "function": {
       "function_name": "decrypt",
@@ -104,31 +40,31 @@
       "span": {
         "end": {
           "column": 2,
-          "line": 1159
+          "line": 1188
         },
         "start": {
           "column": 1,
-          "line": 1067
+          "line": 1087
         }
       }
     },
     "genre": "FnValue",
-    "name": "src/lib.rs:1087:5: replace decrypt -> Result<Plaintext, Error> with Ok(Default::default())",
+    "name": "src/lib.rs:1107:5: replace decrypt -> Result<Plaintext, Error> with Ok(Default::default())",
     "package": "xchacha20-blake3-siv",
     "replacement": "Ok(Default::default())",
     "span": {
       "end": {
-        "column": 37,
-        "line": 1158
+        "column": 29,
+        "line": 1187
       },
       "start": {
         "column": 5,
-        "line": 1087
+        "line": 1107
       }
     }
   },
   {
-    "diff": "--- src/lib.rs\n+++ replace & with ^ in decrypt\n@@ -1103,17 +1103,17 @@\n         //\n         // The volatile re-read is what forbids that merge, and it is here rather\n         // than `black_box` on purpose: whether `black_box` defeats CSE is a\n         // property of the optimizer's choices, not of the program, and this\n         // hardening must not rest on the difference between two compilers.  A\n         // volatile access is one the language requires to happen.\n         //\n         // Cost: two 65-byte copies and two wipes, only under this feature.\n-        let first = computed_tag.ct_eq(tag) & tag.ct_eq(&computed_tag);\n+        let first = computed_tag.ct_eq(tag) ^ /* ~ changed by cargo-mutants ~ */ tag.ct_eq(&computed_tag);\n \n         // SAFETY: `computed_tag` is a live local, initialised and aligned for a\n         // `[u8; TAG_LEN]` read for the whole statement; nothing writes through the\n         // pointer, and a volatile read of live memory has no effect beyond being\n         // the read itself.\n         let mut computed_tag_copy = unsafe { core::ptr::read_volatile(&computed_tag) };\n         // SAFETY: as above, for the caller's reference: `tag` is a live `&[u8;\n         // TAG_LEN]` and this only reads through it, so aliasing rules hold.\n",
+    "diff": "--- src/lib.rs\n+++ replace & with ^ in decrypt\n@@ -1123,17 +1123,17 @@\n         //\n         // The volatile re-read is what forbids that merge, and it is here rather\n         // than `black_box` on purpose: whether `black_box` defeats CSE is a\n         // property of the optimizer's choices, not of the program, and this\n         // hardening must not rest on the difference between two compilers.  A\n         // volatile access is one the language requires to happen.\n         //\n         // Cost: two 65-byte copies and two wipes, only under this feature.\n-        let first = computed_tag.ct_eq(tag) & tag.ct_eq(&computed_tag);\n+        let first = computed_tag.ct_eq(tag) ^ /* ~ changed by cargo-mutants ~ */ tag.ct_eq(&computed_tag);\n \n         // SAFETY: `computed_tag` is a live local, initialised and aligned for a\n         // `[u8; TAG_LEN]` read for the whole statement; nothing writes through the\n         // pointer, and a volatile read of live memory has no effect beyond being\n         // the read itself.\n         let mut computed_tag_copy = unsafe { core::ptr::read_volatile(&computed_tag) };\n         // SAFETY: as above, for the caller's reference: `tag` is a live `&[u8;\n         // TAG_LEN]` and this only reads through it, so aliasing rules hold.\n",
     "file": "src/lib.rs",
     "function": {
       "function_name": "decrypt",
@@ -136,31 +72,31 @@
       "span": {
         "end": {
           "column": 2,
-          "line": 1159
+          "line": 1188
         },
         "start": {
           "column": 1,
-          "line": 1067
+          "line": 1087
         }
       }
     },
     "genre": "BinaryOperator",
-    "name": "src/lib.rs:1111:45: replace & with ^ in decrypt",
+    "name": "src/lib.rs:1131:45: replace & with ^ in decrypt",
     "package": "xchacha20-blake3-siv",
     "replacement": "^",
     "span": {
       "end": {
         "column": 46,
-        "line": 1111
+        "line": 1131
       },
       "start": {
         "column": 45,
-        "line": 1111
+        "line": 1131
       }
     }
   },
   {
-    "diff": "--- src/lib.rs\n+++ replace & with ^ in decrypt\n@@ -1113,17 +1113,17 @@\n         // SAFETY: `computed_tag` is a live local, initialised and aligned for a\n         // `[u8; TAG_LEN]` read for the whole statement; nothing writes through the\n         // pointer, and a volatile read of live memory has no effect beyond being\n         // the read itself.\n         let mut computed_tag_copy = unsafe { core::ptr::read_volatile(&computed_tag) };\n         // SAFETY: as above, for the caller's reference: `tag` is a live `&[u8;\n         // TAG_LEN]` and this only reads through it, so aliasing rules hold.\n         let mut tag_copy = unsafe { core::ptr::read_volatile(tag) };\n-        let second = computed_tag_copy.ct_eq(&tag_copy) & tag_copy.ct_eq(&computed_tag_copy);\n+        let second = computed_tag_copy.ct_eq(&tag_copy) ^ /* ~ changed by cargo-mutants ~ */ tag_copy.ct_eq(&computed_tag_copy);\n \n         // The copies are secret-derived (they are the computed MAC), so they are\n         // wiped like every other copy in this function rather than left in the\n         // frame of the `hardened` build.\n         zeroize_array(&mut computed_tag_copy);\n         zeroize_array(&mut tag_copy);\n \n         (first, second)\n",
+    "diff": "--- src/lib.rs\n+++ replace & with ^ in decrypt\n@@ -1133,17 +1133,17 @@\n         // SAFETY: `computed_tag` is a live local, initialised and aligned for a\n         // `[u8; TAG_LEN]` read for the whole statement; nothing writes through the\n         // pointer, and a volatile read of live memory has no effect beyond being\n         // the read itself.\n         let mut computed_tag_copy = unsafe { core::ptr::read_volatile(&computed_tag) };\n         // SAFETY: as above, for the caller's reference: `tag` is a live `&[u8;\n         // TAG_LEN]` and this only reads through it, so aliasing rules hold.\n         let mut tag_copy = unsafe { core::ptr::read_volatile(tag) };\n-        let second = computed_tag_copy.ct_eq(&tag_copy) & tag_copy.ct_eq(&computed_tag_copy);\n+        let second = computed_tag_copy.ct_eq(&tag_copy) ^ /* ~ changed by cargo-mutants ~ */ tag_copy.ct_eq(&computed_tag_copy);\n \n         // The copies are secret-derived (they are the computed MAC), so they are\n         // wiped like every other copy in this function rather than left in the\n         // frame of the `hardened` build.\n         zeroize_array(&mut computed_tag_copy);\n         zeroize_array(&mut tag_copy);\n \n         (first, second)\n",
     "file": "src/lib.rs",
     "function": {
       "function_name": "decrypt",
@@ -168,31 +104,31 @@
       "span": {
         "end": {
           "column": 2,
-          "line": 1159
+          "line": 1188
         },
         "start": {
           "column": 1,
-          "line": 1067
+          "line": 1087
         }
       }
     },
     "genre": "BinaryOperator",
-    "name": "src/lib.rs:1121:57: replace & with ^ in decrypt",
+    "name": "src/lib.rs:1141:57: replace & with ^ in decrypt",
     "package": "xchacha20-blake3-siv",
     "replacement": "^",
     "span": {
       "end": {
         "column": 58,
-        "line": 1121
+        "line": 1141
       },
       "start": {
         "column": 57,
-        "line": 1121
+        "line": 1141
       }
     }
   },
   {
-    "diff": "--- src/lib.rs\n+++ replace decrypt_bounded -> Result<Plaintext, Error> with Ok(Default::default())\n@@ -1192,20 +1192,17 @@\n pub fn decrypt_bounded(\n     key: &[u8; 32],\n     nonce: &[u8; NONCE_LEN],\n     aad: &[u8],\n     ciphertext: &[u8],\n     tag: &[u8; TAG_LEN],\n     max_len: usize,\n ) -> Result<Plaintext, Error> {\n-    if ciphertext.len() > max_len {\n-        return Err(Error::MessageTooLong);\n-    }\n-    decrypt(key, nonce, aad, ciphertext, tag)\n+    Ok(Default::default()) /* ~ changed by cargo-mutants ~ */\n }\n \n /// Decrypt `buffer` in place, verifying the detached tag.\n ///\n /// On failure the buffer is zeroized, so unverified plaintext is never left in\n /// place. Note this destroys the caller's buffer on the failure path.\n pub fn decrypt_in_place_detached(\n     key: &[u8; 32],\n",
+    "diff": "--- src/lib.rs\n+++ replace decrypt_bounded -> Result<Plaintext, Error> with Ok(Default::default())\n@@ -1221,20 +1221,17 @@\n pub fn decrypt_bounded(\n     key: &[u8; 32],\n     nonce: &[u8; NONCE_LEN],\n     aad: &[u8],\n     ciphertext: &[u8],\n     tag: &[u8; TAG_LEN],\n     max_len: usize,\n ) -> Result<Plaintext, Error> {\n-    if ciphertext.len() > max_len {\n-        return Err(Error::MessageTooLong);\n-    }\n-    decrypt(key, nonce, aad, ciphertext, tag)\n+    Ok(Default::default()) /* ~ changed by cargo-mutants ~ */\n }\n \n /// Decrypt `buffer` in place, verifying the detached tag.\n ///\n /// On failure the buffer is zeroized, so unverified plaintext is never left in\n /// place. Note this destroys the caller's buffer on the failure path.\n pub fn decrypt_in_place_detached(\n     key: &[u8; 32],\n",
     "file": "src/lib.rs",
     "function": {
       "function_name": "decrypt_bounded",
@@ -200,31 +136,31 @@
       "span": {
         "end": {
           "column": 2,
-          "line": 1204
+          "line": 1233
         },
         "start": {
           "column": 1,
-          "line": 1161
+          "line": 1190
         }
       }
     },
     "genre": "FnValue",
-    "name": "src/lib.rs:1200:5: replace decrypt_bounded -> Result<Plaintext, Error> with Ok(Default::default())",
+    "name": "src/lib.rs:1229:5: replace decrypt_bounded -> Result<Plaintext, Error> with Ok(Default::default())",
     "package": "xchacha20-blake3-siv",
     "replacement": "Ok(Default::default())",
     "span": {
       "end": {
         "column": 46,
-        "line": 1203
+        "line": 1232
       },
       "start": {
         "column": 5,
-        "line": 1200
+        "line": 1229
       }
     }
   },
   {
-    "diff": "--- src/lib.rs\n+++ replace > with == in decrypt_bounded\n@@ -1192,17 +1192,17 @@\n pub fn decrypt_bounded(\n     key: &[u8; 32],\n     nonce: &[u8; NONCE_LEN],\n     aad: &[u8],\n     ciphertext: &[u8],\n     tag: &[u8; TAG_LEN],\n     max_len: usize,\n ) -> Result<Plaintext, Error> {\n-    if ciphertext.len() > max_len {\n+    if ciphertext.len() == /* ~ changed by cargo-mutants ~ */ max_len {\n         return Err(Error::MessageTooLong);\n     }\n     decrypt(key, nonce, aad, ciphertext, tag)\n }\n \n /// Decrypt `buffer` in place, verifying the detached tag.\n ///\n /// On failure the buffer is zeroized, so unverified plaintext is never left in\n",
+    "diff": "--- src/lib.rs\n+++ replace > with == in decrypt_bounded\n@@ -1221,17 +1221,17 @@\n pub fn decrypt_bounded(\n     key: &[u8; 32],\n     nonce: &[u8; NONCE_LEN],\n     aad: &[u8],\n     ciphertext: &[u8],\n     tag: &[u8; TAG_LEN],\n     max_len: usize,\n ) -> Result<Plaintext, Error> {\n-    if ciphertext.len() > max_len {\n+    if ciphertext.len() == /* ~ changed by cargo-mutants ~ */ max_len {\n         return Err(Error::MessageTooLong);\n     }\n     decrypt(key, nonce, aad, ciphertext, tag)\n }\n \n /// Decrypt `buffer` in place, verifying the detached tag.\n ///\n /// On failure the buffer is zeroized, so unverified plaintext is never left in\n",
     "file": "src/lib.rs",
     "function": {
       "function_name": "decrypt_bounded",
@@ -232,31 +168,31 @@
       "span": {
         "end": {
           "column": 2,
-          "line": 1204
+          "line": 1233
         },
         "start": {
           "column": 1,
-          "line": 1161
+          "line": 1190
         }
       }
     },
     "genre": "BinaryOperator",
-    "name": "src/lib.rs:1200:25: replace > with == in decrypt_bounded",
+    "name": "src/lib.rs:1229:25: replace > with == in decrypt_bounded",
     "package": "xchacha20-blake3-siv",
     "replacement": "==",
     "span": {
       "end": {
         "column": 26,
-        "line": 1200
+        "line": 1229
       },
       "start": {
         "column": 25,
-        "line": 1200
+        "line": 1229
       }
     }
   },
   {
-    "diff": "--- src/lib.rs\n+++ replace > with < in decrypt_bounded\n@@ -1192,17 +1192,17 @@\n pub fn decrypt_bounded(\n     key: &[u8; 32],\n     nonce: &[u8; NONCE_LEN],\n     aad: &[u8],\n     ciphertext: &[u8],\n     tag: &[u8; TAG_LEN],\n     max_len: usize,\n ) -> Result<Plaintext, Error> {\n-    if ciphertext.len() > max_len {\n+    if ciphertext.len() < /* ~ changed by cargo-mutants ~ */ max_len {\n         return Err(Error::MessageTooLong);\n     }\n     decrypt(key, nonce, aad, ciphertext, tag)\n }\n \n /// Decrypt `buffer` in place, verifying the detached tag.\n ///\n /// On failure the buffer is zeroized, so unverified plaintext is never left in\n",
+    "diff": "--- src/lib.rs\n+++ replace > with < in decrypt_bounded\n@@ -1221,17 +1221,17 @@\n pub fn decrypt_bounded(\n     key: &[u8; 32],\n     nonce: &[u8; NONCE_LEN],\n     aad: &[u8],\n     ciphertext: &[u8],\n     tag: &[u8; TAG_LEN],\n     max_len: usize,\n ) -> Result<Plaintext, Error> {\n-    if ciphertext.len() > max_len {\n+    if ciphertext.len() < /* ~ changed by cargo-mutants ~ */ max_len {\n         return Err(Error::MessageTooLong);\n     }\n     decrypt(key, nonce, aad, ciphertext, tag)\n }\n \n /// Decrypt `buffer` in place, verifying the detached tag.\n ///\n /// On failure the buffer is zeroized, so unverified plaintext is never left in\n",
     "file": "src/lib.rs",
     "function": {
       "function_name": "decrypt_bounded",
@@ -264,31 +200,31 @@
       "span": {
         "end": {
           "column": 2,
-          "line": 1204
+          "line": 1233
         },
         "start": {
           "column": 1,
-          "line": 1161
+          "line": 1190
         }
       }
     },
     "genre": "BinaryOperator",
-    "name": "src/lib.rs:1200:25: replace > with < in decrypt_bounded",
+    "name": "src/lib.rs:1229:25: replace > with < in decrypt_bounded",
     "package": "xchacha20-blake3-siv",
     "replacement": "<",
     "span": {
       "end": {
         "column": 26,
-        "line": 1200
+        "line": 1229
       },
       "start": {
         "column": 25,
-        "line": 1200
+        "line": 1229
       }
     }
   },
   {
-    "diff": "--- src/lib.rs\n+++ replace > with >= in decrypt_bounded\n@@ -1192,17 +1192,17 @@\n pub fn decrypt_bounded(\n     key: &[u8; 32],\n     nonce: &[u8; NONCE_LEN],\n     aad: &[u8],\n     ciphertext: &[u8],\n     tag: &[u8; TAG_LEN],\n     max_len: usize,\n ) -> Result<Plaintext, Error> {\n-    if ciphertext.len() > max_len {\n+    if ciphertext.len() >= /* ~ changed by cargo-mutants ~ */ max_len {\n         return Err(Error::MessageTooLong);\n     }\n     decrypt(key, nonce, aad, ciphertext, tag)\n }\n \n /// Decrypt `buffer` in place, verifying the detached tag.\n ///\n /// On failure the buffer is zeroized, so unverified plaintext is never left in\n",
+    "diff": "--- src/lib.rs\n+++ replace > with >= in decrypt_bounded\n@@ -1221,17 +1221,17 @@\n pub fn decrypt_bounded(\n     key: &[u8; 32],\n     nonce: &[u8; NONCE_LEN],\n     aad: &[u8],\n     ciphertext: &[u8],\n     tag: &[u8; TAG_LEN],\n     max_len: usize,\n ) -> Result<Plaintext, Error> {\n-    if ciphertext.len() > max_len {\n+    if ciphertext.len() >= /* ~ changed by cargo-mutants ~ */ max_len {\n         return Err(Error::MessageTooLong);\n     }\n     decrypt(key, nonce, aad, ciphertext, tag)\n }\n \n /// Decrypt `buffer` in place, verifying the detached tag.\n ///\n /// On failure the buffer is zeroized, so unverified plaintext is never left in\n",
     "file": "src/lib.rs",
     "function": {
       "function_name": "decrypt_bounded",
@@ -296,31 +232,31 @@
       "span": {
         "end": {
           "column": 2,
-          "line": 1204
+          "line": 1233
         },
         "start": {
           "column": 1,
-          "line": 1161
+          "line": 1190
         }
       }
     },
     "genre": "BinaryOperator",
-    "name": "src/lib.rs:1200:25: replace > with >= in decrypt_bounded",
+    "name": "src/lib.rs:1229:25: replace > with >= in decrypt_bounded",
     "package": "xchacha20-blake3-siv",
     "replacement": ">=",
     "span": {
       "end": {
         "column": 26,
-        "line": 1200
+        "line": 1229
       },
       "start": {
         "column": 25,
-        "line": 1200
+        "line": 1229
       }
     }
   },
   {
-    "diff": "--- src/lib.rs\n+++ replace decrypt_in_place_detached -> Result<(), Error> with Ok(())\n@@ -1209,76 +1209,17 @@\n /// place. Note this destroys the caller's buffer on the failure path.\n pub fn decrypt_in_place_detached(\n     key: &[u8; 32],\n     nonce: &[u8; NONCE_LEN],\n     aad: &[u8],\n     buffer: &mut [u8],\n     tag: &[u8; TAG_LEN],\n ) -> Result<(), Error> {\n-    check_lengths(buffer.len(), aad.len())?;\n-\n-    let (mut mac_key, mut enc_seed) = derive_material(key, nonce);\n-    let (mut enc_key, mut enc_nonce) = derive_enc(&enc_seed, tag);\n-\n-    chacha20_apply(&enc_key, 0, &enc_nonce, &Input::InPlace, buffer);\n-\n-    let mut computed_tag = derive_tag(&mac_key, key, nonce, aad, buffer);\n-    #[cfg(feature = \"hardened\")]\n-    let gates = {\n-        // See the matching block in `decrypt`: identical reasoning, and the same\n-        // volatile re-read, so both entry points get a second gate that is a\n-        // recomputation rather than a copy of the first.\n-        let first = computed_tag.ct_eq(tag) & tag.ct_eq(&computed_tag);\n-\n-        // SAFETY: `computed_tag` is a live local, initialised and aligned for a\n-        // `[u8; TAG_LEN]` read for the whole statement; nothing writes through the\n-        // pointer, and a volatile read of live memory has no effect beyond being\n-        // the read itself.\n-        let mut computed_tag_copy = unsafe { core::ptr::read_volatile(&computed_tag) };\n-        // SAFETY: as above, for the caller's reference: `tag` is a live `&[u8;\n-        // TAG_LEN]` and this only reads through it, so aliasing rules hold.\n-        let mut tag_copy = unsafe { core::ptr::read_volatile(tag) };\n-        let second = computed_tag_copy.ct_eq(&tag_copy) & tag_copy.ct_eq(&computed_tag_copy);\n-\n-        // The copies are secret-derived (they are the computed MAC), so they are\n-        // wiped like every other copy in this function rather than left in the\n-        // frame of the `hardened` build.\n-        zeroize_array(&mut computed_tag_copy);\n-        zeroize_array(&mut tag_copy);\n-\n-        (first, second)\n-    };\n-    #[cfg(not(feature = \"hardened\"))]\n-    let auth_ok = computed_tag.ct_eq(tag);\n-\n-    zeroize_array(&mut mac_key);\n-    zeroize_array(&mut enc_seed);\n-    zeroize_array(&mut enc_key);\n-    // The per-message ChaCha20 nonce is secret-derived too (it comes out of\n-    // the same XOF call as `enc_key`), so it is wiped with the rest rather\n-    // than left on the stack.\n-    zeroize_array(&mut enc_nonce);\n-    zeroize_array(&mut computed_tag);\n-\n-    // As in `decrypt`: the rejection is written first, so a fault that skips the\n-    // call cannot accept.\n-    let mut decision: Result<(), Error> = Err(Error::AuthenticationFailed);\n-    #[cfg(not(feature = \"hardened\"))]\n-    accept_or_reject(auth_ok, auth_ok, buffer, &mut decision);\n-    #[cfg(feature = \"hardened\")]\n-    accept_or_reject(gates.0, gates.1, buffer, &mut decision);\n-\n-    if decision.is_ok() {\n-        return Ok(());\n-    }\n-    // Reached on rejection, and on a call that never happened -- in which case the\n-    // caller's buffer still holds the unverified plaintext and is wiped here.\n-    zeroize_slice(buffer);\n-    Err(Error::AuthenticationFailed)\n+    Ok(()) /* ~ changed by cargo-mutants ~ */\n }\n \n // ── ChaCha20 Primitive ────────────────────────────────────────────────\n \n /// Quarter round: (a, b, c, d) → (a', b', c', d')\n #[inline]\n fn qr(a: u32, b: u32, c: u32, d: u32) -> (u32, u32, u32, u32) {\n     let a = a.wrapping_add(b);\n",
+    "diff": "--- src/lib.rs\n+++ replace decrypt_in_place_detached -> Result<(), Error> with Ok(())\n@@ -1238,79 +1238,17 @@\n /// place. Note this destroys the caller's buffer on the failure path.\n pub fn decrypt_in_place_detached(\n     key: &[u8; 32],\n     nonce: &[u8; NONCE_LEN],\n     aad: &[u8],\n     buffer: &mut [u8],\n     tag: &[u8; TAG_LEN],\n ) -> Result<(), Error> {\n-    check_lengths(buffer.len(), aad.len())?;\n-\n-    let (mut mac_key, mut enc_seed) = derive_material(key, nonce);\n-    let (mut enc_key, mut enc_nonce) = derive_enc(&enc_seed, tag);\n-\n-    chacha20_apply(&enc_key, 0, &enc_nonce, &Input::InPlace, buffer);\n-\n-    let mut computed_tag = derive_tag(&mac_key, key, nonce, aad, buffer);\n-    #[cfg(feature = \"hardened\")]\n-    let gates = {\n-        // See the matching block in `decrypt`: identical reasoning, and the same\n-        // volatile re-read, so both entry points get a second gate that is a\n-        // recomputation rather than a copy of the first.\n-        let first = computed_tag.ct_eq(tag) & tag.ct_eq(&computed_tag);\n-\n-        // SAFETY: `computed_tag` is a live local, initialised and aligned for a\n-        // `[u8; TAG_LEN]` read for the whole statement; nothing writes through the\n-        // pointer, and a volatile read of live memory has no effect beyond being\n-        // the read itself.\n-        let mut computed_tag_copy = unsafe { core::ptr::read_volatile(&computed_tag) };\n-        // SAFETY: as above, for the caller's reference: `tag` is a live `&[u8;\n-        // TAG_LEN]` and this only reads through it, so aliasing rules hold.\n-        let mut tag_copy = unsafe { core::ptr::read_volatile(tag) };\n-        let second = computed_tag_copy.ct_eq(&tag_copy) & tag_copy.ct_eq(&computed_tag_copy);\n-\n-        // The copies are secret-derived (they are the computed MAC), so they are\n-        // wiped like every other copy in this function rather than left in the\n-        // frame of the `hardened` build.\n-        zeroize_array(&mut computed_tag_copy);\n-        zeroize_array(&mut tag_copy);\n-\n-        (first, second)\n-    };\n-    #[cfg(not(feature = \"hardened\"))]\n-    let auth_ok = computed_tag.ct_eq(tag);\n-\n-    zeroize_array(&mut mac_key);\n-    zeroize_array(&mut enc_seed);\n-    zeroize_array(&mut enc_key);\n-    // The per-message ChaCha20 nonce is secret-derived too (it comes out of\n-    // the same XOF call as `enc_key`), so it is wiped with the rest rather\n-    // than left on the stack.\n-    zeroize_array(&mut enc_nonce);\n-    zeroize_array(&mut computed_tag);\n-\n-    // As in `decrypt`: two rejections written first, and two serial checks, so a fault\n-    // that skips the call or corrupts one outcome cannot accept.\n-    let mut decision0: Result<(), Error> = Err(Error::AuthenticationFailed);\n-    let mut decision1: Result<(), Error> = Err(Error::AuthenticationFailed);\n-    #[cfg(not(feature = \"hardened\"))]\n-    accept_or_reject(auth_ok, auth_ok, &mut decision0, &mut decision1);\n-    #[cfg(feature = \"hardened\")]\n-    accept_or_reject(gates.0, gates.1, &mut decision0, &mut decision1);\n-\n-    if decision0.is_err() {\n-        zeroize_slice(buffer);\n-        return Err(Error::AuthenticationFailed);\n-    }\n-    if decision1.is_err() {\n-        zeroize_slice(buffer);\n-        return Err(Error::AuthenticationFailed);\n-    }\n-    Ok(())\n+    Ok(()) /* ~ changed by cargo-mutants ~ */\n }\n \n // ── ChaCha20 Primitive ────────────────────────────────────────────────\n \n /// Quarter round: (a, b, c, d) → (a', b', c', d')\n #[inline]\n fn qr(a: u32, b: u32, c: u32, d: u32) -> (u32, u32, u32, u32) {\n     let a = a.wrapping_add(b);\n",
     "file": "src/lib.rs",
     "function": {
       "function_name": "decrypt_in_place_detached",
@@ -328,31 +264,31 @@
       "span": {
         "end": {
           "column": 2,
-          "line": 1277
+          "line": 1309
         },
         "start": {
           "column": 1,
-          "line": 1206
+          "line": 1235
         }
       }
     },
     "genre": "FnValue",
-    "name": "src/lib.rs:1217:5: replace decrypt_in_place_detached -> Result<(), Error> with Ok(())",
+    "name": "src/lib.rs:1246:5: replace decrypt_in_place_detached -> Result<(), Error> with Ok(())",
     "package": "xchacha20-blake3-siv",
     "replacement": "Ok(())",
     "span": {
       "end": {
-        "column": 37,
-        "line": 1276
+        "column": 11,
+        "line": 1308
       },
       "start": {
         "column": 5,
-        "line": 1217
+        "line": 1246
       }
     }
   },
   {
-    "diff": "--- src/lib.rs\n+++ replace & with ^ in decrypt_in_place_detached\n@@ -1222,17 +1222,17 @@\n     chacha20_apply(&enc_key, 0, &enc_nonce, &Input::InPlace, buffer);\n \n     let mut computed_tag = derive_tag(&mac_key, key, nonce, aad, buffer);\n     #[cfg(feature = \"hardened\")]\n     let gates = {\n         // See the matching block in `decrypt`: identical reasoning, and the same\n         // volatile re-read, so both entry points get a second gate that is a\n         // recomputation rather than a copy of the first.\n-        let first = computed_tag.ct_eq(tag) & tag.ct_eq(&computed_tag);\n+        let first = computed_tag.ct_eq(tag) ^ /* ~ changed by cargo-mutants ~ */ tag.ct_eq(&computed_tag);\n \n         // SAFETY: `computed_tag` is a live local, initialised and aligned for a\n         // `[u8; TAG_LEN]` read for the whole statement; nothing writes through the\n         // pointer, and a volatile read of live memory has no effect beyond being\n         // the read itself.\n         let mut computed_tag_copy = unsafe { core::ptr::read_volatile(&computed_tag) };\n         // SAFETY: as above, for the caller's reference: `tag` is a live `&[u8;\n         // TAG_LEN]` and this only reads through it, so aliasing rules hold.\n",
+    "diff": "--- src/lib.rs\n+++ replace & with ^ in decrypt_in_place_detached\n@@ -1251,17 +1251,17 @@\n     chacha20_apply(&enc_key, 0, &enc_nonce, &Input::InPlace, buffer);\n \n     let mut computed_tag = derive_tag(&mac_key, key, nonce, aad, buffer);\n     #[cfg(feature = \"hardened\")]\n     let gates = {\n         // See the matching block in `decrypt`: identical reasoning, and the same\n         // volatile re-read, so both entry points get a second gate that is a\n         // recomputation rather than a copy of the first.\n-        let first = computed_tag.ct_eq(tag) & tag.ct_eq(&computed_tag);\n+        let first = computed_tag.ct_eq(tag) ^ /* ~ changed by cargo-mutants ~ */ tag.ct_eq(&computed_tag);\n \n         // SAFETY: `computed_tag` is a live local, initialised and aligned for a\n         // `[u8; TAG_LEN]` read for the whole statement; nothing writes through the\n         // pointer, and a volatile read of live memory has no effect beyond being\n         // the read itself.\n         let mut computed_tag_copy = unsafe { core::ptr::read_volatile(&computed_tag) };\n         // SAFETY: as above, for the caller's reference: `tag` is a live `&[u8;\n         // TAG_LEN]` and this only reads through it, so aliasing rules hold.\n",
     "file": "src/lib.rs",
     "function": {
       "function_name": "decrypt_in_place_detached",
@@ -360,31 +296,31 @@
       "span": {
         "end": {
           "column": 2,
-          "line": 1277
+          "line": 1309
         },
         "start": {
           "column": 1,
-          "line": 1206
+          "line": 1235
         }
       }
     },
     "genre": "BinaryOperator",
-    "name": "src/lib.rs:1230:45: replace & with ^ in decrypt_in_place_detached",
+    "name": "src/lib.rs:1259:45: replace & with ^ in decrypt_in_place_detached",
     "package": "xchacha20-blake3-siv",
     "replacement": "^",
     "span": {
       "end": {
         "column": 46,
-        "line": 1230
+        "line": 1259
       },
       "start": {
         "column": 45,
-        "line": 1230
+        "line": 1259
       }
     }
   },
   {
-    "diff": "--- src/lib.rs\n+++ replace & with ^ in decrypt_in_place_detached\n@@ -1232,17 +1232,17 @@\n         // SAFETY: `computed_tag` is a live local, initialised and aligned for a\n         // `[u8; TAG_LEN]` read for the whole statement; nothing writes through the\n         // pointer, and a volatile read of live memory has no effect beyond being\n         // the read itself.\n         let mut computed_tag_copy = unsafe { core::ptr::read_volatile(&computed_tag) };\n         // SAFETY: as above, for the caller's reference: `tag` is a live `&[u8;\n         // TAG_LEN]` and this only reads through it, so aliasing rules hold.\n         let mut tag_copy = unsafe { core::ptr::read_volatile(tag) };\n-        let second = computed_tag_copy.ct_eq(&tag_copy) & tag_copy.ct_eq(&computed_tag_copy);\n+        let second = computed_tag_copy.ct_eq(&tag_copy) ^ /* ~ changed by cargo-mutants ~ */ tag_copy.ct_eq(&computed_tag_copy);\n \n         // The copies are secret-derived (they are the computed MAC), so they are\n         // wiped like every other copy in this function rather than left in the\n         // frame of the `hardened` build.\n         zeroize_array(&mut computed_tag_copy);\n         zeroize_array(&mut tag_copy);\n \n         (first, second)\n",
+    "diff": "--- src/lib.rs\n+++ replace & with ^ in decrypt_in_place_detached\n@@ -1261,17 +1261,17 @@\n         // SAFETY: `computed_tag` is a live local, initialised and aligned for a\n         // `[u8; TAG_LEN]` read for the whole statement; nothing writes through the\n         // pointer, and a volatile read of live memory has no effect beyond being\n         // the read itself.\n         let mut computed_tag_copy = unsafe { core::ptr::read_volatile(&computed_tag) };\n         // SAFETY: as above, for the caller's reference: `tag` is a live `&[u8;\n         // TAG_LEN]` and this only reads through it, so aliasing rules hold.\n         let mut tag_copy = unsafe { core::ptr::read_volatile(tag) };\n-        let second = computed_tag_copy.ct_eq(&tag_copy) & tag_copy.ct_eq(&computed_tag_copy);\n+        let second = computed_tag_copy.ct_eq(&tag_copy) ^ /* ~ changed by cargo-mutants ~ */ tag_copy.ct_eq(&computed_tag_copy);\n \n         // The copies are secret-derived (they are the computed MAC), so they are\n         // wiped like every other copy in this function rather than left in the\n         // frame of the `hardened` build.\n         zeroize_array(&mut computed_tag_copy);\n         zeroize_array(&mut tag_copy);\n \n         (first, second)\n",
     "file": "src/lib.rs",
     "function": {
       "function_name": "decrypt_in_place_detached",
@@ -392,26 +328,26 @@
       "span": {
         "end": {
           "column": 2,
-          "line": 1277
+          "line": 1309
         },
         "start": {
           "column": 1,
-          "line": 1206
+          "line": 1235
         }
       }
     },
     "genre": "BinaryOperator",
-    "name": "src/lib.rs:1240:57: replace & with ^ in decrypt_in_place_detached",
+    "name": "src/lib.rs:1269:57: replace & with ^ in decrypt_in_place_detached",
     "package": "xchacha20-blake3-siv",
     "replacement": "^",
     "span": {
       "end": {
         "column": 58,
-        "line": 1240
+        "line": 1269
       },
       "start": {
         "column": 57,
-        "line": 1240
+        "line": 1269
       }
     }
   }
