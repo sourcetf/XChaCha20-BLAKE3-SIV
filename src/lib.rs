@@ -991,8 +991,8 @@ pub fn encrypt_in_place_detached(
 //
 // SIV decrypts before it verifies, so "does this ciphertext authenticate?" is a
 // branch on secret-derived data, and it cannot be removed: that one bit is what
-// the mode is designed to reveal. Three properties depend on its living *here*, in
-// a function of its own, `#[inline(never)]`, shared by both decrypt entry points:
+// the mode is designed to reveal. Four properties depend on its living *here*, in a
+// function of its own, `#[inline(never)]`, shared by both decrypt entry points:
 //
 //  * `tests/ctgrind.supp` suppresses this function and nothing else, so a
 //    secret-dependent branch anywhere else in the crate -- including inside
@@ -1011,28 +1011,16 @@ pub fn encrypt_in_place_detached(
 //  * the rejection path wipes the buffer here, and the caller wipes again on the
 //    rejection it starts with -- because that path is exactly the one a skipped
 //    call leaves behind, and the unverified plaintext must not survive it.
-#[cfg(not(feature = "hardened"))]
-#[inline(never)]
-fn accept_or_reject(auth_ok: subtle::Choice, buffer: &mut [u8], out: &mut Result<(), Error>) {
-    if bool::from(auth_ok) {
-        *out = Ok(());
-    } else {
-        // Per spec, MUST NOT expose unverified plaintext.
-        zeroize_slice(buffer);
-        *out = Err(Error::AuthenticationFailed);
-    }
-}
-
-/// The same decision with the opt-in `hardened` gates.
-///
-/// Fault-injection hardening (opt-in `hardened` feature): two *recomputed*
-/// checks, each with its own branch, so a single skipped instruction reaches the
-/// other gate instead of accepting. `&` and never `&&`: both comparisons always
-/// run, so the time this takes does not reveal which gate failed. No `unwrap_u8`
-/// and no early exit inside the comparisons -- `bool::from` is the conversion
-/// `subtle` documents for exactly this place (the end of a verification). What it
-/// does and does not defend against: see README "What is not defended against".
-#[cfg(feature = "hardened")]
+//  * there is exactly one body, with the `hardened` gates *inside* it rather than a
+//    second `#[cfg]`-selected definition of the same function. Two bodies would be
+//    two functions to a mutation campaign that does not evaluate `cfg`
+//    (`cargo mutants`), and the one that is not compiled in a given run reads as an
+//    uncaught mutant. One body means every mutatable line is compiled in the
+//    `hardened` build, which is a superset of the default one.
+//
+// The default build passes the same `Choice` for both gates -- the second gate is
+// compiled out there, so one comparison is the whole decision and nothing is
+// wasted computing a second one.
 #[inline(never)]
 fn accept_or_reject(
     gate0: subtle::Choice,
@@ -1045,11 +1033,27 @@ fn accept_or_reject(
         *out = Err(Error::AuthenticationFailed);
         return;
     }
+
+    // Fault-injection hardening (opt-in `hardened` feature): a second *recomputed*
+    // check with its own branch, so a single skipped instruction reaches this gate
+    // instead of accepting. `&` and never `&&`: both comparisons always run in the
+    // caller, so the time this takes does not reveal which gate failed. No
+    // `unwrap_u8` and no early exit inside the comparisons -- `bool::from` is the
+    // conversion `subtle` documents for exactly this place (the end of a
+    // verification). What it does and does not defend against: see README "What is
+    // not defended against".
+    #[cfg(feature = "hardened")]
     if !bool::from(gate1) {
         zeroize_slice(buffer);
         *out = Err(Error::AuthenticationFailed);
         return;
     }
+
+    // Without the feature the caller passes `gate0` twice, and the parameter is
+    // unused rather than compiled away silently.
+    #[cfg(not(feature = "hardened"))]
+    let _ = gate1;
+
     *out = Ok(());
 }
 
@@ -1127,7 +1131,7 @@ pub fn decrypt(
     // accepting. See the comment on `accept_or_reject`.
     let mut decision: Result<(), Error> = Err(Error::AuthenticationFailed);
     #[cfg(not(feature = "hardened"))]
-    accept_or_reject(auth_ok, &mut plaintext, &mut decision);
+    accept_or_reject(auth_ok, auth_ok, &mut plaintext, &mut decision);
     #[cfg(feature = "hardened")]
     accept_or_reject(gates.0, gates.1, &mut plaintext, &mut decision);
 
@@ -1200,7 +1204,7 @@ pub fn decrypt_in_place_detached(
     // call cannot accept.
     let mut decision: Result<(), Error> = Err(Error::AuthenticationFailed);
     #[cfg(not(feature = "hardened"))]
-    accept_or_reject(auth_ok, buffer, &mut decision);
+    accept_or_reject(auth_ok, auth_ok, buffer, &mut decision);
     #[cfg(feature = "hardened")]
     accept_or_reject(gates.0, gates.1, buffer, &mut decision);
 

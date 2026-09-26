@@ -1,0 +1,92 @@
+--- src/lib.rs
++++ replace decrypt -> Result<Plaintext, Error> with Ok(Default::default())
+@@ -1065,88 +1065,17 @@
+ #[must_use = "the returned plaintext must be handled"]
+ pub fn decrypt(
+     key: &[u8; 32],
+     nonce: &[u8; NONCE_LEN],
+     aad: &[u8],
+     ciphertext: &[u8],
+     tag: &[u8; TAG_LEN],
+ ) -> Result<Plaintext, Error> {
+-    check_lengths(ciphertext.len(), aad.len())?;
+-
+-    let (mut mac_key, mut enc_seed) = derive_material(key, nonce);
+-    let (mut enc_key, mut enc_nonce) = derive_enc(&enc_seed, tag);
+-
+-    let mut plaintext = alloc_plaintext(ciphertext.len())?;
+-    chacha20_keystream(&enc_key, 0, &enc_nonce, ciphertext, &mut plaintext);
+-
+-    let mut computed_tag = derive_tag(&mac_key, key, nonce, aad, &plaintext);
+-    #[cfg(feature = "hardened")]
+-    let gates = {
+-        // Two *recomputations*, not one result read twice.  The two gate
+-        // expressions are identical, and an optimizer is entitled to
+-        // common-subexpression-eliminate them into a single comparison — at which
+-        // point one fault would carry both gates and the second gate would have
+-        // stopped being a second gate.
+-        //
+-        // The volatile re-read is what forbids that merge, and it is here rather
+-        // than `black_box` on purpose: whether `black_box` defeats CSE is a
+-        // property of the optimizer's choices, not of the program, and this
+-        // hardening must not rest on the difference between two compilers.  A
+-        // volatile access is one the language requires to happen.
+-        //
+-        // Cost: two 65-byte copies and two wipes, only under this feature.
+-        let first = computed_tag.ct_eq(tag) & tag.ct_eq(&computed_tag);
+-
+-        // SAFETY: `computed_tag` is a live local, initialised and aligned for a
+-        // `[u8; TAG_LEN]` read for the whole statement; nothing writes through the
+-        // pointer, and a volatile read of live memory has no effect beyond being
+-        // the read itself.
+-        let mut computed_tag_copy = unsafe { core::ptr::read_volatile(&computed_tag) };
+-        // SAFETY: as above, for the caller's reference: `tag` is a live `&[u8;
+-        // TAG_LEN]` and this only reads through it, so aliasing rules hold.
+-        let mut tag_copy = unsafe { core::ptr::read_volatile(tag) };
+-        let second = computed_tag_copy.ct_eq(&tag_copy) & tag_copy.ct_eq(&computed_tag_copy);
+-
+-        // The copies are secret-derived (they are the computed MAC), so they are
+-        // wiped like every other copy in this function rather than left in the
+-        // frame of the `hardened` build.
+-        zeroize_array(&mut computed_tag_copy);
+-        zeroize_array(&mut tag_copy);
+-
+-        (first, second)
+-    };
+-    #[cfg(not(feature = "hardened"))]
+-    let auth_ok = computed_tag.ct_eq(tag);
+-
+-    zeroize_array(&mut mac_key);
+-    zeroize_array(&mut enc_seed);
+-    zeroize_array(&mut enc_key);
+-    // The per-message ChaCha20 nonce is secret-derived too (it comes out of
+-    // the same XOF call as `enc_key`), so it is wiped with the rest rather
+-    // than left on the stack.
+-    zeroize_array(&mut enc_nonce);
+-    zeroize_array(&mut computed_tag);
+-
+-    // A rejection until the decision proves otherwise, written *before* the call:
+-    // a fault that skips the call leaves this rejection standing instead of
+-    // accepting. See the comment on `accept_or_reject`.
+-    let mut decision: Result<(), Error> = Err(Error::AuthenticationFailed);
+-    #[cfg(not(feature = "hardened"))]
+-    accept_or_reject(auth_ok, auth_ok, &mut plaintext, &mut decision);
+-    #[cfg(feature = "hardened")]
+-    accept_or_reject(gates.0, gates.1, &mut plaintext, &mut decision);
+-
+-    if decision.is_ok() {
+-        return Ok(Plaintext(plaintext));
+-    }
+-    // Reached on rejection, and on a call that never happened -- in which case the
+-    // helper never wiped, so the wipe is here, where both paths arrive.
+-    zeroize_slice(&mut plaintext);
+-    Err(Error::AuthenticationFailed)
++    Ok(Default::default()) /* ~ changed by cargo-mutants ~ */
+ }
+ 
+ /// Decrypt `buffer` in place, verifying the detached tag.
+ ///
+ /// On failure the buffer is zeroized, so unverified plaintext is never left in
+ /// place. Note this destroys the caller's buffer on the failure path.
+ pub fn decrypt_in_place_detached(
+     key: &[u8; 32],

@@ -7,6 +7,21 @@ tags have been cut yet.
 
 ## Unreleased
 
+- **The decision is one function body, not two `#[cfg]`-selected definitions.** The
+  `hardened` gates now live inside the same `accept_or_reject` the default build
+  compiles, with the second gate under `#[cfg(feature = "hardened")]`. Reasons, in
+  order of how much they mattered: `cargo mutants` does not evaluate `cfg`, so the
+  variant that was not compiled in a run read as an *uncaught mutant* — and a filter
+  that still matched the two entry points had already let the decision fall out of
+  that campaign silently (`-F 'decrypt|passed_gates'` names a function that no longer
+  exists). One body means the hardened build contains every mutatable line the
+  default build has, so one ~20-second run covers both: 5 mutants, 4 caught, 1
+  unviable, none uncaught. The default build passes the same `Choice` for both gates,
+  so it computes one comparison and not two.
+- `tests/decision_scope.rs` grew the assertions this needs: exactly one definition,
+  exactly two branches of which exactly one is the opt-in gate, and no
+  `#[cfg(not(hardened))]` branch of its own.
+
 - **The accept/reject decision is fail-closed.** The outcome is written through a
   parameter the caller initialises to a rejection, instead of being returned by
   value: a fault that *skips the decision call* then accepts nothing, where before

@@ -120,55 +120,64 @@ fn the_suppressed_function_contains_only_the_decision() {
     let defs = definitions();
     assert_eq!(
         defs.len(),
-        2,
-        "expected the default and the `hardened` definitions of accept_or_reject"
+        1,
+        "exactly one definition: the `hardened` gates are compiled inside it rather \
+         than selected by a second `#[cfg]`-gated definition. A second body would be \
+         a second function to `cargo mutants`, which does not evaluate cfgs -- the \
+         body that is not compiled in a run reads there as an uncaught mutant."
     );
+    let def = &defs[0];
 
-    for def in &defs {
-        let hardened = def.contains("gate0");
-        // Comments are stripped first: a future comment containing the word "for"
-        // or a question mark must not read as a loop or a `?`.
-        let code: String = def
-            .lines()
-            .map(|l| match l.find("//") {
-                Some(i) => &l[..i],
-                None => l,
-            })
-            .collect::<Vec<_>>()
-            .join("\n");
+    // Comments are stripped first: a future comment containing the word "for" or a
+    // question mark must not read as a loop or a `?`.
+    let code: String = def
+        .lines()
+        .map(|l| match l.find("//") {
+            Some(i) => &l[..i],
+            None => l,
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
 
-        for construct in ["for ", "while ", "loop ", "match "] {
-            assert!(
-                !code.contains(construct),
-                "`{construct}` inside accept_or_reject: the whole function is \
-                 suppressed, so a loop in it would be a secret-dependent branch \
-                 that no check can see. Move it out, or accept that the entry is \
-                 no longer a reviewable one-liner."
-            );
-        }
+    for construct in ["for ", "while ", "loop ", "match "] {
         assert!(
-            !code.contains('?'),
-            "`?` inside accept_or_reject propagates a `Result` through a branch on \
-             a discriminant; it belongs at the call site, where ctgrind verifies \
-             that the branch is on a constant"
-        );
-
-        let branches = code.matches("if ").count();
-        let expected = if hardened { 2 } else { 1 };
-        assert_eq!(
-            branches,
-            expected,
-            "`accept_or_reject` has {branches} branch(es); the {} definition is \
-             expected to have {expected}. The suppressed function is exactly the \
-             decision, and this count is what \"exactly\" means -- if the decision \
-             needs another branch, the suppression entry needs re-reviewing.",
-            if hardened { "hardened" } else { "default" }
-        );
-        assert!(
-            code.contains("bool::from"),
-            "the branch must convert a `Choice`, not compare bytes directly"
+            !code.contains(construct),
+            "`{construct}` inside accept_or_reject: the whole function is suppressed, \
+             so a loop in it would be a secret-dependent branch that no check can \
+             see. Move it out, or accept that the entry is no longer a reviewable \
+             one-liner."
         );
     }
+    assert!(
+        !code.contains('?'),
+        "`?` inside accept_or_reject propagates a `Result` through a branch on a \
+         discriminant; it belongs at the call site, where ctgrind verifies that the \
+         branch is on a constant"
+    );
+
+    let branches = code.matches("if ").count();
+    assert_eq!(
+        branches, 2,
+        "the decision must have exactly two branches: the first gate, and the \
+         `hardened` second gate. The suppressed function is exactly the decision, and \
+         this count is what \"exactly\" means -- if the decision needs another branch, \
+         the suppression entry needs re-reviewing:\n{def}"
+    );
+    assert_eq!(
+        code.matches("#[cfg(feature = \"hardened\")]").count(),
+        1,
+        "exactly one of the two branches is the opt-in gate:\n{def}"
+    );
+    assert_eq!(
+        code.matches("bool::from").count(),
+        2,
+        "both branches must convert a `Choice`, not compare bytes directly:\n{def}"
+    );
+    assert!(
+        !code.contains("#[cfg(not(feature = \"hardened\"))]\n    if "),
+        "the default build must not have a branch of its own: it shares this body, \
+         with the second gate compiled out"
+    );
 }
 
 /// The `hardened` feature's second gate must be a *recomputation*.
@@ -256,13 +265,13 @@ fn the_decision_outcome_is_fail_closed() {
     for (default_call, hardened_call) in [
         (
             "    #[cfg(not(feature = \"hardened\"))]\n    accept_or_reject(auth_ok, \
-             &mut plaintext, &mut decision);",
+             auth_ok, &mut plaintext, &mut decision);",
             "    #[cfg(feature = \"hardened\")]\n    accept_or_reject(gates.0, \
              gates.1, &mut plaintext, &mut decision);",
         ),
         (
             "    #[cfg(not(feature = \"hardened\"))]\n    accept_or_reject(auth_ok, \
-             buffer, &mut decision);",
+             auth_ok, buffer, &mut decision);",
             "    #[cfg(feature = \"hardened\")]\n    accept_or_reject(gates.0, \
              gates.1, buffer, &mut decision);",
         ),
@@ -275,12 +284,21 @@ fn the_decision_outcome_is_fail_closed() {
         );
     }
 
+    // The default build passes the same `Choice` twice (the second gate is compiled
+    // out there), which is also what keeps the signature -- and the symbol the
+    // suppression names -- identical in both builds.
+    assert_eq!(
+        LIB.matches("accept_or_reject(auth_ok, auth_ok, ").count(),
+        2,
+        "the default build must not compute a second comparison it does not use"
+    );
+
     // The helper must write through that pointer rather than return a value: a
     // returned value is what a skipped call loses.
     for signature in [
-        "fn accept_or_reject(auth_ok: subtle::Choice, buffer: &mut [u8], \
-         out: &mut Result<(), Error>)",
-        "    out: &mut Result<(), Error>,\n) {",
+        "fn accept_or_reject(\n    gate0: subtle::Choice,\n    gate1: subtle::Choice,\n    \
+         buffer: &mut [u8],\n    out: &mut Result<(), Error>,\n) {",
+        "    *out = Ok(());",
     ] {
         assert!(
             LIB.contains(signature),

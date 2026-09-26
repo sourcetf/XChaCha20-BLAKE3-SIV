@@ -1,0 +1,21 @@
+--- src/lib.rs
++++ delete ! in accept_or_reject
+@@ -1023,17 +1023,17 @@
+ // wasted computing a second one.
+ #[inline(never)]
+ fn accept_or_reject(
+     gate0: subtle::Choice,
+     gate1: subtle::Choice,
+     buffer: &mut [u8],
+     out: &mut Result<(), Error>,
+ ) {
+-    if !bool::from(gate0) {
++    if  /* ~ changed by cargo-mutants ~ */bool::from(gate0) {
+         zeroize_slice(buffer);
+         *out = Err(Error::AuthenticationFailed);
+         return;
+     }
+ 
+     // Fault-injection hardening (opt-in `hardened` feature): a second *recomputed*
+     // check with its own branch, so a single skipped instruction reaches this gate
+     // instead of accepting. `&` and never `&&`: both comparisons always run in the

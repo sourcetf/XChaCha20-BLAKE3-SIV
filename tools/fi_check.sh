@@ -70,20 +70,12 @@ run_row() {
 # ── patches ────────────────────────────────────────────────────────────────
 patch_none() { :; }
 
-patch_branch_accept() {  # one skipped instruction on the unhardened decision
-  python3 - "$1/src/lib.rs" <<'PY'
-import sys
-p = sys.argv[1]; s = open(p).read()
-# One site: the decision lives in `accept_or_reject` (src/lib.rs), which both
-# entry points call, so this force-accepts on the allocating *and* the in-place
-# path -- still a single fault, which is what the row models.
-old = "    if bool::from(auth_ok) {"
-assert s.count(old) == 1, f"decision sites: {s.count(old)}"
-open(p, "w").write(s.replace(old, "    if true || bool::from(auth_ok) {", 1))
-PY
-}
-
-patch_gate0_branch() {  # one skipped instruction on the hardened decision
+# One neutralised branch, on the first gate. In the default build that branch *is*
+# the decision -- the second gate is compiled out there -- so the forgery goes
+# through; in the `hardened` build it is gate 0, and gate 1 has to reject. One edit,
+# two rows, and the pair is the point: the first row is this campaign's "the fault is
+# real" evidence, the second is what the second gate buys.
+patch_first_gate_neutralised() {
   python3 - "$1/src/lib.rs" <<'PY'
 import sys
 p = sys.argv[1]; s = open(p).read()
@@ -92,6 +84,10 @@ assert s.count(old) == 1, f"gate0 sites: {s.count(old)}"
 open(p, "w").write(s.replace(old, "    if false && !bool::from(gate0) {", 1))
 PY
 }
+# The names the campaign rows below use; both are this one edit, because the source
+# has one decision body (see the comment on `accept_or_reject`).
+patch_branch_accept() { patch_first_gate_neutralised "$@"; }
+patch_gate0_branch() { patch_first_gate_neutralised "$@"; }
 
 patch_gate0_value() {  # the first gate's comparison result is corrupted, not its branch
   python3 - "$1/src/lib.rs" <<'PY'

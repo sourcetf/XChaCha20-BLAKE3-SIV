@@ -204,13 +204,17 @@ it must *fail* when the second gate is replaced by a copy of the first.
 | Availability (any single glitch causes a rejection or a crash) | not defended, by anything |
 
 A bounded mutation run over the decision (`cargo mutants -f src/lib.rs -F
-'decrypt|passed_gates' --features hardened -- --test decision`, in CI) tests the other
-half of that: every mutant of the decision must be caught by `tests/decision.rs`. Four
-of them are excluded as **equivalent under fault-free testing** — `&` to `|` or `^` in
-the two-comparison expression — and that exclusion is itself informative: the two
-comparisons inside a gate always agree, because they compare the same two arrays, so
-they differ *only* when a fault makes them disagree. That case cannot be reached by
-any fault-free test, which is why it is a row of the fault campaign instead.
+'decrypt|accept_or_reject' --features hardened -- --test decision`, in CI) tests the
+other half of that: every mutant of the decision must be caught by
+`tests/decision.rs`. The `&` → `|` or `^` mutants in the two-comparison expression are
+excluded as **equivalent under fault-free testing**, and that exclusion is itself
+informative: the two comparisons inside a gate always agree, because they compare the
+same two arrays, so they differ *only* when a fault makes them disagree. That case
+cannot be reached by any fault-free test, which is why it is a row of the fault
+campaign instead. The run uses `--features hardened` on purpose — the hardened
+decision contains every mutatable line the default one has, and `cargo mutants` does
+not evaluate `cfg`, so a second run without the feature would report the cfg'd-out
+second gate as an uncaught mutant rather than as code the build does not contain.
 
 The same question at the level of the *compiled* code: `tools/fi_instruction.sh`
 replaces every byte of the decision's machine code with `NOP`, one at a time, and

@@ -310,15 +310,27 @@ jobs:
       - name: fault-injection campaign
         run: ./tools/fi_check.sh
 
-      # Every mutant of the decision must be caught by tests/decision.rs. The four
+      # Every mutant of the decision must be caught by tests/decision.rs. The
       # `&` -> `|`/`^` mutants are excluded as *equivalent* under fault-free testing:
       # the two comparisons inside a gate always agree, which is precisely the
       # property that differs only when a fault makes them disagree -- and that case
       # is a row of the fault campaign above, not a gap in the tests.
+      #
+      # One run, with `--features hardened`, deliberately: `cargo mutants` does not
+      # evaluate `cfg`, so a mutant inside a cfg'd-out block is built, tested, passes,
+      # and is reported as uncaught. The hardened build's decision contains every
+      # mutatable line the default build's has, plus the second gate, so this run
+      # covers both -- and running it again without the feature would add only a
+      # mutant of the cfg'd-out second gate, which reads as a gap that is not one.
+      # The filter names the decision function explicitly: it used to be
+      # `decrypt|passed_gates`, and when the decision moved into `accept_or_reject`
+      # that filter kept matching the two entry points and silently stopped covering
+      # the branches the hardening is about. A filter that still matches *something*
+      # is exactly the failure mode this file exists to avoid.
       - name: mutation run over the decision
         run: |
           set -euo pipefail
-          cargo mutants --features hardened -f src/lib.rs -F 'decrypt|passed_gates' \
+          cargo mutants --features hardened -f src/lib.rs -F 'decrypt|accept_or_reject' \
             -E 'replace & with [|^]' -- --test decision
 
       - name: plant bugs and require the checks to fail

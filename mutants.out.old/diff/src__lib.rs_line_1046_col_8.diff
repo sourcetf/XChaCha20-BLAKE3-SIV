@@ -1,0 +1,21 @@
+--- src/lib.rs
++++ delete ! in accept_or_reject
+@@ -1038,17 +1038,17 @@
+     // check with its own branch, so a single skipped instruction reaches this gate
+     // instead of accepting. `&` and never `&&`: both comparisons always run in the
+     // caller, so the time this takes does not reveal which gate failed. No
+     // `unwrap_u8` and no early exit inside the comparisons -- `bool::from` is the
+     // conversion `subtle` documents for exactly this place (the end of a
+     // verification). What it does and does not defend against: see README "What is
+     // not defended against".
+     #[cfg(feature = "hardened")]
+-    if !bool::from(gate1) {
++    if  /* ~ changed by cargo-mutants ~ */bool::from(gate1) {
+         zeroize_slice(buffer);
+         *out = Err(Error::AuthenticationFailed);
+         return;
+     }
+ 
+     // Without the feature the caller passes `gate0` twice, and the parameter is
+     // unused rather than compiled away silently.
+     #[cfg(not(feature = "hardened"))]
