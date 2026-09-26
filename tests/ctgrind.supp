@@ -1,7 +1,41 @@
 # Valgrind suppressions for tests/ctgrind.rs — run via `verify.sh --ctgrind`.
 #
 # This file is a record of what has been examined and permitted, not a silencer.
-# It contains exactly two entries, both about *this crate*.
+# It contains exactly one entry, and it names exactly one function:
+# `accept_or_reject`, the crate's accept/reject decision.
+#
+# # Why the entry names a function of its own
+#
+# Valgrind cannot match on source lines, so an entry can only name *functions* —
+# and an entry naming a function permits every conditional jump anywhere in that
+# function. An earlier revision suppressed `decrypt` and
+# `decrypt_in_place_detached`, the two functions that contained the decision.
+# That read as "the decision is permitted" and meant "any branch in these two
+# functions is permitted": a secret-dependent branch added inside `decrypt`
+# passed the check. Measured on a copy with a data-dependent loop over a poisoned
+# key byte: 6 reports with no suppression file, 0 with it. The claim in the
+# earlier header — that a *new function* branching on secret data would not be
+# suppressed — was true, and it hid the case that mattered: a new branch inside a
+# function that was already suppressed.
+#
+# The decision is now a function of its own, `#[inline(never)]`, shared by both
+# decrypt entry points, and it is the only suppressed thing in the crate. Its
+# whole body is the branch and the wipe, so the permission can be inspected:
+#
+#     if bool::from(auth_ok) { Ok(()) } else { zeroize_slice(buffer); Err(..) }
+#
+# The callers do not branch on the decision at all: it returns a `Result`, and
+# `?` tests a discriminant that each arm writes as a constant, so neither entry
+# point branches on secret-derived data. Two things *enforce* that instead of
+# asserting it:
+#
+#  * `tools/ctgrind.sh` plants a secret-dependent branch inside `decrypt` and
+#    inside `decrypt_in_place_detached` in a throwaway copy and requires that run
+#    to fail; it reports a clean result only if that control was caught. See
+#    `--selftest` there.
+#  * `tools/ctgrind.sh` refuses to run at all unless every entry in this file
+#    names `accept_or_reject`, so widening the suppression is caught by the check
+#    that the suppression serves.
 #
 # # Why there is no "startup noise" group any more
 #
@@ -15,28 +49,32 @@
 # lazy init, the mpmc channel, stack-overflow bookkeeping) appear nowhere in a
 # local build at all. Every one of those failures was announced as "memcheck
 # reported an unsuppressed secret-dependent branch", which is a finding in this
-# crate -- and none of them were.
+# crate — and none of them were.
 #
 # tools/ctgrind.sh now classifies instead: a report whose stack contains a
-# `xchacha20_blake3_siv` frame fails the run, and anything else is reported as
-# what it is -- startup and teardown noise from other people's code -- with a
-# count so it is visible rather than silent. That is version-proof by
-# construction, and it is strictly stronger for this crate: a secret-dependent
-# branch *here* is caught wherever it is, including in code inlined into a test
-# body, because the frame names come from DWARF.
+# `xchacha20_blake3_siv` frame fails the run, whether or not it also appears in
+# this file, and anything else is reported as what it is — startup and teardown
+# noise from other people's code — with a count so it is visible rather than
+# silent. That is version-proof by construction, and it is strictly stronger for
+# this crate: a secret-dependent branch *here* is caught wherever it is,
+# including in code inlined into a test body, because the frame names come from
+# DWARF.
 # ─────────────────────────────────────────────────────────────────────────────
-# The SIV accept/reject decision — the only entries in this file
+# The one permitted branch: the SIV accept/reject decision
 # ─────────────────────────────────────────────────────────────────────────────
 #
-# These two ARE in this crate and are permitted deliberately.
+# `accept_or_reject` ends in `if bool::from(auth_ok)`, where `auth_ok` comes from
+# the tag, which comes from the secret key. That branch depends on secret-derived
+# data and is unavoidable: SIV needs the plaintext before it can compute the tag,
+# so decrypt-then-verify is inherent to the mode (the crate documents this). The
+# decision reveals exactly one bit that is already public — whether this
+# ciphertext authenticates.
 #
-# `decrypt` and `decrypt_in_place_detached` end in
-#     if bool::from(auth_ok) { Ok(..) } else { Err(..) }
-# where `auth_ok` comes from the tag, which comes from the secret key. That
-# branch therefore depends on secret-derived data, and it is unavoidable: SIV
-# needs the plaintext before it can compute the tag, so decrypt-then-verify is
-# inherent to the mode (the crate documents this). The decision reveals exactly
-# one bit that is already public — whether this ciphertext authenticates.
+# `--features hardened` compiles a second definition of the same function, with
+# two recomputed gates and therefore two branches; both are inside it, and the
+# entry below matches it too (v0 mangling encodes the path, not the signature, so
+# both definitions carry this same name — only one of them exists in any given
+# build).
 #
 # This must NOT be read as "the tag comparison is unchecked". The comparison
 # *feeding* the branch is verified separately and mechanically:
@@ -44,18 +82,9 @@
 # operands, requires valgrind to report nothing from the comparison itself, and
 # only unpoisons the resulting `Choice` before branching on it. The timing screen
 # in tests/security.rs additionally checks position-independence end to end.
-#
-# Matching on the mangled name means a *new* function in this crate that branched
-# on secret data would not be suppressed and would fail the run.
 
 {
-   siv-decrypt-accept-reject-decision
+   siv-accept-or-reject-decision
    Memcheck:Cond
-   fun:_RNvCs*_20xchacha20_blake3_siv7decrypt
-}
-
-{
-   siv-decrypt-in-place-accept-reject-decision
-   Memcheck:Cond
-   fun:_RNvCs*_20xchacha20_blake3_siv25decrypt_in_place_detached
+   fun:_RNvCs*_20xchacha20_blake3_siv16accept_or_reject
 }

@@ -74,9 +74,11 @@ patch_branch_accept() {  # one skipped instruction on the unhardened decision
   python3 - "$1/src/lib.rs" <<'PY'
 import sys
 p = sys.argv[1]; s = open(p).read()
+# One site: the decision lives in `accept_or_reject` (src/lib.rs), which both
+# entry points call, so this force-accepts on the allocating *and* the in-place
+# path -- still a single fault, which is what the row models.
 old = "    if bool::from(auth_ok) {"
-assert s.count(old) == 2, f"decision sites: {s.count(old)}"
-# First occurrence only: one fault, on the allocating entry point.
+assert s.count(old) == 1, f"decision sites: {s.count(old)}"
 open(p, "w").write(s.replace(old, "    if true || bool::from(auth_ok) {", 1))
 PY
 }
@@ -85,9 +87,9 @@ patch_gate0_branch() {  # one skipped instruction on the hardened decision
   python3 - "$1/src/lib.rs" <<'PY'
 import sys
 p = sys.argv[1]; s = open(p).read()
-old = "        if !bool::from(gates.0) {"
-assert s.count(old) == 2, f"gate0 sites: {s.count(old)}"
-open(p, "w").write(s.replace(old, "        if false && !bool::from(gates.0) {", 1))
+old = "    if !bool::from(gate0) {"
+assert s.count(old) == 1, f"gate0 sites: {s.count(old)}"
+open(p, "w").write(s.replace(old, "    if false && !bool::from(gate0) {", 1))
 PY
 }
 

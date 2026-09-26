@@ -15,6 +15,13 @@
 //! writes down why it is not a secret-dependent latency, and a removed one fails too
 //! (so the table cannot rot). It says nothing about whether the listed operations are
 //! *actually* safe -- it makes them visible, which is the part that can be automated.
+//!
+//! The same idea covers the crate's control flow, one section down: `CONTROL_FLOW`
+//! counts `if` / `while` / `for` / `loop` / `match` in the non-test source. ctgrind
+//! is the *evidence* that no branch depends on secret content -- it reports those
+//! mechanically -- so that table is not evidence; it is a tripwire so a branch added
+//! or removed anywhere in the crate cannot pass unnoticed while the prose in
+//! `README.md` and `SECURITY.md` still claims the old count.
 use std::collections::BTreeSet;
 
 /// `(trimmed source line, why it is not a secret-dependent latency)`.
@@ -23,6 +30,25 @@ const ALLOWED: &[(&str, &str)] = &[(
     "divides by the *alignment* of `usize`, a compile-time constant, not by anything \
      derived from a key, nonce, AAD or message",
 )];
+
+/// `(keyword, occurrences in the non-test source)`.
+///
+/// Read this with the caveat above: it is a tripwire, not a proof. Every branch here
+/// was audited by hand to depend on a length, an alignment, a CPU feature, an enum
+/// variant, or the accept/reject decision -- never on the content of a key, nonce,
+/// AAD or message -- and ctgrind is what checks that mechanically. The `for` and
+/// `while` counts are dominated by the fixed-trip-count loops of the ChaCha20 and
+/// BLAKE3 permutations, whose trip counts come from block sizes.
+///
+/// When one of these numbers changes: look at the branch, decide what it depends on,
+/// and update this table, `README.md` and `SECURITY.md` together.
+const CONTROL_FLOW: &[(&str, usize)] = &[
+    ("if", 13),
+    ("while", 7),
+    ("for", 27),
+    ("loop", 0),
+    ("match", 3),
+];
 
 /// Every `/` or `%` in `line` that is code rather than a comment or a doc comment.
 fn has_division(line: &str) -> bool {
@@ -67,5 +93,83 @@ fn variable_latency_operations_are_inventoried() {
     assert!(
         gone.is_empty(),
         "documented operation(s) no longer present: {gone:?}. Update ALLOWED."
+    );
+}
+
+/// Whole-word occurrences of `kw` in code, ignoring comments and string literals.
+///
+/// `impl Drop for Plaintext` is not a branch, so `impl` headers are skipped.
+fn count_keyword(line: &str, kw: &str) -> usize {
+    let code = line.split("//").next().unwrap_or("");
+    if code.trim_start().starts_with("impl ") {
+        return 0;
+    }
+
+    // A `"..."` literal becomes nothing. This walks characters rather than
+    // replacing the literal in place: the substitute must contain no quote at all,
+    // or the search finds it again -- an empty literal `""` replaced by `""`
+    // loops forever, which is how this test hung the first time it ran.
+    let mut stripped = String::with_capacity(code.len());
+    let mut in_literal = false;
+    let mut escaped = false;
+    for c in code.chars() {
+        if in_literal {
+            if escaped {
+                escaped = false;
+            } else if c == '\\' {
+                escaped = true;
+            } else if c == '"' {
+                in_literal = false;
+            }
+            continue;
+        }
+        if c == '"' {
+            in_literal = true;
+        } else {
+            stripped.push(c);
+        }
+    }
+
+    let bytes = stripped.as_bytes();
+    let mut n = 0;
+    for (i, _) in stripped.match_indices(kw) {
+        let before = i
+            .checked_sub(1)
+            .is_none_or(|j| !(bytes[j].is_ascii_alphanumeric() || bytes[j] == b'_'));
+        let after = bytes
+            .get(i + kw.len())
+            .is_none_or(|c| !(c.is_ascii_alphanumeric() || *c == b'_'));
+        if before && after {
+            n += 1;
+        }
+    }
+    n
+}
+
+#[test]
+fn control_flow_is_inventoried() {
+    let src = include_str!("../src/lib.rs");
+    let cut = src.find("mod tests {").expect("the test module must exist");
+    let body = &src[..cut];
+
+    let mut drifted = Vec::new();
+    let mut report = String::new();
+    for (kw, expected) in CONTROL_FLOW {
+        let found: usize = body.lines().map(|l| count_keyword(l, kw)).sum();
+        report.push_str(&format!("      {kw:>5}: {found}\n"));
+        if found != *expected {
+            drifted.push(format!(
+                "{kw}: source has {found}, CONTROL_FLOW says {expected}"
+            ));
+        }
+    }
+
+    assert!(
+        drifted.is_empty(),
+        "the crate's control flow changed: {drifted:?}\n\nfound:\n{report}\n\
+         A branch was added, removed or moved. Work out what the new one depends on \
+         (a length, an alignment, a CPU feature, an enum variant, or the decision -- \
+         never the content of a key, nonce, AAD or message; ctgrind checks that \
+         mechanically), then update CONTROL_FLOW, README.md and SECURITY.md together."
     );
 }

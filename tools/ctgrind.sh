@@ -13,21 +13,45 @@
 # three projects that version independently, and every mismatch read as a finding
 # in this crate.
 #
+# tests/ctgrind.supp is still used, but only to permit the crate's one
+# unavoidable secret-dependent branch: the SIV accept/reject decision, which now
+# lives in a function of its own so that the entry naming it cannot cover any
+# other branch. Two checks keep that from being an assertion:
+#
+#   * this script refuses to run unless every entry in that file names
+#     `accept_or_reject`;
+#   * `--selftest` (on by default) plants a secret-dependent branch inside
+#     `decrypt` and inside `decrypt_in_place_detached` in a throwaway copy and
+#     requires the run there to *fail*. Before it existed, an entry naming both
+#     entry points was quietly permitting every branch in them.
+#
 # It is a separate script because it needs three things verify.sh should not
 # assume: valgrind, a statically linked test binary, and a suppression file.
 #
 # Usage:  tools/ctgrind.sh                      # run the check (exit 0 = clean)
 #         tools/ctgrind.sh --features hardened  # ...against an opt-in feature set
+#         tools/ctgrind.sh --no-selftest        # skip the planted-leak control
 #
-# Extra arguments are passed to `cargo test`, so the constant-time check can be run
-# against any feature combination -- the `hardened` build adds a second, recomputed
-# tag comparison to each decrypt, and that is exactly the kind of addition that
-# could introduce a content-dependent branch.
+# Extra arguments other than the two flags are passed to `cargo test`, so the
+# constant-time check can be run against any feature combination -- the
+# `hardened` build adds a second, recomputed tag comparison to each decrypt, and
+# that is exactly the kind of addition that could introduce a content-dependent
+# branch.
 #         tools/ctgrind.sh --setup  # print how to obtain valgrind here
 #
 # Exit codes: 0 clean; 1 clean but the harness failed its own sanity checks;
 #             99 a leak was detected.
 set -euo pipefail
+
+SELFTEST=1
+CARGO_ARGS=()
+for arg in "$@"; do
+  case "$arg" in
+    --selftest) SELFTEST=1 ;;
+    --no-selftest) SELFTEST=0 ;;
+    *) CARGO_ARGS+=("$arg") ;;
+  esac
+done
 
 cd "$(dirname "$0")/.."
 export PATH="$HOME/.cargo/bin:$PATH"
@@ -68,8 +92,25 @@ fi
 echo "using valgrind: $VG ($("$VG" --version 2>&1 | head -1))"
 
 TARGET=x86_64-unknown-linux-gnu
-SUPP=tests/ctgrind.supp
-[ -f "$SUPP" ] || { echo "missing $SUPP" >&2; exit 1; }
+SUPP="$(pwd)/tests/ctgrind.supp"
+[ -f "$SUPP" ] || { echo "missing tests/ctgrind.supp" >&2; exit 1; }
+
+# ── The suppression file may only name the decision ────────────────────
+# An entry permits every conditional jump in the function it names, so an entry
+# naming an entry point reads as "the decision is permitted" while permitting any
+# branch in a 60-line function. That is not hypothetical: it is how a planted
+# leak inside `decrypt` passed this check. Only `accept_or_reject` may appear.
+SUPP_FUNS="$(grep -v '^[[:space:]]*#' "$SUPP" | grep -o 'fun:.*' | sed 's/^fun://' || true)"
+SUPP_COUNT="$(printf '%s\n' "$SUPP_FUNS" | grep -c . || true)"
+SUPP_BAD="$(printf '%s\n' "$SUPP_FUNS" | grep -v 'accept_or_reject' | grep . || true)"
+if [ "$SUPP_COUNT" -lt 1 ] || [ -n "$SUPP_BAD" ]; then
+  echo "FAIL: tests/ctgrind.supp must suppress accept_or_reject and nothing else." >&2
+  echo "      Entries that name anything else permit every branch in that" >&2
+  echo "      function, which is how a planted leak inside decrypt once passed." >&2
+  printf '%s\n' "$SUPP_FUNS" | sed 's/^/      names: /' >&2
+  exit 1
+fi
+echo "suppressions: $SUPP_COUNT entry/entries, all naming accept_or_reject"
 
 # ── Build a static test binary ─────────────────────────────────────────
 # `+crt-static` removes the dynamic linker, which removes the `strcmp`
@@ -80,11 +121,15 @@ SUPP=tests/ctgrind.supp
 # function names, so the file silently stops suppressing anything.
 echo "building a static test binary..."
 RUSTFLAGS="-C target-feature=+crt-static -C strip=none" \
-  cargo test --release --target "$TARGET" --test ctgrind --no-run "$@" >/dev/null
+  cargo test --release --target "$TARGET" --test ctgrind --no-run "${CARGO_ARGS[@]+"${CARGO_ARGS[@]}"}" >/dev/null
 
+# `|| true` is load-bearing: this script runs with `set -o pipefail` and
+# `set -e`, and `grep -v` exits 1 when nothing is left, which killed the whole
+# script at this line -- silently, because the `[ -n "$BIN" ]` that reports it
+# never ran. A failure here has to arrive with a reason.
 BIN=$(ls -t "target/$TARGET/release/deps/"ctgrind-* 2>/dev/null \
-      | grep -vE '\.(d|o)$' | head -1)
-[ -n "$BIN" ] || { echo "could not find the ctgrind test binary" >&2; exit 1; }
+      | grep -vE '\.(d|o)$' | head -1 || true)
+[ -n "$BIN" ] || { echo "could not find the ctgrind test binary under target/$TARGET/release/deps/" >&2; exit 1; }
 echo "binary: $BIN"
 
 # ── 1. The negative control must be detected ───────────────────────────
@@ -146,13 +191,21 @@ out="$("$VG" --error-exitcode=99 --suppressions="$SUPP" --quiet \
 rc=$?
 set -e
 
-# Count reports, and how many of them touch this crate.
-counts="$(printf '%s\n' "$out" | awk -v m="xchacha20_blake3_siv" '
-  /^==[0-9]+== .*(Conditional jump|Use of uninitialised|Invalid read|Invalid write|Syscall param|Mismatched)/ {
-    if (seen) { total++; if (hit) bad++ } ; seen=1; hit=0
-  }
-  /^==[0-9]+==/ { if (index($0, m)) hit=1 }
-  END { if (seen) { total++; if (hit) bad++ } ; print (total+0) " " (bad+0) }')"
+# Count reports on stdin, and how many of them touch this crate: prints
+# "<total> <in_crate>". A report is "in this crate" when any frame in its stack
+# names `xchacha20_blake3_siv` -- the frame names come from DWARF, so that holds
+# whether the branch is in a library function, inlined into a test body, or in a
+# function that did not exist when this script was written.
+classify_reports() {
+  awk -v m="xchacha20_blake3_siv" '
+    /^==[0-9]+== .*(Conditional jump|Use of uninitialised|Invalid read|Invalid write|Syscall param|Mismatched)/ {
+      if (seen) { total++; if (hit) bad++ } ; seen=1; hit=0
+    }
+    /^==[0-9]+==/ { if (index($0, m)) hit=1 }
+    END { if (seen) { total++; if (hit) bad++ } ; print (total+0) " " (bad+0) }'
+}
+
+counts="$(printf '%s\n' "$out" | classify_reports)"
 read -r total in_crate <<EOF
 $counts
 EOF
@@ -171,11 +224,97 @@ if [ "$rc" -ne 0 ] && [ "$rc" -ne 99 ]; then
   echo "FAIL: valgrind exited $rc" >&2
   exit "$rc"
 fi
-echo "PASS: nothing in this crate branches on secret data, beyond the two"
-echo "      documented SIV accept/reject decisions (see tests/ctgrind.supp)."
+echo "PASS: nothing in this crate branches on secret data, beyond the one"
+echo "      documented SIV accept/reject decision (see tests/ctgrind.supp)."
 if [ "$noise" -gt 0 ]; then
   echo "      ($noise report(s) outside this crate ignored: libtest, std and"
   echo "       glibc startup/teardown, whose frames differ per version. A report"
   echo "       that touched a xchacha20_blake3_siv frame would have failed here.)"
 fi
+
+# ── 3. The suppression must not cover a branch outside the decision ────
+#
+# The entry in tests/ctgrind.supp names one function, and this is what proves the
+# claim rather than asserting it: a secret-dependent branch planted *inside*
+# `decrypt` must make the check above fail. That is the shape an earlier revision
+# permitted -- its entries named `decrypt` and `decrypt_in_place_detached`
+# themselves -- and the leak planted here is the one that passed then: a
+# data-dependent trip count, which cannot be compiled into the branchless
+# `setcc`/`cmov` forms memcheck ignores (see the measurements in tests/ctgrind.rs
+# and `secret_dependent_branch` there).
+#
+# The plant is a throwaway copy: the tree under test is never modified, and the
+# copy is removed on exit. Without this stage a clean result would mean "no branch
+# in this crate is reported that is not covered by an entry", which is not the
+# same claim as "nothing outside the decision branches on secrets".
+if [ "$SELFTEST" -eq 1 ]; then
+  echo
+  echo "--- self-test: a branch inside decrypt must be caught ---"
+  WORK="$(mktemp -d)"
+  trap 'rm -rf "$WORK"' EXIT
+  mkdir -p "$WORK/tree"
+  cp -r src tests tools Cargo.toml Cargo.lock benches "$WORK/tree/" 2>/dev/null \
+    || cp -r src tests tools Cargo.toml Cargo.lock "$WORK/tree/"
+
+  if ! python3 - "$WORK/tree" <<'PLANT'
+import sys
+
+p = sys.argv[1] + "/src/lib.rs"
+s = open(p).read()
+# Both decrypt entry points carry this line, so one patch covers both.
+old = "    let auth_ok = computed_tag.ct_eq(tag);\n"
+plant = old + """
+    {
+        // Planted by tools/ctgrind.sh --selftest. `key` is poisoned by the tests
+        // below, so the loop's back-edge is a conditional jump on secret-derived
+        // data -- and a trip count is not something the optimizer can turn into
+        // a `setcc` or a `cmov`.
+        let n = (key[0] & 3) as usize;
+        let mut i = 0usize;
+        while i < n {
+            core::hint::black_box(i);
+            i += 1;
+        }
+    }
+"""
+if s.count(old) != 2:
+    sys.exit("the anchor accounts for %d of 2 decrypt entry points" % s.count(old))
+open(p, "w").write(s.replace(old, plant))
+PLANT
+  then
+    echo "FAIL: the leak could not be planted (the anchor moved), so this" >&2
+    echo "      self-test would be vacuous -- fix it before trusting a run." >&2
+    exit 1
+  fi
+
+  ( cd "$WORK/tree"
+    RUSTFLAGS="-C target-feature=+crt-static -C strip=none" \
+      cargo test --release --target "$TARGET" --test ctgrind --no-run \
+      "${CARGO_ARGS[@]+"${CARGO_ARGS[@]}"}" >/dev/null )
+  planted_bin="$(ls -t "$WORK/tree/target/$TARGET/release/deps/"ctgrind-* 2>/dev/null \
+                 | grep -vE '\.(d|o)$' | head -1 || true)"
+  [ -n "$planted_bin" ] || { echo "FAIL: no planted test binary" >&2; exit 1; }
+
+  set +e
+  planted_out="$("$VG" --error-exitcode=99 --suppressions="$SUPP" --quiet \
+    "$planted_bin" --test-threads=1 \
+    decrypt_does_not_branch_on_secrets 2>&1)"
+  set -e
+
+  counts="$(printf '%s\n' "$planted_out" | classify_reports)"
+  read -r _planted_total planted_in_crate <<EOF
+$counts
+EOF
+
+  if [ "$planted_in_crate" -le 0 ]; then
+    echo "FAIL: a secret-dependent branch planted inside decrypt was NOT" >&2
+    echo "      reported, so the suppression is covering more than the" >&2
+    echo "      accept/reject decision and a clean run above means nothing." >&2
+    printf '%s\n' "$planted_out" | grep -B2 -A12 'xchacha20_blake3_siv' | awk 'NR<=40' >&2
+    exit 1
+  fi
+  echo "ok: the planted leak was reported ($planted_in_crate report(s) inside"
+  echo "    this crate), so the suppression covers only the decision."
+fi
+
 exit 0

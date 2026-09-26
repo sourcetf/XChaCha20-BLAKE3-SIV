@@ -326,6 +326,25 @@ fn decrypt_does_not_branch_on_secrets() {
     unpoison(n.as_ptr(), n.len());
     unpoison(a.as_ptr(), a.len());
 
+    // Both decisions have to be *reached* with poisoned inputs, not just the
+    // rejection: the branch is the same in either direction, and a leak on the
+    // acceptance path is exactly as invisible as one on the rejection path if the
+    // tests only ever reject. `tag` is the real tag for this ciphertext, computed
+    // above while the key material was still defined, so these two calls
+    // authenticate.
+    poison(k.as_ptr(), k.len());
+    poison(n.as_ptr(), n.len());
+    poison(a.as_ptr(), a.len());
+    let accepted = decrypt(&k, &n, &a, &ct, &tag);
+    core::hint::black_box(&accepted);
+    let mut buf_accepted = ct.clone();
+    let accepted_in_place = decrypt_in_place_detached(&k, &n, &a, &mut buf_accepted, &tag);
+    core::hint::black_box(&accepted_in_place);
+    unpoison(k.as_ptr(), k.len());
+    unpoison(n.as_ptr(), n.len());
+    unpoison(a.as_ptr(), a.len());
+    drop((accepted, accepted_in_place, buf_accepted));
+
     // Now the same calls with nothing poisoned, so the assertions are ordinary.
     assert!(decrypt(&key, &nonce, &aad, &ct, &bad_tag).is_err());
     let mut buf2 = ct.clone();

@@ -20,9 +20,11 @@ Anything that breaks the properties claimed in `README.md`:
 - breaking key or context commitment — two different `(key, nonce, aad, message)`
   tuples with the same tag;
 - a **secret-dependent branch or memory access in this crate's own code**. The
-  README documents exactly two tolerated decisions (the SIV accept/reject on
-  decryption); everything else is expected to be constant-time, and
-  `tools/ctgrind.sh` is the mechanical check for it;
+  README documents exactly one tolerated decision (the SIV accept/reject on
+  decryption), it lives in a function of its own (`accept_or_reject`), and
+  `tools/ctgrind.sh` is the mechanical check for it — including for the claim that
+  the tolerance covers nothing else, which it verifies by planting a
+  secret-dependent branch inside `decrypt` and requiring the run to fail;
 - a reachable panic, or an unbounded allocation, from attacker-controlled input;
 - unsoundness in the `unsafe` blocks — see `README.md` for what Miri, Kani and the
   sanitizer runs cover, and note that every block carries a `// SAFETY:` comment

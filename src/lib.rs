@@ -851,6 +851,66 @@ pub fn encrypt_in_place_detached(
     Ok(tag)
 }
 
+// ── The accept/reject decision, isolated in one function ───────────────
+//
+// SIV decrypts before it verifies, so "does this ciphertext authenticate?" is a
+// branch on secret-derived data, and it cannot be removed: that one bit is what
+// the mode is designed to reveal. Two properties depend on its living *here*, in
+// a function of its own, `#[inline(never)]`, shared by both decrypt entry points:
+//
+//  * `tests/ctgrind.supp` suppresses this function and nothing else, so a
+//    secret-dependent branch anywhere else in the crate -- including inside
+//    `decrypt` and `decrypt_in_place_detached`, which an earlier revision
+//    suppressed whole and which therefore hid one -- is reported by memcheck and
+//    fails `tools/ctgrind.sh`. That script plants exactly such a branch in a
+//    throwaway copy and requires it to be caught before it reports a clean run.
+//  * the decision returns a `Result` rather than a `bool` so the callers do not
+//    branch on it a second time, outside this function: `?` branches on the
+//    discriminant, which each arm writes as a constant, so neither entry point
+//    branches on secret-derived data itself.
+//
+// The rejection path wipes the buffer here rather than at the call sites: on
+// rejection the caller must never see unverified plaintext, and both entry
+// points need exactly that.
+#[cfg(not(feature = "hardened"))]
+#[inline(never)]
+fn accept_or_reject(auth_ok: subtle::Choice, buffer: &mut [u8]) -> Result<(), Error> {
+    if bool::from(auth_ok) {
+        Ok(())
+    } else {
+        // Per spec, MUST NOT expose unverified plaintext.
+        zeroize_slice(buffer);
+        Err(Error::AuthenticationFailed)
+    }
+}
+
+/// The same decision with the opt-in `hardened` gates.
+///
+/// Fault-injection hardening (opt-in `hardened` feature): two *recomputed*
+/// checks, each with its own branch, so a single skipped instruction reaches the
+/// other gate instead of accepting. `&` and never `&&`: both comparisons always
+/// run, so the time this takes does not reveal which gate failed. No `unwrap_u8`
+/// and no early exit inside the comparisons -- `bool::from` is the conversion
+/// `subtle` documents for exactly this place (the end of a verification). What it
+/// does and does not defend against: see README "What is not defended against".
+#[cfg(feature = "hardened")]
+#[inline(never)]
+fn accept_or_reject(
+    gate0: subtle::Choice,
+    gate1: subtle::Choice,
+    buffer: &mut [u8],
+) -> Result<(), Error> {
+    if !bool::from(gate0) {
+        zeroize_slice(buffer);
+        return Err(Error::AuthenticationFailed);
+    }
+    if !bool::from(gate1) {
+        zeroize_slice(buffer);
+        return Err(Error::AuthenticationFailed);
+    }
+    Ok(())
+}
+
 /// Decrypt `ciphertext`, verifying the tag.
 ///
 /// Returns the plaintext in a [`Plaintext`] that zeroizes on drop. On failure
@@ -891,34 +951,12 @@ pub fn decrypt(
     zeroize_array(&mut computed_tag);
 
     #[cfg(not(feature = "hardened"))]
-    if bool::from(auth_ok) {
-        Ok(Plaintext(plaintext))
-    } else {
-        // Per spec, MUST NOT expose unverified plaintext.
-        zeroize_slice(&mut plaintext);
-        Err(Error::AuthenticationFailed)
-    }
+    accept_or_reject(auth_ok, &mut plaintext)?;
 
     #[cfg(feature = "hardened")]
-    {
-        // Fault-injection hardening (opt-in `hardened` feature): two *recomputed*
-        // checks, each with its own branch, so a single skipped instruction reaches the
-        // other gate instead of accepting. `&` and never `&&`: both comparisons always
-        // run, so the time this takes does not reveal which gate failed. No `unwrap_u8`
-        // and no early exit inside the comparisons -- `bool::from` is the conversion
-        // subtle documents for exactly this place (the end of a verification).
-        // What it does and does not defend against: see README "What is not defended
-        // against".
-        if !bool::from(gates.0) {
-            zeroize_slice(&mut plaintext);
-            return Err(Error::AuthenticationFailed);
-        }
-        if !bool::from(gates.1) {
-            zeroize_slice(&mut plaintext);
-            return Err(Error::AuthenticationFailed);
-        }
-        Ok(Plaintext(plaintext))
-    }
+    accept_or_reject(gates.0, gates.1, &mut plaintext)?;
+
+    Ok(Plaintext(plaintext))
 }
 
 /// Decrypt `buffer` in place, verifying the detached tag.
@@ -958,33 +996,12 @@ pub fn decrypt_in_place_detached(
     zeroize_array(&mut computed_tag);
 
     #[cfg(not(feature = "hardened"))]
-    if bool::from(auth_ok) {
-        Ok(())
-    } else {
-        zeroize_slice(buffer);
-        Err(Error::AuthenticationFailed)
-    }
+    accept_or_reject(auth_ok, buffer)?;
 
     #[cfg(feature = "hardened")]
-    {
-        // Fault-injection hardening (opt-in `hardened` feature): two *recomputed*
-        // checks, each with its own branch, so a single skipped instruction reaches the
-        // other gate instead of accepting. `&` and never `&&`: both comparisons always
-        // run, so the time this takes does not reveal which gate failed. No `unwrap_u8`
-        // and no early exit inside the comparisons -- `bool::from` is the conversion
-        // subtle documents for exactly this place (the end of a verification).
-        // What it does and does not defend against: see README "What is not defended
-        // against".
-        if !bool::from(gates.0) {
-            zeroize_slice(buffer);
-            return Err(Error::AuthenticationFailed);
-        }
-        if !bool::from(gates.1) {
-            zeroize_slice(buffer);
-            return Err(Error::AuthenticationFailed);
-        }
-        Ok(())
-    }
+    accept_or_reject(gates.0, gates.1, buffer)?;
+
+    Ok(())
 }
 
 // ── ChaCha20 Primitive ────────────────────────────────────────────────

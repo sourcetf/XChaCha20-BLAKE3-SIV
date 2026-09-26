@@ -153,8 +153,14 @@ jobs:
           sudo apt-get install --no-install-recommends -y valgrind
           valgrind --version
 
-      # The script runs its own negative control first and refuses to report a
-      # clean result unless valgrind flags it, so this cannot pass vacuously.
+      # Two controls, both mandatory, and neither is optional here: the script runs
+      # a deliberate leak inside the test binary and refuses to report a clean result
+      # unless valgrind flags it, *and* it plants a secret-dependent branch inside
+      # `decrypt` and inside `decrypt_in_place_detached` in a throwaway copy and
+      # requires its own check to fail. The second one exists because the suppression
+      # file used to name both entry points, which permitted every branch in them --
+      # so a leak added there passed. It also refuses to run unless every
+      # suppression entry names `accept_or_reject`.
       - name: run ctgrind
         run: ./tools/ctgrind.sh
 

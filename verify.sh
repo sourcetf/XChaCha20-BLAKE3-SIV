@@ -302,8 +302,11 @@ fi
 if [ "$RUN_CTGRIND" -eq 1 ]; then
   step "7. ctgrind (constant-time, via valgrind memcheck)"
   # Marks secrets as undefined and lets memcheck report any branch or index that
-  # depends on them. The script verifies its own negative control first, so a
-  # clean result cannot come from poisoning that never took effect.
+  # depends on them. Two controls come with it: a deliberate leak in the test
+  # binary that valgrind must flag, and a secret-dependent branch planted inside
+  # `decrypt`/`decrypt_in_place_detached` in a throwaway copy that must make the
+  # check fail -- so neither a poisoning that never took effect nor a suppression
+  # wider than the decision can turn into a clean result.
   if [ -x tools/ctgrind.sh ]; then
     tools/ctgrind.sh
   else

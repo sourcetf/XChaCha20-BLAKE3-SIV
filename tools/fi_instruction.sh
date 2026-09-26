@@ -3,11 +3,16 @@
 # Instruction-level fault injection, in software: corrupt one byte at a time in the
 # compiled decision code and see what a forgery does.
 #
-# Measured on this machine: 3428 bytes in the unhardened binary and 4690 in the
+# Measured on this machine: 3081 bytes in the unhardened binary and 3987 in the
 # hardened one, and **zero** of them accept a forgery in either build. The output is a
 # map rather than a verdict -- how many faults are neutral, how many crash, how many
 # accept -- and the hardened build's map is printed beside the unhardened one so the
 # difference is visible rather than asserted.
+#
+# The swept ranges are the two decrypt entry points *and* `accept_or_reject`, which
+# holds the decision itself (`#[inline(never)]`, see src/lib.rs): the entry points no
+# longer contain the branch, so a range list built from `decrypt` alone would sweep
+# around it. Every byte of that function is scanned either way.
 #
 # Why this and not only tools/fi_check.sh: that one writes faults down as *source*
 # changes, which is a model of the fault and nothing more. This walks the actual
@@ -68,17 +73,22 @@ if not text:
     sys.exit("FAIL: no .text section")
 _, text_vaddr, text_off = (int(x, 16) for x in text.groups())
 
-# The two entry points that contain the decision, with their sizes.
+# The functions that contain the decision, with their sizes: the two entry points
+# around it, and the decision itself -- `#[inline(never)]` keeps it in a symbol of
+# its own (see `accept_or_reject` in src/lib.rs), so without this the branch the
+# scan exists to sweep would sit outside every range.
 syms = subprocess.run(["nm", "-S", binpath], capture_output=True, text=True).stdout
 ranges = []
 for line in syms.splitlines():
     f = line.split()
-    if len(f) >= 4 and f[2] in ("t", "T") and b"decrypt" in f[3].encode():
-        addr, size = int(f[0], 16), int(f[1], 16)
-        if size:
-            ranges.append((addr, size))
+    if len(f) >= 4 and f[2] in ("t", "T"):
+        name = f[3].encode()
+        if b"decrypt" in name or b"accept_or_reject" in name:
+            addr, size = int(f[0], 16), int(f[1], 16)
+            if size:
+                ranges.append((addr, size))
 if not ranges:
-    sys.exit("FAIL: no decrypt symbols -- was the binary stripped?")
+    sys.exit("FAIL: no decrypt or accept_or_reject symbols -- was the binary stripped?")
 
 covered = [(a - text_vaddr + text_off, s) for a, s in ranges]
 total = sum(s for _, s in covered)
