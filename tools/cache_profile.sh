@@ -40,14 +40,27 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 export PATH="$HOME/.cargo/bin:$PATH"
 
-VALGRIND="${VALGRIND:-$HOME/valgrind/usr/bin/valgrind}"
-if [ ! -x "$VALGRIND" ]; then
-  echo "SKIPPED: no valgrind at $VALGRIND (tools/ctgrind.sh --setup can fetch one)" >&2
+# Same lookup as `tools/ctgrind.sh`: the host this was developed on has valgrind
+# extracted under `$HOME` (no root to install it), while CI installs it system-wide.
+# This used to be a hard-coded `$HOME` path, which on a runner meant "not found" and
+# -- while that answered exit 0 -- this entire differential (and the self-test inside
+# it) silently did not run there. It is now searched for, and not finding it is exit 3.
+VALGRIND="${VALGRIND:-}"
+if [ -z "$VALGRIND" ]; then
+  for c in "$HOME/valgrind/usr/bin/valgrind" "$(command -v valgrind 2>/dev/null || true)"; do
+    if [ -n "$c" ] && [ -x "$c" ]; then VALGRIND="$c"; break; fi
+  done
+fi
+if [ -z "$VALGRIND" ] || [ ! -x "$VALGRIND" ]; then
+  echo "SKIPPED: no valgrind found (tools/ctgrind.sh --setup can fetch one)" >&2
   # 3 = could not run; see the exit-code list in this file's header and the
   # convention `tools/gate_selftest.sh` checks.
   exit 3
 fi
-export VALGRIND_LIB="${VALGRIND_LIB:-$HOME/valgrind/usr/libexec/valgrind}"
+# An extracted copy needs its own library directory; a system one does not.
+if [ -d "$HOME/valgrind/usr/libexec/valgrind" ]; then
+  export VALGRIND_LIB="${VALGRIND_LIB:-$HOME/valgrind/usr/libexec/valgrind}"
+fi
 
 # Vector files: `$1` vectors, key byte `$2`, lengths scaled by `$3`. `-` is the
 # empty field in this format: an empty string collapses under whitespace splitting
