@@ -50,9 +50,12 @@
 //! are available:
 //!
 //! * Allocating: [`encrypt`] / [`decrypt`].
+//! * Allocating under a caller's length policy: [`decrypt_bounded`], which checks
+//!   the bound *before* allocating the plaintext buffer.  This is the entry point
+//!   for input whose length came from a network peer; see the note on [`decrypt`].
 //! * Detached, in-place: [`encrypt_in_place_detached`] /
 //!   [`decrypt_in_place_detached`], for protocols that keep the tag separate or
-//!   want to avoid a second allocation.
+//!   want to avoid a second allocation (and which never allocate themselves).
 //!
 //! Key properties:
 //!
@@ -60,13 +63,15 @@
 //!   (CMT-3) at **2^260**.  Read the "Security level" section below before
 //!   relying on a number.
 //! - SIV mode: tag computed before encryption, nonce-misuse resistant
-//! - Fault-injection hardening, opt-in via the `hardened` feature: the
+//! - Fault-injection hardening, **on by default** (the `hardened` feature): the
 //!   accept/reject decision becomes two independently recomputed checks with
-//!   separate branches, so a single skipped instruction cannot accept a forgery.
+//!   separate branches, so a single skipped instruction cannot accept a forgery —
+//!   and the outcome is fail-closed, so skipping the decision call cannot either.
 //!   It defends the decision and nothing else, it is not validated on a
-//!   fault-injection bench, and it costs ~4-11% below 4 KiB and under 2.5% above. See
-//!   README.md ("The opt-in `hardened` feature") for the table of what it covers
-//!   and what it does not.
+//!   fault-injection bench, and it costs ~4-11% below 4 KiB and under 2.5% above
+//!   (measured against `--no-default-features`, which gives the single-gate build
+//!   back). See README.md ("The `hardened` decision — on by default") for the table
+//!   of what it covers and what it does not.
 //! - Constant-time operations: the tag is compared with `subtle::ConstantTimeEq`
 //!   and decryption is decrypt-then-verify (SIV requires the plaintext to
 //!   recompute the tag, so verify-then-decrypt is not possible).  See the
@@ -294,8 +299,9 @@ pub const DOM_ENC: [u8; 8] = *b"XSIV-ENC";
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum Error {
-    /// The plaintext (on encryption) or ciphertext (on decryption) is longer
-    /// than [`MAX_MSG_SIZE`] (256 GiB).
+    /// The plaintext (on encryption) or ciphertext (on decryption) is longer than
+    /// [`MAX_MSG_SIZE`] (256 GiB) — or, for [`decrypt_bounded`], longer than the
+    /// caller's own `max_len`.
     MessageTooLong,
     /// The associated data is longer than [`MAX_MSG_SIZE`] (256 GiB).
     AadTooLong,
@@ -1034,7 +1040,8 @@ fn accept_or_reject(
         return;
     }
 
-    // Fault-injection hardening (opt-in `hardened` feature): a second *recomputed*
+    // Fault-injection hardening (the `hardened` feature, on by default): a second
+    // *recomputed*
     // check with its own branch, so a single skipped instruction reaches this gate
     // instead of accepting. `&` and never `&&`: both comparisons always run in the
     // caller, so the time this takes does not reveal which gate failed. No
@@ -1058,6 +1065,13 @@ fn accept_or_reject(
 }
 
 /// Decrypt `ciphertext`, verifying the tag.
+///
+/// **This allocates a buffer as large as `ciphertext`.** Bound untrusted input
+/// before calling it: [`MAX_MSG_SIZE`] (256 GiB) is the format's ceiling, not a safe
+/// one, and a service that trusts a length field off the wire can be made to
+/// allocate that much per request. [`decrypt_bounded`] takes a policy limit and
+/// enforces it *before* the allocation; that is the entry point for input whose
+/// length came from a network peer.
 ///
 /// Returns the plaintext in a [`Plaintext`] that zeroizes on drop. On failure
 /// returns [`Error::AuthenticationFailed`] and never exposes the unverified
@@ -1142,6 +1156,51 @@ pub fn decrypt(
     // helper never wiped, so the wipe is here, where both paths arrive.
     zeroize_slice(&mut plaintext);
     Err(Error::AuthenticationFailed)
+}
+
+/// [`decrypt`] with an allocation bound that is checked **before** the buffer is
+/// allocated.
+///
+/// `max_len` is the caller's policy, not the format's: a ciphertext longer than it
+/// is refused with [`Error::MessageTooLong`] and nothing is allocated. This exists
+/// because [`MAX_MSG_SIZE`] (256 GiB) is a format limit and does not bound a remote
+/// request by itself — a service whose message length comes off the wire wants a
+/// limit of its own, applied before the bytes are trusted.
+///
+/// The bound is on the ciphertext, which is the size of the plaintext, so the two
+/// are the same number for the caller's purposes.
+///
+/// ```
+/// # use xchacha20_blake3_siv::{decrypt_bounded, encrypt, Error};
+/// # let key = [0x42u8; 32];
+/// # let nonce = [0x55u8; 24];
+/// # let (ciphertext, tag) = encrypt(&key, &nonce, b"", b"hello").unwrap();
+/// // This service accepts at most 64 KiB, whatever the format would allow.
+/// let plaintext = decrypt_bounded(&key, &nonce, b"", &ciphertext, &tag, 64 * 1024).unwrap();
+/// assert_eq!(plaintext, b"hello");
+///
+/// // Longer than the policy: refused before any buffer is allocated. (`matches!`
+/// // rather than `assert_eq!`: `Plaintext` compares against byte slices, not
+/// // against another `Plaintext`, deliberately.)
+/// assert!(matches!(
+///     decrypt_bounded(&key, &nonce, b"", &ciphertext, &tag, 2),
+///     Err(Error::MessageTooLong)
+/// ));
+/// # Ok::<(), Error>(())
+/// ```
+#[must_use = "the returned plaintext must be handled"]
+pub fn decrypt_bounded(
+    key: &[u8; 32],
+    nonce: &[u8; NONCE_LEN],
+    aad: &[u8],
+    ciphertext: &[u8],
+    tag: &[u8; TAG_LEN],
+    max_len: usize,
+) -> Result<Plaintext, Error> {
+    if ciphertext.len() > max_len {
+        return Err(Error::MessageTooLong);
+    }
+    decrypt(key, nonce, aad, ciphertext, tag)
 }
 
 /// Decrypt `buffer` in place, verifying the detached tag.
@@ -3368,7 +3427,13 @@ mod tests {
         );
     }
 
-    /// cover those separately).
+    /// The tag must not depend on which call shape computed it.
+    ///
+    /// `blake3_keyed_multi` hashes a slice of parts, and `derive_tag` either passes
+    /// them separately or builds one contiguous buffer, switching on the total input
+    /// length (`TAG_CONCAT_MIN` ..= `TAG_CONCAT_LIMIT`). The switch has to be
+    /// invisible, so this walks both sides of it against a tag the test computes
+    /// itself, with the update-per-field shape.
     #[test]
     fn test_both_tag_call_shapes_hash_the_same_bytes() {
         let mac_key = [0x5Au8; 32];

@@ -9,8 +9,10 @@ __pycache__/
 # Cargo's own backup files.
 **/*.rs.bk
 
-# `cargo fuzz run -workers=N` writes one log per worker into the working
-# directory; they are run artefacts, not sources.
+# `cargo fuzz run -workers=N` writes one log per worker into its working
+# directory, which is `fuzz/` when the run is started there (as `verify.sh` and CI
+# do) and the repo root otherwise. Both are run artefacts, not sources.
+fuzz/fuzz-*.log
 /fuzz-*.log
 
 # Editor / OS noise.

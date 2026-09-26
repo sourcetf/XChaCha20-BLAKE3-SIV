@@ -1,4 +1,4 @@
-src/lib.rs:1031:5: replace accept_or_reject with ()
-src/lib.rs:1031:8: delete ! in accept_or_reject
-src/lib.rs:1046:8: delete ! in accept_or_reject
-src/lib.rs:1158:5: replace decrypt_in_place_detached -> Result<(), Error> with Ok(())
+src/lib.rs:1037:5: replace accept_or_reject with ()
+src/lib.rs:1037:8: delete ! in accept_or_reject
+src/lib.rs:1053:8: delete ! in accept_or_reject
+src/lib.rs:1215:5: replace decrypt_in_place_detached -> Result<(), Error> with Ok(())

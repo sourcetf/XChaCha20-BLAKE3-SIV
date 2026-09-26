@@ -66,7 +66,8 @@ run_ctgrind() {
   ( cd "$dir"
     CARGO_TARGET_DIR="$dir/target-ctgrind" \
       RUSTFLAGS="-C target-feature=+crt-static -C strip=none" \
-      cargo test --release --target x86_64-unknown-linux-gnu --test ctgrind --no-run >/dev/null 2>&1
+      cargo test --release --target x86_64-unknown-linux-gnu --test ctgrind --no-run \
+        --no-default-features >/dev/null 2>&1
     local bin
     bin="$(ls -t "$dir"/target-ctgrind/x86_64-unknown-linux-gnu/release/deps/ctgrind-* 2>/dev/null | grep -vE '\.(d|o)$' | head -1)"
     [ -n "$bin" ] || { echo "could not build the ctgrind binary"; return 2; }

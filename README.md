@@ -20,6 +20,15 @@ A detached, in-place API is also available
 (`encrypt_in_place_detached` / `decrypt_in_place_detached`) for protocols that
 store the tag separately or want to avoid a second allocation.
 
+> **Bound your input before you decrypt.** `decrypt` allocates a buffer as large as
+> the ciphertext it is handed, and the format's ceiling (`MAX_MSG_SIZE`, 256 GiB) is
+> not a safe one — it is the largest message the *construction* supports, not the
+> largest a service should accept. A caller whose message length comes off the wire
+> must cap it itself: `decrypt_bounded(key, nonce, aad, ciphertext, tag, max_len)`
+> enforces the caller's limit *before* the allocation, and `MAX_MSG_SIZE` is public
+> so a length can be rejected before the body is even read. This is the misuse this
+> crate cannot catch on the caller's behalf.
+
 ## Not a standard
 
 **There is no published specification for this construction, and it is not
@@ -75,12 +84,26 @@ This is **not** the c2sp.org ChaCha20-Poly1305-SIV construction: it does not use
 Poly1305, its tag is 65 bytes rather than 32, and it is not interoperable with
 anything.
 
-### Wire format is not frozen
+### Wire format: frozen by revision, and the crate is 0.x
 
-Because the construction is bespoke, treat the byte format as unstable until
-this crate reaches 1.0. It has already changed once: v0.1 used Poly1305 with a
-CTX-transformed 32-byte tag, and v0.2 replaces that with a keyed-BLAKE3 65-byte
-tag.
+Two version numbers, deliberately kept apart (see `CHANGELOG.md`, which is written
+in the same terms):
+
+* **construction revision** — `v0.2` today. The bytes: domain strings, key
+  derivation, tag size. This is what a consumer has to match.
+* **crate version** — `0.1.0` in `Cargo.toml`. The Rust API: names, signatures,
+  features.
+
+**The byte format is frozen at revision v0.2.** It will not change without a
+revision bump, a `CHANGELOG` entry and the known-answer vectors updated in the same
+commit — and that is mechanical rather than a promise: `kat_regression_lock`
+re-asserts the published bytes from a fixture no in-crate change can edit, and both
+differential fixtures replay against the independent reference implementation.
+
+Frozen does not mean finished, or standard: the format is this project's own, it is
+**not interoperable with anything**, and until this crate reaches 1.0 it is `0.x`,
+so a consumer should pin an exact version rather than a range. A format change
+before 1.0 would be a revision bump, not a silent one.
 
 ## Properties
 
@@ -174,11 +197,14 @@ ciphertext, tag and AAD is rejected by the tests, and 115 million fuzz execution
 found no acceptance — but those are *non-physical* analogues: they show the
 acceptance predicate is exact, not that the decision survives a glitch.
 
-### The opt-in `hardened` feature
+### The `hardened` decision — on by default
 
-For deployments where the cheap end of that threat model is real, the crate has an
-opt-in `hardened` feature that hardens exactly one thing: **the accept/reject
-decision**, which is the single-fault point where a forgery is accepted. It makes
+The crate hardens exactly one thing: **the accept/reject decision**, which is the
+single-fault point where a forgery is accepted. It is the default configuration, not
+an opt-in: the property it protects is the one a forgery turns on, it costs nothing
+on large messages, and an opt-in that most callers never enable would mean most
+callers are unprotected while this file claims hardening. `default-features = false`
+gives the single-gate build back for a caller who has measured the cost. It makes
 the decision two independently *recomputed* checks, each with its own branch, so
 one skipped instruction reaches the other gate instead of accepting. "Recomputed"
 is load-bearing and is enforced rather than hoped for: the second gate re-reads
@@ -188,11 +214,11 @@ would leave one fault carrying both gates. Both combinations use `&` and never
 `&&`, so both comparisons always run and the time taken does not reveal which gate
 failed; `bool::from` is the conversion `subtle` documents for the end of a
 verification, so no new content-dependent branch is introduced.
-`tools/ctgrind.sh --features hardened` checks that mechanically, and
-`tools/fi_check.sh` writes the faults down as source changes: the default build
-must *fail* the decision test when a gate is skipped or its value corrupted, the
-hardened build must pass, and — the row that makes the other two mean something —
-it must *fail* when the second gate is replaced by a copy of the first.
+`tools/ctgrind.sh` checks that mechanically in both configurations, and
+`tools/fi_check.sh` writes the faults down as source changes: the opt-out build must
+*fail* the decision test when the single gate is skipped or its value corrupted, the
+default (hardened) build must pass, and — the row that makes the other two mean
+something — it must *fail* when the second gate is replaced by a copy of the first.
 
 | A fault that skips the decision call altogether | **defended** — the caller writes a rejection before the call, so skipping it accepts nothing (`tools/fi_instruction.sh` measured six such faults before this shape was adopted, and none after) |
 | Single fault on the decision (a skipped branch, or a corrupted gate *value*) | **defended** — `tools/fi_check.sh` runs this as a campaign row on the hardened build |
@@ -204,9 +230,10 @@ it must *fail* when the second gate is replaced by a copy of the first.
 | Availability (any single glitch causes a rejection or a crash) | not defended, by anything |
 
 A bounded mutation run over the decision (`cargo mutants -f src/lib.rs -F
-'decrypt|accept_or_reject' --features hardened -- --test decision`, in CI) tests the
-other half of that: every mutant of the decision must be caught by
-`tests/decision.rs`. The `&` → `|` or `^` mutants in the two-comparison expression are
+'decrypt|accept_or_reject' --features hardened -- --test decision --test security`, in
+CI) tests the other half of that: every mutant of the decision and of its
+caller-visible limits must be caught, by the decision detector and by the security
+suite. The `&` → `|` or `^` mutants in the two-comparison expression are
 excluded as **equivalent under fault-free testing**, and that exclusion is itself
 informative: the two comparisons inside a gate always agree, because they compare the
 same two arrays, so they differ *only* when a fault makes them disagree. That case
@@ -236,7 +263,7 @@ mutated the unobservable one and the campaign reported "expected fail, got pass"
 which is what a mutation nothing can catch looks like).
 
 Measured cost, in-place round trip on the host above: **+10.8% at 64 bytes, +8.9% at 256, +3.6% at 1 KiB, +4.1% at 4 KiB, +2.5% at 16 KiB, +1.0% at 64 KiB, +0.4% at 1 MiB** — the added work
-is four 65-byte constant-time comparisons, so it does not scale with the message. The hardened build is byte-for-byte identical on the wire (the KATs and
+is four 65-byte constant-time comparisons, so it does not scale with the message. That is the cost of the *default* build over `--no-default-features`; the default build is byte-for-byte identical on the wire (the KATs and
 both differential fixtures replay unchanged), which is what keeps every other piece
 of evidence in this file valid for it.
 
@@ -579,8 +606,9 @@ tests/                      differential vectors and their replay
 tools/ref_impl.py           independent Python reference implementation
 tools/gen_test_vectors.py   fixture generator for the differential vectors
 tools/kani_shards.py        derives the CI proof shards from src/proofs.rs
-standard.txt                the c2sp.org / XChaCha specification text this
-                            crate's older v0.1 construction was built from.
+standard.txt                the c2sp.org / XChaCha specification text the
+                            construction's earlier revision (a crate-version-independent
+                            "construction revision v0.1") was built from.
                             Retained for the RFC 8439 and HChaCha20 test
                             vectors it quotes; it does NOT describe the
                             current construction.

@@ -35,7 +35,7 @@ Anything that breaks the properties claimed in `README.md`:
 Listed so that a report is not needed for them. Everything under "What is not
 defended against" in `README.md`:
 
-- **fault injection**, including the residual attacks that the opt-in `hardened`
+- **fault injection**, including the residual attacks that the `hardened`
   feature does not cover (two independent faults, a targeted fault inside the tag
   computation, key recovery by differential fault analysis, extracting unverified
   plaintext after a skipped wipe). Nothing here has been validated on a real

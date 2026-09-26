@@ -53,13 +53,19 @@ run_row() {
   copy_tree "$dir"
   "$patch" "$dir"
   local args=(--quiet --release --test "$target")
-  [ -n "$features" ] && args+=(--features "$features")
+  if [ -n "$features" ]; then
+    # A raw cargo flag string, so a row can ask for the opt-out configuration
+    # (`--no-default-features`) as well as a feature set: `hardened` is on by
+    # default, so "the plain decision" is now a *removal*, not an addition.
+    # shellcheck disable=SC2206
+    args+=($features)
+  fi
   local got=pass
   if ! ( cd "$dir" && cargo test "${args[@]}" ) > "$WORK/$name.log" 2>&1; then
     got=fail
   fi
   if [ "$got" = "$expect" ]; then
-    printf '  OK   %-22s %-9s %s (detector %s)\n' "$name" "$features" "$expect" "$target"
+    printf '  OK   %-22s %-22s %s (detector %s)\n' "$name" "$features" "$expect" "$target"
     return 0
   fi
   printf '  FAIL %-22s expected %s, got %s -- see %s\n' "$name" "$expect" "$got" "$LOG_KEEP/$name.log" >&2
@@ -177,33 +183,33 @@ echo
 
 # The detector must be satisfiable on a clean hardened build, or the rows below
 # would be measuring a test that fails for unrelated reasons.
-run_row clean-hardened      "hardened" decision    pass patch_none
-run_row clean-default       ""         decision    pass patch_none
+run_row clean-hardened      "--features hardened"      decision pass patch_none
+run_row clean-plain         "--no-default-features"    decision pass patch_none
 
 # Unhardened decision, one skipped instruction: the forgery goes through. This is
 # what the hardening is for, and it is also this campaign's "the fault is real"
 # evidence -- if it ever stops failing, the rows below mean less.
-run_row branch-forced       ""         decision    fail patch_branch_accept
+run_row branch-forced       "--no-default-features"    decision fail patch_branch_accept
 
 # Hardened decision, the same single fault, and a corrupted gate *value* rather
 # than a skipped branch: the other gate has to reject both times.
-run_row gate0-branch-skipped "hardened" decision   pass patch_gate0_branch
-run_row gate0-value-forced   "hardened" decision   pass patch_gate0_value
+run_row gate0-branch-skipped "--features hardened"      decision pass patch_gate0_branch
+run_row gate0-value-forced   "--features hardened"      decision pass patch_gate0_value
 
 # ...and the same corrupted value with the second gate reduced to a copy of the
 # first: the forgery is accepted. This row is why the one above means something --
 # it shows the *recomputation* is what rejects the forgery, not the mere presence of
 # a second `if`. Without it, "two gates" would be a claim about the source text.
-run_row gates-shared         "hardened" decision   fail patch_gates_shared
+run_row gates-shared         "--features hardened"      decision fail patch_gates_shared
 
 # Known limit, pinned: if the computed tag *is* the received tag, both gates are
 # satisfied. Expressed as a source change because a fault model at this level has
 # nothing better; a memory fault that achieves the same on real silicon is what the
 # README's "not defended" row is about.
-run_row computed-tag-replaced "hardened" decision  fail patch_tag_replaced
+run_row computed-tag-replaced "--features hardened"     decision fail patch_tag_replaced
 
 # Defensive, not about forgery: a skipped wipe is a defect the security test catches.
-run_row wipe-skipped        ""         security    fail patch_wipe_skipped
+run_row wipe-skipped        "--no-default-features"    security fail patch_wipe_skipped
 
 echo
 echo "campaign complete: every row behaved as documented"

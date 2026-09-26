@@ -161,15 +161,15 @@ PY
   echo "$(cat "$bin.accepted" | grep -c . || true)" > "$WORK/$label.count"
 }
 
-scan "default (no hardened)" ""
-scan "hardened"             "--features hardened"
+scan "plain (no hardened)"  "--no-default-features"
+scan "hardened (default)"   "--features hardened"
 
-default_n="$(cat "$WORK/default (no hardened).count")"
-hardened_n="$(cat "$WORK/hardened.count")"
+default_n="$(cat "$WORK/plain (no hardened).count")"
+hardened_n="$(cat "$WORK/hardened (default).count")"
 echo
 if [ "$hardened_n" -le "$default_n" ]; then
-  echo "instruction-level FI: hardened is no worse than default ($hardened_n vs $default_n accepting bytes)"
+  echo "instruction-level FI: hardened is no worse than plain ($hardened_n vs $default_n accepting bytes)"
   exit 0
 fi
-echo "FAIL: the hardened build has *more* single-byte accepting faults ($hardened_n) than the default one ($default_n)" >&2
+echo "FAIL: the hardened build has *more* single-byte accepting faults ($hardened_n) than the plain onne ($default_n)" >&2
 exit 1

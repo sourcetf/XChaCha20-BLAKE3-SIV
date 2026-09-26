@@ -1,6 +1,6 @@
 --- src/lib.rs
 +++ delete ! in accept_or_reject
-@@ -1038,17 +1038,17 @@
+@@ -1045,17 +1045,17 @@
      // check with its own branch, so a single skipped instruction reaches this gate
      // instead of accepting. `&` and never `&&`: both comparisons always run in the
      // caller, so the time this takes does not reveal which gate failed. No

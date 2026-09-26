@@ -29,14 +29,14 @@
 # assume: valgrind, a statically linked test binary, and a suppression file.
 #
 # Usage:  tools/ctgrind.sh                      # run the check (exit 0 = clean)
-#         tools/ctgrind.sh --features hardened  # ...against an opt-in feature set
+#         tools/ctgrind.sh --no-default-features  # ...against the opt-out feature set
 #         tools/ctgrind.sh --no-selftest        # skip the planted-leak control
 #
 # Extra arguments other than the two flags are passed to `cargo test`, so the
-# constant-time check can be run against any feature combination -- the
-# `hardened` build adds a second, recomputed tag comparison to each decrypt, and
-# that is exactly the kind of addition that could introduce a content-dependent
-# branch.
+# constant-time check can be run against any feature combination. `hardened` is on
+# by default and adds a second, recomputed tag comparison to each decrypt -- the kind
+# of addition that could introduce a content-dependent branch -- so the combination
+# worth running separately is the *opt-out* one (`--no-default-features`).
 #         tools/ctgrind.sh --setup  # print how to obtain valgrind here
 #
 # Exit codes: 0 clean; 1 clean but the harness failed its own sanity checks;

@@ -1,6 +1,6 @@
 --- src/lib.rs
 +++ replace accept_or_reject with ()
-@@ -1023,43 +1023,17 @@
+@@ -1029,44 +1029,17 @@
  // wasted computing a second one.
  #[inline(never)]
  fn accept_or_reject(
@@ -15,7 +15,8 @@
 -        return;
 -    }
 -
--    // Fault-injection hardening (opt-in `hardened` feature): a second *recomputed*
+-    // Fault-injection hardening (the `hardened` feature, on by default): a second
+-    // *recomputed*
 -    // check with its own branch, so a single skipped instruction reaches this gate
 -    // instead of accepting. `&` and never `&&`: both comparisons always run in the
 -    // caller, so the time this takes does not reveal which gate failed. No
@@ -41,7 +42,7 @@
  
  /// Decrypt `ciphertext`, verifying the tag.
  ///
- /// Returns the plaintext in a [`Plaintext`] that zeroizes on drop. On failure
- /// returns [`Error::AuthenticationFailed`] and never exposes the unverified
- /// plaintext.
- #[must_use = "the returned plaintext must be handled"]
+ /// **This allocates a buffer as large as `ciphertext`.** Bound untrusted input
+ /// before calling it: [`MAX_MSG_SIZE`] (256 GiB) is the format's ceiling, not a safe
+ /// one, and a service that trusts a length field off the wire can be made to
+ /// allocate that much per request. [`decrypt_bounded`] takes a policy limit and

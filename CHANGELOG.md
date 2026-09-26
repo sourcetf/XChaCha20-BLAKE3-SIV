@@ -7,6 +7,72 @@ tags have been cut yet.
 
 ## Unreleased
 
+### Input bounding, and where the warning lives
+
+- **`decrypt_bounded(key, nonce, aad, ciphertext, tag, max_len)`**: the caller's
+  length policy, checked *before* the plaintext buffer is allocated, returning
+  `Error::MessageTooLong` and allocating nothing when it refuses. `decrypt` allocates
+  as large as its ciphertext argument (up to `MAX_MSG_SIZE`, 256 GiB), which is the
+  most likely way to turn a remote request into memory exhaustion, and a warning in an
+  error variant's documentation is not where a caller looks.
+- The warning is now on the README's first page and in `decrypt`'s first paragraph,
+  next to the entry point it is about; the crate-level API list names
+  `decrypt_bounded`; and `Error::MessageTooLong` documents both limits (the format's
+  and the caller's).
+
+### `hardened` is the default
+
+- The `hardened` feature is **on by default** (`default = ["hardened"]`). A hardening
+  property that most callers never enable is a hardening property most callers do not
+  have, and the measured cost is +10.8% at 64 bytes, +8.9% at 256, +3.6% at 1 KiB and
+  below +4.5% from 4 KiB up (against `--no-default-features`). The opt-out is
+  `default-features = false`; it stays measured, tested, and covered by its own CI
+  runs (`tools/ctgrind.sh --no-default-features`, `tools/fi_check.sh`'s `*-plain`
+  rows).
+- Every tool that assumed "hardened means `--features hardened`" was updated to the
+  new axis: `tools/fi_check.sh`'s rows (including a `clean-plain` row),
+  `tools/fi_instruction.sh`'s two scans (now `plain (no hardened)` vs
+  `hardened (default)`, both 0 accepting bytes), the ctgrind CI step, and
+  `tools/mutation_check.sh`, whose `ct_eq` -> `==` mutation is compiled only in the
+  opt-out build and therefore runs there now.
+
+### Release hygiene
+
+- `mutants.out/` is refreshed from HEAD and is now documented as evidence that must
+  match it (tests/README.md). Refreshing it immediately found three **uncaught**
+  mutants in the new `decrypt_bounded` bound check: the mutation run named only
+  `--test decision`, and the suite that witnesses the bound is `tests/security.rs`.
+  The run now covers both suites, and is 9 mutants / 7 caught / 2 unviable / 0
+  uncaught.
+- A doc comment that had been split by an inserted test (`src/lib.rs`, the
+  contiguous-buffer tag test) is repaired rather than left as a fragment.
+- `.gitignore`: `fuzz/fuzz-*.log` in addition to `/fuzz-*.log` — the fuzz runs write
+  their per-worker logs into `fuzz/`, which the old pattern did not match.
+- The README now keeps the two version numbers apart explicitly: **construction
+  revision** (the bytes, `v0.2`) and **crate version** (the Rust API, `0.1.0`), with
+  the freeze and pinning policy stated in both places.
+
+### Release policy
+
+- **The byte format is frozen at construction revision `v0.2`.** It will not change
+  without a revision bump, a `CHANGELOG` entry and the known-answer vectors updated in
+  the same commit; `kat_regression_lock` re-asserts the published bytes from a fixture
+  no in-crate change can edit, so the promise is mechanical rather than stated. (Two
+  version numbers are in play and are kept apart: the **construction revision**
+  `v0.2` is the bytes, and the **crate version** `0.1.0` is the Rust API. The
+  construction has changed once, v0.1 -> v0.2.)
+- **The crate is `0.x` until a deliberate 1.0**, because the Rust API is not frozen:
+  consumers should pin an exact version rather than a range, and treat the API (not
+  the bytes) as the unstable part. It is not interoperable with any standard and no
+  specification exists for it.
+- `hardened` is **on by default**: a hardening property that most callers never enable
+  is a hardening property most callers do not have. The opt-out (`default-features =
+  false`) exists, is measured, and is covered by the same CI runs as the default.
+- **Bound untrusted input before `decrypt`.** It allocates as large as its ciphertext
+  argument; `decrypt_bounded(..., max_len)` enforces a caller policy before the
+  allocation, `MAX_MSG_SIZE` is public for the pre-read check, and the README states
+  this on its first page rather than in an error variant's documentation.
+
 - **The decision is one function body, not two `#[cfg]`-selected definitions.** The
   `hardened` gates now live inside the same `accept_or_reject` the default build
   compiles, with the second gate under `#[cfg(feature = "hardened")]`. Reasons, in
@@ -88,10 +154,13 @@ tags have been cut yet.
   a control-flow inventory in `tests/variable_latency.rs` that fails when the crate's
   branch counts change, so the numbers in `README.md` and `SECURITY.md` cannot go
   stale unnoticed — which is how the previous count was found to be stale.
-- **Fault-injection hardening, opt-in** (`hardened` feature): the accept/reject
-  decision becomes two independently recomputed checks with separate branches.
-  **No wire-format change**; the KATs and both differential fixtures replay
-  unchanged. Measured cost +10.8% at 64 bytes, below +4.5% from 1 KiB up.
+- **Fault-injection hardening** (`hardened` feature, **on by default**): the
+  accept/reject decision becomes two independently recomputed checks with separate
+  branches, written fail-closed, and the second gate is a guaranteed recomputation
+  rather than a copy (see the entries above). **No wire-format change**; the KATs and
+  both differential fixtures replay unchanged. Measured cost of the default build
+  against `--no-default-features`: +10.8% at 64 bytes, +8.9% at 256, +3.6% at 1 KiB,
+  below +4.5% from 4 KiB up.
 - **Fault-injection check** (`tools/fi_check.sh`) plus its detector
   (`tests/decision.rs`), and a CI step for both.
 - **Large-message reference vectors** (`tests/vectors_differential_large.txt`):

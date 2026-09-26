@@ -1,6 +1,6 @@
 --- src/lib.rs
 +++ delete ! in accept_or_reject
-@@ -1023,17 +1023,17 @@
+@@ -1029,17 +1029,17 @@
  // wasted computing a second one.
  #[inline(never)]
  fn accept_or_reject(
@@ -16,6 +16,6 @@
          return;
      }
  
-     // Fault-injection hardening (opt-in `hardened` feature): a second *recomputed*
+     // Fault-injection hardening (the `hardened` feature, on by default): a second
+     // *recomputed*
      // check with its own branch, so a single skipped instruction reaches this gate
-     // instead of accepting. `&` and never `&&`: both comparisons always run in the

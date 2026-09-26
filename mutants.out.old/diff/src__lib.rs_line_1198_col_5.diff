@@ -1,0 +1,24 @@
+--- src/lib.rs
++++ replace decrypt_bounded -> Result<Plaintext, Error> with Ok(Default::default())
+@@ -1190,20 +1190,17 @@
+ pub fn decrypt_bounded(
+     key: &[u8; 32],
+     nonce: &[u8; NONCE_LEN],
+     aad: &[u8],
+     ciphertext: &[u8],
+     tag: &[u8; TAG_LEN],
+     max_len: usize,
+ ) -> Result<Plaintext, Error> {
+-    if ciphertext.len() > max_len {
+-        return Err(Error::MessageTooLong);
+-    }
+-    decrypt(key, nonce, aad, ciphertext, tag)
++    Ok(Default::default()) /* ~ changed by cargo-mutants ~ */
+ }
+ 
+ /// Decrypt `buffer` in place, verifying the detached tag.
+ ///
+ /// On failure the buffer is zeroized, so unverified plaintext is never left in
+ /// place. Note this destroys the caller's buffer on the failure path.
+ pub fn decrypt_in_place_detached(
+     key: &[u8; 32],

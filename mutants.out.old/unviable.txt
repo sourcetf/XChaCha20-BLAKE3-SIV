@@ -1,1 +1,2 @@
-src/lib.rs:1073:5: replace decrypt -> Result<Plaintext, Error> with Ok(Default::default())
+src/lib.rs:1087:5: replace decrypt -> Result<Plaintext, Error> with Ok(Default::default())
+src/lib.rs:1198:5: replace decrypt_bounded -> Result<Plaintext, Error> with Ok(Default::default())

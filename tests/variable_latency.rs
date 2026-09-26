@@ -49,10 +49,12 @@ const ALLOWED: &[(&str, &str)] = &[(
 /// makes them constant-time, and why they are listed rather than suppressed. The
 /// other is the decision function itself: one body with the first gate and, under
 /// `#[cfg(feature = "hardened")]`, the second. When the two `#[cfg]`-selected
-/// definitions were merged into that one body this count moved 15 -> 14, which is
-/// this tripwire doing exactly what it is for.
+/// definitions were merged into that one body this count moved 15 -> 14, and adding
+/// `decrypt_bounded`'s bound check moved it back to 15 -- both times this tripwire
+/// doing exactly what it is for. That bound check branches on the ciphertext's
+/// *length*, which is public.
 const CONTROL_FLOW: &[(&str, usize)] = &[
-    ("if", 14),
+    ("if", 15),
     ("while", 7),
     ("for", 27),
     ("loop", 0),

@@ -164,11 +164,12 @@ jobs:
       - name: run ctgrind
         run: ./tools/ctgrind.sh
 
-      # The `hardened` decision adds two recomputed tag comparisons and a branch,
-      # which is exactly the shape that could introduce a content-dependent timing
-      # difference. Same check, same build flags, different feature set.
-      - name: run ctgrind with the hardened decision
-        run: ./tools/ctgrind.sh --features hardened
+      # `hardened` is on by default, and it adds a second recomputed tag comparison
+      # and a branch -- exactly the shape that could introduce a content-dependent
+      # timing difference. Same check, same build flags, the other configuration:
+      # the opt-out build, since that is now the one no default run covers.
+      - name: run ctgrind on the opt-out configuration
+        run: ./tools/ctgrind.sh --no-default-features
 
       # ctgrind classifies branches and indices in the source; this compares the
       # compiled code's cache and branch *profile* for two different keys, which
@@ -310,7 +311,11 @@ jobs:
       - name: fault-injection campaign
         run: ./tools/fi_check.sh
 
-      # Every mutant of the decision must be caught by tests/decision.rs. The
+      # Every mutant of the decision must be caught, by the two suites that witness
+      # it: `tests/decision.rs` for the accept/reject outcome and `tests/security.rs`
+      # for the caller-visible limits (`decrypt_bounded`'s bound is a mutant target
+      # that the decision detector alone does not exercise -- refreshing this
+      # evidence found exactly that, which is the point of re-running it). The
       # `&` -> `|`/`^` mutants are excluded as *equivalent* under fault-free testing:
       # the two comparisons inside a gate always agree, which is precisely the
       # property that differs only when a fault makes them disagree -- and that case
@@ -331,7 +336,7 @@ jobs:
         run: |
           set -euo pipefail
           cargo mutants --features hardened -f src/lib.rs -F 'decrypt|accept_or_reject' \
-            -E 'replace & with [|^]' -- --test decision
+            -E 'replace & with [|^]' -- --test decision --test security
 
       - name: plant bugs and require the checks to fail
         run: ./tools/mutation_check.sh

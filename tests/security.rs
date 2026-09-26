@@ -17,8 +17,8 @@
 
 use proptest::prelude::*;
 use xchacha20_blake3_siv::{
-    decrypt, decrypt_in_place_detached, encrypt, encrypt_in_place_detached, Error, KEY_LEN,
-    NONCE_LEN, TAG_LEN,
+    decrypt, decrypt_bounded, decrypt_in_place_detached, encrypt, encrypt_in_place_detached, Error,
+    KEY_LEN, NONCE_LEN, TAG_LEN,
 };
 
 // ── Generators ────────────────────────────────────────────────────────
@@ -485,5 +485,55 @@ fn max_msg_size_is_public_and_is_the_documented_limit() {
     assert!(
         xchacha20_blake3_siv::MAX_MSG_SIZE > usize::MAX as u64,
         "on 32-bit the format's limit is above every possible length"
+    );
+}
+
+/// `decrypt_bounded` refuses an over-long ciphertext *before* allocating.
+///
+/// The bound is the caller's, not the format's, and this is the entry point for a
+/// service whose message length came off the wire: `decrypt` would allocate the
+/// buffer first and check nothing, so the limit has to be enforced by a call that
+/// cannot be forgotten. The test asserts the refusal, the boundary (equal to the
+/// length is allowed), and that the bound does not disturb a normal round trip.
+#[test]
+fn decrypt_bounded_enforces_the_callers_limit() {
+    let key = [0x36u8; 32];
+    let nonce = [0x63u8; NONCE_LEN];
+    let message = b"a message whose length is known to the test";
+    let (ciphertext, tag) = encrypt(&key, &nonce, b"aad", message).unwrap();
+
+    // Under the limit: refused, and nothing is allocated first. (`matches!` rather
+    // than `assert_eq!`: `Plaintext` compares against byte slices, not against
+    // another `Plaintext`, deliberately — see its `PartialEq` impls.)
+    for max_len in [0, message.len() - 1] {
+        assert!(
+            matches!(
+                decrypt_bounded(&key, &nonce, b"aad", &ciphertext, &tag, max_len),
+                Err(Error::MessageTooLong)
+            ),
+            "a {max_len}-byte limit must refuse a {}-byte ciphertext",
+            ciphertext.len()
+        );
+    }
+
+    // At the limit and above: accepted, and the plaintext is what was encrypted.
+    for max_len in [message.len(), message.len() + 1, usize::MAX] {
+        assert_eq!(
+            decrypt_bounded(&key, &nonce, b"aad", &ciphertext, &tag, max_len).unwrap(),
+            message,
+            "a {max_len}-byte limit should accept a {}-byte ciphertext",
+            ciphertext.len()
+        );
+    }
+
+    // A bound cannot widen the format's own limit: that check still runs inside, so
+    // the two entry points agree whenever the bound itself admits the input.
+    assert_eq!(
+        decrypt_bounded(&key, &nonce, b"aad", &ciphertext, &tag, usize::MAX)
+            .unwrap()
+            .as_slice(),
+        decrypt(&key, &nonce, b"aad", &ciphertext, &tag)
+            .unwrap()
+            .as_slice()
     );
 }

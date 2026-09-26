@@ -1,6 +1,6 @@
 --- src/lib.rs
 +++ replace decrypt -> Result<Plaintext, Error> with Ok(Default::default())
-@@ -1065,88 +1065,17 @@
+@@ -1079,88 +1079,17 @@
  #[must_use = "the returned plaintext must be handled"]
  pub fn decrypt(
      key: &[u8; 32],
@@ -84,9 +84,9 @@
 +    Ok(Default::default()) /* ~ changed by cargo-mutants ~ */
  }
  
- /// Decrypt `buffer` in place, verifying the detached tag.
+ /// [`decrypt`] with an allocation bound that is checked **before** the buffer is
+ /// allocated.
  ///
- /// On failure the buffer is zeroized, so unverified plaintext is never left in
- /// place. Note this destroys the caller's buffer on the failure path.
- pub fn decrypt_in_place_detached(
-     key: &[u8; 32],
+ /// `max_len` is the caller's policy, not the format's: a ciphertext longer than it
+ /// is refused with [`Error::MessageTooLong`] and nothing is allocated. This exists
+ /// because [`MAX_MSG_SIZE`] (256 GiB) is a format limit and does not bound a remote
