@@ -52,6 +52,18 @@ so a green run is not read as more than it is.
   `origin` remote), so `cargo-deny` expects it at
   `<db-path>/advisory-db-<hash-of-url>`.
 
+- **What ctgrind does not cover.** Two things, worth stating rather than implying.
+  Code the tests never execute: the check reports only what runs, which is why
+  `tests/ctgrind.rs` drives the decision in *both* directions with poisoned inputs
+  now instead of only the rejection. The public `ConstantTimeEq` impls that return a
+  `bool` stay outside it for a related reason — their final conversion branches on
+  the comparison by construction, because a `bool` is what the API returns, and no
+  entry is allowed to suppress them. And branches the optimizer turns into `setcc`
+  or `cmov`: memcheck does not report those at all (measured — see
+  `secret_dependent_branch` in `tests/ctgrind.rs`, which is shaped the way it is
+  because of that). The second class is what `tools/cache_profile.sh` and the
+  statistical screen exist for.
+
 - **Valgrind suppressions match functions, not source lines.** That is the whole
   reason `tests/ctgrind.supp` may only name `accept_or_reject`. An entry permits
   every conditional jump in the function it names, so one naming `decrypt` reads as
