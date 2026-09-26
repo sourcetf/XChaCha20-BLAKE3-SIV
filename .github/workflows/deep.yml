@@ -281,7 +281,12 @@ jobs:
   mutation:
     name: verify the verifier (mutation check)
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    # 60, not 30: this job carries the fault campaign (ten rows, each a build), the
+    # mutation campaign, and the two quick instruction sweeps -- the bit-flip one is
+    # eight times its `nop` sibling and takes about eight minutes on its own. Measured
+    # on the runner rather than guessed; 30 was already close before the second sweep
+    # was added.
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
