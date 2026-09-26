@@ -199,6 +199,38 @@ made to fail on demand, and a guarantee nothing exercises is a comment. The test
 source that writes eight bytes and then fails, which is the worst case the contract
 permits.
 
+### Corrected: the instruction-level fault numbers were measured on the wrong bytes
+
+`tools/fi_instruction.sh` computed its virtual-to-file mapping from `objdump -h`'s **LMA**
+column instead of its **File off** column (`objdump -h` prints `Size VMA LMA File off`; the
+script's regex captured the first three numbers and used the third). On these binaries that
+is a 4 KiB shift, so every fault landed outside the function the tool claimed to test - and
+the tool still printed a plausible map, so the error was invisible. Its "0 accepting faults"
+was an artefact, and the README's rows, this changelog and the audit summaries that repeated
+it were wrong.
+
+The mapping is now taken from the correct column **and asserted against `objdump -d` before a
+single fault is written**, so a wrong offset fails loudly instead of producing a number. With
+that fixed, the measured picture (full sweeps, both builds, both models):
+
+| | neutralised byte | single bit flipped |
+| --- | --- | --- |
+| default (`hardened`) | 1 accepting / 5526 | 13 / 44208 |
+| `--no-default-features` | 9 / 4268 | 152 / 34144 |
+| RustCrypto `XChaCha20Poly1305` (1081 B of decision code) | 13 / 1081 | 106 / 8648 |
+
+Two things follow, and both are now in the README's table. The accepting sites are the
+**same addresses in both builds**, so the class is not the accept/reject gate: it is the
+shared KDF/MAC/SIMD code, and the mechanism is mostly decoder desynchronisation - corrupting
+the middle byte of a multi-byte instruction makes the following bytes execute as different
+instructions. Nothing in the source can prevent that. And the second gate still *buys*
+something measurable: the default build's rate is ~9x lower than the opt-out one and ~40x
+lower than the reference implementation's.
+
+The tool's criterion changed with the numbers: it no longer asserts zero (unreachable for any
+of these implementations) but that the hardened build is not worse than the opt-out one, with
+both counts printed.
+
 ### Release policy
 
 - **The byte format is frozen at construction revision `v0.2`.** It will not change

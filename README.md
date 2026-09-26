@@ -226,9 +226,9 @@ something — it must *fail* when the second gate is replaced by a copy of the f
 
 | A fault that skips the decision call altogether | **defended** — the caller writes *two* rejections before the call, so skipping it accepts nothing (`tools/fi_instruction.sh` measured six such faults before that shape was adopted, and none after) |
 | A fault that corrupts one decision *value* | **defended** — the two gates write two independent slots and the caller rejects if either says so; one corrupted slot leaves the other. `tools/fi_check.sh`'s `one-check-neutralised` row is this attack, and it is rejected |
-| A fault that corrupts the caller's accept *branch* | **defended, measured**: `--bits` flips every bit of the decision and both call sites — 44856 faults in the default build — and the hardened build accepts **none**. The two serial reject-first checks are what does it: a corrupted opcode still lands on the other check |
-| ...the same, in the **opt-out** build (`default-features = false`) | **1 bit, pinned**: 34184 faults, **1** accepting — the opcode of the decision's own arm selection (`je`, whose one-bit-flipped twin is `jne`; the scan prints the site and its surrounding bytes). One gate has nothing behind it, which is the measured argument for the default. `tools/fi_instruction.sh` pins the count at 1, so a change that makes it two fails rather than being absorbed |
 | Single fault on the decision (a skipped branch, or a corrupted gate *value*) | **defended** — `tools/fi_check.sh` runs this as a campaign row on the hardened build |
+| A single corrupted byte or bit in the decision code | **measured, and comparable**: a single-fault sweep of the function finds **1 accepting byte in 5526** (neutralised) and **13 in 44208** (single-bit flips) in the default build. The mechanism is not the gate — the accepting sites are the *same addresses* in both builds, so they sit in the shared KDF/MAC/SIMD code, and several are the middle byte of a multi-byte instruction, where corruption desynchronises the decoder and the following bytes run as different instructions. No source structure prevents that. For scale, the same technique measures RustCrypto's XChaCha20Poly1305 (1081 bytes of decision code) at **13 of 1081** and **106 of 8648** — about 40x the rate of this crate's default build |
+| ...the same, in the **opt-out** build (`default-features = false`) | **worse, and that is the point**: 9 of 4268 and 152 of 34144, i.e. ~9x the default build's rate under both models. The second gate does not remove the class (nothing can) but it measurably shrinks it, which is the argument for it being on by default |
 | A fault that replaces the computed tag with a constant, or with the received tag | **not defended, and pinned**: the campaign asserts that both builds accept it, so a change in either direction is noticed. This is the strongest fault model in the table and it defeats the two gates *together*: either gate is `computed_tag ? tag`, so forcing `computed_tag` to equal `tag` satisfies both at once — two gates over one value are one gate for this attack, and a second gate reading the same memory is not a second witness. The only software measure that would catch it is computing the tag *twice, independently* (a second MAC pass, roughly doubling the tag cost on every message, and the tag pass is a large part of a short message) and requiring both recomputations to match; that is not done here, and a hardware countermeasure — dual-rail logic, an HSM — is what a deployment that faces targeted injection should use instead |
 | Two independent faults | not defended — this is where the attacker's cost moves to a synchronized two-glitch bench |
 | A targeted fault inside the tag computation, making it produce the attacker's tag | not defended — precision injection, laboratory grade |
@@ -254,16 +254,19 @@ purpose — the hardened decision contains every mutatable line the default one 
 report the cfg'd-out second gate as an uncaught mutant rather than as code the build
 does not contain.
 
-The same question at the level of the *compiled* code: `tools/fi_instruction.sh`
-replaces every byte of the decision's machine code with `NOP`, one at a time, and
-re-runs the decision test. Both builds answer **zero** — 3920 single-byte faults in the
-default build and 5680 in the hardened one, none of which turns a rejected forgery into
-an accepted one; most of the rest merely crash. Two caveats are in that script's header
-and matter here: `NOP` is the *neutralise an instruction* fault, which biases towards
-rejection, so it says nothing about a bit flip that turns a comparison into an
-acceptance — that symmetric case is what the second gate is for, and what the
-campaign's `gate0-value-forced` row covers. And the map is of machine code, so a
-different host and toolchain will produce a different one.
+The same question at the level of the *compiled* code: `tools/fi_instruction.sh` damages
+one byte — or one bit — of the decision's machine code at a time and re-runs the decision
+test. **Neither build reaches zero**, and the README's table above carries the corrected
+numbers: 1 accepting byte in 5526 and 13 single-bit flips in 44208 for the default build,
+9 and 152 for the opt-out one. The mechanism is not the accept/reject gate — the accepting
+sites are the *same addresses* in both builds, so they are in the shared KDF/MAC/SIMD code,
+and several are the middle byte of a multi-byte instruction, where corruption desynchronises
+the decoder and the following bytes execute as different instructions. No source-level
+structure prevents that. What the second gate does buy is a *rate*: the default build is
+about 9x lower than the opt-out one and about 40x lower than RustCrypto's
+`XChaCha20Poly1305` measured the same way. The map is of machine code, so a different host
+and toolchain produces a different one — which is why the script gates on the comparison and
+prints both counts rather than asserting a number.
 One more thing the campaign turned up, which is worth knowing before trusting a
 green suite here: the failure-path wipe of the *allocating* `decrypt` is not
 observable from a test at all — the plaintext is wiped and then freed, so a skipped
