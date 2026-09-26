@@ -30,19 +30,16 @@ const LIB: &str = include_str!("../src/lib.rs");
 /// The suppression file itself.
 const SUPP: &str = include_str!("ctgrind.supp");
 
-/// Locate both `accept_or_reject` definitions by name and return their full text,
-/// body included, brace-matched.
+/// Every brace-matched block in `LIB` that starts at `needle`, `needle` included.
 ///
-/// There are two because the function is `#[cfg]`-selected: the default build
-/// converts one `Choice`, and `--features hardened` converts two. Only one of
-/// them exists in any given build, and both are in the source, so a test can
-/// inspect both.
-fn definitions() -> Vec<String> {
+/// Used to pull a block of the source out for assertions about its shape: the two
+/// `accept_or_reject` definitions, and the two `hardened` gate blocks.
+fn brace_blocks(needle: &str) -> Vec<String> {
     let mut out = Vec::new();
     let mut rest = LIB;
-    while let Some(i) = rest.find("fn accept_or_reject(") {
+    while let Some(i) = rest.find(needle) {
         let after = &rest[i..];
-        let open = after.find('{').expect("definition without a body");
+        let open = after.find('{').expect("block without a body");
         let mut depth = 0usize;
         let mut end = None;
         for (n, c) in after[open..].char_indices() {
@@ -58,11 +55,22 @@ fn definitions() -> Vec<String> {
                 _ => {}
             }
         }
-        let end = end.expect("unbalanced braces after accept_or_reject");
+        let end = end.expect("unbalanced braces");
         out.push(after[..=end].to_string());
         rest = &after[end + 1..];
     }
     out
+}
+
+/// Locate both `accept_or_reject` definitions by name and return their full text,
+/// body included, brace-matched.
+///
+/// There are two because the function is `#[cfg]`-selected: the default build
+/// converts one `Choice`, and `--features hardened` converts two. Only one of them
+/// exists in any given build, and both are in the source, so a test can inspect
+/// both.
+fn definitions() -> Vec<String> {
+    brace_blocks("fn accept_or_reject(")
 }
 
 /// Every `fun:` and error-kind line in `tests/ctgrind.supp`, comments removed.
@@ -161,4 +169,132 @@ fn the_suppressed_function_contains_only_the_decision() {
             "the branch must convert a `Choice`, not compare bytes directly"
         );
     }
+}
+
+/// The `hardened` feature's second gate must be a *recomputation*.
+///
+/// The two gate expressions are identical, so an optimizer is entitled to
+/// common-subexpression-eliminate them into one comparison — at which point a
+/// single fault carries both gates and the "second" gate is decoration. `src/lib.rs`
+/// forbids that with a volatile re-read, which is a guarantee the language gives
+/// rather than a hope about an optimizer's choices; this test pins the mechanism in
+/// the source, because a later refactor that "simplifies" the duplicated expression
+/// away would otherwise look like an improvement.
+///
+/// The behavioural half lives in `tools/fi_check.sh`: `gate0-value-forced` must
+/// still be *rejected* (the second gate recomputes), and `gates-shared` — the same
+/// fault with the second gate turned into a copy — must be *accepted*, which is what
+/// shows the recomputation is what does the work.
+#[test]
+fn the_hardened_second_gate_is_recomputed() {
+    let blocks = brace_blocks("let gates = {");
+    assert_eq!(
+        blocks.len(),
+        2,
+        "expected one gate block per decrypt entry point"
+    );
+
+    for block in &blocks {
+        assert_eq!(
+            block.matches("read_volatile").count(),
+            2,
+            "both operands of the second gate must be re-read through a volatile \
+             read, or the comparison can be common-subexpression-eliminated into the \
+             first gate's. Block was:\n{block}"
+        );
+        assert!(
+            block.contains("zeroize_array(&mut computed_tag_copy)"),
+            "the re-read copy of the computed tag is secret-derived and must be \
+             wiped like every other copy in the function:\n{block}"
+        );
+        assert_eq!(
+            block.matches("let first =").count(),
+            1,
+            "the block must compute its first gate exactly once:\n{block}"
+        );
+        assert_eq!(
+            block.matches("let second =").count(),
+            1,
+            "the block must compute its second gate exactly once -- two `if`s over \
+             one shared value is one gate with two branches:\n{block}"
+        );
+    }
+
+    // And the duplication is real duplication: the first gate's expression appears
+    // once per entry point, so a refactor that shares one computation between both
+    // decrypt paths would remove a gate from one of them.
+    assert_eq!(
+        LIB.matches("let first = computed_tag.ct_eq(tag) & tag.ct_eq(&computed_tag);")
+            .count(),
+        2,
+        "the first gate must be computed once per decrypt entry point"
+    );
+}
+
+/// A skipped decision call must leave a rejection standing.
+///
+/// The outcome is written *through* `out`, which the caller initialises before the
+/// call, so a fault that never makes the call cannot accept: the caller reads the
+/// rejection it wrote itself. This is not decoration — `tools/fi_instruction.sh`
+/// measured six single-byte faults in `decrypt` that skipped the call and accepted a
+/// forgery while the helper returned its outcome by value, because the ABI then hands
+/// back whatever the return slot happened to hold. The ordering is the fix, so the
+/// ordering is what is pinned here.
+#[test]
+fn the_decision_outcome_is_fail_closed() {
+    let init = "let mut decision: Result<(), Error> = Err(Error::AuthenticationFailed);";
+    assert_eq!(
+        LIB.matches(init).count(),
+        2,
+        "each decrypt entry point must initialise the decision to a rejection"
+    );
+
+    // The initialisation immediately before the call, then the `hardened` call right
+    // after it: the whole sequence, per entry point, is what makes the outcome
+    // fail-closed. Asserted as one string so a reordering -- write the decision after
+    // the call, or move one variant elsewhere -- cannot pass.
+    for (default_call, hardened_call) in [
+        (
+            "    #[cfg(not(feature = \"hardened\"))]\n    accept_or_reject(auth_ok, \
+             &mut plaintext, &mut decision);",
+            "    #[cfg(feature = \"hardened\")]\n    accept_or_reject(gates.0, \
+             gates.1, &mut plaintext, &mut decision);",
+        ),
+        (
+            "    #[cfg(not(feature = \"hardened\"))]\n    accept_or_reject(auth_ok, \
+             buffer, &mut decision);",
+            "    #[cfg(feature = \"hardened\")]\n    accept_or_reject(gates.0, \
+             gates.1, buffer, &mut decision);",
+        ),
+    ] {
+        let sequence = format!("{init}\n{default_call}\n{hardened_call}");
+        assert_eq!(
+            LIB.matches(sequence.as_str()).count(),
+            1,
+            "one entry point is missing the fail-closed sequence:\n{sequence}"
+        );
+    }
+
+    // The helper must write through that pointer rather than return a value: a
+    // returned value is what a skipped call loses.
+    for signature in [
+        "fn accept_or_reject(auth_ok: subtle::Choice, buffer: &mut [u8], \
+         out: &mut Result<(), Error>)",
+        "    out: &mut Result<(), Error>,\n) {",
+    ] {
+        assert!(
+            LIB.contains(signature),
+            "the decision must take the outcome by `&mut`, not return it: {signature}"
+        );
+    }
+
+    // And the accept path has to be the branch *taken away*, with the wipe and the
+    // error on the fall-through: a neutralised branch then lands on the rejection
+    // rather than past it. `fi_instruction` is what measures this in the compiled
+    // code; the shape is asserted here so it is not refactored by accident.
+    assert_eq!(
+        LIB.matches("if decision.is_ok() {").count(),
+        2,
+        "each entry point must take the accept path conditionally"
+    );
 }

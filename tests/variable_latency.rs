@@ -42,8 +42,14 @@ const ALLOWED: &[(&str, &str)] = &[(
 ///
 /// When one of these numbers changes: look at the branch, decide what it depends on,
 /// and update this table, `README.md` and `SECURITY.md` together.
+///
+/// The two `if`s added by the fail-closed decision shape (`if decision.is_ok()` in
+/// each decrypt entry point) are the most recent entry: they branch on a
+/// discriminant the *caller* wrote as a constant, so they depend on nothing secret
+/// -- which is what makes them constant-time, and why they are listed rather than
+/// suppressed.
 const CONTROL_FLOW: &[(&str, usize)] = &[
-    ("if", 13),
+    ("if", 15),
     ("while", 7),
     ("for", 27),
     ("loop", 0),

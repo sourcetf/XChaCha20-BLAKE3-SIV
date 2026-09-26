@@ -453,3 +453,24 @@ fn kat_regression_lock() {
         hx("1db104f0e59673b1426fc2febf34b719273295bc5d04f7accd04a1181aa5495af53f3924cc55cbf08d17d640ad8af582b49fa64eafb82856f927b3ff173f75996e").as_slice()
     );
 }
+
+// ── Caller-visible limits ───────────────────────────────────────────────
+
+/// `MAX_MSG_SIZE` is public, and that is the half of the memory-exhaustion story a
+/// caller can act on.
+///
+/// `decrypt` allocates a buffer as large as its ciphertext argument, so a service
+/// that trusts a length field off the wire has to reject over the limit *before*
+/// reading the body — the crate cannot do that on the caller's behalf. This test
+/// exists mostly for its compile-time half: it only builds if the constant really
+/// is reachable from outside the crate, and it fails if the limit moves without
+/// anyone deciding to move it (the format's maximum is 2^38, exactly 2^32 ChaCha20
+/// blocks; see `max_msg_size_fits_in_the_block_counter`).
+#[test]
+fn max_msg_size_is_public_and_is_the_documented_limit() {
+    assert_eq!(xchacha20_blake3_siv::MAX_MSG_SIZE, 1u64 << 38);
+    assert!(
+        xchacha20_blake3_siv::MAX_MSG_SIZE <= usize::MAX as u64,
+        "the limit must be expressible as a length on a 64-bit target"
+    );
+}

@@ -93,9 +93,12 @@ tag.
   (SIV requires the plaintext to recompute the tag), and the unverified
   plaintext is wiped, never returned.
 - **Zeroization** — intermediate secrets are wiped with volatile stores; the
-  returned `Plaintext` wipes itself on drop; and BLAKE3's internal state (which
-  holds the MAC key) is explicitly zeroized, since it is unreachable from here
-  and is not cleared on drop.
+  returned `Plaintext` wipes itself on drop, and so does the `Key` that
+  `random::generate_key` returns; and BLAKE3's internal state (which holds the MAC
+  key) is explicitly zeroized, since it is unreachable from here and is not cleared
+  on drop. It is a *volatile-store* wipe, which is a bound worth stating: it does
+  not cover a page that was already swapped out, a core dump, or a cold boot — see
+  "What this crate cannot fix for you" below.
 - **`no_std`** — with `alloc`.
 - **SIMD** — SSE2 / AVX2 on x86-64, NEON on aarch64, with a scalar reference
   fallback on every other target. All backends are held byte-identical to the
@@ -152,11 +155,15 @@ and the table's one entry today divides by the compile-time alignment of `usize`
 glitch that makes the *hardware* execute something other than what the code says —
 is outside this crate's threat model, and outside every tool used to verify it:
 Miri, Kani, ctgrind, ThreadSanitizer and libFuzzer all model *correct* execution,
-and none of them can observe a glitch. Concretely, the accept/reject decision is a
-single branch on a single comparison in both `decrypt` and
-`decrypt_in_place_detached`, so one skipped instruction is the difference between a
-forgery being rejected and being accepted. That is also the shape RustCrypto's
-`chacha20poly1305` has, and neither crate documents fault countermeasures.
+and none of them can observe a glitch. The decision a forgery turns on is a branch
+on a secret-derived comparison, and no software measure removes that branch; what
+*can* be removed is the failure mode where a fault skips the check entirely. The
+decision therefore writes its outcome through a parameter the caller initialises to
+a rejection, so a fault that never makes the call accepts nothing — that shape is
+not decoration: `tools/fi_instruction.sh` measured six single-byte faults in
+`decrypt` that skipped the call and accepted a forgery while the outcome was
+returned by value. That is also the shape RustCrypto's `chacha20poly1305` has, and
+neither crate documents fault countermeasures.
 
 What the construction gives for free is asymmetric: a fault on the *encryption*
 side degrades to rejection rather than to forgery, because the tag is computed over
@@ -173,14 +180,21 @@ For deployments where the cheap end of that threat model is real, the crate has 
 opt-in `hardened` feature that hardens exactly one thing: **the accept/reject
 decision**, which is the single-fault point where a forgery is accepted. It makes
 the decision two independently *recomputed* checks, each with its own branch, so
-one skipped instruction reaches the other gate instead of accepting. Both
-combinations use `&` and never `&&`, so both comparisons always run and the time
-taken does not reveal which gate failed; `bool::from` is the conversion `subtle`
-documents for the end of a verification, so no new content-dependent branch is
-introduced. `tools/ctgrind.sh --features hardened` checks that mechanically, and
-`tools/fi_check.sh` writes the fault down as a source change and requires the
-default build to *fail* the decision test with it while the hardened build passes.
+one skipped instruction reaches the other gate instead of accepting. "Recomputed"
+is load-bearing and is enforced rather than hoped for: the second gate re-reads
+both operands with a volatile read, because the two gate expressions are otherwise
+identical and an optimizer is entitled to merge them into one comparison — which
+would leave one fault carrying both gates. Both combinations use `&` and never
+`&&`, so both comparisons always run and the time taken does not reveal which gate
+failed; `bool::from` is the conversion `subtle` documents for the end of a
+verification, so no new content-dependent branch is introduced.
+`tools/ctgrind.sh --features hardened` checks that mechanically, and
+`tools/fi_check.sh` writes the faults down as source changes: the default build
+must *fail* the decision test when a gate is skipped or its value corrupted, the
+hardened build must pass, and — the row that makes the other two mean something —
+it must *fail* when the second gate is replaced by a copy of the first.
 
+| A fault that skips the decision call altogether | **defended** — the caller writes a rejection before the call, so skipping it accepts nothing (`tools/fi_instruction.sh` measured six such faults before this shape was adopted, and none after) |
 | Single fault on the decision (a skipped branch, or a corrupted gate *value*) | **defended** — `tools/fi_check.sh` runs this as a campaign row on the hardened build |
 | A fault that replaces the computed tag with the received one | **not defended, and pinned**: the campaign asserts that both builds accept it, so a change in either direction is noticed. Both gates compare the same two values, so both are satisfied; a source-level fault model has nothing closer to the memory fault this represents |
 | Two independent faults | not defended — this is where the attacker's cost moves to a synchronized two-glitch bench |
@@ -200,8 +214,8 @@ any fault-free test, which is why it is a row of the fault campaign instead.
 
 The same question at the level of the *compiled* code: `tools/fi_instruction.sh`
 replaces every byte of the decision's machine code with `NOP`, one at a time, and
-re-runs the decision test. Both builds answer **zero** — 3081 single-byte faults in the
-default build and 3987 in the hardened one, none of which turns a rejected forgery into
+re-runs the decision test. Both builds answer **zero** — 3920 single-byte faults in the
+default build and 5680 in the hardened one, none of which turns a rejected forgery into
 an accepted one; most of the rest merely crash. Two caveats are in that script's header
 and matter here: `NOP` is the *neutralise an instruction* fault, which biases towards
 rejection, so it says nothing about a bit flip that turns a comparison into an
@@ -227,6 +241,56 @@ validated on a real fault-injection bench. If your adversary can glitch silicon,
 software AEAD is the wrong component: use a secure element or an HSM, whose
 protection is a hardware property, and whose per-operation latency is orders of
 magnitude worse than what the table above describes.
+
+### What this crate cannot fix for you
+
+Properties of the construction or of the machine. They are listed because each one
+is a real exposure a user might take for a defect, and because the answer for every
+one of them is "somewhere else": the construction, the caller's protocol, or the
+deployment.
+
+- **Deterministic encryption.** `encrypt` is a pure function of
+  `(key, nonce, aad, plaintext)`: the same four inputs give the same ciphertext and
+  tag, forever, with no per-message randomness anywhere. That is what the mode *is*
+  (see "No hidden entropy"), and it is why nonce reuse is survivable rather than
+  catastrophic — but it also means anyone who can guess a message can confirm it by
+  comparing ciphertexts, and equality of two ciphertexts under one `(key, nonce)`
+  says their plaintexts are equal. A protocol that needs ciphertext
+  unpredictability has to supply it: a fresh nonce per message (see "Nonces, and
+  where randomness comes from"), or its own padding to a fixed length.
+- **Length is revealed.** The ciphertext is exactly as long as the plaintext and the
+  tag is fixed-size, so the message length is public to anyone who sees the
+  ciphertext. Every length-preserving AEAD has this; hiding a length means padding
+  or chunking at the application layer, before the bytes reach this crate.
+- **Zeroization is a volatile-store wipe.** It clears the bytes this crate owns, when
+  it drops them. It does not reach a page that had already been swapped out, a core
+  dump or a hibernation image the OS writes, a debugger attached to the process, or
+  DRAM remanence after a cold boot. Those are deployment controls — `mlock` and
+  `MADV_DONTDUMP` for the process's own buffers, `RLIMIT_CORE`, suspend and swap
+  policy, disk encryption for the image, memory encryption or tamper-resistant
+  hardware for the physical end. A library that allocates through `alloc` and runs
+  on an OS it does not own is not where they belong, and this one does not pretend
+  otherwise.
+- **Bounding the input is the caller's job.** `decrypt` allocates a buffer as large
+  as its ciphertext argument, and the format's own ceiling is `MAX_MSG_SIZE`
+  (256 GiB, public now, so a caller can check before it trusts a length off the
+  wire). The allocation is fallible, so an allocator refusal arrives as
+  `Error::AllocationFailed` instead of aborting the process — but a request the
+  kernel *accepts* can still be OOM-killed while it is written to, and no in-process
+  library can prevent that. A service that reads unbounded input has to cap it.
+- **A failed in-place decryption destroys the caller's buffer.** By design: the
+  unverified plaintext must not be readable out of it, so it is wiped to zeros
+  before the error is returned. Retry logic needs the ciphertext again; `decrypt`
+  is the entry point for a caller that would rather keep its buffer.
+- **Length errors and authentication failures are distinguishable.**
+  `MessageTooLong`/`AadTooLong` versus `AuthenticationFailed`. Lengths are public
+  information, so the distinction reveals nothing that was not already known, and a
+  protocol needs it to report a usable failure instead of "something went wrong"; a
+  caller that must not distinguish them can collapse the variants itself.
+- **The wire format is not frozen** ("Wire format is not frozen" above), and it is
+  not interoperable with any standard — a consumer on the other end must be this
+  crate, or a reimplementation of the same three domain strings and the same tag
+  construction.
 
 ## Nonces, and where randomness comes from
 

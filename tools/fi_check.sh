@@ -97,9 +97,45 @@ patch_gate0_value() {  # the first gate's comparison result is corrupted, not it
   python3 - "$1/src/lib.rs" <<'PY'
 import sys
 p = sys.argv[1]; s = open(p).read()
-old = "        computed_tag.ct_eq(tag) & tag.ct_eq(&computed_tag),\n"
-assert s.count(old) == 4, f"gate expressions: {s.count(old)}"
-open(p, "w").write(s.replace(old, "        subtle::Choice::from(1u8),\n", 1))
+# One site per decrypt entry point. This count is also the guard on the
+# *duplication*: `hardened` gets its strength from the two gates being two
+# computations, so the expression has to appear once per entry point. A refactor
+# that shares one gate between both entry points -- or between the two gates of one
+# entry point -- fails here instead of quietly leaving a gate that is decoration.
+old = "        let first = computed_tag.ct_eq(tag) & tag.ct_eq(&computed_tag);"
+assert s.count(old) == 2, f"first-gate expressions: {s.count(old)}"
+open(p, "w").write(s.replace(old, "        let first = subtle::Choice::from(1u8);", 1))
+PY
+}
+
+# The same fault as `patch_gate0_value`, with the second gate turned into a *copy*
+# of the first. The forgery is then accepted, and that is the point of the pair of
+# rows: `gate0-value-forced` passes because the second gate is a recomputation, and
+# this one fails because it is not. Together they show the recomputation is what
+# does the work, rather than the presence of two `if` statements.
+patch_gates_shared() {
+  python3 - "$1/src/lib.rs" <<'PY'
+import sys
+p = sys.argv[1]; s = open(p).read()
+first = "        let first = computed_tag.ct_eq(tag) & tag.ct_eq(&computed_tag);"
+assert s.count(first) == 2, f"first-gate expressions: {s.count(first)}"
+s = s.replace(first, "        let first = subtle::Choice::from(1u8);", 1)
+
+second = """        let mut computed_tag_copy = unsafe { core::ptr::read_volatile(&computed_tag) };
+        // SAFETY: as above, for the caller's reference: `tag` is a live `&[u8;
+        // TAG_LEN]` and this only reads through it, so aliasing rules hold.
+        let mut tag_copy = unsafe { core::ptr::read_volatile(tag) };
+        let second = computed_tag_copy.ct_eq(&tag_copy) & tag_copy.ct_eq(&computed_tag_copy);
+
+        // The copies are secret-derived (they are the computed MAC), so they are
+        // wiped like every other copy in this function rather than left in the
+        // frame of the `hardened` build.
+        zeroize_array(&mut computed_tag_copy);
+        zeroize_array(&mut tag_copy);
+"""
+assert s.count(second) == 2, f"second gates: {s.count(second)}"
+s = s.replace(second, "        let second = first;\n", 1)
+open(p, "w").write(s)
 PY
 }
 
@@ -116,19 +152,25 @@ PY
 # The *in-place* failure path's wipe, which is the one a test can observe: the
 # buffer is the caller's, so leaving the unverified plaintext in it is visible.
 #
+# Two wipes are on that path -- the decision wipes when it rejects, and the entry
+# point wipes again because a fault that skips the decision call never reached the
+# first one -- so the mutation removes both. Removing only the decision's would
+# leave a defect that is not a defect, and the row would read "expected fail, got
+# pass" (which is how the first version of this row failed, on a wipe no test could
+# see).
+#
 # The allocating path (`decrypt`) wipes its plaintext before dropping it, and that
 # one is *not* in this campaign because no test can see it: the memory is freed
-# either way, so a skipped wipe there is only detectable by reading the code. Saying
-# so here is the point -- the first version of this row mutated that unreachable one
-# and the campaign reported "expected fail, got pass", which is exactly what a
-# mutation nothing can catch looks like.
+# either way, so a skipped wipe there is only detectable by reading the code.
 patch_wipe_skipped() {
   python3 - "$1/src/lib.rs" <<'PY'
 import sys
 p = sys.argv[1]; s = open(p).read()
-old = "        zeroize_slice(buffer);"
-assert s.count(old) >= 1, "in-place wipe sites"
-open(p, "w").write(s.replace(old, "        let _ = &mut buffer;"))
+old = "    zeroize_slice(buffer);"
+# The 4-space pattern also matches inside the 8-space one, so this covers the
+# decision's wipes and the entry point's in one pass.
+assert s.count(old) >= 2, f"in-place wipe sites: {s.count(old)}"
+open(p, "w").write(s.replace(old, "    let _ = &mut buffer;"))
 PY
 }
 
@@ -151,6 +193,12 @@ run_row branch-forced       ""         decision    fail patch_branch_accept
 # than a skipped branch: the other gate has to reject both times.
 run_row gate0-branch-skipped "hardened" decision   pass patch_gate0_branch
 run_row gate0-value-forced   "hardened" decision   pass patch_gate0_value
+
+# ...and the same corrupted value with the second gate reduced to a copy of the
+# first: the forgery is accepted. This row is why the one above means something --
+# it shows the *recomputation* is what rejects the forgery, not the mere presence of
+# a second `if`. Without it, "two gates" would be a claim about the source text.
+run_row gates-shared         "hardened" decision   fail patch_gates_shared
 
 # Known limit, pinned: if the computed tag *is* the received tag, both gates are
 # satisfied. Expressed as a source change because a fault model at this level has

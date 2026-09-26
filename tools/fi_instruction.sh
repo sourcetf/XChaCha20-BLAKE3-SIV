@@ -3,7 +3,7 @@
 # Instruction-level fault injection, in software: corrupt one byte at a time in the
 # compiled decision code and see what a forgery does.
 #
-# Measured on this machine: 3081 bytes in the unhardened binary and 3987 in the
+# Measured on this machine: 3920 bytes in the unhardened binary and 5680 in the
 # hardened one, and **zero** of them accept a forgery in either build. The output is a
 # map rather than a verdict -- how many faults are neutral, how many crash, how many
 # accept -- and the hardened build's map is printed beside the unhardened one so the

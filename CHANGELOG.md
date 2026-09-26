@@ -7,6 +7,47 @@ tags have been cut yet.
 
 ## Unreleased
 
+- **The accept/reject decision is fail-closed.** The outcome is written through a
+  parameter the caller initialises to a rejection, instead of being returned by
+  value: a fault that *skips the decision call* then accepts nothing, where before
+  it accepted whatever the ABI left in the return slot. Found by measurement, not
+  reasoning — `tools/fi_instruction.sh` reported six single-byte faults in `decrypt`
+  that accepted a forgery with a returned outcome, and none with this shape. It is
+  also what makes the `hardened` gates reachable: one skipped call used to bypass
+  both of them at once.
+- **`random::generate_key` returns a `Key` that zeroizes on drop** (it used to
+  return `[u8; 32]` and leave that array to the caller). `Key` derefs to
+  `[u8; KEY_LEN]`, so existing call sites are unchanged; `Debug` prints no bytes and
+  no fingerprint of them; `Zeroize`/`ZeroizeOnDrop` are implemented. **API change**
+  (pre-1.0), and it is the one secret this crate generates that has no other copy
+  anywhere.
+- **`MAX_MSG_SIZE` is public**, `Error::AllocationFailed` exists, and the plaintext
+  buffer is allocated fallibly (`try_reserve_exact`): an allocator refusal is now an
+  error a service can report rather than a process abort. `Error` is
+  `#[non_exhaustive]` so the next variant is not a breaking change. This does not
+  bound the input for the caller — a request the kernel *accepts* can still be
+  OOM-killed while it is written to — which is exactly why the constant is public.
+- **The `hardened` second gate is guaranteed to be a recomputation**, not a copy:
+  both operands are re-read with a volatile read. The two gate expressions are
+  identical, so an optimizer was entitled to merge them into one comparison, which
+  would have left a single fault carrying both gates. `tests/decision_scope.rs` pins
+  the mechanism, and `tools/fi_check.sh` gained the row that makes the claim
+  behavioural: with the second gate replaced by a copy of the first, the fault that
+  the `gate0-value-forced` row survives now accepts the forgery.
+- New tests: `Key` wipe-on-drop (read back out of its storage after an in-place
+  drop) and its redacted `Debug`; the fallible allocation; `MAX_MSG_SIZE` reachable
+  from outside the crate; the fail-closed decision shape; the volatile re-read of
+  the second gate. The control-flow tripwire in `tests/variable_latency.rs` moved
+  from 13 to 15 `if`s for the two `if decision.is_ok()` branches it found — the
+  tripwire doing its job.
+- README: a new "What this crate cannot fix for you" section — deterministic
+  encryption, revealed message length, the scope of zeroization (volatile-store
+  level: not swap, not core dumps, not cold boot), input bounding, the destroyed
+  buffer after a failed in-place decryption, distinguishable length errors, and the
+  unfrozen wire format — each stated with where the answer belongs instead.
+- The instruction-level fault-scan counts were re-measured after the changes above:
+  3920 bytes in the default build, 5680 in the hardened one, none accepting.
+
 - **Fixed: ctgrind's suppression covered whole entry points, not the decision.**
   `tests/ctgrind.supp` named `decrypt` and `decrypt_in_place_detached`, and a
   valgrind entry permits *every* conditional jump in the function it names — so a
@@ -16,7 +57,7 @@ tags have been cut yet.
   returns a `Result` so no caller branches on it a second time; the suppression
   names that function and nothing else. **No wire-format change**, and the decision
   itself is unchanged in structure (including the `hardened` gates, whose
-  instruction-level fault scan was re-run: 3081 bytes in the default build and 3987
+  instruction-level fault scan was re-run: 3920 bytes in the default build and 5680
   in the hardened one, none accepting).
 - `tools/ctgrind.sh` now refuses to run unless every suppression entry names
   `accept_or_reject`, and plants a secret-dependent branch inside `decrypt` and

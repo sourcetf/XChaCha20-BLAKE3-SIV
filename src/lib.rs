@@ -193,7 +193,14 @@ use zeroize::Zeroize;
 /// Maximum message size: 2^38 bytes (256 GiB), matching the c2sp.org A_MAX/P_MAX
 /// limit this crate inherited.  See `max_msg_size_fits_in_the_block_counter` for why
 /// it must not be raised: 2^38 is exactly 2^32 ChaCha20 blocks.
-const MAX_MSG_SIZE: u64 = 1u64 << 38;
+///
+/// Public so a caller can reject an input *before* reading or allocating it.  The
+/// AEAD cannot bound what it is handed: [`decrypt`] allocates a buffer as large as
+/// its ciphertext argument, so a service that trusts a length field off the wire
+/// is exposed to a memory-exhaustion request no matter what this crate does.
+/// Checking the length against this constant, before reading the body, is the
+/// cheap place to stop that.
+pub const MAX_MSG_SIZE: u64 = 1u64 << 38;
 
 /// ChaCha20 block size (64 bytes).
 const CHACHA20_BLOCK: usize = 64;
@@ -276,18 +283,28 @@ pub const DOM_ENC: [u8; 8] = *b"XSIV-ENC";
 ///
 /// # Allocation
 ///
-/// [`decrypt`] allocates a buffer the size of the ciphertext. `MAX_MSG_SIZE` is
-/// 256 GiB, so a caller that accepts unbounded input from the network should
-/// bound the length itself *before* calling; this crate cannot do that on the
-/// caller's behalf. Decryption never returns a partial result, so a
+/// [`decrypt`] allocates a buffer the size of the ciphertext, fallibly: if the
+/// allocator refuses, it returns [`Error::AllocationFailed`] rather than aborting
+/// the process. [`MAX_MSG_SIZE`] (256 GiB) is public for the other half of this —
+/// a caller that accepts unbounded input from the network should bound the length
+/// itself *before* calling, because this crate cannot do that on the caller's
+/// behalf, and a request the kernel *accepts* can still be OOM-killed when the
+/// buffer is written to. Decryption never returns a partial result, so a
 /// length-bounded call cannot leak a prefix.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Error {
     /// The plaintext (on encryption) or ciphertext (on decryption) is longer
-    /// than `MAX_MSG_SIZE` (256 GiB).
+    /// than [`MAX_MSG_SIZE`] (256 GiB).
     MessageTooLong,
-    /// The associated data is longer than `MAX_MSG_SIZE` (256 GiB).
+    /// The associated data is longer than [`MAX_MSG_SIZE`] (256 GiB).
     AadTooLong,
+    /// The buffer for the recovered plaintext could not be allocated.
+    ///
+    /// Distinct from [`AuthenticationFailed`](Error::AuthenticationFailed) because
+    /// it is about this process's memory, not about the key or the message: a
+    /// caller may retry a smaller message, but must not retry this one forever.
+    AllocationFailed,
     /// Tag verification failed.  The plaintext is never returned in this case.
     AuthenticationFailed,
 }
@@ -297,6 +314,7 @@ impl core::fmt::Display for Error {
         let msg = match self {
             Error::MessageTooLong => "message exceeds the maximum supported length",
             Error::AadTooLong => "associated data exceeds the maximum supported length",
+            Error::AllocationFailed => "the plaintext buffer could not be allocated",
             Error::AuthenticationFailed => "authentication failed",
         };
         f.write_str(msg)
@@ -427,6 +445,101 @@ impl core::fmt::Debug for Plaintext {
     }
 }
 
+// ── Key ───────────────────────────────────────────────────────────────
+
+/// A 256-bit key that zeroizes on drop.
+///
+/// [`random::generate_key`] returns this rather than a bare `[u8; KEY_LEN]`, so a
+/// key this crate generated is wiped when it goes out of scope instead of being
+/// left in freed stack or heap memory for the next allocation to read.  Every API
+/// here takes `&[u8; KEY_LEN]` and this derefs to it, so call sites are unchanged:
+///
+/// ```ignore
+/// let key = random::generate_key()?;
+/// let (ct, tag) = encrypt(&key, &nonce, &aad, msg)?;
+/// ```
+///
+/// `Debug` prints no key bytes and no fingerprint of them.  The wipe is the same
+/// volatile-store wipe the rest of the crate uses, with the same limits — see
+/// "What is not defended against" in the README: it does not cover a page that was
+/// already swapped out, a core dump, or a cold boot.
+///
+/// A caller that already holds key bytes can wrap them with [`Key::from_bytes`];
+/// that *copies*, so the array passed in is still the caller's to wipe.
+///
+/// `#[repr(transparent)]` over the array: the wrapper is an API convenience, and
+/// its layout is the array's (the test that reads the storage back after a drop
+/// relies on that, and it is worth being sure of rather than assuming).
+#[repr(transparent)]
+pub struct Key([u8; KEY_LEN]);
+
+impl Key {
+    /// Wrap existing key bytes.
+    ///
+    /// The value is copied into the returned `Key`, which wipes its copy on drop.
+    /// The array passed in is untouched and remains the caller's responsibility.
+    #[inline]
+    pub const fn from_bytes(bytes: [u8; KEY_LEN]) -> Self {
+        Key(bytes)
+    }
+
+    /// Borrow the key bytes.
+    #[inline]
+    pub fn as_bytes(&self) -> &[u8; KEY_LEN] {
+        &self.0
+    }
+
+    /// Mutable access, crate-internal: filling a `Key` from the OS CSPRNG is the
+    /// only thing that may write one after construction, and a caller that could
+    /// mutate a `Key` in place would be able to defeat the wipe-on-drop contract.
+    ///
+    /// Gated on `rng` because that is the only caller: without the feature nothing
+    /// generates a key, and an ungated method would be dead code under
+    /// `--no-default-features`, which CI builds with `-D warnings`.
+    #[cfg(feature = "rng")]
+    #[inline]
+    fn as_bytes_mut(&mut self) -> &mut [u8; KEY_LEN] {
+        &mut self.0
+    }
+}
+
+impl core::ops::Deref for Key {
+    type Target = [u8; KEY_LEN];
+    #[inline]
+    fn deref(&self) -> &[u8; KEY_LEN] {
+        &self.0
+    }
+}
+
+impl AsRef<[u8; KEY_LEN]> for Key {
+    #[inline]
+    fn as_ref(&self) -> &[u8; KEY_LEN] {
+        &self.0
+    }
+}
+
+impl Zeroize for Key {
+    fn zeroize(&mut self) {
+        zeroize_array(&mut self.0);
+    }
+}
+
+impl zeroize::ZeroizeOnDrop for Key {}
+
+impl Drop for Key {
+    fn drop(&mut self) {
+        self.zeroize();
+    }
+}
+
+impl core::fmt::Debug for Key {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        // No bytes *and* no fingerprint of them: a prefix or a hash of a key is
+        // still key material in a log.
+        f.write_str("Key([REDACTED; 32])")
+    }
+}
+
 // ── Randomness (optional) ─────────────────────────────────────────────
 
 /// OS-backed random key and nonce generation (requires the `rng` feature).
@@ -495,7 +608,7 @@ impl core::fmt::Debug for Plaintext {
 pub mod random {
     pub use getrandom::Error;
 
-    use crate::{KEY_LEN, NONCE_LEN};
+    use crate::{Key, KEY_LEN, NONCE_LEN};
 
     /// Fill `dest` with bytes from the operating system's CSPRNG.
     ///
@@ -514,13 +627,15 @@ pub mod random {
 
     /// Generate a fresh 256-bit key from the OS CSPRNG.
     ///
-    /// The returned array is **not** zeroized on drop: it is a plain
-    /// `[u8; 32]`, like every other key in this API, so that it can be used
-    /// without unwrapping.  Treat it as secret for its whole lifetime and wipe
-    /// it when it is no longer needed.
-    pub fn generate_key() -> Result<[u8; KEY_LEN], Error> {
-        let mut key = [0u8; KEY_LEN];
-        fill(&mut key)?;
+    /// The key comes back in a [`Key`], which zeroizes it on drop.  A generated key
+    /// is the one secret in this API with no other copy anywhere, so it is the one
+    /// case where bytes left behind afterwards are purely this crate's doing.
+    ///
+    /// A caller that needs a bare array can copy one out of it (`*key`), but then
+    /// that copy is the caller's to wipe.
+    pub fn generate_key() -> Result<Key, Error> {
+        let mut key = Key::from_bytes([0u8; KEY_LEN]);
+        fill(key.as_bytes_mut())?;
         Ok(key)
     }
 
@@ -793,6 +908,27 @@ fn check_lengths(msg_len: usize, aad_len: usize) -> Result<(), Error> {
     Ok(())
 }
 
+/// Allocate the buffer the recovered plaintext is written into.
+///
+/// Fallible on purpose.  `vec![0u8; n]` calls the allocation-error handler, which
+/// aborts the process, and `n` here is the caller's ciphertext length — so an
+/// unlucky size turns a request into a process kill instead of an error the caller
+/// can report and move past.
+///
+/// This is not a substitute for bounding the input: a request the kernel *accepts*
+/// can still be OOM-killed when the buffer is written to, and that half belongs to
+/// the deployment (a cgroup limit, an accept-size policy).  [`MAX_MSG_SIZE`] is
+/// public for the caller-side check.  What this removes is the case where the
+/// allocator says no and the process dies for it.
+fn alloc_plaintext(len: usize) -> Result<Vec<u8>, Error> {
+    let mut buf = Vec::new();
+    buf.try_reserve_exact(len)
+        .map_err(|_| Error::AllocationFailed)?;
+    // Cannot reallocate: `len` bytes are already reserved.
+    buf.resize(len, 0u8);
+    Ok(buf)
+}
+
 /// Encrypt `plaintext` under `(key, nonce, aad)`, returning `(ciphertext, tag)`.
 ///
 /// SIV construction: the tag is computed first, and the per-message encryption
@@ -855,7 +991,7 @@ pub fn encrypt_in_place_detached(
 //
 // SIV decrypts before it verifies, so "does this ciphertext authenticate?" is a
 // branch on secret-derived data, and it cannot be removed: that one bit is what
-// the mode is designed to reveal. Two properties depend on its living *here*, in
+// the mode is designed to reveal. Three properties depend on its living *here*, in
 // a function of its own, `#[inline(never)]`, shared by both decrypt entry points:
 //
 //  * `tests/ctgrind.supp` suppresses this function and nothing else, so a
@@ -864,23 +1000,26 @@ pub fn encrypt_in_place_detached(
 //    suppressed whole and which therefore hid one -- is reported by memcheck and
 //    fails `tools/ctgrind.sh`. That script plants exactly such a branch in a
 //    throwaway copy and requires it to be caught before it reports a clean run.
-//  * the decision returns a `Result` rather than a `bool` so the callers do not
-//    branch on it a second time, outside this function: `?` branches on the
-//    discriminant, which each arm writes as a constant, so neither entry point
-//    branches on secret-derived data itself.
-//
-// The rejection path wipes the buffer here rather than at the call sites: on
-// rejection the caller must never see unverified plaintext, and both entry
-// points need exactly that.
+//  * the outcome is written through `out`, which the *caller* initialises to a
+//    rejection before the call, rather than returned by value. A returned value
+//    can be lost by never making the call: `tools/fi_instruction.sh` measured six
+//    single-byte faults in `decrypt` that skipped the call and accepted a forgery,
+//    because the ABI then hands back whatever the return slot happened to hold. A
+//    check whose outcome can be dropped by not running it is not a check. This
+//    ordering is also what makes the `hardened` gates reachable at all: one
+//    skipped call used to bypass both of them at once.
+//  * the rejection path wipes the buffer here, and the caller wipes again on the
+//    rejection it starts with -- because that path is exactly the one a skipped
+//    call leaves behind, and the unverified plaintext must not survive it.
 #[cfg(not(feature = "hardened"))]
 #[inline(never)]
-fn accept_or_reject(auth_ok: subtle::Choice, buffer: &mut [u8]) -> Result<(), Error> {
+fn accept_or_reject(auth_ok: subtle::Choice, buffer: &mut [u8], out: &mut Result<(), Error>) {
     if bool::from(auth_ok) {
-        Ok(())
+        *out = Ok(());
     } else {
         // Per spec, MUST NOT expose unverified plaintext.
         zeroize_slice(buffer);
-        Err(Error::AuthenticationFailed)
+        *out = Err(Error::AuthenticationFailed);
     }
 }
 
@@ -899,16 +1038,19 @@ fn accept_or_reject(
     gate0: subtle::Choice,
     gate1: subtle::Choice,
     buffer: &mut [u8],
-) -> Result<(), Error> {
+    out: &mut Result<(), Error>,
+) {
     if !bool::from(gate0) {
         zeroize_slice(buffer);
-        return Err(Error::AuthenticationFailed);
+        *out = Err(Error::AuthenticationFailed);
+        return;
     }
     if !bool::from(gate1) {
         zeroize_slice(buffer);
-        return Err(Error::AuthenticationFailed);
+        *out = Err(Error::AuthenticationFailed);
+        return;
     }
-    Ok(())
+    *out = Ok(());
 }
 
 /// Decrypt `ciphertext`, verifying the tag.
@@ -929,15 +1071,45 @@ pub fn decrypt(
     let (mut mac_key, mut enc_seed) = derive_material(key, nonce);
     let (mut enc_key, mut enc_nonce) = derive_enc(&enc_seed, tag);
 
-    let mut plaintext = vec![0u8; ciphertext.len()];
+    let mut plaintext = alloc_plaintext(ciphertext.len())?;
     chacha20_keystream(&enc_key, 0, &enc_nonce, ciphertext, &mut plaintext);
 
     let mut computed_tag = derive_tag(&mac_key, key, nonce, aad, &plaintext);
     #[cfg(feature = "hardened")]
-    let gates = (
-        computed_tag.ct_eq(tag) & tag.ct_eq(&computed_tag),
-        computed_tag.ct_eq(tag) & tag.ct_eq(&computed_tag),
-    );
+    let gates = {
+        // Two *recomputations*, not one result read twice.  The two gate
+        // expressions are identical, and an optimizer is entitled to
+        // common-subexpression-eliminate them into a single comparison — at which
+        // point one fault would carry both gates and the second gate would have
+        // stopped being a second gate.
+        //
+        // The volatile re-read is what forbids that merge, and it is here rather
+        // than `black_box` on purpose: whether `black_box` defeats CSE is a
+        // property of the optimizer's choices, not of the program, and this
+        // hardening must not rest on the difference between two compilers.  A
+        // volatile access is one the language requires to happen.
+        //
+        // Cost: two 65-byte copies and two wipes, only under this feature.
+        let first = computed_tag.ct_eq(tag) & tag.ct_eq(&computed_tag);
+
+        // SAFETY: `computed_tag` is a live local, initialised and aligned for a
+        // `[u8; TAG_LEN]` read for the whole statement; nothing writes through the
+        // pointer, and a volatile read of live memory has no effect beyond being
+        // the read itself.
+        let mut computed_tag_copy = unsafe { core::ptr::read_volatile(&computed_tag) };
+        // SAFETY: as above, for the caller's reference: `tag` is a live `&[u8;
+        // TAG_LEN]` and this only reads through it, so aliasing rules hold.
+        let mut tag_copy = unsafe { core::ptr::read_volatile(tag) };
+        let second = computed_tag_copy.ct_eq(&tag_copy) & tag_copy.ct_eq(&computed_tag_copy);
+
+        // The copies are secret-derived (they are the computed MAC), so they are
+        // wiped like every other copy in this function rather than left in the
+        // frame of the `hardened` build.
+        zeroize_array(&mut computed_tag_copy);
+        zeroize_array(&mut tag_copy);
+
+        (first, second)
+    };
     #[cfg(not(feature = "hardened"))]
     let auth_ok = computed_tag.ct_eq(tag);
 
@@ -950,13 +1122,22 @@ pub fn decrypt(
     zeroize_array(&mut enc_nonce);
     zeroize_array(&mut computed_tag);
 
+    // A rejection until the decision proves otherwise, written *before* the call:
+    // a fault that skips the call leaves this rejection standing instead of
+    // accepting. See the comment on `accept_or_reject`.
+    let mut decision: Result<(), Error> = Err(Error::AuthenticationFailed);
     #[cfg(not(feature = "hardened"))]
-    accept_or_reject(auth_ok, &mut plaintext)?;
-
+    accept_or_reject(auth_ok, &mut plaintext, &mut decision);
     #[cfg(feature = "hardened")]
-    accept_or_reject(gates.0, gates.1, &mut plaintext)?;
+    accept_or_reject(gates.0, gates.1, &mut plaintext, &mut decision);
 
-    Ok(Plaintext(plaintext))
+    if decision.is_ok() {
+        return Ok(Plaintext(plaintext));
+    }
+    // Reached on rejection, and on a call that never happened -- in which case the
+    // helper never wiped, so the wipe is here, where both paths arrive.
+    zeroize_slice(&mut plaintext);
+    Err(Error::AuthenticationFailed)
 }
 
 /// Decrypt `buffer` in place, verifying the detached tag.
@@ -979,10 +1160,30 @@ pub fn decrypt_in_place_detached(
 
     let mut computed_tag = derive_tag(&mac_key, key, nonce, aad, buffer);
     #[cfg(feature = "hardened")]
-    let gates = (
-        computed_tag.ct_eq(tag) & tag.ct_eq(&computed_tag),
-        computed_tag.ct_eq(tag) & tag.ct_eq(&computed_tag),
-    );
+    let gates = {
+        // See the matching block in `decrypt`: identical reasoning, and the same
+        // volatile re-read, so both entry points get a second gate that is a
+        // recomputation rather than a copy of the first.
+        let first = computed_tag.ct_eq(tag) & tag.ct_eq(&computed_tag);
+
+        // SAFETY: `computed_tag` is a live local, initialised and aligned for a
+        // `[u8; TAG_LEN]` read for the whole statement; nothing writes through the
+        // pointer, and a volatile read of live memory has no effect beyond being
+        // the read itself.
+        let mut computed_tag_copy = unsafe { core::ptr::read_volatile(&computed_tag) };
+        // SAFETY: as above, for the caller's reference: `tag` is a live `&[u8;
+        // TAG_LEN]` and this only reads through it, so aliasing rules hold.
+        let mut tag_copy = unsafe { core::ptr::read_volatile(tag) };
+        let second = computed_tag_copy.ct_eq(&tag_copy) & tag_copy.ct_eq(&computed_tag_copy);
+
+        // The copies are secret-derived (they are the computed MAC), so they are
+        // wiped like every other copy in this function rather than left in the
+        // frame of the `hardened` build.
+        zeroize_array(&mut computed_tag_copy);
+        zeroize_array(&mut tag_copy);
+
+        (first, second)
+    };
     #[cfg(not(feature = "hardened"))]
     let auth_ok = computed_tag.ct_eq(tag);
 
@@ -995,13 +1196,21 @@ pub fn decrypt_in_place_detached(
     zeroize_array(&mut enc_nonce);
     zeroize_array(&mut computed_tag);
 
+    // As in `decrypt`: the rejection is written first, so a fault that skips the
+    // call cannot accept.
+    let mut decision: Result<(), Error> = Err(Error::AuthenticationFailed);
     #[cfg(not(feature = "hardened"))]
-    accept_or_reject(auth_ok, buffer)?;
-
+    accept_or_reject(auth_ok, buffer, &mut decision);
     #[cfg(feature = "hardened")]
-    accept_or_reject(gates.0, gates.1, buffer)?;
+    accept_or_reject(gates.0, gates.1, buffer, &mut decision);
 
-    Ok(())
+    if decision.is_ok() {
+        return Ok(());
+    }
+    // Reached on rejection, and on a call that never happened -- in which case the
+    // caller's buffer still holds the unverified plaintext and is wiped here.
+    zeroize_slice(buffer);
+    Err(Error::AuthenticationFailed)
 }
 
 // ── ChaCha20 Primitive ────────────────────────────────────────────────
@@ -2734,14 +2943,58 @@ mod tests {
             "two consecutive nonces were identical -- entropy source broken"
         );
         assert_ne!(
-            key,
-            crate::random::generate_key().unwrap(),
+            key.as_bytes(),
+            crate::random::generate_key().unwrap().as_bytes(),
             "two consecutive keys were identical -- entropy source broken"
         );
 
         // A zero-length request must succeed rather than error.
         crate::random::fill(&mut []).expect("empty fill must succeed");
         crate::random::fill(&mut nonce.clone()).expect("plain fill must succeed");
+    }
+
+    /// A generated key wipes itself on drop, and `Debug` never prints it.
+    ///
+    /// The wipe is read back out of the value's storage *after* dropping it in
+    /// place: wiping only when the allocation is reused, or only the bytes a
+    /// reference covers, is the failure mode this has to distinguish, and it cannot
+    /// be seen from the outside any other way.  `MaybeUninit` + `drop_in_place` is
+    /// what makes reading afterwards legal — the storage is ours, the value is gone,
+    /// and every byte is a `u8`.
+    #[cfg(feature = "rng")]
+    #[test]
+    fn test_key_zeroizes_on_drop_and_hides_itself() {
+        let key = crate::random::generate_key().expect("OS entropy source unavailable");
+        assert!(
+            key.as_bytes().iter().any(|&b| b != 0),
+            "an all-zero key from the OS CSPRNG means the entropy source is broken"
+        );
+        assert_eq!(
+            alloc::format!("{key:?}"),
+            "Key([REDACTED; 32])",
+            "`Debug` must print nothing derived from the key -- not a prefix, not a hash"
+        );
+
+        let mut slot = core::mem::MaybeUninit::<Key>::uninit();
+        slot.write(key);
+        // SAFETY: `slot` was just initialised, and `Key` is `#[repr(transparent)]`
+        // over `[u8; KEY_LEN]`, so its first `KEY_LEN` bytes are the key bytes and
+        // they are initialised.
+        let before = unsafe { core::ptr::read(slot.as_ptr() as *const [u8; KEY_LEN]) };
+        assert!(
+            before.iter().any(|&b| b != 0),
+            "the key was already zero before it was dropped"
+        );
+
+        // SAFETY: `slot` is initialised, so this is the drop the scope would run.
+        unsafe { core::ptr::drop_in_place(slot.as_mut_ptr()) };
+
+        // SAFETY: the drop wrote `KEY_LEN` initialised bytes (`zeroize_array`), `u8`
+        // has no validity requirement beyond being initialised, and the storage is
+        // still `slot`'s, so reading them back is reading initialised memory. The
+        // value is never used as a `Key` again.
+        let after = unsafe { core::ptr::read(slot.as_ptr() as *const [u8; KEY_LEN]) };
+        assert_eq!(after, [0u8; KEY_LEN], "Key::drop left key bytes behind");
     }
 
     /// `random::fill` must overwrite the whole buffer, not a prefix.
@@ -3083,6 +3336,32 @@ mod tests {
             "the maximum exceeds usize here"
         );
         assert!(check_lengths(usize::MAX, usize::MAX).is_ok());
+    }
+
+    /// The plaintext buffer is allocated fallibly, so a length the allocator
+    /// refuses is an error rather than a process abort.
+    ///
+    /// `usize::MAX` is the length used because it is *guaranteed* to be refused
+    /// (the reserve fails on capacity overflow without asking the allocator), so
+    /// this test costs no memory and cannot become flaky under pressure.  What it
+    /// pins is the property, not the number: a `vec![0u8; n]` here would abort the
+    /// test process instead of failing the assertion, which is exactly the
+    /// difference between an error a service can return and one it cannot.
+    #[test]
+    fn test_plaintext_allocation_is_fallible() {
+        assert_eq!(
+            alloc_plaintext(usize::MAX),
+            Err(Error::AllocationFailed),
+            "an impossible allocation must come back as an error, not abort"
+        );
+
+        assert_eq!(alloc_plaintext(0).unwrap().len(), 0);
+        let buf = alloc_plaintext(1024).unwrap();
+        assert_eq!(buf.len(), 1024, "the buffer must be `len` bytes long");
+        assert!(
+            buf.iter().all(|&b| b == 0),
+            "the buffer must start zeroed: the keystream is XORed into it"
+        );
     }
 
     /// cover those separately).
