@@ -1,0 +1,21 @@
+--- src/lib.rs
++++ replace & with ^ in decrypt
+@@ -1555,17 +1555,17 @@
+         // SAFETY: `computed_tag` is a live local, initialised and aligned for a
+         // `[u8; TAG_LEN]` read for the whole statement; nothing writes through the
+         // pointer, and a volatile read of live memory has no effect beyond being
+         // the read itself.
+         let mut computed_tag_copy = unsafe { core::ptr::read_volatile(&computed_tag) };
+         // SAFETY: as above, for the caller's reference: `tag` is a live `&[u8;
+         // TAG_LEN]` and this only reads through it, so aliasing rules hold.
+         let mut tag_copy = unsafe { core::ptr::read_volatile(tag) };
+-        let gate_pair = computed_tag_copy.ct_eq(&tag_copy) & tag_copy.ct_eq(&computed_tag_copy);
++        let gate_pair = computed_tag_copy.ct_eq(&tag_copy) ^ /* ~ changed by cargo-mutants ~ */ tag_copy.ct_eq(&computed_tag_copy);
+         // The independent recomputation joins the second gate: it must match the
+         // stored value *and* the received tag, so a fault that corrupted the stored
+         // value (or a silently rewritten constant) is caught here even though both
+         // gate expressions read the same memory.
+         #[cfg(feature = "dual-mac")]
+         let second = gate_pair & recomputed_tag.ct_eq(&computed_tag) & recomputed_tag.ct_eq(tag);
+         #[cfg(not(feature = "dual-mac"))]
+         let second = gate_pair;

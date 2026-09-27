@@ -326,12 +326,14 @@ jobs:
       # property that differs only when a fault makes them disagree -- and that case
       # is a row of the fault campaign above, not a gap in the tests.
       #
-      # One run, with `--features hardened`, deliberately: `cargo mutants` does not
-      # evaluate `cfg`, so a mutant inside a cfg'd-out block is built, tested, passes,
-      # and is reported as uncaught. The hardened build's decision contains every
-      # mutatable line the default build's has, plus the second gate, so this run
-      # covers both -- and running it again without the feature would add only a
-      # mutant of the cfg'd-out second gate, which reads as a gap that is not one.
+      # One run, with the feature set that compiles the *most* of the decision, because
+      # `cargo mutants` does not evaluate `cfg`: a mutant inside a cfg'd-out block is
+      # built, tested, passes, and is reported as uncaught. `hardened,dual-mac` is that
+      # set -- the second gate and the independent recomputation both contain lines the
+      # default build never compiles -- and a run without them reports their mutants as
+      # gaps that are not gaps. This was measured both ways: with `hardened` alone, four
+      # `&` -> `^` mutants on the `dual-mac` line came back MISSED; with the pair, 13 of
+      # 15 are caught and the rest are unviable.
       # The filter names the decision function explicitly: it used to be
       # `decrypt|passed_gates`, and when the decision moved into `accept_or_reject`
       # that filter kept matching the two entry points and silently stopped covering
@@ -346,8 +348,9 @@ jobs:
       - name: mutation run over the decision
         run: |
           set -euo pipefail
-          cargo mutants --features hardened -f src/lib.rs -F 'decrypt|accept_or_reject' \
-            -E 'replace & with \|' -- --test decision --test security
+          cargo mutants --features hardened,dual-mac -f src/lib.rs \
+            -F 'decrypt|accept_or_reject' -E 'replace & with \|' \
+            -- --test decision --test security
 
       - name: plant bugs and require the checks to fail
         run: ./tools/mutation_check.sh

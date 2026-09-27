@@ -1,0 +1,21 @@
+--- src/lib.rs
++++ replace & with ^ in decrypt_in_place_detached
+@@ -1705,17 +1705,17 @@
+         // TAG_LEN]` and this only reads through it, so aliasing rules hold.
+         let mut tag_copy = unsafe { core::ptr::read_volatile(tag) };
+         let gate_pair = computed_tag_copy.ct_eq(&tag_copy) & tag_copy.ct_eq(&computed_tag_copy);
+         // The independent recomputation joins the second gate: it must match the
+         // stored value *and* the received tag, so a fault that corrupted the stored
+         // value (or a silently rewritten constant) is caught here even though both
+         // gate expressions read the same memory.
+         #[cfg(feature = "dual-mac")]
+-        let second = gate_pair & recomputed_tag.ct_eq(&computed_tag) & recomputed_tag.ct_eq(tag);
++        let second = gate_pair ^ /* ~ changed by cargo-mutants ~ */ recomputed_tag.ct_eq(&computed_tag) & recomputed_tag.ct_eq(tag);
+         #[cfg(not(feature = "dual-mac"))]
+         let second = gate_pair;
+ 
+         // The copies are secret-derived (they are the computed MAC), so they are
+         // wiped like every other copy in this function rather than left in the
+         // frame of the `hardened` build.
+         zeroize_array(&mut computed_tag_copy);
+         zeroize_array(&mut tag_copy);

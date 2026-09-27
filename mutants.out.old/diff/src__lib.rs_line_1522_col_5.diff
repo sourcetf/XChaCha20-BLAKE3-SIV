@@ -1,0 +1,120 @@
+--- src/lib.rs
++++ replace decrypt -> Result<Plaintext, Error> with Ok(Default::default())
+@@ -1514,116 +1514,17 @@
+ #[must_use = "the returned plaintext must be handled"]
+ pub fn decrypt(
+     key: &[u8; 32],
+     nonce: &[u8; NONCE_LEN],
+     aad: &[u8],
+     ciphertext: &[u8],
+     tag: &[u8; TAG_LEN],
+ ) -> Result<Plaintext, Error> {
+-    check_lengths(ciphertext.len(), aad.len())?;
+-
+-    let (mut mac_key, mut enc_seed) = derive_material(key, nonce);
+-    let (mut enc_key, mut enc_nonce) = derive_enc(&enc_seed, tag);
+-
+-    let mut plaintext = alloc_zeroed(ciphertext.len())?;
+-    chacha20_keystream(&enc_key, 0, &enc_nonce, ciphertext, &mut plaintext);
+-
+-    let mut computed_tag = derive_tag(&mac_key, key, nonce, aad, &plaintext);
+-    // `ultra`/`dual-mac`: recompute the tag *independently* and require the
+-    // recomputation to agree with both the stored value and the received tag. The two
+-    // gates above compare the same two values, so a fault that sets the stored tag to
+-    // the received one satisfies both at once; this is the only software measure that
+-    // disagrees with such a fault. Measured cost: +21..40% on decryption.
+-    #[cfg(feature = "dual-mac")]
+-    let mut recomputed_tag = derive_tag(&mac_key, key, nonce, aad, &plaintext);
+-    #[cfg(feature = "hardened")]
+-    let gates = {
+-        // Two *recomputations*, not one result read twice.  The two gate
+-        // expressions are identical, and an optimizer is entitled to
+-        // common-subexpression-eliminate them into a single comparison — at which
+-        // point one fault would carry both gates and the second gate would have
+-        // stopped being a second gate.
+-        //
+-        // The volatile re-read is what forbids that merge, and it is here rather
+-        // than `black_box` on purpose: whether `black_box` defeats CSE is a
+-        // property of the optimizer's choices, not of the program, and this
+-        // hardening must not rest on the difference between two compilers.  A
+-        // volatile access is one the language requires to happen.
+-        //
+-        // Cost: two 65-byte copies and two wipes, only under this feature.
+-        let first = computed_tag.ct_eq(tag) & tag.ct_eq(&computed_tag);
+-
+-        // SAFETY: `computed_tag` is a live local, initialised and aligned for a
+-        // `[u8; TAG_LEN]` read for the whole statement; nothing writes through the
+-        // pointer, and a volatile read of live memory has no effect beyond being
+-        // the read itself.
+-        let mut computed_tag_copy = unsafe { core::ptr::read_volatile(&computed_tag) };
+-        // SAFETY: as above, for the caller's reference: `tag` is a live `&[u8;
+-        // TAG_LEN]` and this only reads through it, so aliasing rules hold.
+-        let mut tag_copy = unsafe { core::ptr::read_volatile(tag) };
+-        let gate_pair = computed_tag_copy.ct_eq(&tag_copy) & tag_copy.ct_eq(&computed_tag_copy);
+-        // The independent recomputation joins the second gate: it must match the
+-        // stored value *and* the received tag, so a fault that corrupted the stored
+-        // value (or a silently rewritten constant) is caught here even though both
+-        // gate expressions read the same memory.
+-        #[cfg(feature = "dual-mac")]
+-        let second = gate_pair & recomputed_tag.ct_eq(&computed_tag) & recomputed_tag.ct_eq(tag);
+-        #[cfg(not(feature = "dual-mac"))]
+-        let second = gate_pair;
+-
+-        // The copies are secret-derived (they are the computed MAC), so they are
+-        // wiped like every other copy in this function rather than left in the
+-        // frame of the `hardened` build.
+-        zeroize_array(&mut computed_tag_copy);
+-        zeroize_array(&mut tag_copy);
+-
+-        (first, second)
+-    };
+-    #[cfg(not(feature = "hardened"))]
+-    let auth_ok = computed_tag.ct_eq(tag);
+-
+-    zeroize_array(&mut mac_key);
+-    zeroize_array(&mut enc_seed);
+-    zeroize_array(&mut enc_key);
+-    // The per-message ChaCha20 nonce is secret-derived too (it comes out of
+-    // the same XOF call as `enc_key`), so it is wiped with the rest rather
+-    // than left on the stack.
+-    zeroize_array(&mut enc_nonce);
+-    zeroize_array(&mut computed_tag);
+-    // The independent recomputation is the computed MAC too, so it is wiped like the
+-    // rest -- `tests/ultra.rs` asserts this, which is how the omission was found.
+-    #[cfg(feature = "dual-mac")]
+-    zeroize_array(&mut recomputed_tag);
+-
+-    // Two rejections until the decision proves otherwise, written *before* the call:
+-    // a fault that skips the call leaves both standing, and a fault that corrupts one
+-    // outcome leaves the other -- so accepting would take two faults. See the comment
+-    // on `accept_or_reject`.
+-    let mut decision0: Result<(), Error> = Err(Error::AuthenticationFailed);
+-    let mut decision1: Result<(), Error> = Err(Error::AuthenticationFailed);
+-    #[cfg(not(feature = "hardened"))]
+-    accept_or_reject(auth_ok, auth_ok, &mut decision0, &mut decision1);
+-    #[cfg(feature = "hardened")]
+-    accept_or_reject(gates.0, gates.1, &mut decision0, &mut decision1);
+-
+-    // Two checks in series, each jumping *to the rejection*: accepting is the
+-    // fall-through of both, so no single corrupted branch accepts -- whichever one is
+-    // corrupted, the other still rejects. A corrupted jump *target* can skip both,
+-    // and that residual is measured (`tools/fi_instruction.sh --bits`) and pinned in
+-    // the README's table rather than claimed away.
+-    if decision0.is_err() {
+-        zeroize_slice(&mut plaintext);
+-        return Err(Error::AuthenticationFailed);
+-    }
+-    if decision1.is_err() {
+-        zeroize_slice(&mut plaintext);
+-        return Err(Error::AuthenticationFailed);
+-    }
+-    Ok(Plaintext(plaintext))
++    Ok(Default::default()) /* ~ changed by cargo-mutants ~ */
+ }
+ 
+ /// [`decrypt`] with an allocation bound that is checked **before** the buffer is
+ /// allocated.
+ ///
+ /// `max_len` is the caller's policy, not the format's: a ciphertext longer than it
+ /// is refused with [`Error::MessageTooLong`] and nothing is allocated. This exists
+ /// because [`MAX_MSG_SIZE`] (256 GiB) is a format limit and does not bound a remote

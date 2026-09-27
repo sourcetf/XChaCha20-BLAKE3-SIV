@@ -248,11 +248,11 @@ excluded `&` → `^`, and since `x ^ x == 0` that mutant makes the gate reject
 everything, which the decision test kills — so the exclusion discarded killable
 mutants and the reason given for it was wrong for half of them. The case where a
 gate's two comparisons *disagree* cannot be reached by any fault-free test, which is
-why it is a row of the fault campaign instead. The run uses `--features hardened` on
-purpose — the hardened decision contains every mutatable line the default one has, and
-`cargo mutants` does not evaluate `cfg`, so a second run without the feature would
-report the cfg'd-out second gate as an uncaught mutant rather than as code the build
-does not contain.
+why it is a row of the fault campaign instead. The run uses `--features hardened,dual-mac`
+on purpose: it is the set that compiles the *most* of the decision, and `cargo mutants`
+does not evaluate `cfg`, so a mutant of a cfg'd-out line is built, tested, passes, and
+reported as uncaught — measured: four such mutants with `hardened` alone, none with the
+pair (13 of 15 caught, 2 unviable).
 
 The same question at the level of the *compiled* code: `tools/fi_instruction.sh` damages
 one byte — or one bit — of the decision's machine code at a time and re-runs the decision
