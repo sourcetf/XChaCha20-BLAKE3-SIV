@@ -149,21 +149,27 @@ first = "        let first = computed_tag.ct_eq(tag) & tag.ct_eq(&computed_tag);
 assert s.count(first) == 2, f"first-gate expressions: {s.count(first)}"
 s = s.replace(first, "        let first = subtle::Choice::from(1u8);", 1)
 
-second = """        let mut computed_tag_copy = unsafe { core::ptr::read_volatile(&computed_tag) };
-        // SAFETY: as above, for the caller's reference: `tag` is a live `&[u8;
-        // TAG_LEN]` and this only reads through it, so aliasing rules hold.
-        let mut tag_copy = unsafe { core::ptr::read_volatile(tag) };
-        let second = computed_tag_copy.ct_eq(&tag_copy) & tag_copy.ct_eq(&computed_tag_copy);
-
-        // The copies are secret-derived (they are the computed MAC), so they are
-        // wiped like every other copy in this function rather than left in the
-        // frame of the `hardened` build.
-        zeroize_array(&mut computed_tag_copy);
-        zeroize_array(&mut tag_copy);
+# The second gate, whose text moved when the two cfg arms appeared (see the comment in
+# src/lib.rs): the patch replaces the shared binding's *guard* so the two `if`s read one
+# value, which is the fault this row models.
+second = """        let second = gate_pair;
 """
 assert s.count(second) == 2, f"second gates: {s.count(second)}"
 s = s.replace(second, "        let second = first;\n", 1)
 open(p, "w").write(s)
+PY
+}
+
+# The attack `dual-mac` exists for: make the stored tag equal the received one. Every
+# gate then compares two equal values and is satisfied -- unless a second, independent
+# computation disagrees, which is what this patch leaves in place.
+patch_recomputed_tag_ignored() {
+  python3 - "$1/src/lib.rs" <<'PY'
+import sys
+p = sys.argv[1]; s = open(p).read()
+old = "    let mut computed_tag = derive_tag(&mac_key, key, nonce, aad, &plaintext);"
+assert s.count(old) == 1, f"computed_tag sites: {s.count(old)}"
+open(p, "w").write(s.replace(old, "    let mut computed_tag = *tag;", 1))
 PY
 }
 
@@ -240,6 +246,13 @@ run_row computed-tag-replaced "--features hardened"     decision fail patch_tag_
 # left implicit.
 run_row one-check-neutralised  "--features hardened"  decision pass patch_first_check_neutralised
 run_row both-checks-neutralised "--features hardened" decision fail patch_both_checks_neutralised
+
+# `dual-mac`: the same stored-tag substitution, on a build that recomputes the tag
+# independently. The recomputation disagrees with the substituted value, so the forgery
+# is *rejected* -- which is the whole return on the feature's cost, and the reason a
+# `ultra` user gets something the default build does not. (Without `dual-mac` the row
+# above shows the opposite: both builds accept it.)
+run_row dual-mac-blocks-tag-substitution "ultra" decision pass patch_recomputed_tag_ignored
 
 # Defensive, not about forgery: a skipped wipe is a defect the security test catches.
 run_row wipe-skipped        "--no-default-features"    security fail patch_wipe_skipped

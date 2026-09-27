@@ -745,8 +745,10 @@ fn derive_enc_reads_every_tag_byte() {
     }
     assert!(diff != 0);
 
-    // Keep the binding alive so CBMC cannot treat `tag` as unused.
-    tag[0] = tag[0];
+    // (`tag` is consumed by `derive_enc` below, so it needs no artificial use. An
+    // earlier revision had `tag[0] = tag[0];` here with a comment claiming it kept the
+    // binding alive; the value was already live, so it was a no-op that read as though
+    // the proof depended on it.)
 }
 
 /// A change to the associated data or to the message must change the tag, for

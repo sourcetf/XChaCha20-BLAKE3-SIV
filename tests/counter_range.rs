@@ -91,7 +91,18 @@ fn every_keystream_call_site_starts_the_counter_at_zero() {
         if code.trim_start().starts_with("fn ") || code.trim_start().starts_with("pub fn ") {
             continue;
         }
-        for f in ["chacha20_keystream(", "chacha20_apply("] {
+        // Every keystream entry point, including the raw (no-XOR) one the derivation
+        // path uses and the SIMD kernels. The list used to be the first two, so a call
+        // routed through `chacha20_keystream_raw` or `x86_simd::blocks8` would have been
+        // invisible here while the `calls >= 4` guard still passed.
+        for f in [
+            "chacha20_keystream(",
+            "chacha20_apply(",
+            "chacha20_keystream_raw(",
+            "x86_simd::blocks4(",
+            "x86_simd::blocks8(",
+            "aarch64_simd::blocks4(",
+        ] {
             let Some(i) = code.find(f) else { continue };
             calls += 1;
             // `chacha20_keystream(&key, 0, &nonce, ...)`: after the first comma the
@@ -105,10 +116,23 @@ fn every_keystream_call_site_starts_the_counter_at_zero() {
                 n + 1,
                 line.trim()
             );
+            // And the counter really is the *second*: the first argument must not be a
+            // numeric literal, which is what it would be if a signature reordering moved
+            // the counter to position 1 and this loop silently inspected the key instead.
+            let first = code[i + f.len()..].split_once(',').map_or("", |(a, _)| a);
+            let first = first.trim();
+            assert!(
+                !first.is_empty() && !first.chars().next().is_some_and(|c| c.is_ascii_digit()),
+                "src/lib.rs:{} passes `{f}` a numeric first argument, so the counter may \
+                 no longer be the second parameter and the check above is inspecting the \
+                 wrong one: {}",
+                n + 1,
+                line.trim()
+            );
         }
     }
     assert!(
-        calls >= 4,
+        calls >= 6,
         "expected the four call sites (two encrypt paths, two decrypt paths) in the \
          non-test source, found {calls}: this check is vacuous if the calls moved"
     );

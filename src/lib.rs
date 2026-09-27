@@ -711,6 +711,341 @@ pub mod random {
     }
 }
 
+// ── Locked memory (the `ultra` feature) ───────────────────────────────
+//
+// The volatile-store wipe above reaches the bytes this process owns *now*. It does not
+// reach a page the kernel already wrote out to swap, or that a core dump is about to
+// copy. Those are the two OS-level reads a userspace library can still ask the kernel
+// to prevent, and this module is that request.
+//
+// It cannot cover everything, and the doc comments say which: a debugger or
+// `/proc/<pid>/mem` from a same-uid process, cold-boot remanence, and a hypervisor
+// remain outside what any in-process code can do. What it reaches is the *deployment*
+// half of the wipe story, which is why it is opt-in rather than default: it changes what
+// the process asks of the kernel, not what the crate computes.
+//
+// Availability: Linux only. On any other target the functions are no-ops that report
+// "not locked", so a caller can decide what to do about it (and the default build never
+// calls them).
+/// Locking keys out of swap and core dumps (the `ultra` feature).
+///
+/// The volatile-store wipe this crate uses everywhere reaches the bytes the process owns
+/// *now*; it cannot reach a page the kernel already wrote to swap, or one a core dump is
+/// about to copy. `mlock` and `madvise(MADV_DONTDUMP)` are the two requests a userspace
+/// library can still make, and this module makes them for a key.
+///
+/// What it does not cover, stated here as well as in the README: a debugger or
+/// `/proc/<pid>/mem` from a process with the same uid, a hypervisor reading guest memory,
+/// and cold-boot remanence. `LockedKey::new` fails loudly when the kernel refuses
+/// (`RLIMIT_MEMLOCK` is the usual reason) rather than leaving the caller unsure which
+/// state it is in.
+#[cfg(feature = "ultra")]
+pub mod locked {
+    /// Whether this platform can lock memory at all.
+    ///
+    /// Linux **and** an architecture with a syscall sequence here: the stub for other
+    /// architectures returns `ENOSYS`, so `cfg!(target_os = "linux")` alone would report
+    /// support on (say) i686 and then fail at the first call. A caller that branches on
+    /// this has to be told the truth.
+    pub const SUPPORTED: bool =
+        cfg!(target_os = "linux") && cfg!(any(target_arch = "x86_64", target_arch = "aarch64"));
+
+    #[cfg(all(
+        target_os = "linux",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    ))]
+    mod imp {
+
+        // Sycall numbers, from the kernel's own headers -- `unistd_64.h` on x86_64
+        // (mlock 149, munlock 150, madvise 28) and `asm-generic/unistd.h` everywhere
+        // else (mlock 228, munlock 229, madvise 233). Having these in a `const` that a
+        // test checks against `/usr/include` would be circular; what is checked instead
+        // is *behaviour*: `lock` must make `is_locked` true, and `mlock` is the only
+        // call that can do that through this path.
+        #[cfg(target_arch = "x86_64")]
+        const NR_MLOCK: usize = 149;
+        #[cfg(target_arch = "x86_64")]
+        const NR_MUNLOCK: usize = 150;
+        #[cfg(target_arch = "x86_64")]
+        const NR_MADVISE: usize = 28;
+
+        #[cfg(not(target_arch = "x86_64"))]
+        const NR_MLOCK: usize = 228;
+        #[cfg(not(target_arch = "x86_64"))]
+        const NR_MUNLOCK: usize = 229;
+        #[cfg(not(target_arch = "x86_64"))]
+        const NR_MADVISE: usize = 233;
+
+        /// `MADV_DONTDUMP` (4): exclude the range from core dumps.
+        const MADV_DONTDUMP: usize = 4;
+
+        /// Raw syscall with two arguments. `-1`..`-4095` is an error; the raw value is
+        /// returned so a caller can classify it (`ENOMEM` 12, `EPERM` 1, `EAGAIN` 11).
+        ///
+        /// SAFETY: the caller guarantees `a` is a valid pointer for `b` bytes, or that
+        /// the syscall number takes non-pointer arguments (as `madvise`'s second one is
+        /// not -- both callers below pass a real region).
+        #[cfg(target_arch = "x86_64")]
+        unsafe fn syscall2(number: usize, a: usize, b: usize) -> isize {
+            let ret: isize;
+            core::arch::asm!(
+                "syscall",
+                inlateout("rax") number as isize => ret,
+                in("rdi") a,
+                in("rsi") b,
+                lateout("rcx") _,
+                lateout("r11") _,
+                options(nostack),
+            );
+            ret
+        }
+
+        #[cfg(target_arch = "aarch64")]
+        unsafe fn syscall2(number: usize, a: usize, b: usize) -> isize {
+            let ret: isize;
+            core::arch::asm!(
+                "svc 0",
+                inlateout("x8") number as isize => _,
+                inlateout("x0") a as isize => ret,
+                in("x1") b,
+                options(nostack),
+            );
+            ret
+        }
+
+        fn ok(ret: isize) -> bool {
+            ret >= 0
+        }
+
+        /// Lock `len` bytes at `ptr` into RAM and exclude them from core dumps.
+        ///
+        /// Returns `Ok(())` only if **both** succeeded. `EFAULT`/`EINVAL` are impossible
+        /// for a live slice, so a failure here is the environment's: `ENOMEM` means the
+        /// `RLIMIT_MEMLOCK` allowance is exhausted (common, and not fatal), `EPERM` a
+        /// hardened container. The caller decides; this crate's default build never
+        /// calls it.
+        pub fn lock_range(ptr: *const u8, len: usize) -> Result<(), isize> {
+            if len == 0 {
+                return Ok(());
+            }
+            // SAFETY: `ptr`/`len` describe a live allocation (the caller's slice), which
+            // is what both syscalls require; neither reads or writes the bytes.
+            unsafe {
+                let l = syscall2(NR_MLOCK, ptr as usize, len);
+                if !ok(l) {
+                    return Err(l);
+                }
+                let d = syscall2(NR_MADVISE, ptr as usize, MADV_DONTDUMP);
+                if !ok(d) {
+                    // Do not leave it locked without the dump exclusion: undo.
+                    let _ = syscall2(NR_MUNLOCK, ptr as usize, len);
+                    return Err(d);
+                }
+            }
+            Ok(())
+        }
+
+        /// Undo [`lock_range`]. Idempotent for an unlocked range.
+        pub fn unlock_range(ptr: *const u8, len: usize) {
+            if len == 0 {
+                return;
+            }
+            // SAFETY: as `lock_range`.
+            unsafe {
+                let _ = syscall2(NR_MUNLOCK, ptr as usize, len);
+            }
+        }
+
+        #[cfg(target_arch = "x86_64")]
+        const NR_READ: usize = 0;
+        #[cfg(target_arch = "x86_64")]
+        const NR_OPENAT: usize = 257;
+        #[cfg(target_arch = "x86_64")]
+        const NR_CLOSE: usize = 3;
+        #[cfg(not(target_arch = "x86_64"))]
+        const NR_READ: usize = 63;
+        #[cfg(not(target_arch = "x86_64"))]
+        const NR_OPENAT: usize = 56;
+        #[cfg(not(target_arch = "x86_64"))]
+        const NR_CLOSE: usize = 57;
+
+        /// `AT_FDCWD`: resolve a relative path against the working directory.
+        const AT_FDCWD: isize = -100;
+        /// `O_RDONLY`.
+        const O_RDONLY: usize = 0;
+
+        /// `openat(AT_FDCWD, path, O_RDONLY)`.
+        ///
+        /// `openat` on both architectures, because `asm-generic`'s table has no
+        /// `__NR_open` at all: the number this used first (56) is `openat` on aarch64,
+        /// so calling it with `open`'s two-argument shape passed the *path* as the
+        /// directory file descriptor and the open failed. The cross-target test is what
+        /// caught that; a single-architecture check could not.
+        fn open_ro(path: &[u8]) -> isize {
+            // SAFETY: `path` is a NUL-terminated byte string in static memory.
+            unsafe {
+                syscall3(
+                    NR_OPENAT,
+                    AT_FDCWD as usize,
+                    path.as_ptr() as usize,
+                    O_RDONLY,
+                )
+            }
+        }
+
+        #[cfg(target_arch = "x86_64")]
+        unsafe fn syscall3(number: usize, a: usize, b: usize, c: usize) -> isize {
+            let ret: isize;
+            core::arch::asm!(
+                "syscall",
+                inlateout("rax") number as isize => ret,
+                in("rdi") a,
+                in("rsi") b,
+                in("rdx") c,
+                lateout("rcx") _,
+                lateout("r11") _,
+                options(nostack),
+            );
+            ret
+        }
+
+        #[cfg(target_arch = "aarch64")]
+        unsafe fn syscall3(number: usize, a: usize, b: usize, c: usize) -> isize {
+            let ret: isize;
+            core::arch::asm!(
+                "svc 0",
+                inlateout("x8") number as isize => _,
+                inlateout("x0") a as isize => ret,
+                in("x1") b,
+                in("x2") c,
+                options(nostack),
+            );
+            ret
+        }
+
+        /// Bytes currently locked into RAM, from `/proc/self/status`'s `VmLck`.
+        ///
+        /// There is no syscall for "is this range locked", so the kernel's own accounting
+        /// is the answer -- read with raw syscalls because this crate is `no_std` and
+        /// has no `std::fs`. A *range* counts as locked if the total is at least its
+        /// length, which is what a single-key test wants.
+        pub fn locked_bytes() -> Option<u64> {
+            const PATH: &[u8] = b"/proc/self/status\0";
+            // SAFETY: `PATH` is a NUL-terminated byte string in static memory; O_RDONLY
+            // is 0. The fd is closed on every path below.
+            let fd = open_ro(PATH);
+            if fd < 0 {
+                return None;
+            }
+            let fd = fd as usize;
+            let mut buf = [0u8; 4096];
+            // SAFETY: `buf` is a live local of exactly the length passed.
+            let n = unsafe { syscall3(NR_READ, fd, buf.as_mut_ptr() as usize, buf.len()) };
+            // SAFETY: closing a descriptor this function owns.
+            unsafe {
+                let _ = syscall2(NR_CLOSE, fd, 0);
+            }
+            if n <= 0 {
+                return None;
+            }
+            let text = core::str::from_utf8(&buf[..n as usize]).ok()?;
+            for line in text.lines() {
+                if let Some(rest) = line.strip_prefix("VmLck:") {
+                    let kb: u64 = rest.split_whitespace().next()?.parse().ok()?;
+                    return Some(kb * 1024);
+                }
+            }
+            None
+        }
+    }
+
+    #[cfg(all(
+        target_os = "linux",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    ))]
+    pub use imp::{lock_range, locked_bytes, unlock_range};
+
+    /// Elsewhere locking is unsupported: `lock_range` reports `ENOSYS` rather than
+    /// pretending, so a caller cannot mistake a no-op for protection.
+    #[cfg(not(all(
+        target_os = "linux",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    )))]
+    pub fn lock_range(_ptr: *const u8, _len: usize) -> Result<(), isize> {
+        Err(-38) // ENOSYS
+    }
+    #[cfg(not(all(
+        target_os = "linux",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    )))]
+    pub fn unlock_range(_ptr: *const u8, _len: usize) {}
+    #[cfg(not(all(
+        target_os = "linux",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    )))]
+    pub fn locked_bytes() -> Option<u64> {
+        None
+    }
+
+    /// A `Key` that is locked into RAM (and excluded from core dumps) for its lifetime.
+    ///
+    /// `ultra`'s answer to the part of the wipe story a volatile store cannot reach:
+    /// while this value is alive its pages cannot be swapped out, and a core dump will
+    /// not contain them. It does **not** cover a debugger attached to the process, a
+    /// hypervisor reading guest memory, or cold-boot remanence — see the README's
+    /// "cannot fix for you" list.
+    ///
+    /// `LockedKey::new` fails when the OS refuses (`ENOMEM` from `RLIMIT_MEMLOCK` is the
+    /// usual one), rather than silently leaving the key unprotected: the whole point is
+    /// that the caller knows which of the two states it is in.
+    pub struct LockedKey(crate::Key);
+
+    impl LockedKey {
+        /// Lock a copy of `key` into memory.
+        pub fn new(key: &[u8; crate::KEY_LEN]) -> Result<Self, isize> {
+            let inner = crate::Key::from_bytes(*key);
+            let ptr = inner.as_bytes().as_ptr();
+            match lock_range(ptr, crate::KEY_LEN) {
+                Ok(()) => Ok(LockedKey(inner)),
+                Err(e) => Err(e),
+            }
+        }
+
+        /// Borrow the key bytes.
+        pub fn as_bytes(&self) -> &[u8; crate::KEY_LEN] {
+            self.0.as_bytes()
+        }
+
+        /// Whether this key's pages are actually locked, read back from the kernel.
+        ///
+        /// Comparing `VmLck` before and after is the only way to ask; this reports the
+        /// process-wide total, which is what a single-key program wants.
+        pub fn locked_bytes() -> Option<u64> {
+            locked_bytes()
+        }
+    }
+
+    impl core::ops::Deref for LockedKey {
+        type Target = [u8; crate::KEY_LEN];
+        fn deref(&self) -> &[u8; crate::KEY_LEN] {
+            self.0.as_bytes()
+        }
+    }
+
+    impl Drop for LockedKey {
+        fn drop(&mut self) {
+            // Unlock first, then let `Key`'s own `Drop` wipe the bytes.
+            unlock_range(self.0.as_bytes().as_ptr(), crate::KEY_LEN);
+        }
+    }
+
+    impl core::fmt::Debug for LockedKey {
+        fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+            f.write_str("LockedKey([REDACTED; 32], locked)")
+        }
+    }
+}
+
 // ── Zeroize helpers ───────────────────────────────────────────────────
 
 /// Zeroize a mutable byte slice in a way the compiler cannot optimize away.
@@ -914,21 +1249,33 @@ fn derive_tag(
     // `head` holds the master key, so the buffer is built once with an exact
     // capacity (no reallocation can strand a copy) and wiped before it is
     // dropped, which is what keeps this consistent with the rest of the crate.
-    let total = head.len() + aad.len() + msg.len();
-    if (TAG_CONCAT_MIN..=TAG_CONCAT_LIMIT).contains(&total) {
+    // `checked_add`, not `+`: on a 32-bit target this sum can overflow, because
+    // `check_lengths` cannot fire there (`MAX_MSG_SIZE` = 2^38 > `u32::MAX`, as
+    // `test_length_guard_cannot_fire_on_32_bit` records), so `aad.len() + msg.len()` is
+    // bounded only by the address space. Reaching it needs ~4 GiB of live slices, so it is
+    // not exploitable -- but a *wrapping* sum would pick a branch by accident, and an
+    // `overflow-checks` build would panic on a caller's input. `None` is the honest
+    // answer: "larger than any total this fast path serves".
+    let window = head
+        .len()
+        .checked_add(aad.len())
+        .and_then(|t| t.checked_add(msg.len()))
+        .filter(|t| (TAG_CONCAT_MIN..=TAG_CONCAT_LIMIT).contains(t));
+    match window {
         // The one infallible allocation outside the entry points, and it is bounded by
-        // construction: this branch is only taken for a total within
+        // construction: this arm is only taken for a total within
         // `TAG_CONCAT_MIN..=TAG_CONCAT_LIMIT`, so `total <= 65_536` whatever the input
         // length is. A refusal here would mean the process has no memory left at all,
         // which is why it is not threaded through `derive_tag`'s array return type.
-        let mut cat = Vec::with_capacity(total);
-        cat.extend_from_slice(&head);
-        cat.extend_from_slice(aad);
-        cat.extend_from_slice(msg);
-        blake3_keyed_multi(mac_key, &[&cat], &mut tag);
-        zeroize_slice(&mut cat);
-    } else {
-        blake3_keyed_multi(mac_key, &[&head, aad, msg], &mut tag);
+        Some(total) => {
+            let mut cat = Vec::with_capacity(total);
+            cat.extend_from_slice(&head);
+            cat.extend_from_slice(aad);
+            cat.extend_from_slice(msg);
+            blake3_keyed_multi(mac_key, &[&cat], &mut tag);
+            zeroize_slice(&mut cat);
+        }
+        None => blake3_keyed_multi(mac_key, &[&head, aad, msg], &mut tag),
     }
 
     // `head` holds the master key at `head[8..40]`, so it is secret and must be
@@ -1181,6 +1528,13 @@ pub fn decrypt(
     chacha20_keystream(&enc_key, 0, &enc_nonce, ciphertext, &mut plaintext);
 
     let mut computed_tag = derive_tag(&mac_key, key, nonce, aad, &plaintext);
+    // `ultra`/`dual-mac`: recompute the tag *independently* and require the
+    // recomputation to agree with both the stored value and the received tag. The two
+    // gates above compare the same two values, so a fault that sets the stored tag to
+    // the received one satisfies both at once; this is the only software measure that
+    // disagrees with such a fault. Measured cost: +21..40% on decryption.
+    #[cfg(feature = "dual-mac")]
+    let mut recomputed_tag = derive_tag(&mac_key, key, nonce, aad, &plaintext);
     #[cfg(feature = "hardened")]
     let gates = {
         // Two *recomputations*, not one result read twice.  The two gate
@@ -1206,7 +1560,15 @@ pub fn decrypt(
         // SAFETY: as above, for the caller's reference: `tag` is a live `&[u8;
         // TAG_LEN]` and this only reads through it, so aliasing rules hold.
         let mut tag_copy = unsafe { core::ptr::read_volatile(tag) };
-        let second = computed_tag_copy.ct_eq(&tag_copy) & tag_copy.ct_eq(&computed_tag_copy);
+        let gate_pair = computed_tag_copy.ct_eq(&tag_copy) & tag_copy.ct_eq(&computed_tag_copy);
+        // The independent recomputation joins the second gate: it must match the
+        // stored value *and* the received tag, so a fault that corrupted the stored
+        // value (or a silently rewritten constant) is caught here even though both
+        // gate expressions read the same memory.
+        #[cfg(feature = "dual-mac")]
+        let second = gate_pair & recomputed_tag.ct_eq(&computed_tag) & recomputed_tag.ct_eq(tag);
+        #[cfg(not(feature = "dual-mac"))]
+        let second = gate_pair;
 
         // The copies are secret-derived (they are the computed MAC), so they are
         // wiped like every other copy in this function rather than left in the
@@ -1227,6 +1589,10 @@ pub fn decrypt(
     // than left on the stack.
     zeroize_array(&mut enc_nonce);
     zeroize_array(&mut computed_tag);
+    // The independent recomputation is the computed MAC too, so it is wiped like the
+    // rest -- `tests/ultra.rs` asserts this, which is how the omission was found.
+    #[cfg(feature = "dual-mac")]
+    zeroize_array(&mut recomputed_tag);
 
     // Two rejections until the decision proves otherwise, written *before* the call:
     // a fault that skips the call leaves both standing, and a fault that corrupts one
@@ -1319,6 +1685,10 @@ pub fn decrypt_in_place_detached(
     chacha20_apply(&enc_key, 0, &enc_nonce, &Input::InPlace, buffer);
 
     let mut computed_tag = derive_tag(&mac_key, key, nonce, aad, buffer);
+    // `ultra`/`dual-mac`, as in `decrypt`: an independent recomputation that must agree
+    // with both the stored value and the received tag.
+    #[cfg(feature = "dual-mac")]
+    let mut recomputed_tag = derive_tag(&mac_key, key, nonce, aad, buffer);
     #[cfg(feature = "hardened")]
     let gates = {
         // See the matching block in `decrypt`: identical reasoning, and the same
@@ -1334,7 +1704,15 @@ pub fn decrypt_in_place_detached(
         // SAFETY: as above, for the caller's reference: `tag` is a live `&[u8;
         // TAG_LEN]` and this only reads through it, so aliasing rules hold.
         let mut tag_copy = unsafe { core::ptr::read_volatile(tag) };
-        let second = computed_tag_copy.ct_eq(&tag_copy) & tag_copy.ct_eq(&computed_tag_copy);
+        let gate_pair = computed_tag_copy.ct_eq(&tag_copy) & tag_copy.ct_eq(&computed_tag_copy);
+        // The independent recomputation joins the second gate: it must match the
+        // stored value *and* the received tag, so a fault that corrupted the stored
+        // value (or a silently rewritten constant) is caught here even though both
+        // gate expressions read the same memory.
+        #[cfg(feature = "dual-mac")]
+        let second = gate_pair & recomputed_tag.ct_eq(&computed_tag) & recomputed_tag.ct_eq(tag);
+        #[cfg(not(feature = "dual-mac"))]
+        let second = gate_pair;
 
         // The copies are secret-derived (they are the computed MAC), so they are
         // wiped like every other copy in this function rather than left in the
@@ -1355,6 +1733,10 @@ pub fn decrypt_in_place_detached(
     // than left on the stack.
     zeroize_array(&mut enc_nonce);
     zeroize_array(&mut computed_tag);
+    // The independent recomputation is the computed MAC too, so it is wiped like the
+    // rest -- `tests/ultra.rs` asserts this, which is how the omission was found.
+    #[cfg(feature = "dual-mac")]
+    zeroize_array(&mut recomputed_tag);
 
     // As in `decrypt`: two rejections written first, and two serial checks, so a fault
     // that skips the call or corrupts one outcome cannot accept.

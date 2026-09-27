@@ -234,11 +234,21 @@ fn the_hardened_second_gate_is_recomputed() {
             1,
             "the block must compute its first gate exactly once:\n{block}"
         );
+        // The second gate is bound once *per configuration*, from a shared `gate_pair`:
+        // the two arms are `#[cfg]`-selected, so exactly one of them is compiled. Two
+        // bindings with no cfg between them would be two gates over one value, which is
+        // the shape this replaced.
+        assert!(
+            block.contains("#[cfg(feature = \"dual-mac\")]")
+                && block.contains("let second =")
+                && block.contains("#[cfg(not(feature = \"dual-mac\"))]"),
+            "the second gate must be bound once per configuration (one arm under \
+             `dual-mac`, one without):\n{block}"
+        );
         assert_eq!(
-            block.matches("let second =").count(),
+            block.matches("let gate_pair =").count(),
             1,
-            "the block must compute its second gate exactly once -- two `if`s over \
-             one shared value is one gate with two branches:\n{block}"
+            "the second gate must be built from one `gate_pair` computation:\n{block}"
         );
     }
 

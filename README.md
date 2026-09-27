@@ -287,6 +287,52 @@ software AEAD is the wrong component: use a secure element or an HSM, whose
 protection is a hardware property, and whose per-operation latency is orders of
 magnitude worse than what the table above describes.
 
+### `ultra`: every defence at once
+
+`ultra` enables every opt-in layer there is. It exists because "turn on all the security
+features" should be one word rather than a checklist someone gets half-right.
+
+```toml
+xchacha20-blake3-siv = { version = "0.1", features = ["ultra"] }
+```
+
+| Layer | What it defends | Cost (measured, this host) |
+| --- | --- | --- |
+| `hardened` (already default) | a single corrupted decision value or instruction | +10.8% at 64 B, +3.6% at 1 KiB, +0.4% at 1 MiB |
+| `dual-mac` | the tag being pinned to a constant or to the received tag — the one model the two gates fail *together* on | +30% at 64 B, +40% at 1 KiB, +24% at 1 MiB on decryption; +8–25% on a round trip |
+| `locked` | key pages readable out of **swap** or a **core dump** | ~7 µs once per key (`mlock`+`munlock`), not per message |
+| `rng` | nothing about the cipher; it is how a caller gets a key at all | — |
+
+`pure` is deliberately **not** in `ultra`: it forces BLAKE3's portable backends, costs
+24–32%, and buys no security — the C/assembly kernels are constant-time by construction and
+covered by the same differential tests. `ultra` is about defences, not about giving up speed
+for nothing.
+
+**What `ultra` still cannot defend against**, because a mode that claims total immunity and
+writes down no limits is worse than one that states its boundaries:
+
+- **A fault inside the tag computation itself** that makes it produce the attacker's tag.
+  `dual-mac` recomputes the tag a second time and requires the two to agree with each other
+  *and* with the received tag, so a corrupted stored value is caught — but two faults, one in
+  each computation, or one targeted at the arithmetic both share, defeat it. That is a
+  laboratory bench, and the answer is a secure element, not software.
+- **A debugger, `ptrace`, or `/proc/<pid>/mem`** from a process with the same uid, and a
+  hypervisor reading guest memory. `locked` asks the kernel to keep pages out of swap and
+  core dumps; it cannot stop a process that is allowed to read this one's memory.
+- **Cold-boot remanence.** DRAM keeps its contents briefly without power, and nothing in
+  userspace changes that.
+- **Deterministic encryption and length disclosure.** Both are the construction, not a
+  defect: the same `(key, nonce, aad, message)` gives the same ciphertext forever, and the
+  ciphertext is exactly as long as the message.
+- **Availability.** Every glitch, every refusal and every refusal-to-allocate is a
+  rejection or an error; no mode makes the system keep working.
+
+Where each layer is *verified* rather than asserted: `tests/ultra.rs` (the wiring of each
+layer, and that the kernel's own `VmLck` accounting shows a `LockedKey` is really locked),
+`tools/ctgrind.sh` (no secret-dependent branch), `tools/fi_check.sh` and
+`tools/fi_instruction.sh` (single-fault behaviour, both models), `tests/decision.rs`
+(forgeries), `tests/security.rs` (lengths, allocation, nonce reuse).
+
 ### What this crate cannot fix for you
 
 Properties of the construction or of the machine. They are listed because each one

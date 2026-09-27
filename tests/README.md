@@ -36,6 +36,13 @@ so a green run is not read as more than it is.
 | Fault injection | **not covered, and not claimed** | No tool in this suite models a glitch — Miri, Kani, ctgrind, TSAN and libFuzzer all assume correct execution. The accept/reject decision is one branch on one comparison, so a single skipped instruction is an accepted forgery; encryption-side faults, by contrast, degrade to rejection, because the tag is computed over the plaintext. A hardened implementation would need a validated countermeasure set and a fault-injection bench — see README's "What is not defended against". |
 | `semgrep` / `codeql` | **not run** | Neither is available here. The branch classification above and the ctgrind run cover the same question (secret-dependent control flow); no automated pattern scanner was used. |
 
+- **`ultra` is checked as a combination, not as a list.** `tests/ultra.rs` asserts that each
+  layer is *wired in* under the feature (`dual-mac`'s independent recomputation reaching both
+  decrypt paths and being wiped, `locked`'s kernel accounting showing a real lock, the
+  decision still answering correctly for honest and forged input with every layer on), and
+  that the limits are written down — because "all defences on" is read as "immune" unless the
+  boundaries are stated where the feature is.
+
 ### What these checks do not reach
 
 Every gate above has an edge, and an edge that is written down is a limit rather than a

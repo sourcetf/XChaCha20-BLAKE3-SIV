@@ -113,6 +113,25 @@ subtle = { version = "2.6.1", default-features = false }
 # fault-injection bench.
 default = ["hardened"]
 hardened = []
+# Everything at once: `hardened` plus the opt-in stack below. See the crate docs'
+# "ultra" section for what each adds, what it costs (every figure measured), and --
+# importantly -- what still cannot be defended against.
+#
+# `pure` is deliberately *not* here: it forces BLAKE3's portable Rust backends, which
+# costs 24-32% (see the `pure` comment below) and buys no security -- the C/assembly
+# kernels are constant-time by construction and covered by the same differential tests.
+# `ultra` is about defences, not about giving up speed for nothing.
+ultra = ["hardened", "rng", "dual-mac", "locked"]
+# A second, independently recomputed tag on the verify path. Defends against a fault
+# that pins the computed tag to a constant or to the received tag (both gates compare
+# the same two values, so they fail *together* without this). Measured +21..40% on
+# decryption, +6..25% on a round trip.
+dual-mac = []
+# `mlock` + `MADV_DONTDUMP` for keys: reaches past swap and core dumps, which a
+# volatile-store wipe cannot. Measured ~7 us per range, so it belongs on long-lived
+# keys, not per message.
+locked = []
+
 # Opt-in OS randomness for `generate_key` / `generate_nonce`.  Off by default:
 # `no_std` builds and users who already have an entropy source pay nothing.
 rng = ["dep:getrandom"]

@@ -79,6 +79,14 @@ def harnesses():
     armed = False
     for line in lines:
         stripped = line.strip()
+        # A harness may be written `#[kani::proof] fn foo()` on one line; matching only
+        # the exact attribute (as this did) made that harness invisible -- it was never
+        # sharded, never counted, and the `planned == len(names)` cross-check at the end
+        # could not fire because the name had never been seen.
+        inline = re.match(r"#\[kani::proof\]\s*fn\s+([A-Za-z0-9_]+)", stripped)
+        if inline:
+            names.append(inline.group(1))
+            continue
         if stripped == "#[kani::proof]":
             armed = True
             continue

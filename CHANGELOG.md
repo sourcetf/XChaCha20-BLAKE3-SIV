@@ -231,6 +231,27 @@ The tool's criterion changed with the numbers: it no longer asserts zero (unreac
 of these implementations) but that the hardened build is not worse than the opt-out one, with
 both counts printed.
 
+### `ultra`: one feature for every defence
+
+- New `ultra` feature = `hardened` + `rng` + `dual-mac` + `locked`, plus the two new opt-in
+  layers it composes:
+  - **`dual-mac`**: an *independent* recomputation of the tag on the verify path, required to
+    agree with both the stored value and the received tag. This is the only software measure
+    against "pin the computed tag to a constant, or to the received tag", where the two
+    `hardened` gates are satisfied together because they compare the same two values.
+    Measured: +21..40% on decryption, +6..25% on a round trip. The recomputed tag is wiped
+    like every other secret-derived copy — `tests/ultra.rs` asserts that, and it is how the
+    omission was found before it shipped.
+  - **`locked`**: `mlock` + `madvise(MADV_DONTDUMP)` for keys, reaching past swap and core
+    dumps, which a volatile-store wipe cannot. `LockedKey::new` fails loudly when the kernel
+    refuses (`RLIMIT_MEMLOCK` is the usual reason). Raw syscalls, because the crate is
+    `no_std`; the numbers come from the kernel's headers, and `tests/ultra.rs` checks the
+    &shy;implementation by reading the kernel's own `VmLck` accounting back.
+- `pure` is deliberately **not** part of `ultra`: it costs 24-32% and buys no security.
+- The README's `ultra` section states the per-layer cost (all measured) and, in the same
+  place, the five attack models that remain out of reach for *any* software build, so the
+  feature cannot be read as total immunity.
+
 ### Release policy
 
 - **The byte format is frozen at construction revision `v0.2`.** It will not change

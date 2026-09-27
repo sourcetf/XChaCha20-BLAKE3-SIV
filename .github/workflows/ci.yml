@@ -93,6 +93,14 @@ jobs:
           # exercised in a debug build.
           - profile: debug, all features
             args: --all-features
+          # `ultra` is a first-class configuration, not a combination that happens to be
+          # covered by `--all-features`: it must build and pass on its own, because that
+          # is how a user enables it and how a regression in its feature wiring shows up.
+          - profile: release, ultra
+            args: --release --features ultra
+          # The opt-out build, so the single-gate configuration keeps its own witness.
+          - profile: release, no default features
+            args: --release --no-default-features
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable

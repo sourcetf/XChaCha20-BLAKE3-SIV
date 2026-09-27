@@ -72,18 +72,49 @@ const ALLOWED: &[(&str, &str)] = &[
 /// and why they are listed rather than suppressed. The fourth `match` is
 /// `random::fill`'s: it branches on whether the OS entropy source *succeeded*, which is
 /// a public fact about the environment, not content — and its arms are what zero the
-/// buffer on the error path.
+/// buffer on the error path. The rest of the growth is the `locked` module (`ultra`):
+/// it branches on a syscall result -- the kernel's answer about *memory*, never about
+/// key or message content -- and on whether the target is Linux and which architecture's
+/// syscall numbers apply, both of which are compile-time facts.
 const CONTROL_FLOW: &[(&str, usize)] = &[
-    ("if", 17),
+    ("if", 23),
     ("while", 7),
-    ("for", 27),
+    ("for", 28),
     ("loop", 0),
-    ("match", 4),
+    ("match", 6),
 ];
+
+/// Replace every `"..."` literal with nothing, so a `/` inside one is not counted.
+fn strip_string_literals(code: &str) -> String {
+    let mut out = String::with_capacity(code.len());
+    let mut in_literal = false;
+    let mut escaped = false;
+    for c in code.chars() {
+        if in_literal {
+            if escaped {
+                escaped = false;
+            } else if c == '\\' {
+                escaped = true;
+            } else if c == '"' {
+                in_literal = false;
+            }
+            continue;
+        }
+        if c == '"' {
+            in_literal = true;
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
 
 /// Every `/` or `%` in `line` that is code rather than a comment or a doc comment.
 fn has_division(line: &str) -> bool {
     let code = line.split("//").next().unwrap_or("");
+    // String literals are not code: `b"/proc/self/status\0"` is a path, not a division,
+    // and allow-listing that line by hand would also hide a real `/` written on it.
+    let code = strip_string_literals(code);
     let b: Vec<char> = code.chars().collect();
     for (i, c) in b.iter().enumerate() {
         if *c != '/' && *c != '%' {
@@ -91,8 +122,11 @@ fn has_division(line: &str) -> bool {
         }
         let prev = if i == 0 { ' ' } else { b[i - 1] };
         let next = if i + 1 == b.len() { ' ' } else { b[i + 1] };
-        // Skip `/*`, `*/`, `/=`, and `/*` markers.
-        if prev == '*' || prev == '/' || next == '*' || next == '/' || next == '=' {
+        // Skip comment markers. `next == '='` used to be in this list, which meant a
+        // *compound assignment* (`x /= n`, `x %= n`) was invisible to the inventory --
+        // and `/=` divides just as much as `/` does. The marker case that matters is
+        // `//` and `/*`, handled by `prev`.
+        if prev == '*' || prev == '/' || next == '*' || next == '/' {
             continue;
         }
         return true;
