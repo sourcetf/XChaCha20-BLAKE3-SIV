@@ -375,6 +375,32 @@ both counts printed.
   place, the five attack models that remain out of reach for *any* software build, so the
   feature cannot be read as total immunity.
 
+### Recheck: an empty feature, a stack cost, and two over-strict tests
+
+- **`--features locked` compiled nothing.** `Cargo.toml` exposes `locked` as a feature of its
+  own, but the module was gated on `ultra`, so a caller who enabled exactly the layer the
+  README's table lists got no module, no error, and no protection. The module is gated on
+  `locked` now (`ultra` implies it, so the bundle is unchanged), `tests/locked.rs` covers it
+  standalone, and CI has a `--features locked` matrix entry so the empty-feature case cannot
+  come back.
+- **The `scrub_stack` frame costs ~16 KiB of stack per call, and that was not written down.**
+  Measured on a 32 KiB thread stack: the default build still runs with 16 KiB of the stack
+  already consumed; a `dual-mac`/`ultra` build fails at 8 KiB. It is a 16 KiB frame, so it can
+  fault the thread it is protecting. The README's cost column and the function's own doc now
+  say so; a caller that runs AEAD on small-stack threads must size them for it.
+- **`dropping_releases_the_lock` was racy and I found it by running the matrix.** `VmLck` is a
+  process-wide counter and `cargo test` runs a file's tests concurrently, so a sibling test
+  locking a key masked the delta. The file's tests now take a mutex.
+- **Two tests were over-strict about documented platform limits.** `SUPPORTED == false` is a
+  compile-time property of the target (the syscalls are wired for Linux x86_64/aarch64 only),
+  so asserting it is a failure made the i686 job red for a documented limit rather than a
+  defect — it skips loudly now, while a *runtime* refusal from the kernel is still a failure.
+  And `tests/locked.rs`'s per-mapping `Locked:` check is not populated under `qemu-user`: it
+  falls back to the kernel's `VmLck` delta there, and only a failure of *both* evidence
+  sources is a failure, so the check stays non-vacuous.
+- Missing doc comments on the module's unsupported-target fallbacks (`missing_docs` caught
+  them on i686, where that arm compiles and the host arm does not).
+
 ### Release policy
 
 - **The byte format is frozen at construction revision `v0.2`.** It will not change

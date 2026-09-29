@@ -769,7 +769,11 @@ pub mod random {
 /// and cold-boot remanence. `LockedKey::new` fails loudly when the kernel refuses
 /// (`RLIMIT_MEMLOCK` is the usual reason) rather than leaving the caller unsure which
 /// state it is in.
-#[cfg(feature = "ultra")]
+// Gated on `locked`, not on `ultra`: `Cargo.toml` exposes `locked` as a feature of its
+// own, so gating the module on `ultra` made `--features locked` an *empty* feature -- it
+// compiled nothing and said nothing, while the README's table lists `locked` as a layer a
+// reader can turn on. `ultra` implies `locked`, so nothing about the bundle changes.
+#[cfg(feature = "locked")]
 pub mod locked {
     /// Whether this platform can lock memory at all.
     ///
@@ -1085,6 +1089,8 @@ pub mod locked {
 
     /// Elsewhere locking is unsupported: `lock_range` reports `ENOSYS` rather than
     /// pretending, so a caller cannot mistake a no-op for protection.
+    /// Unsupported on this target: reports `ENOSYS` rather than pretending, so a caller
+    /// cannot mistake a no-op for protection.
     #[cfg(not(all(
         target_os = "linux",
         any(target_arch = "x86_64", target_arch = "aarch64")
@@ -1092,11 +1098,17 @@ pub mod locked {
     pub fn lock_range(_ptr: *const u8, _len: usize) -> Result<(), isize> {
         Err(-38) // ENOSYS
     }
+    /// Unsupported on this target: nothing was ever locked, so there is nothing to undo.
+    ///
+    /// (This and the two below are `pub` in the module on every target, so they need doc
+    /// comments everywhere — `missing_docs` is a hard lint here, and it caught these on
+    /// i686, where the module compiles its unsupported arm.)
     #[cfg(not(all(
         target_os = "linux",
         any(target_arch = "x86_64", target_arch = "aarch64")
     )))]
     pub fn unlock_range(_ptr: *const u8, _len: usize) {}
+    /// Unsupported on this target: `None`, because there is no `VmLck` to read.
     #[cfg(not(all(
         target_os = "linux",
         any(target_arch = "x86_64", target_arch = "aarch64")
@@ -1251,6 +1263,12 @@ fn zeroize_slice(slice: &mut [u8]) {
 #[inline(never)]
 fn scrub_stack() {
     /// The derivation frames measured ~3.4 KiB deep; this leaves ample margin.
+    ///
+    /// The margin is stack *usage* as well as coverage: this buffer is a 16 KiB frame, so a
+    /// thread whose remaining stack is smaller than that faults here -- measured on a 32 KiB
+    /// thread stack, which survives ~16 KiB of prior consumption in the default build and
+    /// fails at 8 KiB with this enabled. A caller that runs AEAD on small-stack threads must
+    /// size them for it.
     const SCRUB_LEN: usize = 16 * 1024;
     let mut buf = [0u8; SCRUB_LEN];
     // The buffer is already zero, so a plain store would be a dead store the

@@ -109,6 +109,11 @@ jobs:
           # The opt-out build, so the single-gate configuration keeps its own witness.
           - profile: release, no default features
             args: --release --no-default-features
+          # `locked` is a feature a caller can turn on by itself, and it used to gate
+          # nothing at all: the module was under `ultra`, so `--features locked` compiled
+          # an empty feature. This entry is what keeps that from happening again.
+          - profile: release, locked alone
+            args: --release --features locked
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
