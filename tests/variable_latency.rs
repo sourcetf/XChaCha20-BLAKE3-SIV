@@ -75,7 +75,9 @@ const ALLOWED: &[(&str, &str)] = &[
 /// and why they are listed rather than suppressed. The fourth `match` is
 /// `random::fill`'s: it branches on whether the OS entropy source *succeeded*, which is
 /// a public fact about the environment, not content — and its arms are what zero the
-/// buffer on the error path. The rest of the growth is the `locked` module (`ultra`):
+/// buffer on the error path. The rest of the growth is the `locked` module (`ultra`),
+/// whose `Page` allocation and `LockedKey::new` add the branches counted here — the
+/// syscall results and a null check, never key or message content.
 /// it branches on a syscall result -- the kernel's answer about *memory*, never about
 /// key or message content -- and on whether the target is Linux and which architecture's
 /// syscall numbers apply, both of which are compile-time facts.
@@ -94,11 +96,11 @@ const ALLOWED: &[(&str, &str)] = &[
 /// looks at a key, a nonce, an AAD or a message, and none of them is reached with secret
 /// data in hand -- the alignment arithmetic operates on an address, which is not secret.
 const CONTROL_FLOW: &[(&str, usize)] = &[
-    ("if", 28),
+    ("if", 29),
     ("while", 10),
     ("for", 28),
     ("loop", 0),
-    ("match", 6),
+    ("match", 5),
 ];
 
 /// Replace every `"..."` literal with nothing, so a `/` inside one is not counted.

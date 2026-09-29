@@ -923,6 +923,11 @@ pub mod locked {
             }
         }
 
+        /// `page_size` for the rest of the module (the `Page` allocation needs it).
+        pub(crate) fn page_size_pub() -> usize {
+            page_size()
+        }
+
         #[cfg(target_arch = "x86_64")]
         const NR_READ: usize = 0;
         #[cfg(target_arch = "x86_64")]
@@ -1085,6 +1090,11 @@ pub mod locked {
         target_os = "linux",
         any(target_arch = "x86_64", target_arch = "aarch64")
     ))]
+    pub(crate) use imp::page_size_pub;
+    #[cfg(all(
+        target_os = "linux",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    ))]
     pub use imp::{lock_range, locked_bytes, unlock_range};
 
     /// Elsewhere locking is unsupported: `lock_range` reports `ENOSYS` rather than
@@ -1117,6 +1127,20 @@ pub mod locked {
         None
     }
 
+    /// The page size, for `Page`'s allocation, on targets with no syscall arm.
+    ///
+    /// The supported arm reads `AT_PAGESZ` from `/proc/self/auxv`; here nothing is locked,
+    /// so all that matters is an alignment generous enough for the platform (16 KiB covers
+    /// the 4/16/64 KiB page sizes in use), and `LockedKey::new` fails closed before this
+    /// value could mislead anyone.
+    #[cfg(not(all(
+        target_os = "linux",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    )))]
+    pub(crate) fn page_size_pub() -> usize {
+        16 * 1024
+    }
+
     /// A `Key` that is locked into RAM (and excluded from core dumps) for its lifetime.
     ///
     /// `ultra`'s answer to the part of the wipe story a volatile store cannot reach:
@@ -1139,22 +1163,35 @@ pub mod locked {
     /// unlocked page. The struct looked locked (`locked_bytes()` went up, the
     /// test passed) and was not. Heap-allocating first means the `Box` can be
     /// moved as much as it likes without the key ever changing address.
-    pub struct LockedKey(alloc::boxed::Box<crate::Key>);
+    pub struct LockedKey(Page);
 
     impl LockedKey {
         /// Lock a copy of `key` into memory, at an address that will not move.
+        ///
+        /// The key occupies a **page of its own**, and that is deliberate: `mlock`,
+        /// `munlock` and `madvise` are page-granular, so a 32-byte key sharing a page with
+        /// another `LockedKey` would not be independent of it -- dropping one would unlock
+        /// the other's page while it was still alive and still documented as locked. A
+        /// page-aligned allocation of exactly one page costs 4 KiB per key and makes the
+        /// lock the key's own.
+        ///
+        /// The bytes are copied into that page (so the locked range is the range the caller
+        /// uses) and the *whole* page is locked and excluded from core dumps, which is also
+        /// what makes the wipe on drop cover everything that could hold key material.
         pub fn new(key: &[u8; crate::KEY_LEN]) -> Result<Self, isize> {
-            let inner = alloc::boxed::Box::new(crate::Key::from_bytes(*key));
-            let ptr = inner.as_bytes().as_ptr();
-            match lock_range(ptr, crate::KEY_LEN) {
-                Ok(()) => Ok(LockedKey(inner)),
-                Err(e) => Err(e),
-            }
+            let mut page = Page::new().ok_or(-12isize /* ENOMEM */)?;
+            page.bytes_mut()[..crate::KEY_LEN].copy_from_slice(key);
+            // Lock the whole page; on failure `page` is freed by its own `Drop`.
+            lock_range(page.as_ptr(), page.len())?;
+            Ok(LockedKey(page))
         }
 
         /// Borrow the key bytes.
         pub fn as_bytes(&self) -> &[u8; crate::KEY_LEN] {
-            self.0.as_bytes()
+            // SAFETY: `new` wrote `KEY_LEN` initialised bytes at the start of the page; the
+            // page is page-aligned, so the cast is aligned for `[u8; KEY_LEN]` (alignment
+            // 1); nothing writes through this reference; and the allocation outlives it.
+            unsafe { &*(self.0.as_ptr() as *const [u8; crate::KEY_LEN]) }
         }
 
         /// Whether this key's pages are actually locked, read back from the kernel.
@@ -1169,24 +1206,63 @@ pub mod locked {
     impl core::ops::Deref for LockedKey {
         type Target = [u8; crate::KEY_LEN];
         fn deref(&self) -> &[u8; crate::KEY_LEN] {
-            self.0.as_bytes()
+            LockedKey::as_bytes(self)
+        }
+    }
+
+    /// One page-aligned, page-sized, zeroed allocation.
+    ///
+    /// Exists so a key can own its page: every syscall this module uses acts on pages, so
+    /// an allocation smaller than one would share with whatever the allocator put next to it.
+    struct Page {
+        ptr: *mut u8,
+        layout: alloc::alloc::Layout,
+    }
+
+    impl Page {
+        fn new() -> Option<Self> {
+            let ps = page_size_pub();
+            let layout = alloc::alloc::Layout::from_size_align(ps, ps).ok()?;
+            // SAFETY: `layout` has a non-zero size (one page), which is all this call
+            // requires; the result is checked for null and freed with the same layout.
+            let ptr = unsafe { alloc::alloc::alloc_zeroed(layout) };
+            if ptr.is_null() {
+                None
+            } else {
+                Some(Page { ptr, layout })
+            }
+        }
+        fn as_ptr(&self) -> *const u8 {
+            self.ptr
+        }
+        fn len(&self) -> usize {
+            self.layout.size()
+        }
+        fn bytes_mut(&mut self) -> &mut [u8] {
+            // SAFETY: `ptr` and the size come from the allocation made in `new`, which is
+            // still alive and uniquely owned by `self`.
+            unsafe { core::slice::from_raw_parts_mut(self.ptr, self.layout.size()) }
+        }
+    }
+
+    impl Drop for Page {
+        fn drop(&mut self) {
+            // SAFETY: the pointer and layout `new` allocated, freed exactly once.
+            unsafe { alloc::alloc::dealloc(self.ptr, self.layout) }
         }
     }
 
     impl Drop for LockedKey {
         fn drop(&mut self) {
-            // Wipe *before* unlocking, and the order is the point: `munlock`
-            // makes the pages swappable again, so unlocking first opens a window
-            // in which a key whose entire reason for being locked could be
-            // written to swap.  The disassembly of this function was checked to
-            // confirm the `munlock` syscall (`mov $0x96,%eax; syscall`) now comes
-            // after the wipe call rather than before it.
+            // Wipe *before* unlocking, and the order is the point: `munlock` makes the pages
+            // swappable again, so unlocking first opens a window in which a key whose entire
+            // reason for being locked could be written to swap.
             //
-            // `Key`'s own `Drop` runs after this body and wipes again; that is
-            // harmless and keeps the invariant local to `Key` for every other
-            // owner.
-            zeroize::Zeroize::zeroize(&mut *self.0);
-            unlock_range(self.0.as_bytes().as_ptr(), crate::KEY_LEN);
+            // The whole page is wiped, not just the 32 key bytes: that page is what was
+            // locked and what could hold key-derived spill, and `Page`'s own `Drop` frees it
+            // immediately afterwards either way.
+            crate::zeroize_slice(self.0.bytes_mut());
+            unlock_range(self.0.as_ptr(), self.0.len());
         }
     }
 
@@ -1577,15 +1653,20 @@ pub fn encrypt(
 ) -> Result<(Vec<u8>, [u8; TAG_LEN]), Error> {
     check_lengths(plaintext.len(), aad.len())?;
 
+    // The buffer is allocated *first*, before any key material exists: this length is the
+    // caller's, so the allocation is the one step that can fail, and taking it here means
+    // the `?` cannot return through live secrets. (It did: with the derivation first, an
+    // `AllocationFailed` left `mac_key`, `enc_seed`, `enc_key` and `enc_nonce` in the frame
+    // -- on a path the error type explicitly invites the caller to retry, and which the
+    // `ultra` stack scrub would have had to cover as well.)
+    let mut ciphertext = alloc_zeroed(plaintext.len())?;
+
     let (mut mac_key, mut enc_seed) = derive_material(key, nonce);
     let tag = derive_tag(&mac_key, key, nonce, aad, plaintext);
     let mut enc_key = [0u8; 32];
     let mut enc_nonce = [0u8; 12];
     derive_enc(&enc_seed, &tag, &mut enc_key, &mut enc_nonce);
 
-    // Fallible for the same reason `decrypt` is: this length is the caller's, and a
-    // plain `vec!` aborts the process when the allocator refuses.
-    let mut ciphertext = alloc_zeroed(plaintext.len())?;
     chacha20_keystream(&enc_key, 0, &enc_nonce, plaintext, &mut ciphertext);
 
     zeroize_array(&mut mac_key);
@@ -1652,6 +1733,7 @@ pub fn encrypt_in_place_detached(
 /// README's fault table states that boundary rather than implying the two gates are
 /// independent witnesses when they are not.
 #[inline(always)]
+#[cfg(feature = "hardened")]
 fn second_gate_comparison(a: &[u8; TAG_LEN], b: &[u8; TAG_LEN]) -> subtle::Choice {
     let plain = a.ct_eq(b) & b.ct_eq(a);
     #[cfg(feature = "dual-mac")]
@@ -1814,12 +1896,15 @@ pub fn decrypt(
 ) -> Result<Plaintext, Error> {
     check_lengths(ciphertext.len(), aad.len())?;
 
+    // As in `encrypt`: the fallible step runs before any key material exists, so the error
+    // path cannot return through live secrets.
+    let mut plaintext = alloc_zeroed(ciphertext.len())?;
+
     let (mut mac_key, mut enc_seed) = derive_material(key, nonce);
     let mut enc_key = [0u8; 32];
     let mut enc_nonce = [0u8; 12];
     derive_enc(&enc_seed, tag, &mut enc_key, &mut enc_nonce);
 
-    let mut plaintext = alloc_zeroed(ciphertext.len())?;
     chacha20_keystream(&enc_key, 0, &enc_nonce, ciphertext, &mut plaintext);
 
     let mut computed_tag = derive_tag(&mac_key, key, nonce, aad, &plaintext);

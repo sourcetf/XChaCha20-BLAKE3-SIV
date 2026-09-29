@@ -225,25 +225,30 @@ if [ "$RUN_CROSS_EXEC" -eq 1 ]; then
         ;;
     esac
 
-    # `--features pure`: BLAKE3 needs a *target* C toolchain for its C kernels on
-    # x86_64/aarch64, and this stage exists to execute *this crate's* SIMD code,
-    # not BLAKE3's; the wire format is identical either way.
-    cargo test --target "$target" --release --no-run --features pure
-
-    # Run the built test executables directly rather than through
-    # `cargo test --target`, so the emulator is used explicitly and the runner
-    # config cannot silently fall back to executing the target code natively.
-    deps="target/$target/release/deps"
+    # Run the built test executables directly rather than through `cargo test --target`,
+    # so the emulator is used explicitly and the runner config cannot silently fall back
+    # to executing the target code natively.
+    #
+    # `--features pure` on the build: BLAKE3 needs a *target* C toolchain for its C kernels
+    # on x86_64/aarch64, and this stage exists to execute *this crate's* SIMD code, not
+    # BLAKE3's; the wire format is identical either way.
+    #
+    # Every binary this build produced, parsed from cargo's own report, rather than a
+    # hand-listed few or a glob over `$deps`. The hand list left `counter_range` (whose
+    # 32-bit assertions exist for this run), `locked` (whose syscall numbers are
+    # per-architecture), `decision`, `decision_scope`, `ultra` and `variable_latency` built
+    # but never executed; the glob additionally picks up artifacts from *earlier* feature
+    # configurations, and running those executes stale code -- measured locally, three such
+    # binaries failed with counts from an older revision of their tests, which reads as a
+    # broken cross target. Two are excluded because the emulator cannot provide what they
+    # need: `timing*` a real clock (and `security`'s timing screen with it), `ctgrind*`
+    # valgrind on x86_64.
+    exes="$(cargo test --target "$target" --release --no-run --features pure 2>&1 \
+            | sed -n 's/^ *Executable .*(\(.*\))$/\1/p')"
+    [ -n "$exes" ] || { echo "cargo reported no $target executables" >&2; exit 1; }
     ran=0
-    for bin in "$deps"/xchacha20_blake3_siv-* "$deps"/differential_reference-* "$deps"/security-* "$deps"/threads-*; do
-      case "$bin" in *.d|*.rlib|*.rmeta) continue ;; esac
-      [ -x "$bin" ] || continue
-      # The security binary runs too -- its property tests and deterministic fuzz
-      # loop are exactly the kind of broad exercise that a new backend or a new
-      # word size needs -- but the dudect-style timing screen is skipped there:
-      # an emulated clock cannot resolve real timing differences, so it would be
-      # measuring the emulator and could fail for reasons that have nothing to
-      # do with this code.
+    for bin in $exes; do
+      case "$(basename "$bin")" in timing-*|ctgrind-*) continue ;; esac
       extra=()
       case "$(basename "$bin")" in security-*) extra=(--skip timing) ;; esac
       echo "--- $(basename "$bin") ---"

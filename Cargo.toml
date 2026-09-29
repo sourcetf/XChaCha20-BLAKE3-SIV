@@ -126,7 +126,11 @@ ultra = ["hardened", "rng", "dual-mac", "locked"]
 # that pins the computed tag to a constant or to the received tag (both gates compare
 # the same two values, so they fail *together* without this). Measured +21..40% on
 # decryption, +6..25% on a round trip.
-dual-mac = []
+# Implies `hardened`: the recomputation only exists to make the *second gate* independent,
+# so without the gate there is nothing for it to strengthen -- measured with
+# `cargo check --no-default-features --features dual-mac`, which built a second tag
+# derivation, compared it against nothing, and warned that the comparison was dead code.
+dual-mac = ["hardened"]
 # `mlock` + `MADV_DONTDUMP` for keys: reaches past swap and core dumps, which a
 # volatile-store wipe cannot. Measured ~7 us per range, so it belongs on long-lived
 # keys, not per message.

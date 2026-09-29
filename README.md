@@ -233,8 +233,8 @@ something — it must *fail* when the second gate is replaced by a copy of the f
 | Single fault on the decision (a skipped branch, or a corrupted gate *value*) | **defended** — `tools/fi_check.sh` runs this as a campaign row on the hardened build |
 | A single corrupted byte or bit in the decision code | **measured, and comparable**: a single-fault sweep of the function finds **1 accepting byte in 5526** (neutralised) and **13 in 44208** (single-bit flips) in the default build. The mechanism is not the gate — the accepting sites are the *same addresses* in both builds, so they sit in the shared KDF/MAC/SIMD code, and several are the middle byte of a multi-byte instruction, where corruption desynchronises the decoder and the following bytes run as different instructions. No source structure prevents that. For scale, the same technique measures RustCrypto's XChaCha20Poly1305 (1081 bytes of decision code) at **13 of 1081** and **106 of 8648** — about 40x the rate of this crate's default build |
 | ...the same, in the **opt-out** build (`default-features = false`) | **worse, and that is the point**: 9 of 4268 and 152 of 34144, i.e. **11.7x** (9/4268 against 1/5526) and **15.1x** (152/34144 against 13/44208) the default build's rate.  (This said "~9x"; that number is not what these figures give, and the two models disagree with each other as well.) The second gate does not remove the class (nothing can) but it measurably shrinks it, which is the argument for it being on by default |
-| A fault inside the constant-time comparison itself (a shortened loop, a corrupted bound) | **not defended by `hardened`, closed by `ultra`**: with only `hardened`, both gates — and both of `dual-mac`'s recomputations, when it is on — go through the same `subtle` loop, so one fault shortening it disarms every gate at once and a forgery costs `2^(8 * compared bytes)` instead of `2^520`.  Measured: an accept after **2,573 attempts** with the comparison cut to two bytes.  Under `dual-mac`/`ultra` the second gate also `AND`s in `ct_eq_independent`, a differently *written* comparison, and the same fault then yields **no forgery in 2,000,000 attempts**.  Two faults still defeat both, which is the boundary this row states rather than hides |
-| A fault that replaces the computed tag with a constant, or with the received tag | **not defended, and pinned**: the campaign asserts that both builds accept it, so a change in either direction is noticed. This is the strongest fault model in the table and it defeats the two gates *together*: either gate is `computed_tag ? tag`, so forcing `computed_tag` to equal `tag` satisfies both at once — two gates over one value are one gate for this attack, and a second gate reading the same memory is not a second witness. The only software measure that would catch it is computing the tag *twice, independently* (a second MAC pass, roughly doubling the tag cost on every message, and the tag pass is a large part of a short message) and requiring both recomputations to match; that is not done here, and a hardware countermeasure — dual-rail logic, an HSM — is what a deployment that faces targeted injection should use instead |
+| A fault inside the constant-time comparison itself (a shortened loop, a corrupted bound) | **not defended by `hardened`, closed by `ultra`**: with only `hardened`, both gates — and both of `dual-mac`'s recomputations, when it is on — go through the same `subtle` loop, so one fault shortening it disarms every gate at once and a forgery costs `2^(8 * compared bytes)` instead of `2^520`.  **Hand-modelled, not by a committed tool**: no script in `tools/` shortens that loop — the campaign's faults are source-level changes of other kinds (`tools/mutation_check.sh` plants a `==` where `ct_eq` was, which is not a shortened loop) and `tools/fi_instruction.sh` sweeps the compiled bytes uniformly rather than aiming at a loop bound — so both counts in this row came from cutting the comparison down by hand in a throwaway copy.  Hand-measured against that fault: an accept after **2,573 attempts** with the comparison cut to two bytes.  Under `dual-mac`/`ultra` the second gate also `AND`s in `ct_eq_independent`, a differently *written* comparison, and the same hand-made fault then yields **no forgery in 2,000,000 attempts**.  Two faults still defeat both, which is the boundary this row states rather than hides |
+| A fault that replaces the computed tag with a constant, or with the received tag | **not defended by `hardened`, closed by `ultra`/`dual-mac`**: with only `hardened` this is the strongest fault model in the table and it defeats the two gates *together* — either gate is `computed_tag ? tag`, so forcing `computed_tag` to equal `tag` satisfies both at once, and two gates over one value are one gate for this attack, not two witnesses. That half is pinned rather than hidden: `tools/fi_check.sh`'s `computed-tag-replaced` row applies exactly this fault to the hardened build and requires it to be accepted, so a change in either direction is noticed. `dual-mac`, part of `ultra`, closes it by doing the thing an earlier revision of this row said was not done here: computing the tag *twice, independently* — a second MAC pass, and the tag pass is a large part of a short message — and requiring the recomputation to agree with the stored value **and** with the received tag (`recomputed_tag.ct_eq(&computed_tag) & recomputed_tag.ct_eq(tag)`, in both decrypt entry points). A rewritten stored tag then disagrees with the recomputation, and `tools/fi_check.sh`'s `dual-mac-blocks-tag-substitution` row runs that same source fault on the `ultra` build and is rejected there. The residual is the rest of this row's boundary: two faults, one in each derivation, or one aimed at the arithmetic both derivations share (`derive_tag` and the keyed BLAKE3 under it), still defeat it — that is a synchronized two-glitch bench or precision injection, and the answer for a deployment that faces it is a hardware countermeasure — dual-rail logic, an HSM — rather than software |
 | Two independent faults | not defended — this is where the attacker's cost moves to a synchronized two-glitch bench |
 | A targeted fault inside the tag computation, making it produce the attacker's tag | not defended — precision injection, laboratory grade |
 | Key recovery by differential fault analysis of ChaCha20 | not defended — laboratory grade, and harder against ARX than against AES |
@@ -268,10 +268,14 @@ sites are the *same addresses* in both builds, so they are in the shared KDF/MAC
 and several are the middle byte of a multi-byte instruction, where corruption desynchronises
 the decoder and the following bytes execute as different instructions. No source-level
 structure prevents that. What the second gate does buy is a *rate*: the default build is
-about 9x lower than the opt-out one and about 40x lower than RustCrypto's
-`XChaCha20Poly1305` measured the same way. The map is of machine code, so a different host
-and toolchain produces a different one — which is why the script gates on the comparison and
-prints both counts rather than asserting a number.
+about 11.7x lower than the opt-out one on the neutralised-byte model and 15.1x
+lower on the bit-flip one (1/5526 against 9/4268, and 13/44208 against 152/34144 — the
+rates in the table above), and about 40x lower than RustCrypto's
+`XChaCha20Poly1305` measured the same way.  (This paragraph said "about 9x"; that is
+not what those counts give — the two models disagree with each other as well — so the
+two ratios are written out rather than averaged.) The map is of machine code, so a
+different host and toolchain produces a different one — which is why the script gates
+on the comparison and prints both counts rather than asserting a number.
 One more thing the campaign turned up, which is worth knowing before trusting a
 green suite here: the failure-path wipe of the *allocating* `decrypt` is not
 observable from a test at all — the plaintext is wiped and then freed, so a skipped
@@ -411,10 +415,14 @@ deployment.
   the constant to the counter arithmetic, so raising it is a **build** failure rather
   than a silent wrap, and `tests/counter_range.rs` checks the arithmetic at run time
   and that every call site either starts at zero or forwards its own counter.
-- **The wire format is not frozen** ("Wire format is not frozen" above), and it is
-  not interoperable with any standard — a consumer on the other end must be this
+- **The wire format is frozen, and it is not a standard** ("Wire format: frozen by
+  revision, and the crate is 0.x" above): the bytes will not move without a revision
+  bump, while the *crate* is `0.x`, so the Rust API is the unstable part — and none of
+  it is interoperable with any standard, so a consumer on the other end must be this
   crate, or a reimplementation of the same three domain strings and the same tag
-  construction.
+  construction.  (This bullet said "not frozen"; that was true before the format was
+  frozen at revision `v0.2`, and the sentence was left behind when the section above was
+  rewritten.)
 
 ## Nonces, and where randomness comes from
 

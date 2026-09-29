@@ -1,10 +1,18 @@
 //! The accept/reject decision, as a test that a *fault* can break.
 //!
-//! `tools/fi_check.sh` runs this in three configurations: on a clean `hardened`
-//! build, on the default build with the decision "glitched" (the fault written
-//! down as a source change), and on the `hardened` build with the same glitch. The
-//! middle one must *fail* — that is the fault being real rather than hypothetical —
-//! and the last must pass, which is the whole point of the hardening.
+//! `tools/fi_check.sh` runs this in ten configurations — the ten rows of its campaign
+//! that name `--test decision` (its eleventh row drives `tests/security.rs` instead) —
+//! each one a fault written down as a source change and applied to a fresh copy of the
+//! crate. On the clean `hardened` and opt-out (`--no-default-features`) builds it must
+//! pass, and the rows that must *fail* are the real faults: a neutralised gate on the
+//! opt-out build (that is the fault being real rather than hypothetical), a second gate
+//! reduced to a copy of the first, the computed tag replaced by the received one, and
+//! both call-site checks neutralised. The rows that must pass are the countermeasures:
+//! the same neutralised, corrupted or substituted value on the `hardened` build, and the
+//! substituted tag on the `ultra` build, where the independent recomputation disagrees
+//! with it. (An earlier revision of this comment said "three configurations"; the
+//! campaign has grown since, and ten of its eleven rows name this test binary as the
+//! detector.)
 //!
 //! It is also a plain test: a tag or ciphertext with one bit flipped must be
 //! rejected, through both entry points, at the sizes where the tag is hashed in

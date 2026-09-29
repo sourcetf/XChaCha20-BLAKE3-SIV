@@ -16,11 +16,14 @@
 //! | a single corrupted *instruction* | the second gate, and the fail-closed call site | `tools/fi_instruction.sh` (both models) |
 //! | `computed_tag` pinned / rewritten | an independent recomputation cross-checked against both values | `dual_mac_is_wired_into_both_decrypt_paths` |
 //! | key pages read out of swap or a core dump | `mlock` + `MADV_DONTDUMP` | `locked_key_is_actually_locked` |
-//! | a nonce reused | SIV: the tag binds the message, so reuse degrades rather than fails | `spec/tests`: `test_message_swap_under_a_reused_nonce_is_rejected` |
+//! | a nonce reused | SIV: the tag binds the message, so reuse degrades rather than fails | `src/lib.rs`: `test_message_swap_under_a_reused_nonce_is_rejected` |
 //! | remote memory exhaustion | a public bound, a pre-allocation policy check, fallible allocation | `tests/security.rs` |
 //!
-//! `ultra` = `hardened` + `rng` + `dual-mac` + `locked` + `pure`; this file is compiled
-//! only when it is on, and the assertions below are about the *combination*, which nothing
+//! `ultra` = `hardened` + `rng` + `dual-mac` + `locked`. (`pure` is deliberately *not*
+//! part of it — it is a cross-compile/perf switch that forces BLAKE3's portable backends,
+//! costs 24-32% and buys no security — and `Cargo.toml` and `README.md` both say so; this
+//! line used to list it, which contradicted them.) This file is compiled only when
+//! `ultra` is on, and the assertions below are about the *combination*, which nothing
 //! else in the suite can check.
 
 #![cfg(feature = "ultra")]

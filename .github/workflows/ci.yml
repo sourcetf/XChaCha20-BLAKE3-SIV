@@ -114,6 +114,13 @@ jobs:
           # an empty feature. This entry is what keeps that from happening again.
           - profile: release, locked alone
             args: --release --features locked
+          # `rng` alone, and the `no_std` shape of it (`--no-default-features --features
+          # rng`): the feature adds a module and a dependency, and neither combination was
+          # built anywhere.
+          - profile: release, rng alone
+            args: --release --features rng
+          - profile: release, no default features with rng
+            args: --release --no-default-features --features rng
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
@@ -306,26 +313,42 @@ jobs:
             echo "CARGO_TARGET_POWERPC64_UNKNOWN_LINUX_MUSL_LINKER=$sysroot/lib/rustlib/$host/bin/rust-lld"
             echo "CARGO_TARGET_POWERPC64_UNKNOWN_LINUX_MUSL_RUSTFLAGS=-C linker-flavor=ld.lld -C link-self-contained=yes -C relocation-model=static -L native=$alias_dir"
           } >> "$GITHUB_ENV"
+      # The list of binaries this build produced is captured, not guessed: `deps/` also
+      # holds artifacts from earlier feature configurations (`Swatinem/rust-cache` restores
+      # `target/`), and running those executes stale code. Measured locally: three such
+      # binaries failed with counts from an older revision of their own tests, which reads
+      # as "the cross target is broken" and is not.
       - name: build ${{ matrix.target }} test binaries
-        run: cargo test --target ${{ matrix.target }} --release --no-run --features pure
+        run: |
+          set -euo pipefail
+          cargo test --target ${{ matrix.target }} --release --no-run --features pure \
+            | tee build.log
+          sed -n 's/^ *Executable .*(\\(.*\\))$/\\1/p' build.log > executables.txt
+          count="$(grep -c . executables.txt || true)"
+          [ "$count" -gt 0 ] || { echo "cargo reported no executables" >&2; exit 1; }
+          echo "built $count test binaries"
+          cat executables.txt
 
       - name: execute under qemu
         run: |
           set -euo pipefail
-          deps=target/${{ matrix.target }}/release/deps
           ran=0
-          for bin in "$deps"/xchacha20_blake3_siv-* "$deps"/differential_reference-* "$deps"/security-* "$deps"/threads-*; do
-            case "$bin" in *.d|*.rlib|*.rmeta) continue ;; esac
-            [ -x "$bin" ] || continue
-            # The security binary runs too (property tests + deterministic fuzz),
-            # but its dudect-style timing screen is skipped: an emulated clock
-            # cannot resolve real timing differences.
+          # Every test binary the build produced, not a hand-listed few. The list used to
+          # name four (`xchacha20_blake3_siv-*`, `differential_reference-*`, `security-*`,
+          # `threads-*`), which left `counter_range`, `decision`, `decision_scope`,
+          # `locked`, `ultra` and `variable_latency` built but never executed on the cross
+          # targets -- including `counter_range`, whose 32-bit assertions exist for the
+          # i686 run, and `locked`, whose syscall numbers are per-architecture. The two
+          # exclusions need something the emulator cannot provide: `timing-*` a real clock
+          # (and `security-*`'s timing screen with it), `ctgrind-*` valgrind on x86_64.
+          while IFS= read -r bin; do
+            case "$(basename "$bin")" in timing-*|ctgrind-*) continue ;; esac
             extra=()
             case "$(basename "$bin")" in security-*) extra=(--skip timing) ;; esac
             echo "--- $(basename "$bin") ---"
             ${{ matrix.qemu }} "$bin" --test-threads=1 ${extra[@]+"${extra[@]}"}
             ran=$((ran + 1))
-          done
+          done < executables.txt
           if [ "$ran" -eq 0 ]; then
             echo "no ${{ matrix.target }} test binaries found in $deps" >&2
             exit 1

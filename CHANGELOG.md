@@ -108,7 +108,10 @@ than asserted, because a gate that fails upstream is a gate someone deletes.
 - `every_layer_is_compiled_in_under_ultra` and
   `without_dual_mac_there_is_no_second_derivation_on_this_target` asserted that
   `src/lib.rs` *contains* `#[cfg(feature = "dual-mac")]` — true in every build, so they
-  could not fail. Replaced with `ultra_enables_every_layer_it_bundles` (`cfg!`) and
+  could not fail. Replaced with the anonymous `const _: () = { ... }` assertion at the
+  top of `tests/ultra.rs` (compile-time `cfg!` checks that panic if any bundled layer is
+  off; there is no named test — this entry used to name one,
+  `ultra_enables_every_layer_it_bundles`, which does not exist) and
   `every_layer_answers_correctly_in_the_ultra_build` (end-to-end), plus
   `dual_mac_adds_exactly_one_extra_tag_derivation`, a unit test that counts the
   derivations through a test-only counter: 1 + 1 without `dual-mac`, 1 + 2 with it.
@@ -155,7 +158,9 @@ than asserted, because a gate that fails upstream is a gate someone deletes.
 - Every tool that assumed "hardened means `--features hardened`" was updated to the
   new axis: `tools/fi_check.sh`'s rows (including a `clean-plain` row),
   `tools/fi_instruction.sh`'s two scans (now `plain (no hardened)` vs
-  `hardened (default)`, both 0 accepting bytes), the ctgrind CI step, and
+  `hardened (default)`; the "both 0 accepting bytes" those scans printed at the time
+  was the wrong-bytes artefact of the `objdump -h` offset bug — the corrected counts
+  and the comparison-based criterion are further down), the ctgrind CI step, and
   `tools/mutation_check.sh`, whose `ct_eq` -> `==` mutation is compiled only in the
   opt-out build and therefore runs there now.
 
@@ -193,10 +198,18 @@ than asserted, because a gate that fails upstream is a gate someone deletes.
   mutation_check), `verify.sh` maps it to a skipped stage, and the new self-test proves
   it by hiding the tooling (a non-executable `valgrind` stub first on `PATH`, so it
   works on runners that do have a system valgrind).
-- **The instruction-level scan's criterion is absolute**: it required
-  `hardened ≤ plain`, so 50 accepting bytes in each build would have passed as "no
-  worse than". It now requires **zero** accepting bytes in both, which is what the
-  README claims.
+- **The instruction-level scan's criterion is a comparison, not a threshold of zero.**
+  `tools/fi_instruction.sh` requires `hardened ≤ plain` and prints *both* counts, because
+  zero accepting faults is unreachable in any of these builds: the accepting sites are in
+  the shared KDF/MAC/SIMD code rather than in the gate, so the property the tool can
+  enforce is that the second gate never makes the built code worse — and the printed
+  numbers are what make a regression visible. (The comparison alone would tolerate equal
+  non-zero counts in both builds, which is exactly why the counts are printed rather than
+  absorbed by the gate.) This bullet previously claimed the opposite — that the criterion
+  had become "zero accepting bytes in both, which is what the README claims" — and
+  neither half held: the tool's zero was the *wrong-bytes* artefact of the `objdump -h`
+  offset bug (see "Corrected: the instruction-level fault numbers were measured on the
+  wrong bytes" below), and the README says neither build reaches zero.
 - **The timing screen is split**: `timing-instrument` blocks on the detectability
   control (`timing_screen_can_detect_a_real_difference`, asserted `t > 10`, measured
   3244) on every push, and the two statistical *screens* stay advisory — the same
@@ -347,8 +360,11 @@ Two things follow, and both are now in the README's table. The accepting sites a
 shared KDF/MAC/SIMD code, and the mechanism is mostly decoder desynchronisation - corrupting
 the middle byte of a multi-byte instruction makes the following bytes execute as different
 instructions. Nothing in the source can prevent that. And the second gate still *buys*
-something measurable: the default build's rate is ~9x lower than the opt-out one and ~40x
-lower than the reference implementation's.
+something measurable: the default build's rate is 11.7x lower than the opt-out one on
+the neutralised-byte model and 15.1x lower on the bit-flip one (1/5526 against 9/4268,
+13/44208 against 152/34144), and ~40x lower than the reference implementation's. (This
+sentence said "~9x"; that is not what these counts give, and the two models disagree
+with each other as well — see the Documentation entry above.)
 
 The tool's criterion changed with the numbers: it no longer asserts zero (unreachable for any
 of these implementations) but that the hardened build is not worse than the opt-out one, with
