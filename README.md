@@ -197,9 +197,13 @@ side degrades to rejection rather than to forgery, because the tag is computed o
 the plaintext (see the SIV property above), so a corrupted keystream, a corrupted
 key derivation or a corrupted tag can only produce a message the receiver refuses.
 The data path is held to that empirically — every single-bit corruption of
-ciphertext, tag and AAD is rejected by the tests, and 115 million fuzz executions
-found no acceptance — but those are *non-physical* analogues: they show the
-acceptance predicate is exact, not that the decision survives a glitch.
+ciphertext, tag and AAD is rejected by the tests, and every fuzz run recorded in
+CI has found no acceptance — but those are *non-physical* analogues: they show the
+acceptance predicate is exact, not that the decision survives a glitch.  (This
+claimed a specific "115 million fuzz executions".  No artefact in the repository
+records that many: the configured budget is 120 s locally and 300 s in CI, at
+roughly 1100 exec/s.  The claim is removed rather than re-derived, because a number
+nobody can reproduce is worth less than no number.)
 
 ### The `hardened` decision — on by default
 
@@ -228,7 +232,8 @@ something — it must *fail* when the second gate is replaced by a copy of the f
 | A fault that corrupts one decision *value* | **defended** — the two gates write two independent slots and the caller rejects if either says so; one corrupted slot leaves the other. `tools/fi_check.sh`'s `one-check-neutralised` row is this attack, and it is rejected |
 | Single fault on the decision (a skipped branch, or a corrupted gate *value*) | **defended** — `tools/fi_check.sh` runs this as a campaign row on the hardened build |
 | A single corrupted byte or bit in the decision code | **measured, and comparable**: a single-fault sweep of the function finds **1 accepting byte in 5526** (neutralised) and **13 in 44208** (single-bit flips) in the default build. The mechanism is not the gate — the accepting sites are the *same addresses* in both builds, so they sit in the shared KDF/MAC/SIMD code, and several are the middle byte of a multi-byte instruction, where corruption desynchronises the decoder and the following bytes run as different instructions. No source structure prevents that. For scale, the same technique measures RustCrypto's XChaCha20Poly1305 (1081 bytes of decision code) at **13 of 1081** and **106 of 8648** — about 40x the rate of this crate's default build |
-| ...the same, in the **opt-out** build (`default-features = false`) | **worse, and that is the point**: 9 of 4268 and 152 of 34144, i.e. ~9x the default build's rate under both models. The second gate does not remove the class (nothing can) but it measurably shrinks it, which is the argument for it being on by default |
+| ...the same, in the **opt-out** build (`default-features = false`) | **worse, and that is the point**: 9 of 4268 and 152 of 34144, i.e. **11.7x** (9/4268 against 1/5526) and **15.1x** (152/34144 against 13/44208) the default build's rate.  (This said "~9x"; that number is not what these figures give, and the two models disagree with each other as well.) The second gate does not remove the class (nothing can) but it measurably shrinks it, which is the argument for it being on by default |
+| A fault inside the constant-time comparison itself (a shortened loop, a corrupted bound) | **not defended by `hardened`, closed by `ultra`**: with only `hardened`, both gates — and both of `dual-mac`'s recomputations, when it is on — go through the same `subtle` loop, so one fault shortening it disarms every gate at once and a forgery costs `2^(8 * compared bytes)` instead of `2^520`.  Measured: an accept after **2,573 attempts** with the comparison cut to two bytes.  Under `dual-mac`/`ultra` the second gate also `AND`s in `ct_eq_independent`, a differently *written* comparison, and the same fault then yields **no forgery in 2,000,000 attempts**.  Two faults still defeat both, which is the boundary this row states rather than hides |
 | A fault that replaces the computed tag with a constant, or with the received tag | **not defended, and pinned**: the campaign asserts that both builds accept it, so a change in either direction is noticed. This is the strongest fault model in the table and it defeats the two gates *together*: either gate is `computed_tag ? tag`, so forcing `computed_tag` to equal `tag` satisfies both at once — two gates over one value are one gate for this attack, and a second gate reading the same memory is not a second witness. The only software measure that would catch it is computing the tag *twice, independently* (a second MAC pass, roughly doubling the tag cost on every message, and the tag pass is a large part of a short message) and requiring both recomputations to match; that is not done here, and a hardware countermeasure — dual-rail logic, an HSM — is what a deployment that faces targeted injection should use instead |
 | Two independent faults | not defended — this is where the attacker's cost moves to a synchronized two-glitch bench |
 | A targeted fault inside the tag computation, making it produce the attacker's tag | not defended — precision injection, laboratory grade |
@@ -300,7 +305,9 @@ xchacha20-blake3-siv = { version = "0.1", features = ["ultra"] }
 | --- | --- | --- |
 | `hardened` (already default) | a single corrupted decision value or instruction | +10.8% at 64 B, +3.6% at 1 KiB, +0.4% at 1 MiB |
 | `dual-mac` | the tag being pinned to a constant or to the received tag — the one model the two gates fail *together* on | +30% at 64 B, +40% at 1 KiB, +24% at 1 MiB on decryption; +8–25% on a round trip |
-| `locked` | key pages readable out of **swap** or a **core dump** | ~7 µs once per key (`mlock`+`munlock`), not per message |
+| `dual-mac` | a fault inside the shared constant-time comparison (a shortened loop): the second gate uses a differently *written* comparison, so one fault reaches only one of them | one extra 65-byte comparison, ~+2.7% at 64 B |
+| `dual-mac` | the `blake3` dependency's XOF output surviving in its own stack frames: `scrub_stack()` overwrites the 16 KiB below the entry point after the last derivation | ~16 KiB of volatile stores, ~0.5–1 µs per operation |
+| `locked` | key pages readable out of **swap** or a **core dump** | ~7 µs once per key (`mlock`+`munlock`), not per message. The key is heap-allocated so its address is stable: `mlock` is address-based, and a key returned by value moves after being locked, which left this layer protecting a dead stack slot |
 | `rng` | nothing about the cipher; it is how a caller gets a key at all | — |
 
 `pure` is deliberately **not** in `ultra`: it forces BLAKE3's portable backends, costs
@@ -353,6 +360,22 @@ deployment.
   tag is fixed-size, so the message length is public to anyone who sees the
   ciphertext. Every length-preserving AEAD has this; hiding a length means padding
   or chunking at the application layer, before the bytes reach this crate.
+- **A stack scan finds the `blake3` dependency's own frame residue, and this crate
+  cannot reach it.** Measured with `tools/stack_residue.sh`: after a full round trip,
+  the master key never appears in the call-chain stack region, but the *XOF output* of
+  the keyed hash does — a full 44-byte `enc_key ‖ enc_nonce` — because `blake3` keeps
+  its output block in frames of its own. The key itself is not left (measured: longest
+  run 4 bytes); the derived material is. `blake3`'s `zeroize` feature is already on and
+  the crate already calls `reader.zeroize(); hasher.zeroize();`, which is the entire
+  reach a caller has. What this means in practice: an attacker who can read this
+  process's stack gets per-message encryption keys, not the master key — and such an
+  attacker can usually read the caller's own key copy anyway. It is written down here
+  because the crate's own claim ("no copy of the MAC key survives the call") is about
+  the MAC key, and a reader should not extend it to the encryption key. Two source
+  changes in this crate reduce the residue that *is* reachable — `derive_enc` writes
+  through caller slices instead of returning a 44-byte aggregate, and
+  `chacha20_rounds` mutates in place instead of taking the key state by value — and
+  both were found by exactly this scan.
 - **Zeroization is a volatile-store wipe.** It clears the bytes this crate owns, when
   it drops them. It does not reach a page that had already been swapped out, a core
   dump or a hibernation image the OS writes, a debugger attached to the process, or

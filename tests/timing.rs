@@ -69,10 +69,15 @@ use xchacha20_blake3_siv::{decrypt, encrypt, TAG_LEN};
 // screen, not evidence.
 //
 // **Where the real constant-time evidence is:**
-//   1. source analysis — all 17 branch statements in non-test code were
-//      classified: they depend on lengths, pointer alignment, CPU features, an
-//      enum variant, or the final authentication decision. None depends on the
-//      *content* of a key, nonce, AAD or message;
+//   1. source analysis — every branch statement in non-test code was classified
+//      and is enumerated in `tests/variable_latency.rs`, whose table fails when
+//      any count changes so each one is re-audited: they depend on lengths,
+//      pointer alignment, CPU features, an enum variant, or the final
+//      authentication decision. None depends on the *content* of a key, nonce,
+//      AAD or message. (This comment used to carry a hand-copied count -- "all
+//      17" -- which had drifted from the enforced table; the number now lives in
+//      exactly one place, and that place fails the build when it stops being
+//      true.)
 //   2. disassembly — `subtle::ConstantTimeEq` over the 65-byte tag compiles to an
 //      unrolled branchless compare (checked for the 32-byte case in the previous
 //      revision of this crate; the 65-byte form uses the same generic code);

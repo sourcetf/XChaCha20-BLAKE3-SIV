@@ -27,6 +27,30 @@
 
 use xchacha20_blake3_siv::{decrypt, decrypt_in_place_detached, encrypt, Error};
 
+// `ultra` is a bundle, and this asserts the bundle is wired -- at *compile* time,
+// which is the right place for a fact about which features are on. The previous
+// version grepped `src/lib.rs` for the text `#[cfg(feature = "dual-mac")]`: that
+// string is in the file in every configuration, so the assertion held even if
+// `ultra` enabled nothing, which is how three defects in the `locked` layer
+// survived a suite that claimed to test it.
+const _: () = {
+    // `if !.. { panic!(..) }` rather than `assert!`: clippy's
+    // `assertions_on_constants` rejects `assert!` on a constant, and it is right
+    // that a fact about which features are on belongs in a `const` block.
+    if !cfg!(feature = "hardened") {
+        panic!("`ultra` must enable `hardened`");
+    }
+    if !cfg!(feature = "dual-mac") {
+        panic!("`ultra` must enable `dual-mac`");
+    }
+    if !cfg!(feature = "locked") {
+        panic!("`ultra` must enable `locked`");
+    }
+    if !cfg!(feature = "rng") {
+        panic!("`ultra` must enable `rng`");
+    }
+};
+
 const KEY: [u8; 32] = [0x11u8; 32];
 const NONCE: [u8; 24] = [0x22u8; 24];
 
@@ -66,26 +90,6 @@ fn dual_mac_is_wired_into_both_decrypt_paths() {
     );
 }
 
-/// The recomputation must not cost anything when the feature is off.
-///
-/// Not a timing test: the claim is structural — with `dual-mac` off there is no second
-/// `derive_tag` call in the compiled body at all, so the cost is exactly zero rather than
-/// "small". A `#[cfg]`-gated call is the difference between zero and a few percent.
-#[test]
-fn without_dual_mac_there_is_no_second_derivation_on_this_target() {
-    // `ultra` implies `dual-mac`, so this test can only observe the *on* state; what it
-    // pins is that the call sites are cfg-gated rather than unconditional.
-    let src = include_str!("../src/lib.rs");
-    let cut = src.find("mod tests {").expect("test module");
-    let body = &src[..cut];
-    let gated = body.matches("#[cfg(feature = \"dual-mac\")]").count();
-    assert!(
-        gated >= 4,
-        "the dual-mac work must be behind `#[cfg]` at every site (found {gated} gates): \
-         an unconditional second derivation would tax builds that did not ask for it"
-    );
-}
-
 /// A locking key is really locked, read back from the kernel.
 ///
 /// The syscall numbers in `locked` are `const`s, and a wrong one would not be caught by
@@ -96,10 +100,23 @@ fn without_dual_mac_there_is_no_second_derivation_on_this_target() {
 /// refuses, rather than passing vacuously.
 #[test]
 fn locked_key_is_actually_locked() {
-    use xchacha20_blake3_siv::locked::{LockedKey, SUPPORTED};
+    use xchacha20_blake3_siv::locked::{unlock_range, LockedKey, SUPPORTED};
+
+    // Returning early when the environment refuses to lock is indistinguishable,
+    // in a test report, from having verified the lock: both say `ok`. That is the
+    // vacuous shape this test exists to prevent, so a refusal is a *failure* by
+    // default. `XSIV_ALLOW_UNLOCKED=1` is the explicit, recorded way to say "this
+    // host cannot lock and that is not a regression" -- and setting it is a
+    // decision that `ultra`'s `locked` layer is knowingly inactive here.
+    let allow_unlocked = std::env::var("XSIV_ALLOW_UNLOCKED").is_ok();
 
     if !SUPPORTED {
-        eprintln!("SKIPPED: locking is unsupported on this target");
+        assert!(
+            allow_unlocked,
+            "memory locking is unsupported on this target, so `ultra`'s `locked` layer is \
+             inactive. Run on Linux x86_64/aarch64, or set XSIV_ALLOW_UNLOCKED=1 to accept \
+             that this host is knowingly uncovered."
+        );
         return;
     }
 
@@ -108,9 +125,14 @@ fn locked_key_is_actually_locked() {
         Ok(k) => k,
         Err(e) => {
             // `ENOMEM` (12) from RLIMIT_MEMLOCK, `EPERM` (1) in a hardened container.
-            // Reported, not swallowed: a test that passes because it never locked
-            // anything is the vacuous kind.
-            eprintln!("SKIPPED: the kernel refused to lock memory (errno {})", -e);
+            assert!(
+                allow_unlocked,
+                "the kernel refused to lock memory (errno {}), so `ultra` promises \
+                 mlock + MADV_DONTDUMP and this host is not getting it. Raise \
+                 RLIMIT_MEMLOCK or grant CAP_IPC_LOCK, or set XSIV_ALLOW_UNLOCKED=1 to \
+                 record that this host knowingly runs unlocked.",
+                -e
+            );
             return;
         }
     };
@@ -119,6 +141,23 @@ fn locked_key_is_actually_locked() {
         after >= before + 32,
         "VmLck did not account for the locked key: before {before}, after {after}. A wrong \
          syscall number or a no-op `lock_range` looks exactly like this."
+    );
+
+    // The lock must be on the *live* key's page, not on an address the value was
+    // moved away from. `mlock` is address-based, and a `LockedKey` returned by
+    // value moves its 32 bytes -- so an earlier version locked a stack slot in
+    // `new` and left the returned copy on an unlocked page, while VmLck (and the
+    // assertion above) still looked right. Unlocking the live key's own page must
+    // show up in the kernel's accounting; if it does not, the locked page is
+    // somewhere else and the protection is not on the key.
+    let held = LockedKey::locked_bytes().expect("VmLck is readable on Linux");
+    unlock_range(key.as_bytes().as_ptr(), 32);
+    let after_unlocking_live = LockedKey::locked_bytes().expect("VmLck is readable on Linux");
+    assert!(
+        after_unlocking_live < held,
+        "unlocking the live key's page did not change VmLck ({held} -> {after_unlocking_live}), \
+         so the page that was locked is not the page the key is on: the value was moved \
+         after being locked. The key must be heap-allocated (`Box`) so its address is stable."
     );
 
     // And the key still works, so the locking did not corrupt or move it.
@@ -175,24 +214,30 @@ fn documents_what_it_cannot_defend_against() {
 /// code checking `feature = "ultra"` somewhere and missing it — would be invisible in a
 /// normal test run because the default build does not compile any of it.
 #[test]
-fn every_layer_is_compiled_in_under_ultra() {
-    // `hardened`: the second gate's branch exists.
-    let src = include_str!("../src/lib.rs");
-    let cut = src.find("mod tests {").expect("test module");
-    let body = &src[..cut];
+fn every_layer_answers_correctly_in_the_ultra_build() {
+    // Replaces a test that asserted `src/lib.rs` contains the strings
+    // `#[cfg(feature = "hardened")]` and `pub mod locked` -- true in every build, so it
+    // passed whether or not the layers were compiled. What is worth asserting here is
+    // that the assembled build still answers correctly end to end; the per-layer
+    // behaviour is checked by the `const _` assertion at the top of this file,
+    // `locked_key_is_actually_locked` and the unit tests in `src/lib.rs`.
+    let (ct, tag) = encrypt(&KEY, &NONCE, b"aad", b"message").unwrap();
+    assert_eq!(
+        decrypt(&KEY, &NONCE, b"aad", &ct, &tag).unwrap(),
+        b"message"
+    );
+    let mut bad = tag;
+    bad[0] ^= 1;
+    assert!(
+        decrypt(&KEY, &NONCE, b"aad", &ct, &bad).is_err(),
+        "a tampered tag must be rejected with every layer on"
+    );
 
-    assert!(
-        body.contains("#[cfg(feature = \"hardened\")]"),
-        "the hardened gate must be compiled in"
-    );
-    assert!(
-        body.contains("#[cfg(feature = \"dual-mac\")]"),
-        "the independent recomputation must be compiled in"
-    );
-    assert!(
-        body.contains("pub mod locked"),
-        "the locked-memory module must be compiled in"
-    );
+    // `locked::SUPPORTED` is a `const bool`, so asserting on it is an assertion on a
+    // constant (clippy rejects it, and it would be a compile-time fact anyway). That
+    // the locking module is usable is asserted where it is observable:
+    // `locked_key_is_actually_locked`, which now fails -- rather than skipping when
+    // the kernel refuses -- and checks the lock is on the live key's page.
 
     // `rng`: generating a key works here (this is the one feature `ultra` adds that
     // changes nothing about the cipher, and it is worth one assertion that it is live).

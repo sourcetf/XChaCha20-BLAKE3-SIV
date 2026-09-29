@@ -196,6 +196,32 @@ use alloc::vec::Vec;
 use subtle::ConstantTimeEq;
 use zeroize::Zeroize;
 
+/// Test-only instrumentation, compiled out of every non-test build.
+///
+/// It exists so that "the `dual-mac` layer actually runs" can be asserted as
+/// *behaviour* rather than by grepping the source for a `#[cfg]` string.  The
+/// source-text version passed in every configuration, which is how the three
+/// defects in the `locked` module (wrong `madvise` arity, wrong `MADV_DONTDUMP`
+/// value, unaligned `madvise` range) survived a suite that claimed to test the
+/// layer: the one assertion that touched it could not fail.
+#[cfg(test)]
+extern crate std;
+
+#[cfg(test)]
+pub(crate) mod test_counters {
+    std::thread_local! {
+        /// Number of times `derive_tag` has been entered **on this thread**.
+        ///
+        /// Thread-local, not a global counter: `cargo test` runs tests in parallel
+        /// threads, so a process-wide counter is incremented by every other test that
+        /// encrypts anything, and the deltas a counting test measures become noise.
+        /// This is measured, not guessed -- the first version was a global `AtomicUsize`
+        /// and passed in one configuration and failed in another depending on
+        /// scheduling.
+        pub static DERIVE_TAG_CALLS: core::cell::Cell<usize> = const { core::cell::Cell::new(0) };
+    }
+}
+
 // ── Constants ────────────────────────────────────────────────────────
 
 /// Maximum message size: 2^38 bytes (256 GiB), matching the c2sp.org A_MAX/P_MAX
@@ -444,10 +470,14 @@ impl PartialEq<Vec<u8>> for Plaintext {
 impl Drop for Plaintext {
     fn drop(&mut self) {
         // Wipe the whole allocation, not just `len` bytes.  `decrypt` builds this
-        // `Vec` with `vec![0u8; n]`, whose capacity is exactly `n`, so the
-        // initialized part *is* the allocation today; the `capacity` tail is
-        // handled anyway so a future constructor that grows the buffer cannot
-        // silently leave plaintext behind in it.
+        // `Vec` with `alloc_zeroed`, which reserves exactly `n` and cannot
+        // reallocate, so the initialized part *is* the allocation today; the
+        // `capacity` tail is handled anyway so a future constructor that grows the
+        // buffer cannot silently leave plaintext behind in it.  (This comment said
+        // `vec![0u8; n]`, which is the *infallible* allocation `alloc_zeroed`
+        // replaced -- the difference is the `Error::AllocationFailed` return rather
+        // than an abort, so a reader trusting the old text would have had the
+        // memory-exhaustion behaviour backwards.)
         zeroize_slice(self.0.as_mut_slice());
         let (len, cap) = (self.0.len(), self.0.capacity());
         if cap > len {
@@ -776,8 +806,20 @@ pub mod locked {
         #[cfg(not(target_arch = "x86_64"))]
         const NR_MADVISE: usize = 233;
 
-        /// `MADV_DONTDUMP` (4): exclude the range from core dumps.
-        const MADV_DONTDUMP: usize = 4;
+        /// `MADV_DONTDUMP`: exclude the range from core dumps.
+        ///
+        /// **16**, from `asm-generic/mman-common.h` (`#define MADV_DONTDUMP 16`),
+        /// where 4 is `MADV_DONTNEED`.  This constant was 4.  The consequence was
+        /// not "core dumps still contain the key": because `MADV_DONTNEED` on a
+        /// page that has just been `mlock`ed is rejected (`EINVAL` -- the kernel
+        /// will not let the contents of a locked page be discarded), `lock_range`
+        /// returned an error, undid the `mlock`, and `LockedKey::new` refused.  So
+        /// the whole `locked` layer was inert on any host that reached this line,
+        /// and it read as "the kernel would not let us lock memory" -- a
+        /// deployment conclusion, not a bug report.  Both this and the
+        /// argument-arity bug in the call below were invisible because
+        /// `locked_key_is_actually_locked` returned early with `ok`.
+        const MADV_DONTDUMP: usize = 16;
 
         /// Raw syscall with two arguments. `-1`..`-4095` is an error; the raw value is
         /// returned so a caller can classify it (`ENOMEM` 12, `EPERM` 1, `EAGAIN` 11).
@@ -835,7 +877,28 @@ pub mod locked {
                 if !ok(l) {
                     return Err(l);
                 }
-                let d = syscall2(NR_MADVISE, ptr as usize, MADV_DONTDUMP);
+                // `madvise(addr, length, advice)` takes THREE arguments.  This
+                // was called through `syscall2`, which put `MADV_DONTDUMP` in the
+                // *length* slot and left `advice` as whatever happened to be in
+                // `rdx` -- undefined at the ABI level, and in practice almost
+                // always invalid, so the call returned `EINVAL` on hosts where
+                // `mlock` itself had just succeeded.  `lock_range` then reported
+                // failure and `LockedKey::new` refused, which read as "the kernel
+                // will not let us lock" and was masked by a test that skipped
+                // instead of failing.  With the real length and the real advice,
+                // `EINVAL` is impossible for a live slice, as the comment above
+                // says it is.
+                //
+                // `madvise` also demands a page-aligned address, which a slice
+                // pointer is not: unlike `mlock`, it does not round.  The range is
+                // therefore expanded to whole pages covering the key.  Aligning
+                // down cannot leave the mapping (mappings start on a page
+                // boundary) and rounding the end up cannot leave it either
+                // (mappings end on one), so this cannot touch foreign memory.
+                let ps = page_size();
+                let start = (ptr as usize) & !(ps - 1);
+                let end = ((ptr as usize).saturating_add(len).saturating_add(ps - 1)) & !(ps - 1);
+                let d = syscall3(NR_MADVISE, start, end - start, MADV_DONTDUMP);
                 if !ok(d) {
                     // Do not leave it locked without the dump exclusion: undo.
                     let _ = syscall2(NR_MUNLOCK, ptr as usize, len);
@@ -891,6 +954,61 @@ pub mod locked {
                     O_RDONLY,
                 )
             }
+        }
+
+        /// The system page size, from `/proc/self/auxv`'s `AT_PAGESZ`.
+        ///
+        /// Needed because `madvise` rejects an address that is not page-aligned --
+        /// unlike `mlock`, which rounds the range itself.  4096 is correct for
+        /// every x86_64 Linux, but an aarch64 kernel can be built with 16 or 64 KiB
+        /// pages, where aligning to 4096 would still not be aligned and the call
+        /// would keep returning `EINVAL`.  Falls back to 4096 if auxv cannot be
+        /// read, which is the x86_64 answer and the common aarch64 one.
+        fn page_size() -> usize {
+            const PATH: &[u8] = b"/proc/self/auxv\0";
+            const AT_PAGESZ: u64 = 6;
+            const FALLBACK: usize = 4096;
+
+            // SAFETY: `PATH` is a NUL-terminated byte string in static memory.
+            let fd = open_ro(PATH);
+            if fd < 0 {
+                return FALLBACK;
+            }
+            let fd = fd as usize;
+            let mut buf = [0u8; 512];
+            // SAFETY: `buf` is a live local of exactly the length passed.
+            let n = unsafe { syscall3(NR_READ, fd, buf.as_mut_ptr() as usize, buf.len()) };
+            // SAFETY: closing a descriptor this function owns.
+            unsafe {
+                let _ = syscall2(NR_CLOSE, fd, 0);
+            }
+            if n < 16 {
+                return FALLBACK;
+            }
+            let n = n as usize;
+            let mut i = 0usize;
+            while i + 16 <= n {
+                let mut ty = [0u8; 8];
+                let mut val = [0u8; 8];
+                ty.copy_from_slice(&buf[i..i + 8]);
+                val.copy_from_slice(&buf[i + 8..i + 16]);
+                let ty = u64::from_ne_bytes(ty);
+                if ty == 0 {
+                    break; // AT_NULL ends the vector
+                }
+                if ty == AT_PAGESZ {
+                    let v = u64::from_ne_bytes(val);
+                    // Only accept something that could be a page size; a
+                    // truncated read must not produce a bogus mask.
+                    return if v >= 4096 && v.is_power_of_two() {
+                        v as usize
+                    } else {
+                        FALLBACK
+                    };
+                }
+                i += 16;
+            }
+            FALLBACK
         }
 
         #[cfg(target_arch = "x86_64")]
@@ -998,12 +1116,23 @@ pub mod locked {
     /// `LockedKey::new` fails when the OS refuses (`ENOMEM` from `RLIMIT_MEMLOCK` is the
     /// usual one), rather than silently leaving the key unprotected: the whole point is
     /// that the caller knows which of the two states it is in.
-    pub struct LockedKey(crate::Key);
+    /// The key lives behind a `Box` so its address is **stable**.
+    ///
+    /// This is not an optimisation, it is what makes the lock mean anything.
+    /// `mlock` is address-based: it locks the pages covering the address it is
+    /// given. An earlier version locked a `crate::Key` held in a local and then
+    /// returned `LockedKey(inner)` — and returning a 32-byte value *moves* it,
+    /// typically into the caller's frame or a return slot, so the lock was left
+    /// on the callee's dead stack slot while the live copy sat unprotected on an
+    /// unlocked page. The struct looked locked (`locked_bytes()` went up, the
+    /// test passed) and was not. Heap-allocating first means the `Box` can be
+    /// moved as much as it likes without the key ever changing address.
+    pub struct LockedKey(alloc::boxed::Box<crate::Key>);
 
     impl LockedKey {
-        /// Lock a copy of `key` into memory.
+        /// Lock a copy of `key` into memory, at an address that will not move.
         pub fn new(key: &[u8; crate::KEY_LEN]) -> Result<Self, isize> {
-            let inner = crate::Key::from_bytes(*key);
+            let inner = alloc::boxed::Box::new(crate::Key::from_bytes(*key));
             let ptr = inner.as_bytes().as_ptr();
             match lock_range(ptr, crate::KEY_LEN) {
                 Ok(()) => Ok(LockedKey(inner)),
@@ -1034,7 +1163,17 @@ pub mod locked {
 
     impl Drop for LockedKey {
         fn drop(&mut self) {
-            // Unlock first, then let `Key`'s own `Drop` wipe the bytes.
+            // Wipe *before* unlocking, and the order is the point: `munlock`
+            // makes the pages swappable again, so unlocking first opens a window
+            // in which a key whose entire reason for being locked could be
+            // written to swap.  The disassembly of this function was checked to
+            // confirm the `munlock` syscall (`mov $0x96,%eax; syscall`) now comes
+            // after the wipe call rather than before it.
+            //
+            // `Key`'s own `Drop` runs after this body and wipes again; that is
+            // harmless and keeps the invariant local to `Key` for every other
+            // owner.
+            zeroize::Zeroize::zeroize(&mut *self.0);
             unlock_range(self.0.as_bytes().as_ptr(), crate::KEY_LEN);
         }
     }
@@ -1085,6 +1224,41 @@ fn zeroize_slice(slice: &mut [u8]) {
         i += 1;
     }
     core::sync::atomic::compiler_fence(core::sync::atomic::Ordering::SeqCst);
+}
+
+/// Overwrite the stack region the key derivations just used (the `ultra` layer).
+///
+/// Every named local in this crate is wiped, and `tools/stack_residue.sh` confirms
+/// that the master key never survives in the call-chain stack region.  What *does*
+/// survive is the `blake3` dependency's XOF output block: its frames hold a full
+/// `enc_key ‖ enc_nonce`, and this crate cannot name them, let alone zeroize them.
+///
+/// Those frames can, however, be **overwritten**, because they sit below this
+/// function's own frame and are about to be reused anyway.  Calling this from an
+/// entry point after the last derivation turns "the dependency's residue is still
+/// there" into "the region it lived in has been rewritten", using the stack the way
+/// it is normally used rather than doing anything fragile.
+///
+/// Two limits, stated rather than implied:
+///
+/// * It is not a proof.  A compiler may keep a secret in a register, or spill it
+///   further down than `SCRUB_LEN`.  The constant is several times the deepest frame
+///   measured, and the tool that measures it is committed so the claim can be
+///   rechecked instead of believed.
+/// * It reaches only this thread's stack.  A value already written to swap, a core
+///   dump, or another process is what `locked` is for, not this.
+#[cfg(feature = "dual-mac")]
+#[inline(never)]
+fn scrub_stack() {
+    /// The derivation frames measured ~3.4 KiB deep; this leaves ample margin.
+    const SCRUB_LEN: usize = 16 * 1024;
+    let mut buf = [0u8; SCRUB_LEN];
+    // The buffer is already zero, so a plain store would be a dead store the
+    // optimizer may delete -- and deleting it is exactly what must not happen.
+    // `zeroize_array` issues volatile stores, so the write to this address range
+    // happens.  Note what is being written to *is the point*, not what is in it.
+    zeroize_array(&mut buf);
+    core::hint::black_box(&buf);
 }
 
 /// Volatile-zero the raw memory of any value (array, scalar, ...).
@@ -1209,6 +1383,7 @@ const TAG_CONCAT_MIN: usize = 2_048;
 ///
 /// The hasher is fed incrementally rather than through one concatenated buffer,
 /// so the key never lands in a growable heap allocation.
+#[allow(unused_variables)]
 fn derive_tag(
     mac_key: &[u8; 32],
     key: &[u8; 32],
@@ -1216,6 +1391,9 @@ fn derive_tag(
     aad: &[u8],
     msg: &[u8],
 ) -> [u8; TAG_LEN] {
+    #[cfg(test)]
+    test_counters::DERIVE_TAG_CALLS.with(|c| c.set(c.get() + 1));
+
     // Fixed-width head: domain, key, nonce, and the two lengths.  Assembled on
     // the stack so the key never enters a heap buffer, and so the whole thing is
     // one slice the seam can absorb.
@@ -1292,22 +1470,42 @@ fn derive_tag(
 /// Consuming all `TAG_LEN` bytes is what makes the ciphertext commit to the full
 /// 520 bits: the ciphertext is a function of the tag, and the tag is transmitted
 /// and compared in full.
-fn derive_enc(enc_seed: &[u8; 32], tag: &[u8; TAG_LEN]) -> ([u8; 32], [u8; 12]) {
+///
+/// # Why this writes through the caller's slices
+///
+/// It used to return `([u8; 32], [u8; 12])`. Returning a 44-byte aggregate makes
+/// the compiler materialise an unnamed temporary for the return value — a copy
+/// no `zeroize_array` call in this function can name, and therefore none can
+/// wipe. A stack scan (`tests/stack_residue.rs`'s method, run as a unit test)
+/// found exactly that: the tail of this value, `material[16..44]` — the second
+/// half of `enc_key` together with the whole `enc_nonce` — survived in the frame
+/// after a full round trip, in all three build configurations. Writing into the
+/// caller's buffers leaves the caller's own named locals as the only copies, and
+/// the caller already wipes them.
+///
+/// This does not make the wipe *provable* — a compiler may still spill to the
+/// stack — which is why the unit test exists as a regression check rather than
+/// as an argument.
+fn derive_enc(
+    enc_seed: &[u8; 32],
+    tag: &[u8; TAG_LEN],
+    enc_key: &mut [u8; 32],
+    enc_nonce: &mut [u8; 12],
+) {
     let mut input = [0u8; 8 + TAG_LEN];
     input[0..8].copy_from_slice(&DOM_ENC);
     input[8..].copy_from_slice(tag);
 
+    // One buffer, written once by the XOF and copied out immediately, so there
+    // is a single place for `enc_key ‖ enc_nonce` to live inside this call.
     let mut material = [0u8; 44];
     blake3_keyed_xof(enc_seed, &input, &mut material);
 
-    let mut enc_key = [0u8; 32];
     enc_key.copy_from_slice(&material[0..32]);
-    let mut enc_nonce = [0u8; 12];
     enc_nonce.copy_from_slice(&material[32..44]);
 
     zeroize_array(&mut material);
     zeroize_array(&mut input);
-    (enc_key, enc_nonce)
 }
 
 #[inline]
@@ -1363,7 +1561,9 @@ pub fn encrypt(
 
     let (mut mac_key, mut enc_seed) = derive_material(key, nonce);
     let tag = derive_tag(&mac_key, key, nonce, aad, plaintext);
-    let (mut enc_key, mut enc_nonce) = derive_enc(&enc_seed, &tag);
+    let mut enc_key = [0u8; 32];
+    let mut enc_nonce = [0u8; 12];
+    derive_enc(&enc_seed, &tag, &mut enc_key, &mut enc_nonce);
 
     // Fallible for the same reason `decrypt` is: this length is the caller's, and a
     // plain `vec!` aborts the process when the allocator refuses.
@@ -1377,6 +1577,9 @@ pub fn encrypt(
     // the same XOF call as `enc_key`), so it is wiped with the rest rather
     // than left on the stack.
     zeroize_array(&mut enc_nonce);
+
+    #[cfg(feature = "dual-mac")]
+    scrub_stack();
 
     Ok((ciphertext, tag))
 }
@@ -1393,7 +1596,9 @@ pub fn encrypt_in_place_detached(
 
     let (mut mac_key, mut enc_seed) = derive_material(key, nonce);
     let tag = derive_tag(&mac_key, key, nonce, aad, buffer);
-    let (mut enc_key, mut enc_nonce) = derive_enc(&enc_seed, &tag);
+    let mut enc_key = [0u8; 32];
+    let mut enc_nonce = [0u8; 12];
+    derive_enc(&enc_seed, &tag, &mut enc_key, &mut enc_nonce);
 
     chacha20_apply(&enc_key, 0, &enc_nonce, &Input::InPlace, buffer);
 
@@ -1405,7 +1610,77 @@ pub fn encrypt_in_place_detached(
     // than left on the stack.
     zeroize_array(&mut enc_nonce);
 
+    #[cfg(feature = "dual-mac")]
+    scrub_stack();
+
     Ok(tag)
+}
+
+/// The second gate's comparison of the two volatile copies.
+///
+/// Always `subtle`'s loop, both ways round; under `dual-mac` it is `AND`-ed with
+/// `ct_eq_independent`, a *differently written* constant-time comparison.
+///
+/// The reason is a boundary worth naming: with only `hardened`, every comparison in
+/// every gate is the same `subtle` byte loop, so one fault that shortens that loop
+/// makes them all say "equal" for different tags — one fault reaching two gates — and
+/// `dual-mac`'s recomputations do not help, because they are compared through the same
+/// function again. Measured before this existed: a forgery accepted after 2,573
+/// attempts with the comparison cut to two bytes, in both the default and the `ultra`
+/// build. With the second, differently-written comparison in place, one fault can only
+/// disarm one of them, so a forgery needs two faults.
+///
+/// This is an `ultra` defence. `hardened` on its own keeps the plain form, and the
+/// README's fault table states that boundary rather than implying the two gates are
+/// independent witnesses when they are not.
+#[inline(always)]
+fn second_gate_comparison(a: &[u8; TAG_LEN], b: &[u8; TAG_LEN]) -> subtle::Choice {
+    let plain = a.ct_eq(b) & b.ct_eq(a);
+    #[cfg(feature = "dual-mac")]
+    let also = ct_eq_independent(a, b);
+    #[cfg(not(feature = "dual-mac"))]
+    let also = subtle::Choice::from(1);
+    plain & also
+}
+
+#[cfg(feature = "dual-mac")]
+/// A second, independent constant-time equality over two tags.
+///
+/// Deliberately a different *shape* from `subtle`'s comparison, which walks the
+/// bytes one at a time: this folds eight bytes at a time into a `u64` and tests
+/// the accumulator once. The reason is that both gates of the `hardened` decision
+/// otherwise call the *same* `subtle` loop, so a single fault that shortens that
+/// loop disarms both gates at once — one fault reaching two gates defeats the
+/// purpose of having two — and `dual-mac` does not help, because its two
+/// recomputations are compared through the same function again.
+///
+/// This is not a claim of fault-injection resistance. An adversary who can fault
+/// this loop *and* `subtle`'s has two faults and defeats both, which is what the
+/// README's table already says. What it removes is the single-fault case, where
+/// the two gates were one gate wearing two hats.
+///
+/// Constant time: the loop bounds depend only on the public length, there is no
+/// data-dependent branch and no data-dependent index, and the final
+/// `acc.ct_eq(&0)` is a single `u64` comparison with no loop of its own to
+/// shorten. `#[inline(never)]` keeps the compiler from merging it with the other
+/// comparison, which would put both gates back on shared code.
+#[inline(never)]
+fn ct_eq_independent(a: &[u8; TAG_LEN], b: &[u8; TAG_LEN]) -> subtle::Choice {
+    let mut acc = 0u64;
+    let mut i = 0usize;
+    while i + 8 <= TAG_LEN {
+        let x = u64::from_le_bytes(a[i..i + 8].try_into().unwrap())
+            ^ u64::from_le_bytes(b[i..i + 8].try_into().unwrap());
+        acc |= x;
+        i += 8;
+    }
+    // TAG_LEN is 65, so one byte is left over; a general loop rather than a
+    // hard-coded tail keeps this correct if TAG_LEN ever changes.
+    while i < TAG_LEN {
+        acc |= (a[i] ^ b[i]) as u64;
+        i += 1;
+    }
+    acc.ct_eq(&0u64)
 }
 
 // ── The accept/reject decision, isolated in one function ───────────────
@@ -1522,7 +1797,9 @@ pub fn decrypt(
     check_lengths(ciphertext.len(), aad.len())?;
 
     let (mut mac_key, mut enc_seed) = derive_material(key, nonce);
-    let (mut enc_key, mut enc_nonce) = derive_enc(&enc_seed, tag);
+    let mut enc_key = [0u8; 32];
+    let mut enc_nonce = [0u8; 12];
+    derive_enc(&enc_seed, tag, &mut enc_key, &mut enc_nonce);
 
     let mut plaintext = alloc_zeroed(ciphertext.len())?;
     chacha20_keystream(&enc_key, 0, &enc_nonce, ciphertext, &mut plaintext);
@@ -1560,7 +1837,7 @@ pub fn decrypt(
         // SAFETY: as above, for the caller's reference: `tag` is a live `&[u8;
         // TAG_LEN]` and this only reads through it, so aliasing rules hold.
         let mut tag_copy = unsafe { core::ptr::read_volatile(tag) };
-        let gate_pair = computed_tag_copy.ct_eq(&tag_copy) & tag_copy.ct_eq(&computed_tag_copy);
+        let gate_pair = second_gate_comparison(&computed_tag_copy, &tag_copy);
         // The independent recomputation joins the second gate: it must match the
         // stored value *and* the received tag, so a fault that corrupted the stored
         // value (or a silently rewritten constant) is caught here even though both
@@ -1598,6 +1875,9 @@ pub fn decrypt(
     // a fault that skips the call leaves both standing, and a fault that corrupts one
     // outcome leaves the other -- so accepting would take two faults. See the comment
     // on `accept_or_reject`.
+    #[cfg(feature = "dual-mac")]
+    scrub_stack();
+
     let mut decision0: Result<(), Error> = Err(Error::AuthenticationFailed);
     let mut decision1: Result<(), Error> = Err(Error::AuthenticationFailed);
     #[cfg(not(feature = "hardened"))]
@@ -1680,7 +1960,9 @@ pub fn decrypt_in_place_detached(
     check_lengths(buffer.len(), aad.len())?;
 
     let (mut mac_key, mut enc_seed) = derive_material(key, nonce);
-    let (mut enc_key, mut enc_nonce) = derive_enc(&enc_seed, tag);
+    let mut enc_key = [0u8; 32];
+    let mut enc_nonce = [0u8; 12];
+    derive_enc(&enc_seed, tag, &mut enc_key, &mut enc_nonce);
 
     chacha20_apply(&enc_key, 0, &enc_nonce, &Input::InPlace, buffer);
 
@@ -1704,7 +1986,7 @@ pub fn decrypt_in_place_detached(
         // SAFETY: as above, for the caller's reference: `tag` is a live `&[u8;
         // TAG_LEN]` and this only reads through it, so aliasing rules hold.
         let mut tag_copy = unsafe { core::ptr::read_volatile(tag) };
-        let gate_pair = computed_tag_copy.ct_eq(&tag_copy) & tag_copy.ct_eq(&computed_tag_copy);
+        let gate_pair = second_gate_comparison(&computed_tag_copy, &tag_copy);
         // The independent recomputation joins the second gate: it must match the
         // stored value *and* the received tag, so a fault that corrupted the stored
         // value (or a silently rewritten constant) is caught here even though both
@@ -1740,6 +2022,9 @@ pub fn decrypt_in_place_detached(
 
     // As in `decrypt`: two rejections written first, and two serial checks, so a fault
     // that skips the call or corrupts one outcome cannot accept.
+    #[cfg(feature = "dual-mac")]
+    scrub_stack();
+
     let mut decision0: Result<(), Error> = Err(Error::AuthenticationFailed);
     let mut decision1: Result<(), Error> = Err(Error::AuthenticationFailed);
     #[cfg(not(feature = "hardened"))]
@@ -1774,8 +2059,19 @@ fn qr(a: u32, b: u32, c: u32, d: u32) -> (u32, u32, u32, u32) {
     (a, b, c, d)
 }
 
-/// 20 rounds of ChaCha (10 double-rounds).
-fn chacha20_rounds(mut s: [u32; 16]) -> [u32; 16] {
+/// 20 rounds of ChaCha (10 double-rounds), **in place**.
+///
+/// Takes `&mut` rather than by value on purpose. `[u32; 16]` is `Copy`, so a
+/// by-value signature hands the callee its own copy of the state -- and that state
+/// holds the key -- which no `zeroize_array` in the caller can name, let alone
+/// wipe. A stack scan found a 24-byte prefix of the per-message encryption key
+/// surviving in exactly that shape, on the scalar path taken by messages below the
+/// SIMD threshold. Mutating in place leaves the caller's `s` as the only live copy,
+/// and the caller already wipes it.
+///
+/// This is the same failure mode as the `let mut orig = orig;` bug that
+/// `chacha20_block`'s comment records: wiping a copy is not wiping the original.
+fn chacha20_rounds(s: &mut [u32; 16]) {
     for _ in 0..10 {
         // Column rounds
         let (a, b, c, d) = qr(s[0], s[4], s[8], s[12]);
@@ -1820,7 +2116,6 @@ fn chacha20_rounds(mut s: [u32; 16]) -> [u32; 16] {
         s[9] = c;
         s[14] = d;
     }
-    s
 }
 
 /// Generate one ChaCha20 keystream block (64 bytes).
@@ -1850,11 +2145,13 @@ fn chacha20_block(key: &[u8; 32], counter: u32, nonce: &[u8; 12]) -> [u8; 64] {
     s[15] = u32::from_le_bytes([nonce[8], nonce[9], nonce[10], nonce[11]]);
 
     let mut orig = s;
-    let mut out = chacha20_rounds(s);
+    // In place: `s` becomes the post-round state, and it is the caller's own local,
+    // so the wipe below reaches it. There is no `out` to leave behind.
+    chacha20_rounds(&mut s);
 
     let mut keystream = [0u8; 64];
     for i in 0..16 {
-        let v = out[i].wrapping_add(orig[i]);
+        let v = s[i].wrapping_add(orig[i]);
         keystream[i * 4..i * 4 + 4].copy_from_slice(&v.to_le_bytes());
     }
 
@@ -1864,7 +2161,6 @@ fn chacha20_block(key: &[u8; 32], counter: u32, nonce: &[u8; 12]) -> [u8; 64] {
     // leaves the original on the stack, i.e. no wipe at all.
     zeroize_array(&mut s);
     zeroize_array(&mut orig);
-    zeroize_array(&mut out);
 
     keystream
 }
@@ -2487,7 +2783,8 @@ fn chacha20_keystream_raw(key: &[u8; 32], counter: u32, nonce: &[u8; 12], out: &
 /// HChaCha20: derive 32-byte subkey from key and 16-byte nonce.
 ///
 /// Runs 20 rounds, outputs state words 0-3 and 12-15 WITHOUT final addition.
-/// Per RFC 8439 §2.8 / draft-irtf-cfrg-xchacha §2.2.
+/// Per draft-irtf-cfrg-xchacha-03 §2.2.  (Not RFC 8439: that document is
+/// ChaCha20 and Poly1305 and contains no HChaCha20 at all.)
 fn hchacha20(key: &[u8; 32], nonce: &[u8; 16]) -> [u8; 32] {
     const CHACHA_CONST: [u32; 4] = [0x61707865, 0x3320646e, 0x79622d32, 0x6b206574];
 
@@ -2509,13 +2806,14 @@ fn hchacha20(key: &[u8; 32], nonce: &[u8; 16]) -> [u8; 32] {
     s[14] = u32::from_le_bytes([nonce[8], nonce[9], nonce[10], nonce[11]]);
     s[15] = u32::from_le_bytes([nonce[12], nonce[13], nonce[14], nonce[15]]);
 
-    let mut out = chacha20_rounds(s);
+    // In place, for the same reason as in `chacha20_block`.
+    chacha20_rounds(&mut s);
 
     let mut r = [0u8; 32];
     // Output words 0,1,2,3,12,13,14,15 (NO final addition!)
     let indices = [0usize, 1, 2, 3, 12, 13, 14, 15];
     for (i, &idx) in indices.iter().enumerate() {
-        r[i * 4..i * 4 + 4].copy_from_slice(&out[idx].to_le_bytes());
+        r[i * 4..i * 4 + 4].copy_from_slice(&s[idx].to_le_bytes());
     }
 
     // Side-channel hygiene, as in `chacha20_block`: wipe the key-bearing locals
@@ -2523,7 +2821,6 @@ fn hchacha20(key: &[u8; 32], nonce: &[u8; 16]) -> [u8; 32] {
     // a copy of the pre-round state would be a second copy of the key material to
     // keep alive for no reason.
     zeroize_array(&mut s);
-    zeroize_array(&mut out);
 
     r
 }
@@ -3734,12 +4031,16 @@ mod tests {
         for (i, b) in base.iter_mut().enumerate() {
             *b = i as u8;
         }
-        let (key0, nonce0) = derive_enc(&enc_seed, &base);
+        let mut key0 = [0u8; 32];
+        let mut nonce0 = [0u8; 12];
+        derive_enc(&enc_seed, &base, &mut key0, &mut nonce0);
 
         for pos in 0..TAG_LEN {
             let mut t = base;
             t[pos] ^= 0x01;
-            let (k, n) = derive_enc(&enc_seed, &t);
+            let mut k = [0u8; 32];
+            let mut n = [0u8; 12];
+            derive_enc(&enc_seed, &t, &mut k, &mut n);
             assert!(
                 k != key0 || n != nonce0,
                 "tag byte {pos} does not reach the encryption key or nonce"
@@ -4094,5 +4395,43 @@ mod tests {
                 "the tag depends on which hash call shape was chosen (total={total})"
             );
         }
+    }
+    /// `dual-mac` must actually add a second, independent tag derivation.
+    ///
+    /// This is the *behavioural* form of what `tests/ultra.rs` used to assert by
+    /// grepping the source for `#[cfg(feature = "dual-mac")]` -- a string that is
+    /// present in every configuration, so that assertion could not fail even if
+    /// the feature turned on nothing.  Counting the derivations through the
+    /// crate's own instrumentation observes the compiled artefact instead: one
+    /// derivation to encrypt, and one for the decryption without the feature,
+    /// two with it.
+    ///
+    /// It lives here rather than in `tests/` because an integration test cannot see
+    /// crate internals, and "the extra work happens" is exactly an internal fact.
+    #[test]
+    fn dual_mac_adds_exactly_one_extra_tag_derivation() {
+        let count = || test_counters::DERIVE_TAG_CALLS.with(|c| c.get());
+
+        let key = [0x11u8; 32];
+        let nonce = [0x22u8; 24];
+        let before = count();
+        let (ct, tag) = encrypt(&key, &nonce, b"", b"dual-mac probe").unwrap();
+        let after_encrypt = count();
+        decrypt(&key, &nonce, b"", &ct, &tag).unwrap();
+        let after_decrypt = count();
+
+        assert_eq!(after_encrypt - before, 1, "encryption derives the tag once");
+        #[cfg(feature = "dual-mac")]
+        assert_eq!(
+            after_decrypt - after_encrypt,
+            2,
+            "with `dual-mac`, decryption must derive the tag twice (stored + independent              recomputation)"
+        );
+        #[cfg(not(feature = "dual-mac"))]
+        assert_eq!(
+            after_decrypt - after_encrypt,
+            1,
+            "without `dual-mac`, decryption must derive the tag exactly once"
+        );
     }
 }

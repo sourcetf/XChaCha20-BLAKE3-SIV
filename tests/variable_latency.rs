@@ -56,8 +56,11 @@ const ALLOWED: &[(&str, &str)] = &[
 /// When one of these numbers changes: look at the branch, decide what it depends on,
 /// and update this table, `README.md` and `SECURITY.md` together.
 ///
-/// The two `if`s added by the fail-closed decision shape (`if decision.is_ok()` in
-/// each decrypt entry point) are one recent entry: they branch on a discriminant the
+/// The two `if`s added by the fail-closed decision shape (`if decision0.is_err()` in
+/// each decrypt entry point) are one recent entry: (an earlier revision of this comment
+/// named `if decision.is_ok()`, a shape the code never had -- `grep` finds zero of them
+/// -- and that `decision_scope.rs` explicitly forbids; the reject-first spelling is what
+/// is actually there): they branch on a discriminant the
 /// *caller* wrote as a constant, so they depend on nothing secret -- which is what
 /// makes them constant-time, and why they are listed rather than suppressed. The
 /// other is the decision function itself: one body with the first gate and, under
@@ -76,9 +79,23 @@ const ALLOWED: &[(&str, &str)] = &[
 /// it branches on a syscall result -- the kernel's answer about *memory*, never about
 /// key or message content -- and on whether the target is Linux and which architecture's
 /// syscall numbers apply, both of which are compile-time facts.
+///
+/// `while` 7 -> 9 was `ct_eq_independent`, the second gate's comparison under `dual-mac`:
+/// its trip counts are `TAG_LEN / 8` and `TAG_LEN % 8`, both compile-time constants, and
+/// the loop body is a branch-free XOR-OR fold, so the iteration count depends on nothing
+/// secret. That function exists precisely so the two gates do not share a comparison
+/// loop; see its comment in `src/lib.rs`.
+///
+/// `if` 23 -> 28 and `while` 9 -> 10 are the `locked` module's page-size discovery and
+/// range alignment (`page_size()`, and the `return if ... {} else {}` in `lock_range`).
+/// Every branch there tests a *public* fact: whether a `/proc` open succeeded, whether
+/// the auxv read returned a full entry, whether the entry is `AT_PAGESZ`, whether the
+/// value is a plausible page size, and whether a syscall returned an error. None of them
+/// looks at a key, a nonce, an AAD or a message, and none of them is reached with secret
+/// data in hand -- the alignment arithmetic operates on an address, which is not secret.
 const CONTROL_FLOW: &[(&str, usize)] = &[
-    ("if", 23),
-    ("while", 7),
+    ("if", 28),
+    ("while", 10),
     ("for", 28),
     ("loop", 0),
     ("match", 6),

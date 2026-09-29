@@ -281,7 +281,7 @@ jobs:
   mutation:
     name: verify the verifier (mutation check)
     runs-on: ubuntu-latest
-    # 60, not 30: this job carries the fault campaign (ten rows, each a build), the
+    # 60, not 30: this job carries the fault campaign (eleven rows, each a build), the
     # mutation campaign, and the two quick instruction sweeps -- the bit-flip one is
     # eight times its `nop` sibling and takes about eight minutes on its own. Measured
     # on the runner rather than guessed; 30 was already close before the second sweep
@@ -301,7 +301,7 @@ jobs:
           sudo apt-get install --no-install-recommends -y valgrind
           valgrind --version
 
-      # The fault-injection counterpart: a campaign of seven faults written down as
+      # The fault-injection counterpart: a campaign of eleven rows written down as
       # source changes, each with the build it applies to, the test that acts as its
       # detector, and the outcome that is expected. Three of the rows are the
       # interesting ones: one skipped branch accepts a forgery on the default build

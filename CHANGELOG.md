@@ -7,6 +7,129 @@ tags have been cut yet.
 
 ## Unreleased
 
+### Wire format
+
+**Unchanged.** Every ciphertext and tag this revision produces is byte-identical to
+the previous one; the KATs, the differential fixture against `tools/ref_impl.py` and
+the accelerated-path corpus all still pin the same bytes. Nothing below touches the
+construction — it is hardening, correctness in `ultra`, and evidence quality.
+
+### `ultra`: the `locked` layer never worked, and now does
+
+Three defects in the same ten lines, none of which any test could see because the one
+test that exercised the layer returned early with `ok`:
+
+- **`madvise` was called with two arguments through `syscall2`.** `madvise(addr,
+  length, advice)` takes three, so `MADV_DONTDUMP` landed in the *length* slot and
+  `advice` was whatever happened to be in `rdx` — undefined at the ABI level.
+- **`MADV_DONTDUMP` was 4.** It is 16 (`asm-generic/mman-common.h`); 4 is
+  `MADV_DONTNEED`, an advice that *discards* page contents.
+- **`madvise` rejects an unaligned address** (unlike `mlock`, which rounds), and the
+  call was given a plain slice pointer. The range is now expanded to whole pages
+  covering the key, using the page size read from `/proc/self/auxv` — 4096 is not
+  safe to assume on aarch64, where 16 and 64 KiB pages exist.
+
+Together these meant `lock_range` returned `EINVAL`, undid the `mlock`, and
+`LockedKey::new` refused, which read as "the kernel will not let us lock memory" — a
+deployment conclusion rather than a bug report.
+
+`LockedKey` also **heap-allocates the key now**. `mlock` is address-based, and an
+earlier version locked a key held in a local and then returned it by value: the move
+left the lock on the callee's dead stack slot while the live copy sat on an unlocked
+page. `locked_bytes()` went up and the test passed, which is exactly the shape that
+hides this class of bug.
+
+### `ultra`: the two gates shared one comparison, and now do not
+
+Both gates, and both of `dual-mac`'s recomputations, called the same
+`subtle::ConstantTimeEq` loop. A single fault that shortens that loop therefore
+disarmed every gate at once — `dual-mac` included, because it compares through the same
+function. Measured: a forgery is accepted after **2,573 attempts** with the comparison
+cut to two bytes.
+
+Under `dual-mac`/`ultra`, the second gate now `AND`s in `ct_eq_independent`, a
+differently *written* constant-time comparison (an 8-byte fold into a `u64`, one
+comparison at the end). Re-measured against the same fault: **no forgery in 2,000,000
+attempts**. One fault can now only disarm one of the two comparisons, so a forgery needs
+two faults — which is the boundary the README's table states.
+
+**The default builds are deliberately unchanged here.** `hardened` on its own still
+compares both gates through `subtle`, and still accepts that forgery; this is an
+`ultra` defence, and the README's fault table says so on the row rather than leaving
+the reader to infer that two gates over one comparison are two witnesses. Cost under
+`ultra`: one extra 65-byte comparison, about +2.7% at 64 B and +0.1% at 1 MiB.
+
+### `ultra`: the stack region the key derivations used is overwritten
+
+New in `ultra`: `scrub_stack()`. Every named local in this crate is wiped, and the
+master key never survives a round trip (measured, `tools/stack_residue.sh`) — but the
+`blake3` dependency's XOF output block does, holding a full `enc_key ‖ enc_nonce` in
+frames this crate cannot name. Those frames *can* be overwritten, because they sit
+below the entry point's own frame and are about to be reused: `scrub_stack()` writes 16
+KiB of volatile zeros over that range after the last derivation, which is several times
+the deepest frame measured.
+
+Measured, same scanner, same four entry points: the default builds still show a 32-byte
+`enc_key` run and a 12-byte `enc_nonce` run; `ultra` reports **clean** on all four.
+Cost is the 16 KiB write, about 0.5–1 µs per operation — visible in the constant-time
+trace (21,980 → 46,050 instructions) and only under `ultra`.
+
+Honest limits, stated where the code is: it is not a proof (a compiler may spill below
+the scrubbed distance), it reaches only this thread's stack, and it does nothing about a
+value already written to swap — that is what `locked` is for.
+
+### Zeroization: two copies the wipes could not reach
+
+Fixed in every configuration, because these are copies the wipes should already have
+reached:
+
+- **`derive_enc` wrote through caller slices instead of returning
+  `([u8; 32], [u8; 12])`.** A 44-byte aggregate return makes the compiler materialise
+  an unnamed temporary, which no `zeroize_array` in the function can name. A stack scan
+  found the tail of exactly that value — `enc_key[16..32]` together with the whole
+  `enc_nonce` — surviving in the frame after a round trip.
+- **`chacha20_rounds` takes `&mut [u32; 16]` instead of the state by value.** `[u32;
+  16]` is `Copy`, so the by-value signature gave the callee its own copy of a
+  key-bearing state; the caller's wipes never reached it. Found by the same scan, on
+  the scalar path used by messages below the SIMD threshold.
+
+Both are the failure mode `chacha20_block`'s own comment records ("wiping a copy is
+not wiping the original"). The scan (`tools/stack_residue.sh`) is committed as a tool,
+not a gate: what it finds now is dominated by the `blake3` dependency's XOF output
+buffer, which lives in frames this crate cannot reach — documented in the README rather
+than asserted, because a gate that fails upstream is a gate someone deletes.
+
+### Tests and evidence
+
+- `locked_key_is_actually_locked` **fails** when the kernel refuses to lock, instead
+  of returning early with `ok`; `XSIV_ALLOW_UNLOCKED=1` is the explicit opt-out. It also
+  now asserts the lock is on the *live* key's page (unlocking it must move `VmLck`),
+  which is the assertion that catches the moved-after-locking bug above.
+- `every_layer_is_compiled_in_under_ultra` and
+  `without_dual_mac_there_is_no_second_derivation_on_this_target` asserted that
+  `src/lib.rs` *contains* `#[cfg(feature = "dual-mac")]` — true in every build, so they
+  could not fail. Replaced with `ultra_enables_every_layer_it_bundles` (`cfg!`) and
+  `every_layer_answers_correctly_in_the_ultra_build` (end-to-end), plus
+  `dual_mac_adds_exactly_one_extra_tag_derivation`, a unit test that counts the
+  derivations through a test-only counter: 1 + 1 without `dual-mac`, 1 + 2 with it.
+- Control-flow inventory 7 -> 9 `while` (the two loops of `ct_eq_independent`), and the
+  stale hand counts in `tests/README.md`, `tests/timing.rs` and `deep.yml` corrected —
+  the enforced table in `tests/variable_latency.rs` is now the only place a count lives.
+- `tests/variable_latency.rs` described an `if decision.is_ok()` shape the code never
+  had; the actual reject-first spelling is named instead.
+
+### Documentation
+
+- HChaCha20 was cited as "RFC 8439 §2.8". RFC 8439 contains no HChaCha20; the source
+  is draft-irtf-cfrg-xchacha-03 §2.2.
+- `Plaintext::drop`'s comment described a `vec![0u8; n]` construction that
+  `alloc_zeroed` replaced, which had the memory-exhaustion behaviour backwards.
+- The "~9x" fault-rate ratio is 11.7x–15.1x by its own figures; the "115 million fuzz
+  executions" is removed — nothing in the repository records that many.
+- The fault table gains the comparison-primitive row above, so the boundary is written
+  where a reader looking for it will be.
+
+
 ### Input bounding, and where the warning lives
 
 - **`decrypt_bounded(key, nonce, aad, ciphertext, tag, max_len)`**: the caller's

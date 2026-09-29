@@ -87,11 +87,17 @@ proptest! {
         prop_assert_eq!(buf, pt);
     }
 
-    /// Flipping **any** single bit of the ciphertext must be rejected.
+    /// Flipping a bit of the ciphertext must be rejected.
     ///
     /// This is the property that a truncated-MAC or prefix-comparing
-    /// implementation would violate, and it is quantified over every position
-    /// rather than sampled.
+    /// implementation would violate.  Note what this test does and does not do:
+    /// `proptest` draws a *single* `(pos, bit)` per case and varies the inputs
+    /// across cases, so the coverage over tag positions is statistical, not
+    /// exhaustive.  (This comment claimed it was "quantified over every position
+    /// rather than sampled", which is not what the strategy does.)  The exhaustive
+    /// sweeps are `tests/decision.rs`, which walks all 65 tag bytes for a fixed
+    /// vector, and `tests/differential_reference.rs`, which sweeps every position
+    /// of a corpus.
     #[test]
     fn prop_ciphertext_bit_flip_rejected(
         key in key_strategy(),

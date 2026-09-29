@@ -343,6 +343,33 @@ jobs:
       - name: committed fixture is current
         run: python3 tools/gen_test_vectors.py --check
 
+  stack-residue:
+    name: stack residue (advisory, ultra)
+    runs-on: ubuntu-latest
+    # `continue-on-error` on purpose, and the reason is written here rather than
+    # left implicit: what this measures is *layout dependent* -- the residue that
+    # `ultra`'s `scrub_stack` erases lives in the `blake3` dependency's frames,
+    # and which frames a compiler picks is not something a test can pin.  The
+    # assertion it does make (the master key never appears in the call-chain
+    # stack region) has held in every run so far, so this job is expected to
+    # pass; it is advisory so that a toolchain change that moves the residue
+    # *reports* instead of blocking, which is the honest disposition for a
+    # measurement whose target is a compiler's choice.
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v7
+
+      # Default build: the residue is expected here, and the tool reports it
+      # rather than failing -- the assertion is on the master key, which does not
+      # appear in any configuration.
+      - name: default build
+        run: tools/stack_residue.sh
+
+      # `ultra`: `scrub_stack` overwrites the region, so this is the run that
+      # shows the defence working.
+      - name: ultra build
+        run: tools/stack_residue.sh --ultra
+
   release:
     name: tag the commit and publish a release
     # Gate on every verification job: a release must not exist for a commit that
