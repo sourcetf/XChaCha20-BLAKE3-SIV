@@ -59,6 +59,14 @@ jobs:
       - name: gate contract (a gate that could not run must not exit 0)
         run: ./tools/gate_selftest.sh
 
+      # `src/proofs.rs` is `#[cfg(kani)]`, so nothing above compiles it -- a
+      # signature change to an internal function breaks the Formal job with no
+      # local symptom, which is what happened to `derive_enc` and took all four
+      # Kani shards down. This type-checks the harnesses against no-op stand-ins
+      # for Kani's attributes. It proves nothing; it catches the break.
+      - name: Kani harnesses still compile (--cfg kani, no-op shim)
+        run: ./tools/check_kani_cfg.sh
+
       # Catches broken intra-doc links, which are invisible to `cargo test`.
       - name: rustdoc
         run: cargo doc --no-deps --all-features

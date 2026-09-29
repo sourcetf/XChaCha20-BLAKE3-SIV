@@ -732,8 +732,18 @@ fn derive_enc_reads_every_tag_byte() {
     let mut perturbed = tag;
     perturbed[pos] ^= 0xff;
 
-    let (k1, n1) = derive_enc(&enc_seed, &tag);
-    let (k2, n2) = derive_enc(&enc_seed, &perturbed);
+    // `derive_enc` writes through caller slices rather than returning a 44-byte
+    // aggregate: returning one makes the compiler materialise an unnamed temporary
+    // that no `zeroize_array` can reach, and a stack scan found the tail of exactly
+    // that value surviving a round trip.  (This harness is the caller that had to be
+    // updated with it -- it is `#[cfg(kani)]`, so `cargo test` never compiled it, and
+    // the breakage only showed up in the Formal job.)
+    let mut k1 = [0u8; 32];
+    let mut n1 = [0u8; 12];
+    derive_enc(&enc_seed, &tag, &mut k1, &mut n1);
+    let mut k2 = [0u8; 32];
+    let mut n2 = [0u8; 12];
+    derive_enc(&enc_seed, &perturbed, &mut k2, &mut n2);
 
     // Some byte of (key, nonce) must differ.
     let mut diff = 0u8;
@@ -745,7 +755,7 @@ fn derive_enc_reads_every_tag_byte() {
     }
     assert!(diff != 0);
 
-    // (`tag` is consumed by `derive_enc` below, so it needs no artificial use. An
+    // (`tag` is consumed by `derive_enc` above, so it needs no artificial use. An
     // earlier revision had `tag[0] = tag[0];` here with a comment claiming it kept the
     // binding alive; the value was already live, so it was a no-op that read as though
     // the proof depended on it.)
