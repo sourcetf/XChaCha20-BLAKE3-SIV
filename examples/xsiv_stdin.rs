@@ -17,13 +17,20 @@
 //! cargo run --release --example xsiv_stdin < vectors.txt > rust-side.txt
 //! ```
 //!
+//! With `--roundtrip`, each vector is also decrypted (both the allocating and the
+//! in-place entry point) and the plaintext is compared to the input. Encrypt-only is
+//! what the differential fixture needs; the decrypt half is what
+//! `tools/cache_profile.sh` needs, because the cache/branch profile of `decrypt` -- the
+//! path the crate's whole hardening story is about, and under `ultra` the path a second
+//! implementation runs on -- is not exercised by encrypting at all.
+//!
 //! Exists so `tools/broad_differential.py` can push thousands of random vectors
 //! through the crate without a generated fixture living in the repository.  Not
 //! part of the library, and not used by the test suite.
 
 use std::io::{self, BufRead, Write};
 
-use xchacha20_blake3_siv::encrypt;
+use xchacha20_blake3_siv::{decrypt, decrypt_in_place_detached, encrypt};
 
 fn from_hex(field: &str) -> Vec<u8> {
     if field == "-" {
@@ -46,6 +53,10 @@ fn to_hex(bytes: &[u8]) -> String {
 }
 
 fn main() {
+    // A flag rather than a default: the differential fixture compares *encryption*
+    // against the reference implementation, and a decrypt call in that path would make
+    // the fixture's own output depend on a second computation.
+    let roundtrip = std::env::args().skip(1).any(|a| a == "--roundtrip");
     let stdin = io::stdin();
     let stdout = io::stdout();
     let mut out = io::BufWriter::new(stdout.lock());
@@ -73,6 +84,16 @@ fn main() {
             .unwrap_or_else(|_| panic!("nonce not 24 bytes"));
 
         let (ct, tag) = encrypt(&key, &nonce, &aad, &msg).expect("encrypt");
+        if roundtrip {
+            let pt = decrypt(&key, &nonce, &aad, &ct, &tag).expect("decrypt");
+            assert_eq!(pt, msg, "round trip differs from the message");
+            // The in-place entry point has its own copy of the decision wiring, so it
+            // is a separate path to profile rather than a duplicate of the one above.
+            let mut buf = ct.clone();
+            decrypt_in_place_detached(&key, &nonce, &aad, &mut buf, &tag)
+                .expect("in-place decrypt");
+            assert_eq!(buf, msg, "in-place round trip differs from the message");
+        }
         // `-` for an empty ciphertext, matching the input convention: an empty
         // field would collapse under whitespace splitting.
         let ct = if ct.is_empty() {

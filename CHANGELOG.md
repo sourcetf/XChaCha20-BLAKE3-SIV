@@ -78,6 +78,69 @@ Honest limits, stated where the code is: it is not a proof (a compiler may spill
 the scrubbed distance), it reaches only this thread's stack, and it does nothing about a
 value already written to swap — that is what `locked` is for.
 
+### `ultra`: the whole construction is recomputed by an independent implementation
+
+New in `ultra`: `src/witness.rs`, a second implementation of ChaCha20, HChaCha20 and
+keyed BLAKE3 (the reference CV-stack tree, the chunk/parent structure, the XOF), plus
+the construction over them, written from the specification and sharing no code with the
+crate's path — not the `blake3` dependency, not the SIMD kernels, not `derive_tag`, not
+the buffering.
+
+Both decrypt entry points require its agreement (`witness_tag == computed_tag` **and**
+`witness_plaintext == plaintext`) and `encrypt` cross-checks its tag before returning.
+The agreement is a `Choice` folded into the existing second gate rather than a check of
+its own: as a separate `if`, it would be a secret-dependent branch outside
+`accept_or_reject`, which is what the suppression file forbids (measured: 7 ctgrind
+reports, all in `decrypt`), and it would add a branch a single fault could skip.
+
+**The encrypt-side cross-check had exactly that defect, and the new run found it.**
+Written as `if !bool::from(witness::encrypt_tag(..).ct_eq(&tag)) { return Err(..) }` it
+is a branch on the tag — both operands are secret-derived — and `tools/ctgrind.sh
+--features ultra` reported it inside `encrypt`. That is the check the suppression file
+may not cover, so the comparison now goes through `accept_or_reject` like the decrypt
+side's: two slots written before the call, two serial reject-first checks, and the
+caller branches only on a discriminant written as a constant. The encrypt-side refusal
+is a fail-safe rather than a forgery defence (a fault there would otherwise emit a
+ciphertext the peer refuses, so it is availability, not authenticity) — but the branch
+was real, it was on the secret path, and nothing in the repository could see it until
+this configuration was run.
+
+**Why this model needs an implementation and not another comparison.** `dual-mac`
+derives the tag twice, but both derivations are the same machine code: a fault in
+`derive_tag` or the keyed BLAKE3 under it changes both answers *in the same direction*,
+which is precisely what the two gates cannot see. The witness closes that, and it is the
+mechanism behind every accepting byte `tools/fi_instruction.sh` finds — those live in the
+shared KDF/MAC/SIMD code (the accepting sites are the same addresses in the opt-out and
+hardened builds, which is how that was established), and none of that code is on the
+witness's path.
+
+**Cost**: it is a scalar implementation, so the cost is per byte rather than fixed.
+Measured with `examples/bench_aead.rs` (release, this host), `ultra` against
+`hardened,dual-mac,locked,rng` — which is `ultra` without the witness: decryption 30.1 →
+20.8 MB/s at 64 B, 259 → 121 at 1 KiB, 1462 → 232 at 64 KiB, 1767 → 192 at 1 MiB.
+Cachegrind instruction counts agree in shape: +17 k instructions per 64 B message on the
+decrypt path, +64 M on a 1 MiB one. `ultra` is for callers who have decided that is worth
+it; the four features can also be listed without the witness. **The witness's buffers are
+a second and third copy of the message on the decrypt paths** (three times the message in
+flight rather than two), all allocated up front by `src/lib.rs` — `witness::decrypt`
+writes into a caller slice rather than allocating, so a refusal is
+`Error::AllocationFailed` from the documented place instead of an `abort` inside the
+witness.
+
+**Found while wiring it up, and fixed: an allocation that could return through live key
+material.** The in-place path's witness buffers were allocated where they are used —
+after `derive_material`, `derive_enc` and four live locals — so an `AllocationFailed`
+from either `?` returned with the MAC key, the encryption seed, the per-message key and
+nonce sitting in the frame, unwiped. This is the same defect `encrypt` was fixed for in
+the previous revision (`allocate before deriving`), reintroduced by adding an allocation
+below that line. Both buffers now come first, and
+`tests/security.rs::every_allocation_happens_before_any_derivation` asserts the ordering
+for all three entry points, since nothing outside the crate can observe a stack frame.
+
+What it does **not** buy, stated on the README's row rather than implied: both
+implementations run on one CPU and one compiler, so a fault that hits both, or a
+systematic error in both, is outside what agreement can detect.
+
 ### Zeroization: two copies the wipes could not reach
 
 Fixed in every configuration, because these are copies the wipes should already have
@@ -101,6 +164,58 @@ than asserted, because a gate that fails upstream is a gate someone deletes.
 
 ### Tests and evidence
 
+- **The evidence set now covers the configuration with the most code in it**, which is
+  what the entries below have in common. Each of them found something the default run
+  could not: `ctgrind` found the encrypt-side branch above; `fi_instruction` found that the
+  extra code the witness adds to the two entry points changes the fault numbers and forced
+  the criterion to be scoped to the decision; `cache_profile` had never run `decrypt` at
+  all; the cross-architecture suite had never compiled the witness.
+- `tools/ctgrind.sh` now runs in three configurations — default, `--no-default-features`,
+  and `--features ultra` — in `deep.yml` and locally. The third is what reported the
+  encrypt-side cross-check, and the witness's own code is covered by it too (clean: its
+  branches are lengths).
+- `tools/fi_instruction.sh` sweeps a third configuration (`ultra`), **attributes every
+  accepting fault to the symbol it sits in**, and gates on the *decision-scoped* count. The
+  old criterion — "each layer no worse than the one below it", on raw totals — was wrong,
+  and the `ultra` row is what showed it: the witness adds code to both entry points (a call,
+  an extra gate operand, a ciphertext copy), so a longer swept region collects more
+  accepting bytes even when every one of them is outside the decision. Measured, full local
+  sweep of the final revision, as `(total, inside the decision)`: opt-out `2, 0` (nop) and
+  `117, 3` (bits); `hardened` `0, 0` and `1, 0`; `ultra` `0, 0` and `5, 0`. The property
+  that is comparable — and the one the three configurations are about — is the decision:
+  **zero accepting faults inside `accept_or_reject` for `hardened` and `ultra` in both
+  models**, against three in the opt-out build's bit-flip model, which is also the control
+  that the sweep reaches the decision at all (its single `test`/`je` pair is one flipped bit
+  from falling through into the accept store). That control is model-specific, and the
+  reason is written into the tool: overwriting the `je` with `0x90` makes the following
+  bytes decode as a different instruction and the run crashes instead of accepting.
+  The sweep also **shards across cores** (`--jobs`, default the core count capped at 16),
+  each shard on its own copy of the binary over a disjoint slice of the offsets: the full
+  three-configuration `nop` sweep went from ~15 minutes sequential to under two, and the
+  `bits` sweep from hours to ~9 minutes.
+- `tools/cache_profile.sh` now profiles **two phases** — encrypt-only and round-trip — and
+  takes `XSIV_FEATURES` so the same differential can be pointed at any configuration,
+  self-test included (`XSIV_FEATURES=ultra ./tools/cache_profile.sh --selftest`). The
+  example grew `--roundtrip` for it, and the script refuses to report the second phase
+  unless it executed strictly more instructions than the first, so "decrypt is covered" is
+  checked rather than assumed. Before this, every cache and branch profile in the
+  repository was of `encrypt` alone: the path the crate's whole hardening story is about,
+  and the path `ultra` puts a second implementation on, had never been profiled.
+- The cross-architecture stage (CI's `cross-exec`, `verify.sh` stage 5) builds with
+  `--features ultra,pure` instead of `--features pure`. The witness is hand-written
+  byte-order-sensitive code — every ChaCha20 and BLAKE3 word goes through
+  `from_le_bytes`/`to_le_bytes`, and the BLAKE3 chunk counter and message length are
+  64-bit — and it was the one part of the crate never built or executed on the 32-bit or
+  big-endian targets. All three now execute it: aarch64, i686 and powerpc64, 11 binaries
+  each.
+- `tests/variable_latency.rs` inventories `src/witness.rs` in its own control-flow table
+  (3 `if`, 5 `while`, 21 `for`, 0 `loop`, 0 `match`), so the second implementation cannot
+  grow a branch unnoticed while the table still covers only `src/lib.rs`.
+- `tests/decision_scope.rs` pins the third call site: the encrypt-side cross-check must go
+  through `accept_or_reject` (and *not* be an `if` at its own call site), and both of its
+  reject paths must wipe the key material they have derived. It also skips the test module
+  when counting call sites, so this file's own calls to the witness are not mistaken for
+  the crate's.
 - `locked_key_is_actually_locked` **fails** when the kernel refuses to lock, instead
   of returning early with `ok`; `XSIV_ALLOW_UNLOCKED=1` is the explicit opt-out. It also
   now asserts the lock is on the *live* key's page (unlocking it must move `VmLck`),

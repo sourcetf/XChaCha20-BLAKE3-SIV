@@ -130,14 +130,17 @@ if [ "$KANI_ONLY" -eq 0 ]; then
   # Type-check against the gnu target (no linker needed), then build the musl
   # target, which is what step 5 executes.  `.cargo/config.toml` selects
   # rust-lld so no cross C toolchain is required.
+  # `ultra` is in the feature list alongside `pure` so the witness is type-checked for
+  # these targets too; stage 5 below *executes* it on three of them. (`pure` is what makes
+  # BLAKE3's C kernels unnecessary here; see stage 5.)
   if rustup target list --installed 2>/dev/null | grep -q aarch64-unknown-linux-gnu; then
-    cargo check --target aarch64-unknown-linux-gnu --all-targets --features pure
+    cargo check --target aarch64-unknown-linux-gnu --all-targets --features ultra,pure
   else
     skip "aarch64-unknown-linux-gnu type-check" "target not installed"
     echo "         (rustup target add aarch64-unknown-linux-gnu)"
   fi
   if rustup target list --installed 2>/dev/null | grep -q aarch64-unknown-linux-musl; then
-    cargo check --target aarch64-unknown-linux-musl --all-targets --features pure
+    cargo check --target aarch64-unknown-linux-musl --all-targets --features ultra,pure
   else
     skip "aarch64-unknown-linux-musl type-check" "target not installed"
     echo "         (rustup target add aarch64-unknown-linux-musl)"
@@ -146,7 +149,7 @@ if [ "$KANI_ONLY" -eq 0 ]; then
   # scalar-only configuration (see `.cargo/config.toml` for why it is not
   # linked/executed).
   if rustup target list --installed 2>/dev/null | grep -q riscv64gc-unknown-linux-musl; then
-    cargo check --target riscv64gc-unknown-linux-musl --all-targets --features pure
+    cargo check --target riscv64gc-unknown-linux-musl --all-targets --features ultra,pure
   else
     skip "riscv64gc-unknown-linux-musl type-check" "target not installed"
     echo "         (rustup target add riscv64gc-unknown-linux-musl)"
@@ -191,7 +194,8 @@ if [ "$RUN_CROSS_EXEC" -eq 1 ]; then
 
     # `--features pure`: BLAKE3 needs a *target* C toolchain for its C kernels on
     # x86_64/aarch64, and this stage exists to execute *this crate's* SIMD code,
-    # not BLAKE3's; the wire format is identical either way.
+    # not BLAKE3's; the wire format is identical either way. `ultra` is added to the
+    # build below, where the reason is written out.
     if ! rustup target list --installed 2>/dev/null | grep -qx "$target"; then
       skip "$target execution" "the target is not installed (rustup target add $target)"
       echo "           rustup target add $target"
@@ -243,7 +247,17 @@ if [ "$RUN_CROSS_EXEC" -eq 1 ]; then
     # broken cross target. Two are excluded because the emulator cannot provide what they
     # need: `timing*` a real clock (and `security`'s timing screen with it), `ctgrind*`
     # valgrind on x86_64.
-    exes="$(cargo test --target "$target" --release --no-run --features pure 2>&1 \
+    # `--features ultra,pure`: `pure` because BLAKE3 needs a *target* C toolchain for its
+    # C kernels on x86_64/aarch64, and this stage exists to execute *this crate's* SIMD
+    # code, not BLAKE3's; the wire format is identical either way. `ultra` because it is
+    # the configuration with the most code in it, and its second implementation is
+    # hand-written **byte-order-sensitive** code -- `from_le_bytes`/`to_le_bytes` on every
+    # word of a ChaCha20 block and a BLAKE3 state -- which is exactly what a big-endian
+    # target is here to exercise, and whose 64-bit length and chunk-counter arithmetic is
+    # what the 32-bit target exercises. Building it out on these targets meant the only
+    # architecture-dependent code in the crate was the only code never run on another
+    # architecture.
+    exes="$(cargo test --target "$target" --release --no-run --features ultra,pure 2>&1 \
             | sed -n 's/^ *Executable .*(\(.*\))$/\1/p')"
     [ -n "$exes" ] || { echo "cargo reported no $target executables" >&2; exit 1; }
     ran=0

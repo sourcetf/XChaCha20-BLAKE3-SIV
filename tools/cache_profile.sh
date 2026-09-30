@@ -33,12 +33,22 @@
 #        tools/cache_profile.sh --trace [vectors]   # address-trace mode
 #        tools/cache_profile.sh --selftest [vectors] [--trace]
 #
+# Set `XSIV_FEATURES` to run the same differential against a feature combination --
+# `XSIV_FEATURES=ultra tools/cache_profile.sh` is the one that matters, because `ultra`
+# adds a second implementation (another ChaCha20/BLAKE3, its own buffers) to the path
+# that handles the key, and a secret-dependent access in it would be invisible to every
+# other check here. The variable is read by the self-test's inner invocation too, so the
+# planted-leak control runs in the same configuration as the check it guards.
+#
 # Exit codes: 0 = as expected; 1 = a profile depended on a secret, or a check could
 # not run, or the self-test found that this tool cannot detect a planted leak.
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
 export PATH="$HOME/.cargo/bin:$PATH"
+
+# Feature flags for the example under test. Empty (the default) is the default build.
+FEATURES="${XSIV_FEATURES:-}"
 
 # Same lookup as `tools/ctgrind.sh`: the host this was developed on has valgrind
 # extracted under `$HOME` (no root to install it), while CI installs it system-wide.
@@ -77,7 +87,11 @@ for i in range(n):
 PY
 }
 
-cargo build --release --quiet --example xsiv_stdin
+cargo build --release --quiet --example xsiv_stdin ${FEATURES:+--features "$FEATURES"}
+
+# Which configuration the verdicts below are about. Printed in every mode, so a log that
+# says PASS says what it passed *for*.
+echo "configuration: ${FEATURES:-default features}"
 
 # ── Address-trace mode ──
 if [ "${1:-}" = "--trace" ]; then
@@ -86,35 +100,43 @@ if [ "${1:-}" = "--trace" ]; then
   work="$(mktemp -d)"; trap 'rm -rf "$work"' EXIT
   gen "$vectors" 00 > "$work/t-zero.txt"
   gen "$vectors" ff > "$work/t-ones.txt"
-  for side in zero ones; do
-    # ASLR off: the comparison is over addresses, so the same code has to be at the
-    # same addresses in both runs. That requirement is this mode's main caveat -- it
-    # needs a controlled layout, which is not a statement about a hostile process.
-    setarch --addr-no-randomize "$VALGRIND" --tool=lackey --trace-mem=yes \
-      ./target/release/examples/xsiv_stdin < "$work/t-$side.txt" 2>&1 \
-      | grep -E "^[ILSM] " > "$work/$side.trace" || true
+  # Two phases, encrypt-only and round-trip: `decrypt` is the path the hardening is
+  # about, and it is never entered by the encrypt-only pass.
+  for phase in enc roundtrip; do
+    extra=()
+    [ "$phase" = roundtrip ] && extra=(--roundtrip)
+    for side in zero ones; do
+      # ASLR off: the comparison is over addresses, so the same code has to be at the
+      # same addresses in both runs. That requirement is this mode's main caveat -- it
+      # needs a controlled layout, which is not a statement about a hostile process.
+      setarch --addr-no-randomize "$VALGRIND" --tool=lackey --trace-mem=yes \
+        ./target/release/examples/xsiv_stdin ${extra[@]+"${extra[@]}"} \
+        < "$work/t-$side.txt" 2>&1 \
+        | grep -E "^[ILSM] " > "$work/$phase-$side.trace" || true
+    done
+    # A trace that carries no load/store lines is not a trace. This valgrind, extracted
+    # from a package rather than installed, cannot start external tools at all: it looks
+    # for them under the prefix it was built with, and `VALGRIND_LIB` only redirects the
+    # core. The first version of this mode filtered on `^[ILSM] ` and compared the
+    # *error message* that came back instead -- two runs of identical text, reported as
+    # "identical address traces". Exit 3 means "could not run", which the self-test
+    # treats as its own failure rather than as a detection.
+    loads="$(grep -c '^[LSM] ' "$work/$phase-zero.trace" || true)"
+    if [ "${loads:-0}" -eq 0 ]; then
+      echo "SKIPPED: no load/store lines in the $phase trace -- valgrind here cannot" >&2
+      echo "         start the lackey tool (see the comment above)." >&2
+      exit 3
+    fi
+    if cmp -s "$work/$phase-zero.trace" "$work/$phase-ones.trace"; then
+      echo "PASS: identical $phase address traces for two different keys"
+      echo "      ($(wc -l < "$work/$phase-zero.trace") memory accesses compared)"
+    else
+      echo "FAIL: the $phase address trace depends on the values of a secret" >&2
+      diff "$work/$phase-zero.trace" "$work/$phase-ones.trace" | head -10 >&2
+      exit 1
+    fi
   done
-  # A trace that carries no load/store lines is not a trace. This valgrind, extracted
-  # from a package rather than installed, cannot start external tools at all: it looks
-  # for them under the prefix it was built with, and `VALGRIND_LIB` only redirects the
-  # core. The first version of this mode filtered on `^[ILSM] ` and compared the
-  # *error message* that came back instead -- two runs of identical text, reported as
-  # "identical address traces". Exit 3 means "could not run", which the self-test
-  # treats as its own failure rather than as a detection.
-  loads="$(grep -c '^[LSM] ' "$work/zero.trace" || true)"
-  if [ "${loads:-0}" -eq 0 ]; then
-    echo "SKIPPED: no load/store lines in the trace -- valgrind here cannot start the" >&2
-    echo "         lackey tool (see the comment above). The counts mode is unaffected." >&2
-    exit 3
-  fi
-  if cmp -s "$work/zero.trace" "$work/ones.trace"; then
-    echo "PASS: identical address traces for two different keys"
-    echo "      ($(wc -l < "$work/zero.trace") memory accesses compared)"
-    exit 0
-  fi
-  echo "FAIL: the address trace depends on the values of a secret" >&2
-  diff "$work/zero.trace" "$work/ones.trace" | head -10 >&2
-  exit 1
+  exit 0
 fi
 
 # ── Self-test: plant a leak a *cache-resident* table hides from the counts, and
@@ -122,6 +144,10 @@ fi
 # nothing, so this checks the exit status rather than printing what came out. ──
 if [ "${1:-}" = "--selftest" ]; then
   mode="${2:-}"; count="${3:-32}"
+  # `$mode` is the mode flag for the inner run (`--trace` or nothing), which is what the
+  # messages below have to name -- an earlier version printed it as if it were a mode
+  # name and reported "detected by " with an empty field.
+  mode_name="${mode:-counts}"
   work="$(mktemp -d)"; trap 'rm -rf "$work"' EXIT
   cp -r src tests examples benches tools Cargo.toml Cargo.lock "$work/" 2>/dev/null || true
   cp -r src tests examples tools Cargo.toml Cargo.lock "$work/"
@@ -150,9 +176,10 @@ s = s.replace(old, """    // Deliberately leaky, for tools/cache_profile.sh --se
 open(p, "w").write(s)
 PY
   echo "self-test: planted a secret-dependent table access into a throwaway copy"
+  echo "self-test: the copy is built with the same features as this run (${FEATURES:-default})"
   inner=0
   if ( cd "$work" && exec "$0" $mode "$count" ) > "$work/selftest.log" 2>&1; then
-    echo "FAIL: the planted leak left the profile identical, so $mode cannot detect" >&2
+    echo "FAIL: the planted leak left the profile identical, so $mode_name cannot detect" >&2
     echo "      that class and its PASS elsewhere means correspondingly less." >&2
     tail -20 "$work/selftest.log" >&2
     exit 1
@@ -160,11 +187,11 @@ PY
     inner=$?
   fi
   if [ "$inner" = 3 ]; then
-    echo "FAIL: $mode could not run here, so the self-test cannot conclude anything" >&2
+    echo "FAIL: $mode_name could not run here, so the self-test cannot conclude anything" >&2
     echo "      about it. Exit 3 is 'could not run', not 'detected'." >&2
     exit 1
   fi
-  echo "OK: the planted leak is detected by $mode"
+  echo "OK: the planted leak is detected by $mode_name"
   grep -E "^(FAIL|[-+](D1mr|DLmr|L|S|I) )" "$work/selftest.log" | head -4
   exit 0
 fi
@@ -179,10 +206,12 @@ gen "$vectors" 00 2 > "$work/in-longer.txt"
 # `--cache-sim=yes` explicitly: with only `--branch-sim=yes` this valgrind emits
 # branch events *instead of* the cache events, which would quietly make the whole
 # comparison about branches alone.
-profile() {  # in-file, out-file
+profile() {  # args..., then in-file and out-file are last two
+  local extra=("${@:1:$#-2}")
+  local in="${@: -2:1}" out="${@: -1}"
   "$VALGRIND" --tool=cachegrind --cache-sim=yes --branch-sim=yes \
-    --cachegrind-out-file="$2" ./target/release/examples/xsiv_stdin \
-    < "$1" > /dev/null 2>&1
+    --cachegrind-out-file="$out" ./target/release/examples/xsiv_stdin \
+    ${extra[@]+"${extra[@]}"} < "$in" > /dev/null 2>&1
 }
 
 # Read the counters out of the profile rather than out of `cg_annotate`'s text
@@ -197,42 +226,63 @@ counters() {  # cg-file
     }' "$1"
 }
 
-profile "$work/in-zero.txt" "$work/zero.cg"
-profile "$work/in-zero.txt" "$work/zero-again.cg"
-profile "$work/in-ones.txt" "$work/ones.cg"
-profile "$work/in-longer.txt" "$work/longer.cg"
-counters "$work/zero.cg" > "$work/zero.sum"
-counters "$work/zero-again.cg" > "$work/zero-again.sum"
-counters "$work/ones.cg" > "$work/ones.sum"
-counters "$work/longer.cg" > "$work/longer.sum"
+# Two phases: encrypt-only, then round-trip. The second one is where `decrypt` runs at
+# all, and under `ultra` it is where a second implementation handles the key -- the
+# encrypt-only columns above say nothing about either.
+for phase in enc roundtrip; do
+  extra=()
+  [ "$phase" = roundtrip ] && extra=(--roundtrip)
+  profile "${extra[@]+"${extra[@]}"}" "$work/in-zero.txt" "$work/$phase-zero.cg"
+  profile "${extra[@]+"${extra[@]}"}" "$work/in-zero.txt" "$work/$phase-zero-again.cg"
+  profile "${extra[@]+"${extra[@]}"}" "$work/in-ones.txt" "$work/$phase-ones.cg"
+  profile "${extra[@]+"${extra[@]}"}" "$work/in-longer.txt" "$work/$phase-longer.cg"
+  counters "$work/$phase-zero.cg" > "$work/$phase-zero.sum"
+  counters "$work/$phase-zero-again.cg" > "$work/$phase-zero-again.sum"
+  counters "$work/$phase-ones.cg" > "$work/$phase-ones.sum"
+  counters "$work/$phase-longer.cg" > "$work/$phase-longer.sum"
 
-# Negative control: a *public* difference (message lengths) must move the counters.
-if [ ! -s "$work/zero.sum" ]; then
-  echo "FAIL: no counters were extracted -- the profile is empty, so any comparison" >&2
-  echo "      here would be vacuous. Is valgrind working?" >&2
-  exit 1
-fi
-if diff -q "$work/zero.sum" "$work/longer.sum" > /dev/null; then
-  echo "FAIL: control runs with different message lengths produced identical" >&2
-  echo "      counters, so this mode cannot detect anything." >&2
-  exit 1
-fi
-if ! diff -q "$work/zero.sum" "$work/zero-again.sum" > /dev/null; then
-  echo "FAIL: two runs on the *same* input produced different counters, so this mode" >&2
-  echo "      cannot separate a leak from its own noise and both verdicts below are" >&2
-  echo "      meaningless." >&2
-  diff -u "$work/zero.sum" "$work/zero-again.sum" >&2
-  exit 1
-fi
-echo "control: the same input twice gives identical counters (the mode is repeatable)"
-echo "control: different message lengths change the counters, as they must"
+  # Negative control: a *public* difference (message lengths) must move the counters.
+  if [ ! -s "$work/$phase-zero.sum" ]; then
+    echo "FAIL: no counters were extracted from the $phase phase -- the profile is" >&2
+    echo "      empty, so any comparison here would be vacuous. Is valgrind working?" >&2
+    exit 1
+  fi
+  if diff -q "$work/$phase-zero.sum" "$work/$phase-longer.sum" > /dev/null; then
+    echo "FAIL: $phase control runs with different message lengths produced identical" >&2
+    echo "      counters, so this mode cannot detect anything." >&2
+    exit 1
+  fi
+  if ! diff -q "$work/$phase-zero.sum" "$work/$phase-zero-again.sum" > /dev/null; then
+    echo "FAIL: two $phase runs on the *same* input produced different counters, so" >&2
+    echo "      this mode cannot separate a leak from its own noise and both verdicts" >&2
+    echo "      below are meaningless." >&2
+    diff -u "$work/$phase-zero.sum" "$work/$phase-zero-again.sum" >&2
+    exit 1
+  fi
+  # The round-trip phase must do *more* work than the encrypt-only one, or the flag it
+  # passes is not reaching the example and the "decrypt is covered" claim is empty.
+  if [ "$phase" = roundtrip ]; then
+    enc_ir="$(awk '$1 == "Ir" { print $2 }' "$work/enc-zero.sum")"
+    rt_ir="$(awk '$1 == "Ir" { print $2 }' "$work/roundtrip-zero.sum")"
+    if [ -z "$enc_ir" ] || [ -z "$rt_ir" ] || [ "$rt_ir" -le "$enc_ir" ]; then
+      echo "FAIL: the round-trip phase does not execute more instructions than the" >&2
+      echo "      encrypt-only phase ($enc_ir -> $rt_ir), so it is not reaching" >&2
+      echo "      \`decrypt\` and this run would be reporting the encrypt path twice." >&2
+      exit 1
+    fi
+    echo "control (roundtrip): the round-trip phase executes more instructions than the"
+    echo "        encrypt-only one ($enc_ir -> $rt_ir), so it does reach \`decrypt\`"
+  fi
+  echo "control ($phase): the same input twice gives identical counters"
+  echo "control ($phase): different message lengths change the counters, as they must"
 
-if diff -u "$work/zero.sum" "$work/ones.sum" > "$work/diff"; then
-  echo "PASS: identical cache and branch profiles for two different keys"
-  echo "      ($(wc -l < "$work/zero.sum") counters over $vectors vectors per side;"
-  echo "       see the header for what this does and does not catch)"
-else
-  echo "FAIL: the cache or branch profile depends on the key" >&2
-  cat "$work/diff" >&2
-  exit 1
-fi
+  if diff -u "$work/$phase-zero.sum" "$work/$phase-ones.sum" > "$work/$phase.diff"; then
+    echo "PASS ($phase): identical cache and branch profiles for two different keys"
+    echo "      ($(wc -l < "$work/$phase-zero.sum") counters over $vectors vectors per side;"
+    echo "       see the header for what this does and does not catch)"
+  else
+    echo "FAIL: the $phase cache or branch profile depends on the key" >&2
+    cat "$work/$phase.diff" >&2
+    exit 1
+  fi
+done

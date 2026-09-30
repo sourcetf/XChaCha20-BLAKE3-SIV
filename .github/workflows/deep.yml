@@ -171,6 +171,14 @@ jobs:
       - name: run ctgrind on the opt-out configuration
         run: ./tools/ctgrind.sh --no-default-features
 
+      # And on `ultra`, which is the only configuration that runs a second, independent
+      # implementation (src/witness.rs) over the key. It is hand-written ChaCha20 and
+      # BLAKE3, so "does it branch on secret data?" is a question about new code that no
+      # other run asks -- the suppression file still names `accept_or_reject` only, so a
+      # branch in the witness is reported like any other.
+      - name: run ctgrind on ultra
+        run: ./tools/ctgrind.sh --features ultra
+
       # ctgrind classifies branches and indices in the source; this compares the
       # compiled code's cache and branch *profile* for two different keys, which
       # catches a leak with no branch and no index to name. The self-test plants a
@@ -181,6 +189,19 @@ jobs:
           set -euo pipefail
           ./tools/cache_profile.sh 48
           ./tools/cache_profile.sh --selftest
+
+      # The same differential on `ultra`, the configuration with the most code in it:
+      # a second ChaCha20/BLAKE3 implementation and its own buffers handle the key, and
+      # a secret-dependent access *there* is invisible to the default run above.
+      # `XSIV_FEATURES` is inherited by the self-test's inner invocation, so the
+      # planted-leak control is exercised in this configuration too -- a detector that
+      # stopped detecting under `ultra` would otherwise report PASS while proving
+      # nothing about the configuration it was pointed at.
+      - name: cache-profile differential on ultra, with its self-test
+        run: |
+          set -euo pipefail
+          XSIV_FEATURES=ultra ./tools/cache_profile.sh 48
+          XSIV_FEATURES=ultra ./tools/cache_profile.sh --selftest
 
       # The address-trace mode is the stronger technique -- it sees which line is
       # touched, not just how many misses there were -- but it needs valgrind's
@@ -193,6 +214,7 @@ jobs:
         run: |
           ./tools/cache_profile.sh --trace 12
           ./tools/cache_profile.sh --selftest --trace
+          XSIV_FEATURES=ultra ./tools/cache_profile.sh --trace 12
 
   audit:
     name: cargo-audit
@@ -357,9 +379,16 @@ jobs:
 
       # The instruction-level scan is what turns "one skipped instruction accepts a
       # forgery" from a claim into a measurement, and it is cheap enough in `--quick`
-      # mode (every seventh byte, both builds, about a minute) to run on every push.
-      # The full sweep is in the scheduled `wide` job; a version of this that ran
-      # only weekly was promised as "branches on every push" and was not.
+      # mode (every seventh byte, all three builds, sharded across the runner's cores)
+      # to run on every push. The full sweep is in the scheduled `wide` job; a version
+      # of this that ran only weekly was promised as "branches on every push" and was
+      # not.
+      #
+      # Three configurations now: the opt-out build, `hardened`, and `ultra` -- the last
+      # of which is both the largest (the witness implementation is swept with the
+      # decision, because its symbols are under `decrypt`) and the one that reaches zero
+      # accepting faults, since the accepting sites in the other two live in the shared
+      # KDF/MAC/SIMD code that the witness does not share.
       - name: instruction-level faults, quick sweep (neutralised byte)
         run: ./tools/fi_instruction.sh --quick
 
@@ -472,11 +501,17 @@ jobs:
       # rewrites the binary once per byte and re-runs the decision test, so it is a
       # ~30 minute job -- which is why it lives here and not on every push.
       # Instruction-level faults: every byte of the compiled decision code is NOPed in
-      # turn, in both builds, and the decision test has to keep rejecting forgeries.
-      # It was measured at about seven minutes on a development machine and then hit
-      # the 30-minute budget of the per-push job on a runner, which is why it lives
-      # here: the same way this repository sizes every other check, by measurement
-      # rather than by hope.
+      # turn, in all three configurations, and the decision test has to keep rejecting
+      # forgeries. It was measured at about seven minutes on a development machine for
+      # two configurations, and then hit the 30-minute budget of the per-push job on a
+      # runner -- which is why it lives here, and why the tool now shards the sweep
+      # across the runner's cores (`--jobs`, default the core count capped at 16): the
+      # three-configuration sweep measures 98 seconds on a 16-core host.
+      #
+      # The `bits` model is not run in full here (eight times the faults of this one, so
+      # it would be the job's whole budget); it runs `--quick` on every push in the
+      # mutation job above, and in full locally via
+      # `tools/fi_instruction.sh --bits`.
       - name: instruction-level faults (every byte of the decision)
         run: ./tools/fi_instruction.sh
 

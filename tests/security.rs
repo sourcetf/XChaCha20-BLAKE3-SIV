@@ -558,3 +558,82 @@ fn decrypt_bounded_enforces_the_callers_limit() {
             .as_slice()
     );
 }
+
+/// The fallible step in every entry point runs **before** any key material exists.
+///
+/// `alloc_zeroed` returns `Error::AllocationFailed` instead of aborting, and the
+/// `?` that carries it out of the function also skips every `zeroize_array` below —
+/// so an allocation taken *after* a derivation returns through live key material.
+/// That was a real defect (`encrypt` derived first, and an `AllocationFailed` left
+/// `mac_key`, `enc_seed`, `enc_key` and `enc_nonce` in the frame), and it came back
+/// when `ultra`'s witness buffers were added to `decrypt_in_place_detached` where
+/// they are used rather than at the top.
+///
+/// This is a source-shape assertion, which is unusual here, and it is one because the
+/// property is not observable from outside: the failure needs an allocator refusal,
+/// and what it leaves behind is stack memory no test can reach. The same reasoning as
+/// `tests/decision_scope.rs` applies — the ordering is the fix, so the ordering is
+/// what is pinned.
+#[test]
+fn every_allocation_happens_before_any_derivation() {
+    const LIB: &str = include_str!("../src/lib.rs");
+
+    /// The body of `fn name(`, brace-matched.
+    fn body(name: &str) -> String {
+        let start = LIB
+            .find(&format!("pub fn {name}("))
+            .unwrap_or_else(|| panic!("{name} not found"));
+        let after = &LIB[start..];
+        let open = after.find('{').expect("block without a body");
+        let mut depth = 0usize;
+        for (i, c) in after[open..].char_indices() {
+            match c {
+                '{' => depth += 1,
+                '}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return after[..=open + i].to_string();
+                    }
+                }
+                _ => {}
+            }
+        }
+        panic!("unbalanced braces in {name}");
+    }
+
+    for name in ["encrypt", "decrypt", "decrypt_in_place_detached"] {
+        let body = body(name);
+        let alloc = body
+            .find("alloc_zeroed(")
+            .unwrap_or_else(|| panic!("{name} has no allocation at all -- is it still there?"));
+        let derive = body
+            .find("derive_material(")
+            .unwrap_or_else(|| panic!("{name} derives no key material"));
+        assert!(
+            alloc < derive,
+            "{name} allocates after deriving key material: an `AllocationFailed` from \
+             that `?` returns through live key material without wiping it. Move the \
+             allocation above the first derivation (and say why in a comment, because \
+             it looks like it can go anywhere)."
+        );
+    }
+
+    // And `ultra` adds its own buffers, which is how this came back: the witness writes
+    // into caller slices, so those allocations are in the entry points too -- and all of
+    // them must be on the early side of the same line.
+    let in_place = body("decrypt_in_place_detached");
+    for buffer in ["witness_ciphertext", "witness_plaintext"] {
+        let site = in_place
+            .find(&format!("let mut {buffer} = alloc_zeroed("))
+            .unwrap_or_else(|| {
+                panic!(
+                    "`ultra`'s {buffer} is no longer a fallible allocation -- an \
+                     infallible one aborts the process on refusal, which is worse"
+                )
+            });
+        assert!(
+            site < in_place.find("derive_material(").unwrap(),
+            "`ultra`'s {buffer} is allocated after the derivations"
+        );
+    }
+}

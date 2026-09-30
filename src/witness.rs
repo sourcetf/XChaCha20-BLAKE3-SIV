@@ -1,0 +1,695 @@
+//! An independent second implementation of the whole construction, for `ultra`.
+//!
+//! Every other defence in this crate is a *shape*: two gates, two serial checks, two slots,
+//! a fail-closed call site. They all share one property that no amount of restructuring
+//! removes — the bytes being compared come from **one** implementation. A fault that makes
+//! that implementation produce the attacker's tag, or that corrupts the keystream before the
+//! tag is computed, is invisible to every gate, because every gate is looking at the same
+//! wrong answer. `tools/fi_check.sh` pins that as a known limit (`computed-tag-replaced`).
+//!
+//! This module is the software answer: a second implementation of ChaCha20, HChaCha20 and
+//! keyed BLAKE3, written here from the specifications, with no shared code and no shared
+//! dependency — the crate's normal path goes through the `blake3` crate and its SIMD
+//! kernels, this one is scalar Rust written from the BLAKE3 book and the ChaCha20 RFC. Under
+//! `ultra` the whole decryption is computed **twice**, once by each, and the two results are
+//! required to agree bit for bit before anything is accepted. A single fault must then
+//! corrupt *two independent implementations identically* to get through.
+//!
+//! What that does and does not buy, stated plainly, because "two implementations" invites
+//! over-reading:
+//!
+//! * **It does buy:** any fault confined to one implementation — the compressed keystream,
+//!   a corrupted comparison, a skipped round, a wrong constant, a pin on the tag, a fault in
+//!   the `blake3` dependency's own state. The two sides are computed by different code, so a
+//!   fault has to land on both, in the same way, to survive.
+//! * **It does not buy:** two faults, one in each implementation; a fault in the shared
+//!   *inputs* (a corrupted key byte corrupts both sides identically); a fault in the
+//!   comparison that ANDs the agreement itself; and anything physical — power, EM, a
+//!   hypervisor, cold boot. Those are the residual, and the README says so.
+//!
+//! Cost is the point of `ultra`: this doubles the cipher and the MAC and allocates a second
+//! plaintext. It is not on unless the feature is, and the crate's default build does not
+//! compile this file.
+//!
+//! # Why it is written the way it is
+//!
+//! Deliberately *unlike* the main path, in every way that could otherwise be shared:
+//!
+//! * scalar, no SIMD, no target features, no CPU detection — the main path's AVX2/SSE2/NEON
+//!   kernels are where a keystream fault would live;
+//! * a different BLAKE3 implementation strategy: this one streams through a chunk state with
+//!   an explicit CV stack (the reference structure), while the crate's path hands the whole
+//!   input to the `blake3` crate's `Hasher` in one or three `update` calls;
+//! * `u32`/`u64` arithmetic written out rather than reusing the crate's helpers, so a fault
+//!   in one of those helpers (say the rotate amount in `qr`) cannot affect both sides.
+//!
+//! The one thing that *must* be shared is the specification: flags, constants, domain
+//! strings. Those are duplicated as literals here on purpose, so a typo in one copy shows up
+//! as a disagreement in the first test rather than as a silent mismatch of behaviour.
+
+use alloc::vec::Vec;
+
+use crate::{DOM_ENC, DOM_TAG, NONCE_LEN, SUBKEY_DOMAIN, TAG_LEN};
+
+/// Volatile-zero a slice.
+///
+/// The witness keeps key-derived state in every buffer it touches, and `ultra` does not count
+/// cost, so every one of them is wiped. This is also what keeps `tools/ctgrind.sh` quiet: the
+/// first version of this module left its BLAKE3 chaining values in a `Vec<[u32; 8]>`, and
+/// memcheck reported a conditional jump in glibc's `free` — the freed chunk's payload held
+/// poisoned data, and the allocator reads part of it. Wiping before the buffer is released is
+/// both correct hygiene and what removes the report.
+#[inline(never)]
+fn wipe<T>(value: &mut T) {
+    let bytes = core::mem::size_of::<T>();
+    let p = value as *mut T as *mut u8;
+    for i in 0..bytes {
+        // SAFETY: `p` is the base of a live `T`, so `p.add(i)` is in bounds for `i < bytes`,
+        // and `T` here is only ever an integer or an array of them.
+        unsafe { core::ptr::write_volatile(p.add(i), 0) };
+    }
+    core::sync::atomic::compiler_fence(core::sync::atomic::Ordering::SeqCst);
+}
+
+/// Volatile-zero a `u32` array.
+#[inline(never)]
+fn wipe_words(words: &mut [u32]) {
+    for w in words.iter_mut() {
+        // SAFETY: `w` is a live `u32`; a volatile store needs no more than that.
+        unsafe { core::ptr::write_volatile(w, 0) };
+    }
+    core::sync::atomic::compiler_fence(core::sync::atomic::Ordering::SeqCst);
+}
+
+// ── ChaCha20 (RFC 8439) ───────────────────────────────────────────────
+
+const CHACHA_CONST: [u32; 4] = [0x61707865, 0x3320646e, 0x79622d32, 0x6b206574];
+
+/// One ChaCha20 block, written out as the RFC states it.
+fn block(key: &[u8; 32], counter: u32, nonce: &[u8; 12]) -> [u8; 64] {
+    let mut s = [0u32; 16];
+    s[0..4].copy_from_slice(&CHACHA_CONST);
+    for i in 0..8 {
+        let mut w = [0u8; 4];
+        w.copy_from_slice(&key[i * 4..i * 4 + 4]);
+        s[4 + i] = u32::from_le_bytes(w);
+    }
+    s[12] = counter;
+    for i in 0..3 {
+        let mut w = [0u8; 4];
+        w.copy_from_slice(&nonce[i * 4..i * 4 + 4]);
+        s[13 + i] = u32::from_le_bytes(w);
+    }
+
+    let mut v = s;
+    for _ in 0..10 {
+        // Column rounds.
+        quarter(&mut v, 0, 4, 8, 12);
+        quarter(&mut v, 1, 5, 9, 13);
+        quarter(&mut v, 2, 6, 10, 14);
+        quarter(&mut v, 3, 7, 11, 15);
+        // Diagonal rounds.
+        quarter(&mut v, 0, 5, 10, 15);
+        quarter(&mut v, 1, 6, 11, 12);
+        quarter(&mut v, 2, 7, 8, 13);
+        quarter(&mut v, 3, 4, 9, 14);
+    }
+
+    let mut out = [0u8; 64];
+    for i in 0..16 {
+        let w = v[i].wrapping_add(s[i]).to_le_bytes();
+        out[i * 4..i * 4 + 4].copy_from_slice(&w);
+    }
+    out
+}
+
+/// One quarter round, in place — the same arithmetic as the crate's `qr`, written
+/// differently (indexing a mutable state rather than returning a tuple).
+fn quarter(v: &mut [u32; 16], a: usize, b: usize, c: usize, d: usize) {
+    v[a] = v[a].wrapping_add(v[b]);
+    v[d] ^= v[a];
+    v[d] = v[d].rotate_left(16);
+    v[c] = v[c].wrapping_add(v[d]);
+    v[b] ^= v[c];
+    v[b] = v[b].rotate_left(12);
+    v[a] = v[a].wrapping_add(v[b]);
+    v[d] ^= v[a];
+    v[d] = v[d].rotate_left(8);
+    v[c] = v[c].wrapping_add(v[d]);
+    v[b] ^= v[c];
+    v[b] = v[b].rotate_left(7);
+}
+
+/// `out = input ^ keystream`, starting at `counter`.
+fn keystream_xor(key: &[u8; 32], counter: u32, nonce: &[u8; 12], input: &[u8], out: &mut [u8]) {
+    assert_eq!(input.len(), out.len(), "witness: length mismatch");
+    let mut ctr = counter;
+    let mut off = 0usize;
+    while off < input.len() {
+        let mut ks = block(key, ctr, nonce);
+        let take = core::cmp::min(64, input.len() - off);
+        for i in 0..take {
+            out[off + i] = input[off + i] ^ ks[i];
+        }
+        // The keystream block is secret (it is the key stream), so it is wiped every
+        // iteration rather than left for the next one to overwrite.
+        wipe(&mut ks);
+        ctr = ctr.wrapping_add(1);
+        off += take;
+    }
+}
+
+/// HChaCha20 (draft-irtf-cfrg-xchacha §2.2).
+fn hchacha20(key: &[u8; 32], nonce: &[u8; 16]) -> [u8; 32] {
+    let mut s = [0u32; 16];
+    s[0..4].copy_from_slice(&CHACHA_CONST);
+    for i in 0..8 {
+        let mut w = [0u8; 4];
+        w.copy_from_slice(&key[i * 4..i * 4 + 4]);
+        s[4 + i] = u32::from_le_bytes(w);
+    }
+    for i in 0..4 {
+        let mut w = [0u8; 4];
+        w.copy_from_slice(&nonce[i * 4..i * 4 + 4]);
+        s[12 + i] = u32::from_le_bytes(w);
+    }
+
+    let mut v = s;
+    for _ in 0..10 {
+        quarter(&mut v, 0, 4, 8, 12);
+        quarter(&mut v, 1, 5, 9, 13);
+        quarter(&mut v, 2, 6, 10, 14);
+        quarter(&mut v, 3, 7, 11, 15);
+        quarter(&mut v, 0, 5, 10, 15);
+        quarter(&mut v, 1, 6, 11, 12);
+        quarter(&mut v, 2, 7, 8, 13);
+        quarter(&mut v, 3, 4, 9, 14);
+    }
+
+    // No feed-forward: words 0..4 and 12..16.
+    let mut out = [0u8; 32];
+    for (i, idx) in [0usize, 1, 2, 3, 12, 13, 14, 15].iter().enumerate() {
+        out[i * 4..i * 4 + 4].copy_from_slice(&v[*idx].to_le_bytes());
+    }
+    out
+}
+
+// ── BLAKE3 (keyed, XOF) ───────────────────────────────────────────────
+//
+// Written from the specification's own structure: a chunk state of 16 blocks, a CV stack
+// for the tree, and an `Output` that becomes the root. The crate's path calls the `blake3`
+// crate instead, so the two implementations share no code beyond the algorithm.
+
+const BLAKE3_BLOCK: usize = 64;
+const BLAKE3_CHUNK: usize = 1024;
+
+const CHUNK_START: u32 = 1 << 0;
+const CHUNK_END: u32 = 1 << 1;
+const PARENT: u32 = 1 << 2;
+const ROOT: u32 = 1 << 3;
+const KEYED_HASH: u32 = 1 << 4;
+
+const BLAKE3_IV: [u32; 8] = [
+    0x6A09E667, 0xBB67AE85, 0x3C6EF372, 0xA54FF53A, 0x510E527F, 0x9B05688C, 0x1F83D9AB, 0x5BE0CD19,
+];
+
+const MSG_PERMUTATION: [usize; 16] = [2, 6, 3, 10, 7, 0, 4, 13, 1, 11, 12, 5, 9, 14, 15, 8];
+
+fn words_from_le_bytes(bytes: &[u8; 64]) -> [u32; 16] {
+    let mut w = [0u32; 16];
+    for i in 0..16 {
+        let mut b = [0u8; 4];
+        b.copy_from_slice(&bytes[i * 4..i * 4 + 4]);
+        w[i] = u32::from_le_bytes(b);
+    }
+    w
+}
+
+fn mix(state: &mut [u32; 16], a: usize, b: usize, c: usize, d: usize, mx: u32, my: u32) {
+    state[a] = state[a].wrapping_add(state[b]).wrapping_add(mx);
+    state[d] = (state[d] ^ state[a]).rotate_right(16);
+    state[c] = state[c].wrapping_add(state[d]);
+    state[b] = (state[b] ^ state[c]).rotate_right(12);
+    state[a] = state[a].wrapping_add(state[b]).wrapping_add(my);
+    state[d] = (state[d] ^ state[a]).rotate_right(8);
+    state[c] = state[c].wrapping_add(state[d]);
+    state[b] = (state[b] ^ state[c]).rotate_right(7);
+}
+
+fn round(state: &mut [u32; 16], m: &[u32; 16]) {
+    mix(state, 0, 4, 8, 12, m[0], m[1]);
+    mix(state, 1, 5, 9, 13, m[2], m[3]);
+    mix(state, 2, 6, 10, 14, m[4], m[5]);
+    mix(state, 3, 7, 11, 15, m[6], m[7]);
+    mix(state, 0, 5, 10, 15, m[8], m[9]);
+    mix(state, 1, 6, 11, 12, m[10], m[11]);
+    mix(state, 2, 7, 8, 13, m[12], m[13]);
+    mix(state, 3, 4, 9, 14, m[14], m[15]);
+}
+
+fn permute(m: &[u32; 16]) -> [u32; 16] {
+    let mut p = [0u32; 16];
+    for i in 0..16 {
+        p[i] = m[MSG_PERMUTATION[i]];
+    }
+    p
+}
+
+/// Seven rounds, then the feed-forward that makes the first eight words the chaining value
+/// and all sixteen the output block.
+fn compress(
+    cv: &[u32; 8],
+    block_words: &[u32; 16],
+    counter: u64,
+    block_len: u32,
+    flags: u32,
+) -> [u32; 16] {
+    let mut state = [
+        cv[0],
+        cv[1],
+        cv[2],
+        cv[3],
+        cv[4],
+        cv[5],
+        cv[6],
+        cv[7],
+        BLAKE3_IV[0],
+        BLAKE3_IV[1],
+        BLAKE3_IV[2],
+        BLAKE3_IV[3],
+        counter as u32,
+        (counter >> 32) as u32,
+        block_len,
+        flags,
+    ];
+    let mut m = *block_words;
+    for _ in 0..7 {
+        round(&mut state, &m);
+        m = permute(&m);
+    }
+    let mut out = [0u32; 16];
+    for i in 0..8 {
+        out[i] = state[i] ^ state[i + 8];
+        out[i + 8] = state[i + 8] ^ cv[i];
+    }
+    out
+}
+
+fn first8(words: &[u32; 16]) -> [u32; 8] {
+    let mut cv = [0u32; 8];
+    cv.copy_from_slice(&words[0..8]);
+    cv
+}
+
+/// The node whose `chaining_value` is the CV of a subtree and whose `root_output_bytes` is
+/// the XOF when it happens to be the root.
+struct Output {
+    input_cv: [u32; 8],
+    block_words: [u32; 16],
+    counter: u64,
+    block_len: u32,
+    flags: u32,
+}
+
+impl Output {
+    fn chaining_value(&self) -> [u32; 8] {
+        first8(&compress(
+            &self.input_cv,
+            &self.block_words,
+            self.counter,
+            self.block_len,
+            self.flags,
+        ))
+    }
+
+    fn root_output_bytes(&self, out: &mut [u8]) {
+        // `enumerate` rather than a hand-kept counter: clippy flagged the loop-variable shape,
+        // and the output block index *is* the counter, so saying so is clearer anyway.
+        for (counter, chunk) in out.chunks_mut(2 * 32).enumerate() {
+            let counter = counter as u64;
+            let words = compress(
+                &self.input_cv,
+                &self.block_words,
+                counter,
+                self.block_len,
+                self.flags | ROOT,
+            );
+            for (word, four) in words.iter().zip(chunk.chunks_mut(4)) {
+                let le = word.to_le_bytes();
+                for (dst, src) in four.iter_mut().zip(le.iter()) {
+                    *dst = *src;
+                }
+            }
+        }
+    }
+}
+
+fn parent_output(left: &[u32; 8], right: &[u32; 8], key: &[u32; 8], flags: u32) -> Output {
+    let mut block_words = [0u32; 16];
+    block_words[0..8].copy_from_slice(left);
+    block_words[8..16].copy_from_slice(right);
+    Output {
+        input_cv: *key,
+        block_words,
+        counter: 0,
+        block_len: BLAKE3_BLOCK as u32,
+        flags: flags | PARENT,
+    }
+}
+
+fn parent_cv(left: &[u32; 8], right: &[u32; 8], key: &[u32; 8], flags: u32) -> [u32; 8] {
+    parent_output(left, right, key, flags).chaining_value()
+}
+
+/// One 1024-byte chunk, filled block by block.
+struct ChunkState {
+    cv: [u32; 8],
+    chunk_counter: u64,
+    block: [u8; BLAKE3_BLOCK],
+    block_len: usize,
+    blocks_compressed: usize,
+    flags: u32,
+}
+
+impl ChunkState {
+    fn new(key: &[u32; 8], chunk_counter: u64, flags: u32) -> Self {
+        ChunkState {
+            cv: *key,
+            chunk_counter,
+            block: [0u8; BLAKE3_BLOCK],
+            block_len: 0,
+            blocks_compressed: 0,
+            flags,
+        }
+    }
+
+    fn len(&self) -> usize {
+        self.blocks_compressed * BLAKE3_BLOCK + self.block_len
+    }
+
+    fn start_flag(&self) -> u32 {
+        if self.blocks_compressed == 0 {
+            CHUNK_START
+        } else {
+            0
+        }
+    }
+
+    fn update(&mut self, mut input: &[u8]) {
+        while !input.is_empty() {
+            if self.block_len == BLAKE3_BLOCK {
+                let words = words_from_le_bytes(&self.block);
+                self.cv = first8(&compress(
+                    &self.cv,
+                    &words,
+                    self.chunk_counter,
+                    BLAKE3_BLOCK as u32,
+                    self.flags | self.start_flag(),
+                ));
+                self.blocks_compressed += 1;
+                self.block = [0u8; BLAKE3_BLOCK];
+                self.block_len = 0;
+            }
+            let want = BLAKE3_BLOCK - self.block_len;
+            let take = core::cmp::min(want, input.len());
+            self.block[self.block_len..self.block_len + take].copy_from_slice(&input[..take]);
+            self.block_len += take;
+            input = &input[take..];
+        }
+    }
+
+    fn output(&self) -> Output {
+        Output {
+            input_cv: self.cv,
+            block_words: words_from_le_bytes(&self.block),
+            counter: self.chunk_counter,
+            block_len: self.block_len as u32,
+            flags: self.flags | self.start_flag() | CHUNK_END,
+        }
+    }
+}
+
+/// Keyed BLAKE3, streaming, with XOF output.
+pub struct Hasher {
+    key_words: [u32; 8],
+    chunk: ChunkState,
+    cv_stack: Vec<[u32; 8]>,
+    flags: u32,
+}
+
+impl Hasher {
+    /// Keyed mode: the key words *are* the initial chaining value.
+    ///
+    /// Worth stating because the first version of this had `key_words = IV ^ key`, which is
+    /// the shape BLAKE2's keyed mode has and BLAKE3's does not — and the differential test
+    /// below caught it immediately, at the empty input, before any of this was wired
+    /// anywhere.
+    pub fn new_keyed(key: &[u8; 32]) -> Self {
+        let mut key_words = [0u32; 8];
+        for i in 0..8 {
+            let mut b = [0u8; 4];
+            b.copy_from_slice(&key[i * 4..i * 4 + 4]);
+            key_words[i] = u32::from_le_bytes(b);
+        }
+        let flags = KEYED_HASH;
+        Hasher {
+            key_words,
+            chunk: ChunkState::new(&key_words, 0, flags),
+            cv_stack: Vec::new(),
+            flags,
+        }
+    }
+
+    fn add_chunk_cv(&mut self, mut new_cv: [u32; 8], total_chunks: u64) {
+        let mut chunks = total_chunks;
+        while chunks & 1 == 0 {
+            // The popped CV is key-derived; wipe the slot it leaves behind as well as the copy
+            // this function folds, so nothing in the stack's storage outlives its use.
+            let mut left = self.cv_stack.pop().expect("witness: CV stack underflow");
+            new_cv = parent_cv(&left, &new_cv, &self.key_words, self.flags);
+            wipe_words(&mut left);
+            chunks >>= 1;
+        }
+        self.cv_stack.push(new_cv);
+    }
+
+    /// Wipe everything this hasher accumulated, before its buffers are released.
+    fn wipe_state(&mut self) {
+        for cv in self.cv_stack.iter_mut() {
+            wipe_words(cv);
+        }
+        self.cv_stack.clear();
+        wipe_words(&mut self.key_words);
+        wipe_words(&mut self.chunk.cv);
+        wipe(&mut self.chunk.block);
+        self.chunk.block_len = 0;
+        self.chunk.blocks_compressed = 0;
+    }
+
+    pub fn update(&mut self, mut input: &[u8]) {
+        while !input.is_empty() {
+            if self.chunk.len() == BLAKE3_CHUNK {
+                let cv = self.chunk.output().chaining_value();
+                let total = self.chunk.chunk_counter + 1;
+                self.add_chunk_cv(cv, total);
+                self.chunk = ChunkState::new(&self.key_words, total, self.flags);
+            }
+            let want = BLAKE3_CHUNK - self.chunk.len();
+            let take = core::cmp::min(want, input.len());
+            self.chunk.update(&input[..take]);
+            input = &input[take..];
+        }
+    }
+
+    pub fn finalize_xof(&self, out: &mut [u8]) {
+        let mut output = self.chunk.output();
+        let mut remaining = self.cv_stack.len();
+        while remaining > 0 {
+            remaining -= 1;
+            output = parent_output(
+                &self.cv_stack[remaining],
+                &output.chaining_value(),
+                &self.key_words,
+                self.flags,
+            );
+        }
+        output.root_output_bytes(out);
+    }
+}
+
+fn keyed_xof(key: &[u8; 32], parts: &[&[u8]], out: &mut [u8]) {
+    let mut h = Hasher::new_keyed(key);
+    for p in parts {
+        h.update(p);
+    }
+    h.finalize_xof(out);
+    // Wipe before the hasher's `Vec` and chunk state are released: the chaining values are
+    // key-derived, and leaving them is both a hygiene gap and what made memcheck report a
+    // conditional jump inside glibc's `free`.
+    h.wipe_state();
+}
+
+// ── The construction, independently ───────────────────────────────────
+
+/// `(mac_key, enc_seed)`, recomputed the way the crate specifies it.
+fn material(key: &[u8; 32], nonce: &[u8; NONCE_LEN]) -> ([u8; 32], [u8; 32]) {
+    let mut hch_nonce = [0u8; 16];
+    hch_nonce.copy_from_slice(&nonce[0..16]);
+    let mut subkey = hchacha20(key, &hch_nonce);
+
+    let mut sub_nonce = [0u8; 12];
+    sub_nonce[0..4].copy_from_slice(&SUBKEY_DOMAIN);
+    sub_nonce[4..12].copy_from_slice(&nonce[16..24]);
+
+    let mut material = [0u8; 64];
+    keystream_xor(&subkey, 0, &sub_nonce, &[0u8; 64], &mut material);
+
+    let mut mac_key = [0u8; 32];
+    mac_key.copy_from_slice(&material[0..32]);
+    let mut enc_seed = [0u8; 32];
+    enc_seed.copy_from_slice(&material[32..64]);
+
+    // Every one of these is key material: the subkey, the domain nonce (it carries key-derived
+    // bytes on input), and the 64-byte block they produced.
+    wipe(&mut subkey);
+    wipe(&mut sub_nonce);
+    wipe(&mut hch_nonce);
+    wipe(&mut material);
+    (mac_key, enc_seed)
+}
+
+/// The 65-byte tag, recomputed: fixed-width head, then AAD and message.
+pub fn tag(
+    mac_key: &[u8; 32],
+    key: &[u8; 32],
+    nonce: &[u8; NONCE_LEN],
+    aad: &[u8],
+    msg: &[u8],
+) -> [u8; TAG_LEN] {
+    let mut head = [0u8; 8 + 32 + NONCE_LEN + 16];
+    head[0..8].copy_from_slice(&DOM_TAG);
+    head[8..40].copy_from_slice(key);
+    head[40..40 + NONCE_LEN].copy_from_slice(nonce);
+    head[40 + NONCE_LEN..48 + NONCE_LEN].copy_from_slice(&(aad.len() as u64).to_le_bytes());
+    head[48 + NONCE_LEN..56 + NONCE_LEN].copy_from_slice(&(msg.len() as u64).to_le_bytes());
+
+    let mut out = [0u8; TAG_LEN];
+    keyed_xof(mac_key, &[&head, aad, msg], &mut out);
+    // `head` holds the master key at `head[8..40]`.
+    wipe(&mut head);
+    out
+}
+
+/// `(enc_key, enc_nonce)` from the seed and the whole tag.
+fn enc_material(enc_seed: &[u8; 32], tag: &[u8; TAG_LEN]) -> ([u8; 32], [u8; 12]) {
+    let mut input = [0u8; 8 + TAG_LEN];
+    input[0..8].copy_from_slice(&DOM_ENC);
+    input[8..].copy_from_slice(tag);
+
+    let mut material = [0u8; 44];
+    keyed_xof(enc_seed, &[&input], &mut material);
+
+    let mut enc_key = [0u8; 32];
+    enc_key.copy_from_slice(&material[0..32]);
+    let mut enc_nonce = [0u8; 12];
+    enc_nonce.copy_from_slice(&material[32..44]);
+
+    // The tag is a hash of key material and the 44 bytes are the per-message key and nonce.
+    wipe(&mut input);
+    wipe(&mut material);
+    (enc_key, enc_nonce)
+}
+
+/// The whole decryption, independently: writes the plaintext into `plaintext` and returns
+/// the recomputed tag.
+///
+/// Used by `ultra` to cross-check the main path bit for bit. The output is a caller slice
+/// rather than a `Vec` on purpose: allocation belongs to `src/lib.rs`, where it is fallible
+/// and taken *before* any key material exists, and an allocation inside this function would
+/// abort the process on refusal instead of returning `Error::AllocationFailed`. The caller
+/// wipes both the slice and the tag when it is done.
+pub fn decrypt(
+    key: &[u8; 32],
+    nonce: &[u8; NONCE_LEN],
+    aad: &[u8],
+    ciphertext: &[u8],
+    received_tag: &[u8; TAG_LEN],
+    plaintext: &mut [u8],
+) -> [u8; TAG_LEN] {
+    // The parameter is `received_tag`, not `tag`: naming it `tag` shadowed this module's
+    // own `tag` function, so the call below resolved to the reference.
+    assert_eq!(
+        plaintext.len(),
+        ciphertext.len(),
+        "witness: the output buffer must be the length of the ciphertext"
+    );
+    let (mut mac_key, mut enc_seed) = material(key, nonce);
+    let (mut enc_key, mut enc_nonce) = enc_material(&enc_seed, received_tag);
+
+    keystream_xor(&enc_key, 0, &enc_nonce, ciphertext, plaintext);
+
+    let recomputed = tag(&mac_key, key, nonce, aad, plaintext);
+    // The derived keys are wiped here; the plaintext slice is the caller's to wipe (it is
+    // written through its buffer, and under `ultra` the caller wipes it after comparing).
+    wipe(&mut mac_key);
+    wipe(&mut enc_seed);
+    wipe(&mut enc_key);
+    wipe(&mut enc_nonce);
+    recomputed
+}
+
+/// The tag the *encryption* side would produce, independently.
+pub fn encrypt_tag(
+    key: &[u8; 32],
+    nonce: &[u8; NONCE_LEN],
+    aad: &[u8],
+    plaintext: &[u8],
+) -> [u8; TAG_LEN] {
+    let (mut mac_key, mut enc_seed) = material(key, nonce);
+    let t = tag(&mac_key, key, nonce, aad, plaintext);
+    wipe(&mut mac_key);
+    wipe(&mut enc_seed);
+    t
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Locate a disagreement: the ChaCha20 block first, then HChaCha20, then BLAKE3.
+    #[test]
+    fn chacha20_block_matches_the_crate() {
+        let key = [0x37u8; 32];
+        let nonce = [0x11u8; 12];
+        for ctr in [0u32, 1, 7, u32::MAX] {
+            assert_eq!(
+                block(&key, ctr, &nonce),
+                crate::chacha20_block(&key, ctr, &nonce),
+                "ChaCha20 block disagrees at counter {ctr}"
+            );
+        }
+    }
+
+    #[test]
+    fn hchacha20_matches_the_crate() {
+        let key = [0x42u8; 32];
+        let n16 = [0x5Au8; 16];
+        assert_eq!(hchacha20(&key, &n16), crate::hchacha20(&key, &n16));
+    }
+
+    #[test]
+    fn blake3_keyed_xof_matches_the_crate() {
+        let key = [0x11u8; 32];
+        // Sizes that cross BLAKE3's block (64), chunk (1024) and a few tree levels.
+        for len in [
+            0usize, 1, 63, 64, 65, 1023, 1024, 1025, 2048, 2049, 4096, 100_000,
+        ] {
+            let data: Vec<u8> = (0..len).map(|i| (i % 253) as u8).collect();
+            let mut mine = [0u8; 65];
+            let mut theirs = [0u8; 65];
+            keyed_xof(&key, &[&data], &mut mine);
+            crate::blake3_keyed_xof(&key, &data, &mut theirs);
+            assert_eq!(mine, theirs, "keyed BLAKE3 XOF disagrees at length {len}");
+        }
+    }
+}

@@ -231,8 +231,8 @@ something — it must *fail* when the second gate is replaced by a copy of the f
 | A fault that skips the decision call altogether | **defended** — the caller writes *two* rejections before the call, so skipping it accepts nothing (`tools/fi_instruction.sh` measured six such faults before that shape was adopted, and none after) |
 | A fault that corrupts one decision *value* | **defended** — the two gates write two independent slots and the caller rejects if either says so; one corrupted slot leaves the other. `tools/fi_check.sh`'s `one-check-neutralised` row is this attack, and it is rejected |
 | Single fault on the decision (a skipped branch, or a corrupted gate *value*) | **defended** — `tools/fi_check.sh` runs this as a campaign row on the hardened build |
-| A single corrupted byte or bit in the decision code | **measured, and comparable**: a single-fault sweep of the function finds **1 accepting byte in 5526** (neutralised) and **13 in 44208** (single-bit flips) in the default build. The mechanism is not the gate — the accepting sites are the *same addresses* in both builds, so they sit in the shared KDF/MAC/SIMD code, and several are the middle byte of a multi-byte instruction, where corruption desynchronises the decoder and the following bytes run as different instructions. No source structure prevents that. For scale, the same technique measures RustCrypto's XChaCha20Poly1305 (1081 bytes of decision code) at **13 of 1081** and **106 of 8648** — about 40x the rate of this crate's default build |
-| ...the same, in the **opt-out** build (`default-features = false`) | **worse, and that is the point**: 9 of 4268 and 152 of 34144, i.e. **11.7x** (9/4268 against 1/5526) and **15.1x** (152/34144 against 13/44208) the default build's rate.  (This said "~9x"; that number is not what these figures give, and the two models disagree with each other as well.) The second gate does not remove the class (nothing can) but it measurably shrinks it, which is the argument for it being on by default |
+| A single corrupted byte or bit **inside the decision function** | **defended, and measured**: `tools/fi_instruction.sh` sweeps every byte of the compiled `accept_or_reject` — both fault models, three configurations — and attributes each accepting fault to the symbol it sits in. Accepting faults inside the decision: **0 in the `hardened` build and 0 in `ultra`, in both models**. The opt-out build has **3** in the bit-flip model, which is the control that the sweep reaches the decision at all: its single `test`/`je` pair is one flipped bit away from falling through into the accept store, and that is precisely the defect the second gate removes |
+| A single corrupted byte or bit **anywhere in the swept code** (the two entry points and the decision) | **measured, and not zero — the mechanism is not the gate**: last full local sweep, `(total, inside the decision)` — opt-out `2, 0` (nop) and `117, 3` (bits); `hardened` `0, 0` and `1, 0`; `ultra` `0, 0` and `5, 0`. The accepting sites outside the decision are in the shared KDF/MAC/SIMD code, and several are the middle byte of a multi-byte instruction, where corruption desynchronises the decoder and the following bytes execute as different instructions — no source structure prevents that. **The raw totals are not comparable across configurations**, and an earlier revision of this table compared them as if they were: `ultra`'s entry points contain more code than `hardened`'s (the witness call, an extra gate operand, a ciphertext copy), so a longer region naturally collects more accepting bytes even when every one of them is outside the decision. What is comparable is the decision-scoped count, which is why that is what the tool gates on. For scale, the same technique over RustCrypto's `XChaCha20Poly1305` measures 13 of 1081 (nop) and 106 of 8648 (bits) — on a *different region*, its whole tag-verification function rather than a decision helper of 18–25 bytes, so the two are not like-for-like either |
 | A fault inside the constant-time comparison itself (a shortened loop, a corrupted bound) | **not defended by `hardened`, closed by `ultra`**: with only `hardened`, both gates — and both of `dual-mac`'s recomputations, when it is on — go through the same `subtle` loop, so one fault shortening it disarms every gate at once and a forgery costs `2^(8 * compared bytes)` instead of `2^520`.  **Hand-modelled, not by a committed tool**: no script in `tools/` shortens that loop — the campaign's faults are source-level changes of other kinds (`tools/mutation_check.sh` plants a `==` where `ct_eq` was, which is not a shortened loop) and `tools/fi_instruction.sh` sweeps the compiled bytes uniformly rather than aiming at a loop bound — so both counts in this row came from cutting the comparison down by hand in a throwaway copy.  Hand-measured against that fault: an accept after **2,573 attempts** with the comparison cut to two bytes.  Under `dual-mac`/`ultra` the second gate also `AND`s in `ct_eq_independent`, a differently *written* comparison, and the same hand-made fault then yields **no forgery in 2,000,000 attempts**.  Two faults still defeat both, which is the boundary this row states rather than hides |
 | A fault that replaces the computed tag with a constant, or with the received tag | **not defended by `hardened`, closed by `ultra`/`dual-mac`**: with only `hardened` this is the strongest fault model in the table and it defeats the two gates *together* — either gate is `computed_tag ? tag`, so forcing `computed_tag` to equal `tag` satisfies both at once, and two gates over one value are one gate for this attack, not two witnesses. That half is pinned rather than hidden: `tools/fi_check.sh`'s `computed-tag-replaced` row applies exactly this fault to the hardened build and requires it to be accepted, so a change in either direction is noticed. `dual-mac`, part of `ultra`, closes it by doing the thing an earlier revision of this row said was not done here: computing the tag *twice, independently* — a second MAC pass, and the tag pass is a large part of a short message — and requiring the recomputation to agree with the stored value **and** with the received tag (`recomputed_tag.ct_eq(&computed_tag) & recomputed_tag.ct_eq(tag)`, in both decrypt entry points). A rewritten stored tag then disagrees with the recomputation, and `tools/fi_check.sh`'s `dual-mac-blocks-tag-substitution` row runs that same source fault on the `ultra` build and is rejected there. The residual is the rest of this row's boundary: two faults, one in each derivation, or one aimed at the arithmetic both derivations share (`derive_tag` and the keyed BLAKE3 under it), still defeat it — that is a synchronized two-glitch bench or precision injection, and the answer for a deployment that faces it is a hardware countermeasure — dual-rail logic, an HSM — rather than software |
 | Two independent faults | not defended — this is where the attacker's cost moves to a synchronized two-glitch bench |
@@ -261,21 +261,24 @@ pair (13 of 15 caught, 2 unviable).
 
 The same question at the level of the *compiled* code: `tools/fi_instruction.sh` damages
 one byte — or one bit — of the decision's machine code at a time and re-runs the decision
-test. **Neither build reaches zero**, and the README's table above carries the corrected
-numbers: 1 accepting byte in 5526 and 13 single-bit flips in 44208 for the default build,
-9 and 152 for the opt-out one. The mechanism is not the accept/reject gate — the accepting
-sites are the *same addresses* in both builds, so they are in the shared KDF/MAC/SIMD code,
-and several are the middle byte of a multi-byte instruction, where corruption desynchronises
-the decoder and the following bytes execute as different instructions. No source-level
-structure prevents that. What the second gate does buy is a *rate*: the default build is
-about 11.7x lower than the opt-out one on the neutralised-byte model and 15.1x
-lower on the bit-flip one (1/5526 against 9/4268, and 13/44208 against 152/34144 — the
-rates in the table above), and about 40x lower than RustCrypto's
-`XChaCha20Poly1305` measured the same way.  (This paragraph said "about 9x"; that is
-not what those counts give — the two models disagree with each other as well — so the
-two ratios are written out rather than averaged.) The map is of machine code, so a
-different host and toolchain produces a different one — which is why the script gates
-on the comparison and prints both counts rather than asserting a number.
+test, over three configurations, and reports each accepting fault with the symbol it sits
+in. The decisive number is the decision-scoped one, `accept_or_reject` itself: **zero
+accepting faults there in the `hardened` and `ultra` builds, in both models**, against
+three in the opt-out build's bit-flip model — which is both the defect the second gate
+removes and this sweep's proof that it reaches the decision at all. The totals over the
+whole swept region are not zero and are not comparable between configurations (see the
+table above); they live in the shared KDF/MAC/SIMD code and in decoder desynchronisation,
+and the tool prints all six counts rather than asserting a number, because the map is of
+machine code and a different host and toolchain produce a different one.
+
+Three configurations, and the reason each is there: the opt-out build is the control
+(its single gate is one bit from accepting), `hardened` is the default and the property
+the second gate exists for, and `ultra` is the build whose *totals* are largest and whose
+decision-scoped count is still zero — the witness adds code to both entry points without
+adding an accepting byte to the decision. The sweep is sharded across cores
+(`--jobs`, default the core count capped at 16), which is what makes the full
+three-configuration sweep a two-minute check instead of a quarter-hour one.
+
 One more thing the campaign turned up, which is worth knowing before trusting a
 green suite here: the failure-path wipe of the *allocating* `decrypt` is not
 observable from a test at all — the plaintext is wiped and then freed, so a skipped
@@ -311,22 +314,80 @@ xchacha20-blake3-siv = { version = "0.1", features = ["ultra"] }
 | `dual-mac` | the tag being pinned to a constant or to the received tag — the one model the two gates fail *together* on | +30% at 64 B, +40% at 1 KiB, +24% at 1 MiB on decryption; +8–25% on a round trip |
 | `dual-mac` | a fault inside the shared constant-time comparison (a shortened loop): the second gate uses a differently *written* comparison, so one fault reaches only one of them | one extra 65-byte comparison, ~+2.7% at 64 B |
 | `dual-mac` | the `blake3` dependency's XOF output surviving in its own stack frames: `scrub_stack()` overwrites the 16 KiB below the entry point after the last derivation | ~16 KiB of volatile stores, ~0.5–1 µs per operation, **and ~16 KiB of stack per call**. Measured on a thread with a 32 KiB stack: the default build still runs after 16 KiB of the stack is already consumed, this one does not survive 8 KiB. A caller that spawns threads with small stacks must size them for it — the scrub is a 16 KiB frame, so it can fault the thread it is protecting |
+| `witness` (in `ultra` only) | a fault aimed at the **derivation arithmetic both tag computations share** — `derive_tag`, the keyed BLAKE3 under it, and the SIMD kernels: the one model `dual-mac` alone cannot close, and where every accepting fault the sweep finds in the `hardened` build sits | decryption **1.4x at 64 B, 2.1x at 1 KiB, 6.3x at 64 KiB, 9.2x at 1 MiB** (§). It is a *scalar* implementation, so its cost is per byte; the encrypt-side cross-check is ~+20% of the encrypt path's instructions. It does not make the *totals* in the fault table zero — it removes accepting faults from the decision and from the shared derivation, and the `ultra` build has a handful elsewhere (§§) |
 | `locked` | key pages readable out of **swap** or a **core dump** | ~7 µs once per key (`mlock`+`munlock`), not per message. The key is heap-allocated so its address is stable: `mlock` is address-based, and a key returned by value moves after being locked, which left this layer protecting a dead stack slot |
 | `rng` | nothing about the cipher; it is how a caller gets a key at all | — |
+
+(§§) Last full sweep, bit-flip model, as `(total, inside the decision)`: the `hardened`
+build is `1, 0` and `ultra` is `5, 0`. The 5 are in `ultra`'s own entry points — which
+hold more code than `hardened`'s, because the witness call, the extra gate operand and the
+ciphertext copy all live there — and they are the same class as the `hardened` build's 1:
+decoder desynchronisation, where corrupting one byte makes the following bytes execute as
+different instructions. Nothing at the source level prevents that; what the witness does
+prevent is an accepting fault in the *decision* or in the *shared derivation*, which is
+where every accepting fault in the `hardened` build sits.
+
+(§) Measured with `examples/bench_aead.rs`, release, on this host, comparing
+`hardened,dual-mac,locked,rng` — which is `ultra` minus the witness — against `ultra`:
+decryption 30.1 → 20.8 MB/s at 64 B, 259 → 121 at 1 KiB, 1462 → 232 at 64 KiB, 1767 → 192
+at 1 MiB, and encryption 46.8 → 32.0, 444 → 247, 2089 → 588, 2406 → 610 on the same
+sizes. The deterministic half of that measurement (cachegrind instruction counts on
+`examples/xsiv_stdin`, per message) agrees: the decrypt path's added work is 17 k
+instructions at 64 B and 64 M at 1 MiB, i.e. it grows with the message while every other
+layer here is fixed-cost. `ultra` is the mode for callers who have decided that a second
+implementation on the path is worth more than throughput; a caller who wants the other
+layers without it can spell them out (`features = ["hardened", "dual-mac", "locked",
+"rng"]`) or take `--no-default-features --features dual-mac` and keep the default build's
+speed where it matters.
 
 `pure` is deliberately **not** in `ultra`: it forces BLAKE3's portable backends, costs
 24–32%, and buys no security — the C/assembly kernels are constant-time by construction and
 covered by the same differential tests. `ultra` is about defences, not about giving up speed
 for nothing.
 
+**What the witness is, and what "independent" means here.** `src/witness.rs` is a second
+implementation of the whole construction — ChaCha20, HChaCha20 and keyed BLAKE3 with the
+reference CV-stack tree logic, written from the specification rather than by adapting the
+crate's code — and `ultra` compares its answer to the crate's bit for bit on every decrypt
+(`witness_tag == computed_tag` **and** `witness_plaintext == plaintext`) and on every
+encrypt (its tag against the one about to be returned). It shares no code with the crate's
+crypto: not the `blake3` dependency, not the SIMD kernels, not `derive_tag`, not the
+buffering. That is exactly what makes the model above reachable — a single fault in the
+shared derivation changes one answer and not the other, and the gate that `AND`s the
+agreement in rejects. It is not two physically independent machines: same CPU, same
+compiler, same source file tree, so a *systematic* fault (a compiler bug, a wrong constant
+in both implementations, a fault that hits both code paths in one glitch) is still outside
+what this can see. What it does not share, and what makes it worth 4x on a large message,
+is the *machine code that computes the tag*.
+
+Two things follow, and both are asserted rather than promised: the agreement is a `Choice`
+folded into the second gate (so a disagreement is a rejection on the same branch as
+everything else, and no new secret-dependent branch exists — `tools/ctgrind.sh --features
+ultra`), and the witness is inventoried like the rest of the crate (`tests/variable_latency.rs`
+counts its control flow in its own table; `tools/cache_profile.sh` under `XSIV_FEATURES=ultra`
+compares its cache and branch profile for two different keys, in both the encrypt-only and
+round-trip phases).
+
+The encrypt-side cross-check goes through `accept_or_reject` too, and that was a finding
+rather than an implementation choice: written as a comparison followed by an `if` at its own
+call site, it is a branch on the tag — both operands secret-derived — and `tools/ctgrind.sh
+--features ultra`, added with this layer, reported exactly that inside `encrypt`. It is not a
+forgery defence (a fault there would emit a ciphertext the peer refuses: availability, not
+authenticity), but the branch was on the secret path where no suppression entry may reach,
+so it is the one decision function's business like everything else.
+
 **What `ultra` still cannot defend against**, because a mode that claims total immunity and
 writes down no limits is worse than one that states its boundaries:
 
 - **A fault inside the tag computation itself** that makes it produce the attacker's tag.
   `dual-mac` recomputes the tag a second time and requires the two to agree with each other
-  *and* with the received tag, so a corrupted stored value is caught — but two faults, one in
-  each computation, or one targeted at the arithmetic both share, defeat it. That is a
-  laboratory bench, and the answer is a secure element, not software.
+  *and* with the received tag, so a corrupted stored value is caught; `ultra` additionally
+  requires a second *implementation* to produce the same answer, so a corruption in the
+  arithmetic both derivations share is caught too. What is left is a fault that corrupts
+  both answers — two independent faults, or one aimed at the code both implementations use,
+  which is now only the gate, the caller and the primitives both call (`subtle`,
+  `core::ptr::read_volatile`) rather than the cipher. That is a laboratory bench with
+  synchronization, and the answer is a secure element, not software.
 - **A debugger, `ptrace`, or `/proc/<pid>/mem`** from a process with the same uid, and a
   hypervisor reading guest memory. `locked` asks the kernel to keep pages out of swap and
   core dumps; it cannot stop a process that is allowed to read this one's memory.
@@ -340,9 +401,14 @@ writes down no limits is worse than one that states its boundaries:
 
 Where each layer is *verified* rather than asserted: `tests/ultra.rs` (the wiring of each
 layer, and that the kernel's own `VmLck` accounting shows a `LockedKey` is really locked),
-`tools/ctgrind.sh` (no secret-dependent branch), `tools/fi_check.sh` and
-`tools/fi_instruction.sh` (single-fault behaviour, both models), `tests/decision.rs`
-(forgeries), `tests/security.rs` (lengths, allocation, nonce reuse).
+`tools/ctgrind.sh --features ultra` (no secret-dependent branch, with the witness's own code
+in the run), `XSIV_FEATURES=ultra tools/cache_profile.sh` (the witness's cache and branch
+profile does not depend on the key, with its planted-leak control re-run in the same
+configuration), `tools/fi_check.sh` and `tools/fi_instruction.sh` (single-fault behaviour,
+both models — the campaign's three configurations are opt-out, `hardened` and `ultra`),
+`tests/decision.rs` (forgeries), `tests/decision_scope.rs` (the shape of the decision and
+where the witness is folded into it), `tests/security.rs` (lengths, allocation, nonce
+reuse).
 
 ### What this crate cannot fix for you
 
@@ -398,7 +464,13 @@ deployment.
   arrives as `Error::AllocationFailed` rather than as an `abort` the application
   cannot catch — but a request the kernel *accepts* can still be OOM-killed while the
   buffer is written to, and no in-process library can prevent that. A service that
-  reads unbounded input has to cap it.
+  reads unbounded input has to cap it. **Under `ultra` the peak is three times the
+  message**, not two: the witness decrypts into a second buffer of its own (`decrypt`)
+  or keeps a copy of the ciphertext plus an output buffer (`decrypt_in_place_detached`).
+  All of them are allocated up front, before any key material exists, and fallibly —
+  `tests/security.rs::every_allocation_happens_before_any_derivation` pins both halves
+  of that, because the `?` on an allocation taken after a derivation returns through
+  live keys without wiping them (a defect this crate has now had twice).
 - **A failed in-place decryption destroys the caller's buffer.** By design: the
   unverified plaintext must not be readable out of it, so it is wiped to zeros
   before the error is returned. Retry logic needs the ciphertext again; `decrypt`
@@ -557,7 +629,13 @@ works unprivileged, and the emulator is extracted into `~/.local/bin`.
   throwaway copy and requires that run to *fail* before it reports a clean one.
   Reports are classified by whether they touch this crate, so the check does not
   depend on libtest/std/glibc frames; the control verifies itself with valgrind's
-  `GET_VBITS` and `COUNT_ERRORS`.
+  `GET_VBITS` and `COUNT_ERRORS`. Three configurations run it — default, the
+  opt-out build, and `ultra`, whose hand-written second implementation is new code
+  on the secret path and would be reported if it branched on a key. The same
+  question at the level of the compiled code's cache and branch profile is asked by
+  `tools/cache_profile.sh`, which now runs both an encrypt-only and a round-trip
+  phase (the decrypt path, including the witness under `XSIV_FEATURES=ultra`) and
+  re-runs its planted-leak control in whichever configuration it was pointed at.
 - **Checks that are not vacuous** — `tools/mutation_check.sh` plants known bugs
   (a `ct_eq` → `==` regression, a changed domain constant) in a throwaway copy and
   requires the relevant check to fail. This exists because one of them was
@@ -652,6 +730,12 @@ work is real either way -- two 1 MiB allocations, the copies into them, and the
 wipe of the `Plaintext` that `decrypt` returns -- and the in-place path touches
 none of it. For large messages, use the in-place API.
 
+**Every number above is the default build.** `ultra` is a different trade and is
+measured separately in its own section: its independent second implementation costs
+1.4x at 64 bytes and 9.2x at 1 MiB on decryption, because it is scalar and re-runs
+both passes. Nothing above changes if you turn `ultra` on and then off again — the
+default build's machine code is untouched by the feature.
+
 **Where the remaining headroom is, and where it is not.** Measured, so that nobody
 has to rediscover it:
 
@@ -703,6 +787,7 @@ run against both):
 ```
 src/lib.rs                  the construction, the SIMD backends, the test suite
 src/proofs.rs               Kani harnesses (`cfg(kani)` only)
+src/witness.rs              the `ultra` build's independent second implementation
 tests/                      differential vectors and their replay
 tools/ref_impl.py           independent Python reference implementation
 tools/gen_test_vectors.py   fixture generator for the differential vectors

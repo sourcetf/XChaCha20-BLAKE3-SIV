@@ -234,16 +234,31 @@ fn the_hardened_second_gate_is_recomputed() {
             1,
             "the block must compute its first gate exactly once:\n{block}"
         );
-        // The second gate is bound once *per configuration*, from a shared `gate_pair`:
-        // the two arms are `#[cfg]`-selected, so exactly one of them is compiled. Two
-        // bindings with no cfg between them would be two gates over one value, which is
-        // the shape this replaced.
+        // The second gate is bound once *per configuration*, from a shared `gate_pair`: the
+        // arms are `#[cfg]`-selected, so exactly one of them is compiled. Two bindings with no
+        // cfg between them would be two gates over one value, which is the shape this replaced.
+        // `ultra` adds a third arm, because its witness agreement joins the same gate.
+        for arm in [
+            "#[cfg(all(feature = \"dual-mac\", feature = \"ultra\"))]",
+            "#[cfg(all(feature = \"dual-mac\", not(feature = \"ultra\")))]",
+            "#[cfg(not(feature = \"dual-mac\"))]",
+        ] {
+            assert!(
+                block.contains(arm),
+                "the second gate needs its arm for `{arm}` -- one binding per \
+                 configuration, so that no build ever has two gates over one value:\n{block}"
+            );
+        }
+        assert_eq!(
+            block.matches("let second =").count(),
+            3,
+            "one `second` binding per arm, and no arm without one:\n{block}"
+        );
         assert!(
-            block.contains("#[cfg(feature = \"dual-mac\")]")
-                && block.contains("let second =")
-                && block.contains("#[cfg(not(feature = \"dual-mac\"))]"),
-            "the second gate must be bound once per configuration (one arm under \
-             `dual-mac`, one without):\n{block}"
+            block.contains("& witness_ok"),
+            "`ultra`'s witness agreement must join the second gate rather than becoming a \
+             branch of its own -- a branch on a secret-derived comparison outside \
+             `accept_or_reject` is what the suppression file forbids:\n{block}"
         );
         assert_eq!(
             block.matches("let gate_pair =").count(),
@@ -288,26 +303,29 @@ fn the_decision_outcome_is_fail_closed() {
     assert_eq!(
         LIB.matches("let mut decision0: Result<(), Error> = Err(Error::AuthenticationFailed);")
             .count(),
-        2,
-        "each entry point must start slot 0 as a rejection"
+        3,
+        "each call site must start slot 0 as a rejection: the two decrypt entry points, \
+         and `encrypt`'s `ultra` cross-check, which compares the witness's tag with its \
+         own and must not branch on that comparison itself (ctgrind reports it when it \
+         does: measured, one report inside `encrypt`)"
     );
     assert_eq!(
         LIB.matches("let mut decision1: Result<(), Error> = Err(Error::AuthenticationFailed);")
             .count(),
-        2,
-        "each entry point must start slot 1 as a rejection"
+        3,
+        "each call site must start slot 1 as a rejection"
     );
-    // The two checks sit in series, each jumping to the rejection, so accepting is the
+    // The checks sit in series, each jumping to the rejection, so accepting is the
     // fall-through of both: a single corrupted branch lands on a rejection.
     assert_eq!(
         LIB.matches("if decision0.is_err() {").count(),
-        2,
-        "one first check per entry point"
+        3,
+        "one first check per call site"
     );
     assert_eq!(
         LIB.matches("if decision1.is_err() {").count(),
-        2,
-        "one second check per entry point"
+        3,
+        "one second check per call site"
     );
     {
         let default_call =
@@ -357,7 +375,20 @@ fn the_decision_outcome_is_fail_closed() {
                 .matches("if decision1.is_err() {\n        zeroize_slice(")
                 .count(),
         4,
-        "each of the four reject checks must wipe before returning"
+        "each of the four decrypt reject checks must wipe the buffer before returning"
+    );
+    // The third call site, `ultra`'s cross-check inside `encrypt`, wipes what it has
+    // derived by then -- the MAC key and the encryption seed -- on both of its reject
+    // paths. It is a different set of locals (the buffer is not written yet on that path),
+    // so it is asserted separately rather than folded into the count above.
+    assert_eq!(
+        LIB.matches("if decision0.is_err() {\n            zeroize_array(&mut mac_key);")
+            .count()
+            + LIB
+                .matches("if decision1.is_err() {\n            zeroize_array(&mut mac_key);")
+                .count(),
+        2,
+        "`encrypt`'s two reject checks must wipe the derived key material"
     );
     // There must be no conditional jump *to the accept path*: accepting is the
     // fall-through of the two reject checks, so a corrupted branch lands on a
@@ -389,4 +420,47 @@ fn the_decision_outcome_is_fail_closed() {
             "the accept must be the fall-through of both reject checks:\n{tail}"
         );
     }
+
+    // The witness is a `Choice` folded into the gate, and the `encrypt` cross-check is a
+    // rejection path of its own — both are asserted, because the whole point of the feature is
+    // that the agreement is *required* rather than consulted.
+    let non_test = &LIB[..LIB.find("mod tests {").expect("test module")];
+    assert_eq!(
+        non_test.matches("let witness_ok: subtle::Choice").count(),
+        2,
+        "each decrypt entry point must compute the witness agreement"
+    );
+    assert_eq!(
+        non_test.matches("& witness_ok").count(),
+        2,
+        "each entry point must fold that agreement into the gate"
+    );
+    assert_eq!(
+        non_test.matches("witness::decrypt(").count(),
+        2,
+        "each decrypt entry point must run the independent implementation"
+    );
+    assert_eq!(
+        non_test.matches("witness::encrypt_tag(").count(),
+        1,
+        "`encrypt` must cross-check the tag with the independent implementation"
+    );
+    assert!(
+        LIB.contains("mod witness;"),
+        "the independent implementation must be compiled in"
+    );
+    // `encrypt`'s cross-check goes through the same function rather than comparing and
+    // branching at its own call site: as an `if !bool::from(..ct_eq(..))` it is a branch on
+    // the tag, which no suppression entry covers (valgrind reported it: one report inside
+    // `encrypt`, `tools/ctgrind.sh --features ultra`). One call, both slots from the same
+    // `Choice`, so the decision has exactly one definition in the crate.
+    assert_eq!(
+        non_test.matches("accept_or_reject(agree, agree,").count(),
+        1,
+        "`ultra`'s encrypt-side cross-check must go through the one suppressed decision"
+    );
+    assert!(
+        !non_test.contains("if !bool::from(witness::encrypt_tag"),
+        "the witness agreement must not be branched on at the call site"
+    );
 }

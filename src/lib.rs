@@ -1663,6 +1663,42 @@ pub fn encrypt(
 
     let (mut mac_key, mut enc_seed) = derive_material(key, nonce);
     let tag = derive_tag(&mac_key, key, nonce, aad, plaintext);
+    // `ultra`: the independent implementation must produce the same tag. A mismatch is a
+    // rejection here rather than a ciphertext the peer will refuse -- and it is the only way
+    // to notice a fault in the tag computation on the *sending* side at all.
+    //
+    // The comparison is secret-derived (both operands are), so the branch on it goes through
+    // `accept_or_reject` with the decrypt side's rather than standing here as an `if`: a
+    // comparison-then-branch at this call site is precisely what the suppression file may not
+    // cover, and `tools/ctgrind.sh --features ultra` reports it when it is written that way
+    // (measured before this shape: 1 report, inside `encrypt`). What the caller branches on
+    // below is a discriminant written as a *constant* by each arm of that function, so the
+    // decision is the same one reviewed in `accept_or_reject` and nothing else is suppressed.
+    #[cfg(feature = "ultra")]
+    {
+        let agree: subtle::Choice = witness::encrypt_tag(key, nonce, aad, plaintext).ct_eq(&tag);
+        // Two rejections written before the call and checked in series, the same fail-closed
+        // shape as both decrypt entry points: a fault that skips the call, or corrupts one
+        // outcome, leaves a rejection standing.
+        let mut decision0: Result<(), Error> = Err(Error::AuthenticationFailed);
+        let mut decision1: Result<(), Error> = Err(Error::AuthenticationFailed);
+        accept_or_reject(agree, agree, &mut decision0, &mut decision1);
+        if decision0.is_err() {
+            zeroize_array(&mut mac_key);
+            zeroize_array(&mut enc_seed);
+            // The buffer has not been written yet (the keystream runs below), but it is
+            // zeroized on this path anyway rather than left to `Drop`, so the two rejection
+            // paths out of this function differ only in what they have derived.
+            zeroize_slice(&mut ciphertext);
+            return Err(Error::AuthenticationFailed);
+        }
+        if decision1.is_err() {
+            zeroize_array(&mut mac_key);
+            zeroize_array(&mut enc_seed);
+            zeroize_slice(&mut ciphertext);
+            return Err(Error::AuthenticationFailed);
+        }
+    }
     let mut enc_key = [0u8; 32];
     let mut enc_nonce = [0u8; 12];
     derive_enc(&enc_seed, &tag, &mut enc_key, &mut enc_nonce);
@@ -1897,8 +1933,13 @@ pub fn decrypt(
     check_lengths(ciphertext.len(), aad.len())?;
 
     // As in `encrypt`: the fallible step runs before any key material exists, so the error
-    // path cannot return through live secrets.
+    // path cannot return through live secrets. `ultra`'s witness needs an output buffer of the
+    // same size, so that allocation is taken here too, with the same reasoning -- and it is
+    // why `witness::decrypt` writes into a caller slice instead of allocating: an allocation
+    // inside it would `abort` on refusal rather than returning `Error::AllocationFailed`.
     let mut plaintext = alloc_zeroed(ciphertext.len())?;
+    #[cfg(feature = "ultra")]
+    let mut witness_plaintext = alloc_zeroed(ciphertext.len())?;
 
     let (mut mac_key, mut enc_seed) = derive_material(key, nonce);
     let mut enc_key = [0u8; 32];
@@ -1908,6 +1949,27 @@ pub fn decrypt(
     chacha20_keystream(&enc_key, 0, &enc_nonce, ciphertext, &mut plaintext);
 
     let mut computed_tag = derive_tag(&mac_key, key, nonce, aad, &plaintext);
+    // `ultra`: recompute the *entire* decryption with the independent implementation in
+    // `witness` and require bit-for-bit agreement — plaintext and tag both. Every other
+    // defence compares values produced by one implementation, so a fault that makes that
+    // implementation wrong is invisible to all of them; this is the only check that can
+    // disagree with it.
+    //
+    // The agreement is a `Choice` that the gate below absorbs, *not* a branch here: a branch on
+    // a secret-derived comparison outside `accept_or_reject` is precisely what
+    // `tests/ctgrind.supp` exists to forbid, and the first version of this was written that way
+    // — seven memcheck reports against this crate, caught by `tools/ctgrind.sh --features
+    // ultra`. Riding the gate keeps one branch site, keeps it fail-closed, and keeps it
+    // audited.
+    #[cfg(feature = "ultra")]
+    let witness_ok: subtle::Choice = {
+        let witness_tag =
+            witness::decrypt(key, nonce, aad, ciphertext, tag, &mut witness_plaintext);
+        let agree = witness_tag.ct_eq(&computed_tag)
+            & witness_plaintext.as_slice().ct_eq(plaintext.as_slice());
+        zeroize_slice(&mut witness_plaintext);
+        agree
+    };
     // `ultra`/`dual-mac`: recompute the tag *independently* and require the
     // recomputation to agree with both the stored value and the received tag. The two
     // gates above compare the same two values, so a fault that sets the stored tag to
@@ -1944,8 +2006,14 @@ pub fn decrypt(
         // The independent recomputation joins the second gate: it must match the
         // stored value *and* the received tag, so a fault that corrupted the stored
         // value (or a silently rewritten constant) is caught here even though both
-        // gate expressions read the same memory.
-        #[cfg(feature = "dual-mac")]
+        // gate expressions read the same memory. Under `ultra` the witness agreement
+        // joins the same gate, so the decision still has exactly two branch sites.
+        #[cfg(all(feature = "dual-mac", feature = "ultra"))]
+        let second = gate_pair
+            & recomputed_tag.ct_eq(&computed_tag)
+            & recomputed_tag.ct_eq(tag)
+            & witness_ok;
+        #[cfg(all(feature = "dual-mac", not(feature = "ultra")))]
         let second = gate_pair & recomputed_tag.ct_eq(&computed_tag) & recomputed_tag.ct_eq(tag);
         #[cfg(not(feature = "dual-mac"))]
         let second = gate_pair;
@@ -2062,14 +2130,53 @@ pub fn decrypt_in_place_detached(
 ) -> Result<(), Error> {
     check_lengths(buffer.len(), aad.len())?;
 
+    // `ultra` needs the ciphertext later, and the in-place transform consumes it, so a copy is
+    // taken. This was the first version's bug: the witness was handed `buffer` *after* the XOR,
+    // so it decrypted plaintext-as-ciphertext and disagreed with everything -- which is at
+    // least the right failure (a rejection), but for a reason unrelated to any fault.
+    //
+    // Both buffers are allocated *before* any derivation, like `encrypt`'s and `decrypt`'s: the
+    // `?` here must not return through live key material. It did, while these two were
+    // allocated where they are used -- the same defect `encrypt` was fixed for, reintroduced by
+    // adding an allocation after the derivations.
+    #[cfg(feature = "ultra")]
+    let mut witness_ciphertext = alloc_zeroed(buffer.len())?;
+    #[cfg(feature = "ultra")]
+    let mut witness_plaintext = alloc_zeroed(buffer.len())?;
+
     let (mut mac_key, mut enc_seed) = derive_material(key, nonce);
     let mut enc_key = [0u8; 32];
     let mut enc_nonce = [0u8; 12];
     derive_enc(&enc_seed, tag, &mut enc_key, &mut enc_nonce);
 
+    #[cfg(feature = "ultra")]
+    witness_ciphertext.copy_from_slice(buffer);
+
     chacha20_apply(&enc_key, 0, &enc_nonce, &Input::InPlace, buffer);
 
     let mut computed_tag = derive_tag(&mac_key, key, nonce, aad, buffer);
+    // `ultra`: the independent implementation recomputes the whole decryption from the
+    // ciphertext the caller still holds, and its agreement rides the existing gate rather than
+    // becoming a branch of its own -- a branch on a secret-derived comparison outside
+    // `accept_or_reject` is what `tests/ctgrind.supp` exists to forbid, and the first version
+    // of this did exactly that (seven memcheck reports against this crate, caught by
+    // `tools/ctgrind.sh --features ultra`). Riding the gate keeps one branch site, keeps it
+    // fail-closed, and keeps it audited.
+    #[cfg(feature = "ultra")]
+    let witness_ok: subtle::Choice = {
+        let witness_tag = witness::decrypt(
+            key,
+            nonce,
+            aad,
+            &witness_ciphertext,
+            tag,
+            &mut witness_plaintext,
+        );
+        let agree = witness_tag.ct_eq(&computed_tag) & witness_plaintext.ct_eq(buffer);
+        zeroize_slice(&mut witness_plaintext);
+        zeroize_slice(&mut witness_ciphertext);
+        agree
+    };
     // `ultra`/`dual-mac`, as in `decrypt`: an independent recomputation that must agree
     // with both the stored value and the received tag.
     #[cfg(feature = "dual-mac")]
@@ -2093,8 +2200,14 @@ pub fn decrypt_in_place_detached(
         // The independent recomputation joins the second gate: it must match the
         // stored value *and* the received tag, so a fault that corrupted the stored
         // value (or a silently rewritten constant) is caught here even though both
-        // gate expressions read the same memory.
-        #[cfg(feature = "dual-mac")]
+        // gate expressions read the same memory. Under `ultra` the witness agreement
+        // joins the same gate, so the decision still has exactly two branch sites.
+        #[cfg(all(feature = "dual-mac", feature = "ultra"))]
+        let second = gate_pair
+            & recomputed_tag.ct_eq(&computed_tag)
+            & recomputed_tag.ct_eq(tag)
+            & witness_ok;
+        #[cfg(all(feature = "dual-mac", not(feature = "ultra")))]
         let second = gate_pair & recomputed_tag.ct_eq(&computed_tag) & recomputed_tag.ct_eq(tag);
         #[cfg(not(feature = "dual-mac"))]
         let second = gate_pair;
@@ -2932,6 +3045,13 @@ fn hchacha20(key: &[u8; 32], nonce: &[u8; 16]) -> [u8; 32] {
 
 #[cfg(kani)]
 mod proofs;
+
+/// The independent second implementation `ultra` cross-checks against.
+///
+/// Private: it is an implementation detail of the `ultra` feature, not API. See the module
+/// documentation for what a second implementation does and does not buy.
+#[cfg(feature = "ultra")]
+mod witness;
 
 #[cfg(test)]
 mod tests {
@@ -4372,6 +4492,94 @@ mod tests {
             "the maximum exceeds usize here"
         );
         assert!(check_lengths(usize::MAX, usize::MAX).is_ok());
+    }
+
+    /// The independent implementation must agree with the main path, everywhere.
+    ///
+    /// This is the load-bearing test for `ultra`: the cross-check rejects a message the two
+    /// implementations disagree on, so a *wrong* witness would reject everything, and a
+    /// witness that agreed for the wrong reason (say, a stub) would be worse than none. The
+    /// lengths sweep every structural boundary the construction has — the ChaCha20 block, the
+    /// SIMD widths, the tag's contiguous-buffer window at 2048 and 65536, and BLAKE3's chunk
+    /// boundaries at 1024 — because those are where two implementations most plausibly differ.
+    #[cfg(feature = "ultra")]
+    #[test]
+    fn test_witness_agrees_with_the_main_path() {
+        let key = [0x37u8; 32];
+        let nonce = [0x5Au8; NONCE_LEN];
+        let aad_len = 13usize;
+
+        for len in [
+            0usize, 1, 63, 64, 65, 127, 255, 256, 257, 511, 512, 513, 1023, 1024, 1025, 2047, 2048,
+            2049, 4096, 16384, 65535, 65536, 65537,
+        ] {
+            let pt: Vec<u8> = (0..len).map(|i| (i % 251) as u8).collect();
+            let aad: Vec<u8> = (0..aad_len).map(|i| (i % 241) as u8).collect();
+
+            let (ct, tag) = encrypt(&key, &nonce, &aad, &pt).unwrap();
+
+            // The tag the *encryption* side computes, independently.
+            assert_eq!(
+                crate::witness::encrypt_tag(&key, &nonce, &aad, &pt),
+                tag,
+                "witness tag disagrees at length {len}"
+            );
+
+            // And the whole decryption: plaintext and recomputed tag both. The witness
+            // writes into a caller slice (see its documentation: allocation belongs to the
+            // entry points, where it is fallible and taken before any derivation).
+            let mut w_pt = vec![0u8; ct.len()];
+            let w_tag = crate::witness::decrypt(&key, &nonce, &aad, &ct, &tag, &mut w_pt);
+            assert_eq!(w_pt, pt, "witness plaintext disagrees at length {len}");
+            assert_eq!(
+                w_tag, tag,
+                "witness recomputed tag disagrees at length {len}"
+            );
+
+            // The main path's own tag, for the same input, must equal the witness's.
+            let (mac_key, _) = derive_material(&key, &nonce);
+            assert_eq!(
+                derive_tag(&mac_key, &key, &nonce, &aad, &pt),
+                w_tag,
+                "the crate's tag and the witness tag disagree at length {len}"
+            );
+        }
+    }
+
+    /// The witness must reject a forgery too, so the cross-check cannot be satisfied by a
+    /// witness that says "fine" to everything.
+    #[cfg(feature = "ultra")]
+    #[test]
+    fn test_witness_recomputes_rather_than_echoing() {
+        let key = [0x11u8; 32];
+        let nonce = [0x22u8; NONCE_LEN];
+        let pt = b"the witness must not echo the received tag".as_slice();
+        let (ct, tag) = encrypt(&key, &nonce, b"aad", pt).unwrap();
+
+        // A forged tag changes the *encryption* material (the tag feeds it), so the witness
+        // decrypts to different plaintext and recomputes a tag matching neither the forged one
+        // nor the genuine one. Both inequalities are the point: an implementation that echoed
+        // the received tag fails the first, and one that ignored the tag when deriving fails
+        // the second (it would recompute the genuine tag under a forgery, which is not SIV).
+        let mut bad = tag;
+        bad[0] ^= 1;
+        let mut w_pt_bad = vec![0u8; ct.len()];
+        let w_tag_bad = crate::witness::decrypt(&key, &nonce, b"aad", &ct, &bad, &mut w_pt_bad);
+        assert_ne!(
+            w_tag_bad, bad,
+            "the witness returned the received tag: it is echoing, not recomputing"
+        );
+        assert_ne!(
+            w_pt_bad, pt,
+            "the witness produced the genuine plaintext under a forged tag, so it ignored the \
+             tag when deriving the encryption material"
+        );
+
+        // With the genuine tag it recomputes exactly the crate's tag.
+        let mut w_pt = vec![0u8; ct.len()];
+        let w_tag = crate::witness::decrypt(&key, &nonce, b"aad", &ct, &tag, &mut w_pt);
+        assert_eq!(w_pt, pt);
+        assert_eq!(w_tag, tag);
     }
 
     /// The ChaCha20 counter range, exercised rather than asserted in prose.

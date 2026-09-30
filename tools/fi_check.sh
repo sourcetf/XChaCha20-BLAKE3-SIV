@@ -96,13 +96,22 @@ PY
 
 # The call site's serial checks: one neutralised is not enough (the other still
 # rejects), both is (and that is two faults).
+#
+# The patterns are anchored on a leading newline so they name the *decrypt* call sites
+# only. There is a third pair of checks -- `ultra`'s encrypt-side cross-check, indented
+# one level deeper inside its `#[cfg(feature = "ultra")]` block -- and an unanchored
+# four-space pattern matches inside it too, which is why the assertion below reported
+# "first-check sites: 3" the first time this ran after that site was added. It is not
+# patched here: a fault that neutralises *it* makes `encrypt` hand out a ciphertext the
+# peer will refuse, which is availability rather than authenticity, and every forgery
+# row here is about the decrypt decision.
 patch_first_check_neutralised() {
   python3 - "$1/src/lib.rs" <<'PY'
 import sys
 p = sys.argv[1]; s = open(p).read()
-old = "    if decision0.is_err() {"
-assert s.count(old) == 2, f"first-check sites: {s.count(old)}"
-open(p, "w").write(s.replace(old, "    if false && decision0.is_err() {", 1))
+old = "\n    if decision0.is_err() {"
+assert s.count(old) == 2, f"decrypt first-check sites: {s.count(old)}"
+open(p, "w").write(s.replace(old, "\n    if false && decision0.is_err() {", 1))
 PY
 }
 
@@ -110,9 +119,9 @@ patch_both_checks_neutralised() {
   python3 - "$1/src/lib.rs" <<'PY'
 import sys
 p = sys.argv[1]; s = open(p).read()
-for old in ("    if decision0.is_err() {", "    if decision1.is_err() {"):
+for old in ("\n    if decision0.is_err() {", "\n    if decision1.is_err() {"):
     assert s.count(old) == 2, f"{old!r}: {s.count(old)}"
-    s = s.replace(old, "    if false {")
+    s = s.replace(old, "\n    if false {")
 open(p, "w").write(s)
 PY
 }
@@ -170,6 +179,24 @@ p = sys.argv[1]; s = open(p).read()
 old = "    let mut computed_tag = derive_tag(&mac_key, key, nonce, aad, &plaintext);"
 assert s.count(old) == 1, f"computed_tag sites: {s.count(old)}"
 open(p, "w").write(s.replace(old, "    let mut computed_tag = *tag;", 1))
+PY
+}
+
+# The fault the gates structurally cannot see: make the tag stop depending on the message.
+# `encrypt` and `decrypt` run the same broken function, so they still agree with each other,
+# every gate finds computed == received, and `dual-mac`'s recomputation goes through the same
+# function and agrees as well. What breaks is commitment: one observed tag then authenticates
+# any ciphertext under that (key, nonce, aad). `ultra`'s independent implementation is a
+# different program whose tag does commit, so it disagrees and the forgery is rejected.
+patch_message_independent_mac() {
+  python3 - "$1/src/lib.rs" <<'PY'
+import sys
+p = sys.argv[1]; s = open(p).read()
+old = "    msg: &[u8],\n) -> [u8; TAG_LEN] {\n"
+assert s.count(old) == 1, f"derive_tag signature sites: {s.count(old)}"
+# Shadow the parameter: everything downstream keeps working, on the empty message.
+s = s.replace(old, old + "    // PLANTED: the message no longer reaches the tag.\n    let msg: &[u8] = &[];\n", 1)
+open(p, "w").write(s)
 PY
 }
 
@@ -253,6 +280,13 @@ run_row both-checks-neutralised "--features hardened" decision fail patch_both_c
 # `ultra` user gets something the default build does not. (Without `dual-mac` the row
 # above shows the opposite: both builds accept it.)
 run_row dual-mac-blocks-tag-substitution "ultra" decision pass patch_recomputed_tag_ignored
+
+# The pair that shows what a *second implementation* buys, and what it does not: the same
+# message-independent MAC fault, which the gates and `dual-mac` cannot see (they recompute
+# through the broken function), and which `ultra`'s independent implementation catches because
+# it is a different program whose tag commits to the message.
+run_row msg-independent-mac-hardened "--features hardened,dual-mac" mac_commitment fail patch_message_independent_mac
+run_row msg-independent-mac-witness  "--features ultra"             mac_commitment pass patch_message_independent_mac
 
 # Defensive, not about forgery: a skipped wipe is a defect the security test catches.
 run_row wipe-skipped        "--no-default-features"    security fail patch_wipe_skipped

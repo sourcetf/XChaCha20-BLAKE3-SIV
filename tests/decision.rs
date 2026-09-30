@@ -73,3 +73,51 @@ fn a_forged_tag_must_not_be_accepted() {
         );
     }
 }
+
+/// A tag observed for one message must not authenticate a **different** one.
+///
+/// This is the fault that the gates cannot see, and it is worth being precise about why: if
+/// the tag computation is faulted so that it stops depending on the message — one corrupted
+/// pointer, one skipped `update`, a hasher fed an empty slice — then `encrypt` and `decrypt`
+/// still agree with each other, because they run the same broken function. Every gate compares
+/// the computed tag against the received one and finds them equal, `dual-mac` recomputes
+/// through the same function and agrees too. What breaks is the *construction*: the tag stops
+/// committing to the message, so one observed `(ciphertext, tag)` pair authenticates any
+/// ciphertext at all under the same key, nonce and AAD.
+///
+/// `tools/fi_check.sh` writes that fault down as a source change (`let msg: &[u8] = &[];` at
+/// the top of `derive_tag`) and runs this test against it, in two configurations: the
+/// `hardened,dual-mac` build *fails* it — the fault is invisible there — and the `ultra`
+/// build passes, because the independent implementation in `witness` is a different program
+/// and its tag does depend on the message. That contrast is the whole argument for the
+/// second implementation; without it this test would only be another bit-flip test.
+#[test]
+fn a_tag_from_one_message_must_not_authenticate_another() {
+    let a = b"the message the tag was issued for";
+    let b_msg = b"a different message entirely";
+
+    let (ct_a, tag_a) = encrypt(&KEY, &NONCE, AAD, a).unwrap();
+    let (ct_b, _tag_b) = encrypt(&KEY, &NONCE, AAD, b_msg).unwrap();
+
+    // `a`'s tag must not authenticate `b`'s ciphertext ...
+    assert!(
+        decrypt(&KEY, &NONCE, AAD, &ct_b, &tag_a).is_err(),
+        "a tag issued for one message authenticated another"
+    );
+    assert!(
+        decrypt_in_place_detached(&KEY, &NONCE, AAD, &mut ct_b.to_vec(), &tag_a).is_err(),
+        "a tag issued for one message authenticated another (in place)"
+    );
+
+    // ... and neither must it authenticate a ciphertext of the same length, which is the
+    // cheap forgery: same tag, different bytes.
+    let mut same_len = ct_a.clone();
+    same_len[0] ^= 1;
+    assert!(
+        decrypt(&KEY, &NONCE, AAD, &same_len, &tag_a).is_err(),
+        "a tag authenticated a ciphertext it was not issued for"
+    );
+
+    // The genuine pair still works, so the rejections above are the forgery.
+    assert_eq!(decrypt(&KEY, &NONCE, AAD, &ct_a, &tag_a).unwrap(), a);
+}

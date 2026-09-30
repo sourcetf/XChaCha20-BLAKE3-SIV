@@ -318,10 +318,18 @@ jobs:
       # `target/`), and running those executes stale code. Measured locally: three such
       # binaries failed with counts from an older revision of their own tests, which reads
       # as "the cross target is broken" and is not.
+      # `--features ultra,pure`: `pure` because BLAKE3's build script compiles C kernels
+      # for x86_64/aarch64 and needs a *target* C toolchain to do it, while this job exists
+      # to run *this crate's* code; `ultra` because it is the configuration with the most
+      # code in it and the parts of it that are architecture-sensitive -- the
+      # `from_le_bytes`/`to_le_bytes` conversions on every ChaCha20 and BLAKE3 word, 64-bit
+      # chunk counters and lengths on a 32-bit `usize` -- are only reachable there. Leaving
+      # `ultra` out meant the only architecture-dependent code in the crate was the only
+      # code never executed on another architecture.
       - name: build ${{ matrix.target }} test binaries
         run: |
           set -euo pipefail
-          cargo test --target ${{ matrix.target }} --release --no-run --features pure \
+          cargo test --target ${{ matrix.target }} --release --no-run --features ultra,pure \
             | tee build.log
           sed -n 's/^ *Executable .*(\\(.*\\))$/\\1/p' build.log > executables.txt
           count="$(grep -c . executables.txt || true)"

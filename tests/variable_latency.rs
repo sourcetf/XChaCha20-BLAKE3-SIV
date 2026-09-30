@@ -44,7 +44,7 @@ const ALLOWED: &[(&str, &str)] = &[
     ),
 ];
 
-/// `(keyword, occurrences in the non-test source)`.
+/// `(keyword, occurrences in the non-test source)` — `src/lib.rs`.
 ///
 /// Read this with the caveat above: it is a tripwire, not a proof. Every branch here
 /// was audited by hand to depend on a length, an alignment, a CPU feature, an enum
@@ -54,53 +54,79 @@ const ALLOWED: &[(&str, &str)] = &[
 /// BLAKE3 permutations, whose trip counts come from block sizes.
 ///
 /// When one of these numbers changes: look at the branch, decide what it depends on,
-/// and update this table, `README.md` and `SECURITY.md` together.
+/// and update this table, `README.md`, `SECURITY.md` and `tests/README.md` together.
 ///
-/// The two `if`s added by the fail-closed decision shape (`if decision0.is_err()` in
-/// each decrypt entry point) are one recent entry: (an earlier revision of this comment
-/// named `if decision.is_ok()`, a shape the code never had -- `grep` finds zero of them
-/// -- and that `decision_scope.rs` explicitly forbids; the reject-first spelling is what
-/// is actually there): they branch on a discriminant the
-/// *caller* wrote as a constant, so they depend on nothing secret -- which is what
-/// makes them constant-time, and why they are listed rather than suppressed. The
-/// other is the decision function itself: one body with the first gate and, under
-/// `#[cfg(feature = "hardened")]`, the second. This tripwire has moved three times and
-/// been right three times: 15 -> 14 when the two `#[cfg]`-selected definitions were
-/// merged into one body, back to 15 when `decrypt_bounded`'s bound check was added
-/// (that one branches on the ciphertext's *length*, which is public), and 15 -> 17 when
-/// the caller's single accept branch became two serial reject-first checks -- the change
-/// that took the call site's accept decision from one corrupted branch away from a
-/// forgery. All four caller branches test a discriminant the caller wrote as a
-/// constant, so they depend on nothing secret, which is what makes them constant-time
-/// and why they are listed rather than suppressed. The fourth `match` is
-/// `random::fill`'s: it branches on whether the OS entropy source *succeeded*, which is
-/// a public fact about the environment, not content — and its arms are what zero the
-/// buffer on the error path. The rest of the growth is the `locked` module (`ultra`),
-/// whose `Page` allocation and `LockedKey::new` add the branches counted here — the
-/// syscall results and a null check, never key or message content.
-/// it branches on a syscall result -- the kernel's answer about *memory*, never about
-/// key or message content -- and on whether the target is Linux and which architecture's
-/// syscall numbers apply, both of which are compile-time facts.
+/// What the numbers are made of, so a change can be read against this list:
 ///
-/// `while` 7 -> 9 was `ct_eq_independent`, the second gate's comparison under `dual-mac`:
-/// its trip counts are `TAG_LEN / 8` and `TAG_LEN % 8`, both compile-time constants, and
-/// the loop body is a branch-free XOR-OR fold, so the iteration count depends on nothing
-/// secret. That function exists precisely so the two gates do not share a comparison
-/// loop; see its comment in `src/lib.rs`.
+/// * the decision function itself: two gate branches, no loops, no `match` (see
+///   `tests/decision_scope.rs`, which holds that shape);
+/// * six `if decision*.is_err()` checks: the fail-closed shape, on all three call sites --
+///   the two decrypt entry points and, under `ultra`, `encrypt`'s cross-check of its own tag
+///   against the witness. They branch on a discriminant the *caller* wrote as a constant, so
+///   they depend on nothing secret, which is what makes them constant-time and why they are
+///   listed rather than suppressed;
+/// * `decrypt_bounded`'s length check and the `MAX_MSG_SIZE` checks in `derive_tag`:
+///   lengths, which are public;
+/// * the `locked` module: `Page` allocation, `LockedKey::new`, `lock_range`'s
+///   alignment, and `page_size()`'s auxv walk. Every branch there tests a public fact
+///   -- a `/proc` open, a full auxv entry, `AT_PAGESZ`, a plausible page size, a
+///   syscall result -- and none is reached with secret data in hand (the arithmetic is
+///   on addresses, which are not secret);
+/// * `random::fill` (branches on whether the OS entropy source succeeded, a public fact
+///   about the environment, and its arms are what zero the buffer on the error path);
+/// * the `derive_tag` window `match`, on the public message/AAD lengths;
+/// * `soft_impl`/`x86_simd` CPU-feature detection: a CPU fact, and `usize` width;
+/// * the fallible-allocation and slice-copy helpers, on lengths.
 ///
-/// `if` 23 -> 28 and `while` 9 -> 10 are the `locked` module's page-size discovery and
-/// range alignment (`page_size()`, and the `return if ... {} else {}` in `lock_range`).
-/// Every branch there tests a *public* fact: whether a `/proc` open succeeded, whether
-/// the auxv read returned a full entry, whether the entry is `AT_PAGESZ`, whether the
-/// value is a plausible page size, and whether a syscall returned an error. None of them
-/// looks at a key, a nonce, an AAD or a message, and none of them is reached with secret
-/// data in hand -- the alignment arithmetic operates on an address, which is not secret.
+/// History, because this tripwire has moved repeatedly and been right each time. The
+/// early moves (15 -> 14 when the two `#[cfg]`-selected `accept_or_reject` definitions
+/// were merged into one body, back to 15 when `decrypt_bounded`'s bound check was
+/// added, 15 -> 17 when the caller's accept branch became two serial reject-first
+/// checks) are in `git log` on this file. The most recent moves: the `locked` module and
+/// the `ultra` witness took it to 34; moving the witness into its own file --
+/// `src/witness.rs`, inventoried on its own below -- while folding its agreement into
+/// the existing gate took it back to 30; and 30 -> 31 when `encrypt`'s cross-check
+/// against the witness stopped being a comparison-then-branch at the call site and went
+/// through `accept_or_reject` like the decrypt side (-1 for that `if`, +2 for the
+/// fail-closed checks that replace it, which is the count now).
 const CONTROL_FLOW: &[(&str, usize)] = &[
-    ("if", 29),
+    ("if", 31),
     ("while", 10),
     ("for", 28),
     ("loop", 0),
     ("match", 5),
+];
+
+/// The same table for `src/witness.rs`, the `ultra` build's independent second
+/// implementation.
+///
+/// Separate because the file is separate, and because the *reason* the counts are safe
+/// is different in kind: this file is a from-scratch ChaCha20/BLAKE3 written to be
+/// checked against the crate's, so what it must not do is branch on key, nonce, AAD or
+/// message *content*. Its loops run over block indices and chunk boundaries (lengths,
+/// hence public) and its branches are length and boundary tests:
+///
+/// * `if` 3: `ChunkState::start_flag` (is this the chunk's first block -- a counter),
+///   `ChunkState::update` (is the block buffer full) and `Hasher::update` (is the chunk
+///   buffer full). Counters and lengths;
+/// * `while` 5 / `for` 21: `keystream_xor`'s block loop, `ChunkState::update`,
+///   `Hasher::add_chunk_cv`'s carry loop, `Hasher::update` and `finalize_xof`'s squeeze
+///   loop; and the `for` loops of the ChaCha20 permutation (10 double-rounds), the
+///   key/nonce word unpacking, the BLAKE3 round function (7 rounds), the message
+///   permutation, the chaining-value extraction and the byte loops of the tag
+///   comparison. Trip counts come from `CHACHA20_BLOCK`, `BLAKE3_BLOCK`, `CHUNK_LEN`,
+///   `TAG_LEN` and the 8 words of a chaining value, all compile-time constants or
+///   public lengths; `add_chunk_cv`'s carry loop runs once per finalised chunk, which
+///   is `len / 1024`.
+///
+/// The one thing to check when this changes: an early return or a `match` on a *byte of
+/// state* rather than on a boundary. There is none today.
+const WITNESS_CONTROL_FLOW: &[(&str, usize)] = &[
+    ("if", 3),
+    ("while", 5),
+    ("for", 21),
+    ("loop", 0),
+    ("match", 0),
 ];
 
 /// Replace every `"..."` literal with nothing, so a `/` inside one is not counted.
@@ -232,28 +258,42 @@ fn count_keyword(line: &str, kw: &str) -> usize {
 
 #[test]
 fn control_flow_is_inventoried() {
-    let src = include_str!("../src/lib.rs");
-    let cut = src.find("mod tests {").expect("the test module must exist");
-    let body = &src[..cut];
+    let lib = include_str!("../src/lib.rs");
+    let witness = include_str!("../src/witness.rs");
 
-    let mut drifted = Vec::new();
-    let mut report = String::new();
-    for (kw, expected) in CONTROL_FLOW {
-        let found: usize = body.lines().map(|l| count_keyword(l, kw)).sum();
-        report.push_str(&format!("      {kw:>5}: {found}\n"));
-        if found != *expected {
-            drifted.push(format!(
-                "{kw}: source has {found}, CONTROL_FLOW says {expected}"
-            ));
+    // Every file of the crate that has branches is listed here, so "the crate's control
+    // flow is inventoried" stays true when a file is added rather than quietly covering
+    // part of the crate. `src/proofs.rs` is deliberately not listed: it is
+    // `#[cfg(kani)]`, compiled out of every build this suite runs in, and its loops are
+    // bounded-model-checking scaffolding rather than shipped code -- Kani's own harnesses
+    // state what they must hold.
+    for (name, src, table) in [
+        ("src/lib.rs", lib, CONTROL_FLOW),
+        ("src/witness.rs", witness, WITNESS_CONTROL_FLOW),
+    ] {
+        let cut = src.find("mod tests {").unwrap_or(src.len());
+        let body = &src[..cut];
+
+        let mut drifted = Vec::new();
+        let mut report = String::new();
+        for (kw, expected) in table {
+            let found: usize = body.lines().map(|l| count_keyword(l, kw)).sum();
+            report.push_str(&format!("      {kw:>5}: {found}\n"));
+            if found != *expected {
+                drifted.push(format!(
+                    "{kw}: source has {found}, the table says {expected}"
+                ));
+            }
         }
-    }
 
-    assert!(
-        drifted.is_empty(),
-        "the crate's control flow changed: {drifted:?}\n\nfound:\n{report}\n\
-         A branch was added, removed or moved. Work out what the new one depends on \
-         (a length, an alignment, a CPU feature, an enum variant, or the decision -- \
-         never the content of a key, nonce, AAD or message; ctgrind checks that \
-         mechanically), then update CONTROL_FLOW, README.md and SECURITY.md together."
-    );
+        assert!(
+            drifted.is_empty(),
+            "{name}'s control flow changed: {drifted:?}\n\nfound:\n{report}\n\
+             A branch was added, removed or moved. Work out what the new one depends on \
+             (a length, an alignment, a CPU feature, an enum variant, or the decision -- \
+             never the content of a key, nonce, AAD or message; ctgrind checks that \
+             mechanically), then update the table for that file, README.md, SECURITY.md \
+             and tests/README.md together."
+        );
+    }
 }

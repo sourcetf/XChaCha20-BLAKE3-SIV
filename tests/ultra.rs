@@ -75,15 +75,26 @@ fn dual_mac_is_wired_into_both_decrypt_paths() {
         2,
         "both decrypt paths must recompute the tag independently"
     );
+    // Four, not two: the comparison appears in the shared `gate_pair` arm *and* in the
+    // `dual-mac`-without-witness arm, and exactly one of those is compiled -- so this is
+    // "once per entry point, per configuration", read off the source text.
     assert_eq!(
         body.matches("recomputed_tag.ct_eq(&computed_tag)").count(),
-        2,
+        4,
         "the recomputation must be compared against the stored value"
     );
     assert_eq!(
         body.matches("recomputed_tag.ct_eq(tag)").count(),
-        2,
+        4,
         "and against the received tag, which is what catches a rewritten stored value"
+    );
+    // Under `ultra` the independent *implementation* joins the same gate: the stored tag
+    // agreeing with the received one is not enough if both came from a rewritten
+    // computation, so the witness's own answer is required too.
+    assert_eq!(
+        body.matches("& witness_ok;").count(),
+        2,
+        "`ultra`'s witness agreement must be ANDed into the second gate of both entry points"
     );
     // Wiped like every other secret-derived copy in the function.
     assert_eq!(

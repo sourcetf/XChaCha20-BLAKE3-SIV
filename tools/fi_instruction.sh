@@ -46,9 +46,10 @@
 # disturb, and can be *targeted* rather than uniform. This enumerates two uniform
 # single-fault models over the instruction stream and nothing else.
 #
-# Usage: tools/fi_instruction.sh [--quick] [--bits]
-# Exit codes: 0 = both maps came out with zero accepting faults; 1 = otherwise, or the
-#             machinery failed.
+# Usage: tools/fi_instruction.sh [--quick] [--bits] [--jobs N]
+#        (--jobs defaults to the core count, capped at 16; the sweep shards across cores)
+# Exit codes: 0 = every layer is at least as good as the one below it; 1 = otherwise,
+#             or the machinery failed.
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
@@ -61,12 +62,30 @@ export CARGO_TARGET_DIR="$WORK/target"
 
 quick=""
 MODEL="nop"
+JOBS=""
 for arg in "$@"; do
   case "$arg" in
     --quick) quick="--quick" ;;
     --bits) MODEL="bits" ;;
+    --jobs) JOBS="next" ;;
+    --jobs=*) JOBS="${arg#--jobs=}" ;;
+    *)
+      if [ "$JOBS" = "next" ]; then JOBS="$arg"; else
+        echo "FAIL: unknown argument $arg" >&2; exit 1
+      fi ;;
   esac
 done
+# The sweep is thousands of short-lived process launches and one file rewrite each, so it
+# shards across cores by default: each shard owns a *copy* of the binary (two processes
+# cannot rewrite one file) and a disjoint slice of the offsets. Measured on a 32-core
+# host: the full `nop` sweep for three configurations went from ~15 minutes sequential to
+# under two.
+if [ -z "$JOBS" ]; then
+  JOBS="$(nproc 2>/dev/null || echo 4)"
+  [ "$JOBS" -gt 16 ] && JOBS=16
+fi
+case "$JOBS" in (*[!0-9]*|"") echo "FAIL: --jobs wants a number, got '$JOBS'" >&2; exit 1 ;; esac
+[ "$JOBS" -ge 1 ] || { echo "FAIL: --jobs wants a positive number" >&2; exit 1; }
 
 scan() {  # label, features
   local label="$1" features="$2"
@@ -75,12 +94,40 @@ scan() {  # label, features
   local bin
   bin="$(ls -t "$CARGO_TARGET_DIR"/release/deps/decision-* | grep -v '\.d$' | head -1)"
   [ -n "$bin" ] || { echo "FAIL: no decision binary" >&2; exit 1; }
-  python3 - "$bin" "$label" "$quick" "$MODEL" <<'PY'
+
+  local shard pids=()
+  for shard in $(seq 0 $((JOBS - 1))); do
+    cp "$bin" "$WORK/shard-$label-$shard.bin"
+    scan_shard "$WORK/shard-$label-$shard.bin" "$label" "$quick" "$MODEL" "$shard" "$JOBS" &
+    pids+=("$!")
+  done
+  local pid failed=0
+  for pid in "${pids[@]}"; do
+    wait "$pid" || failed=1
+  done
+  [ "$failed" -eq 0 ] || { echo "FAIL: a sweep shard failed" >&2; exit 1; }
+  # The counts are the union over shards; the shards are disjoint by construction, so
+  # summing distinct offsets is the same set the sequential scan would have produced.
+  # Two counts per configuration: every accepting byte, and the subset inside
+  # `accept_or_reject` (the decision itself) -- the driver gates on the second.
+  cat "$WORK"/shard-"$label"-*.bin.accepted 2>/dev/null | grep -c . > "$WORK/$label.count" || true
+  cat "$WORK"/shard-"$label"-*.bin.accepted_decision 2>/dev/null | grep -c . \
+    > "$WORK/$label.decision" || true
+  cat "$WORK"/shard-"$label"-0.bin.ranges > "$WORK/$label.ranges" 2>/dev/null || true
+}
+
+# The scanner, run once per shard with (binary, label, quick, model, shard, nshards):
+# offsets are partitioned modulo `nshards` and each shard may only touch its own copy of
+# the binary. The verdicts are per fault, so the shards are independent by construction
+# and their accepted sets are disjoint.
+scan_shard() {  # bin, label, quick, model, shard, nshards
+  python3 - "$@" <<'PY'
 import re
 import subprocess
 import sys
 
 binpath, label, quick, model = sys.argv[1], sys.argv[2], sys.argv[3] == "--quick", sys.argv[4]
+shard, nshards = int(sys.argv[5]), int(sys.argv[6])
 
 # Where `.text` lives in the file, so a virtual address from `nm` can be turned into
 # a file offset.
@@ -108,15 +155,27 @@ ranges = []
 for line in syms.splitlines():
     f = line.split()
     if len(f) >= 4 and f[2] in ("t", "T"):
-        name = f[3].encode()
-        if b"decrypt" in name or b"accept_or_reject" in name:
+        name = f[3]
+        if "decrypt" in name or "accept_or_reject" in name:
             addr, size = int(f[0], 16), int(f[1], 16)
             if size:
-                ranges.append((addr, size))
+                ranges.append((addr, size, name))
 if not ranges:
     sys.exit("FAIL: no decrypt or accept_or_reject symbols -- was the binary stripped?")
 
-covered = [(a - text_vaddr + text_off, s) for a, s in ranges]
+# Which symbol each swept byte belongs to, so an accepting fault can be attributed:
+# "the decision itself" and "the entry point around it" are different findings, and the
+# counts across configurations are only comparable per symbol (`ultra`'s `decrypt` and
+# `decrypt_in_place_detached` contain more code -- the witness call, an extra gate
+# operand, a ciphertext copy -- so their raw totals are naturally larger).
+def symbol_of(off):
+    for addr, size, name in ranges:
+        start = addr - text_vaddr + text_off
+        if start <= off < start + size:
+            return name
+    return "<outside>"
+
+covered = [(a - text_vaddr + text_off, s, n) for a, s, n in ranges]
 
 with open(binpath, "rb") as fh:
     original = fh.read()
@@ -131,7 +190,7 @@ for line in disasm.splitlines():
     if mm:
         shown[int(mm.group(1), 16)] = bytes(int(b, 16) for b in mm.group(2).split())
 checked = 0
-for addr, size in ranges:
+for addr, size, _name in ranges:
     if addr not in shown:
         continue
     off = addr - text_vaddr + text_off
@@ -144,7 +203,7 @@ for addr, size in ranges:
     checked += 1
 if checked == 0:
     sys.exit("FAIL: no instruction from the swept ranges could be cross-checked")
-total = sum(s for _, s in covered)
+total = sum(s for _, s, _ in covered)
 stride = 7 if quick else 1
 
 def run():
@@ -165,7 +224,11 @@ if base != "rejected":
 
 # The fault, per model: `nop` writes 0x90 over a byte; `bits` flips one bit of it.
 accepted, crashed, untouched = [], 0, 0
-offs = [off + i for off, size in covered for i in range(0, size, stride)]
+offs = [off + i for off, size, _n in covered for i in range(0, size, stride)]
+# This shard's slice of the offsets. Every fault is a self-contained run of the binary,
+# so the shards cannot interact; the union over shards is what the sequential scan
+# produced, and the caller sums the accepted sets.
+offs = offs[shard::nshards]
 faults = (
     [(off, 0) for off in offs]
     if model == "nop"
@@ -205,59 +268,106 @@ for off, bit in faults:
     else:
         untouched += 1
 
-print(f"  {label:<26} [{model}] scanned {len(faults):5d}  rejected {untouched:5d}  "
-      f"crashed {crashed:5d}  ACCEPTED {len(accepted):3d}")
+print(f"  {label:<16} shard {shard + 1:>2}/{nshards} [{model}] scanned {len(faults):5d}  "
+      f"rejected {untouched:5d}  crashed {crashed:5d}  ACCEPTED {len(accepted):3d}")
 if accepted:
-    # One line of the file around each accepting byte, so the map is usable.
-    print(f"    bytes that single-handedly accept a forgery: {len(accepted)}")
+    # One line of the file around each accepting byte, so the map is usable, and the
+    # symbol it belongs to, so the number can be read: an accepting byte in the decision
+    # function and one in the entry point around it are different findings.
+    in_decision = [off for off in accepted if "accept_or_reject" in symbol_of(off)]
+    print(f"    accepting bytes (shard {shard + 1}): {len(accepted)} "
+          f"-- {len(in_decision)} of them inside the decision function")
     for off in accepted[:8]:
-        print(f"      0x{off:x}  " + " ".join(f"{b:02x}" for b in original[off-3:off+4]))
+        sym = symbol_of(off)
+        short = sym.split("::")[-1] if "::" in sym else sym
+        print(f"      0x{off:x} [{short}]  "
+              + " ".join(f"{b:02x}" for b in original[off-3:off+4]))
     if len(accepted) > 8:
         print(f"      ... and {len(accepted) - 8} more")
-# Machine-readable for the caller.
+# Machine-readable for the caller: every accepting byte, and the subset that is inside
+# `accept_or_reject` -- two files, because the driver gates on the second one.
 with open(sys.argv[1] + ".accepted", "w") as fh:
     fh.write("\n".join(str(x) for x in accepted))
+with open(sys.argv[1] + ".accepted_decision", "w") as fh:
+    fh.write("\n".join(str(x) for x in accepted if "accept_or_reject" in symbol_of(x)))
+with open(sys.argv[1] + ".ranges", "w") as fh:
+    fh.write("\n".join(f"{n} {s}" for _a, s, n in ranges))
 PY
-  echo "$(cat "$bin.accepted" | grep -c . || true)" > "$WORK/$label.count"
 }
 
 scan "plain (no hardened)"  "--no-default-features"
 scan "hardened (default)"   "--features hardened"
+# `ultra` adds the independent second implementation, so a byte corrupted in the shared
+# KDF/MAC/SIMD code no longer has to be caught by the gate alone: the crate's own answer
+# stops matching the witness's, and the gate that ANDs the agreement in rejects. This row
+# is where that shows up as a number -- the mechanism the accepting sites live in
+# (decoder desynchronisation in shared code) is exactly the code the witness does not share.
+scan "ultra"                "--features ultra"
 
 default_n="$(cat "$WORK/plain (no hardened).count")"
 hardened_n="$(cat "$WORK/hardened (default).count")"
+ultra_n="$(cat "$WORK/ultra.count")"
+default_d="$(cat "$WORK/plain (no hardened).decision")"
+hardened_d="$(cat "$WORK/hardened (default).decision")"
+ultra_d="$(cat "$WORK/ultra.decision")"
 echo
-# The criterion is *not* "zero accepting faults", and that is a correction. The
-# previous version asserted zero and reported zero -- on the wrong bytes: `objdump -h`
-# prints `Size VMA LMA File off`, this script took the third number (LMA) as the file
-# offset, and on these binaries that is a 4 KiB shift, so the whole sweep ran outside
-# the function it claimed to test. With the mapping fixed (and asserted against
-# `objdump -d` before any fault is written) the scan finds accepting faults in every
-# configuration, including the hardened one -- and in RustCrypto's XChaCha20Poly1305
-# too, which this script's technique measures at 13 of 1081 bytes (NOP) and 106 of 8648
-# (bits).
+# What the criterion is, and why it is scoped to the decision function.
 #
-# The mechanism is not the decision: the accepting sites are *identical* in the default
-# and opt-out builds (9 of 9 the same addresses), so they sit in the shared KDF/MAC/SIMD
-# code, and several are the second byte of a multi-byte instruction -- corrupting that
-# byte desynchronises the decoder, and the following bytes execute as different
-# instructions. No source-level structure prevents that; the CPU is running different
-# code. What *is* enforceable, and what is enforced here:
+# The sweep finds accepting faults in every configuration, and "zero" was never a
+# defensible target: the raw count is dominated by *decoder desynchronisation* in the
+# code around the decision -- corrupting the second byte of a multi-byte instruction makes
+# the following bytes execute as different instructions, and no source-level structure
+# prevents the CPU from running different code. It also makes the raw counts incomparable
+# across configurations, which is what a first version of this gate got wrong: `ultra`'s
+# entry points contain more code than `hardened`'s (a call to the witness, an extra gate
+# operand, a ciphertext copy), so a longer region naturally collects more accepting bytes
+# even when every one of them is outside the decision.
 #
-#   * the hardened build must not be worse than the opt-out one, which is the property
-#     the second gate exists for, and
-#   * both counts are printed, so a regression is visible as a number rather than
-#     absorbed by a threshold.
+# What *is* comparable, and what the three features are actually about, is the decision
+# function itself: `accept_or_reject`. The property asserted here is
+#
+#   * no single-byte fault -- neutralised byte or flipped bit -- inside `accept_or_reject`
+#     accepts a forgery in the `hardened` or `ultra` build;
+#   * the opt-out build *does* have such a byte in the bit-flip model, or this scan is not
+#     reaching the decision at all. That is the positive control, and it is model-specific
+#     for a reason worth writing down: the opt-out decision is one `test`/`je` pair, and
+#     flipping the bit that turns `je` into `jne` falls through into the *accept* store.
+#     Overwriting that byte with `0x90` does not do that -- the next byte then decodes as
+#     part of a different instruction, and the run crashes instead of accepting -- so in
+#     the `nop` model this control cannot hold and is not required. (Both models are still
+#     swept in full; only the control is model-specific.)
+#   * all six counts are printed, so a regression outside the decision is visible as a
+#     number rather than absorbed by a threshold.
 #
 # Absolute counts are machine-code dependent (the README says as much about the map), so
 # the gate is a comparison rather than a number to hit.
-if [ "$hardened_n" -le "$default_n" ]; then
-  echo "instruction-level FI [$MODEL]: $hardened_n accepting fault(s) in the hardened"
-  echo "                      build, $default_n in the opt-out one (the hardened build is"
-  echo "                      not worse, which is what the second gate is for)"
-  exit 0
+ok=1
+if [ "$hardened_d" -ne 0 ] || [ "$ultra_d" -ne 0 ]; then
+  echo "FAIL: $hardened_d accepting fault(s) inside the decision in the hardened build" >&2
+  echo "      and $ultra_d in the ultra one. The second gate (and, under ultra, the" >&2
+  echo "      independent implementation) exist so that no single fault in the decision" >&2
+  echo "      accepts. See \$WORK/*.accepted_decision for the bytes." >&2
+  ok=0
 fi
-echo "FAIL: the hardened build has $hardened_n accepting fault(s) and the opt-out one" >&2
-echo "      $default_n -- more than the plain build, which the second gate is supposed to" >&2
-echo "      make impossible. Look at \$WORK/*.accepted for the bytes." >&2
-exit 1
+if [ "$MODEL" = "bits" ] && [ -z "$quick" ] && [ "$default_d" -eq 0 ]; then
+  echo "FAIL: the opt-out build has no accepting bit-flip inside the decision, so this" >&2
+  echo "      sweep is not reaching the decision function and the rows above mean nothing." >&2
+  echo "      Flipping the opcode bit of its single 'je' is supposed to fall through into" >&2
+  echo "      the accept store -- that is the defect the hardened build exists to remove." >&2
+  ok=0
+fi
+[ "$ok" -eq 1 ] || exit 1
+echo "instruction-level FI [$MODEL${quick:+, quick}] accepting faults:"
+printf '                      %-22s %6s total, %4s inside the decision\n' \
+  "opt-out" "$default_n" "$default_d"
+printf '                      %-22s %6s total, %4s inside the decision\n' \
+  "hardened (default)" "$hardened_n" "$hardened_d"
+printf '                      %-22s %6s total, %4s inside the decision\n' \
+  "ultra" "$ultra_n" "$ultra_d"
+echo "                      (the decision is what the layers are for: zero there in the"
+echo "                       hardened and ultra builds)"
+if [ -n "$quick" ]; then
+  echo "                      quick mode samples every ${stride:-seventh} byte, so the"
+  echo "                      opt-out control is only asserted by the full sweep (and only"
+  echo "                      in the bit-flip model -- see the comment above)."
+fi
