@@ -33,13 +33,18 @@
 #     pinned residual -- the accept decision of any branch-based implementation is one
 #     bit from being wrong -- rather than claimed away.
 #
-# Cost: about seven minutes for the full `nop` sweep and about one for `--quick`
-# (every seventh byte), which is why the full one runs in the scheduled `wide` job and
-# `--quick` runs in the mutation job on every push. `--bits` is eight times its `nop`
-# counterpart, so it is run with `--quick` on every push and in full nightly. An
-# earlier estimate of half an hour for the `nop` sweep was really the per-patch
-# *timeout* being hit by branches whose NOP turns a loop into a spin, and a
-# five-second timeout fixed that.
+# Cost, measured on a 16-core host with `--jobs 16`: the full `nop` sweep for three
+# configurations is under two minutes (it was ~15 sequential), the full `bits` sweep
+# about nine, and `--quick` (every thirteenth byte) 25 and 65 seconds respectively.
+# That is why the full sweeps run in the scheduled `wide` job and `--quick` runs in the
+# mutation job on every push. An earlier estimate of half an hour for the `nop` sweep
+# was really the per-patch *timeout* being hit by branches whose NOP turns a loop into a
+# spin, and a five-second timeout fixed that.
+#
+# The stride is 13 rather than 7 because the sweep grew a third configuration and
+# `ultra`'s region is larger than the other two together; a coarser sample keeps the
+# per-push cost where it was, and quick mode asserts nothing about the opt-out control
+# anyway (it says so in its own output).
 #
 # What this is still not: a fault model. A real glitch can hit a register or a bus
 # rather than the instruction stream, can be timed relative to the data it is meant to

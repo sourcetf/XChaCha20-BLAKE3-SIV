@@ -384,7 +384,7 @@ jobs:
 
       # The instruction-level scan is what turns "one skipped instruction accepts a
       # forgery" from a claim into a measurement, and it is cheap enough in `--quick`
-      # mode (every seventh byte, all three builds, sharded across the runner's cores)
+      # mode (every thirteenth byte, all three builds, sharded across the runner's cores)
       # to run on every push. The full sweep is in the scheduled `wide` job; a version
       # of this that ran only weekly was promised as "branches on every push" and was
       # not.
