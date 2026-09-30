@@ -141,7 +141,64 @@ What it does **not** buy, stated on the README's row rather than implied: both
 implementations run on one CPU and one compiler, so a fault that hits both, or a
 systematic error in both, is outside what agreement can detect.
 
-### The security argument, written out as a reduction — and two properties it needs, tested
+### Six defects in the *evidence*, found by auditing the verifier instead of the code
+
+Nothing here touches the construction or the wire format. All six are in the machinery
+that is supposed to catch defects, which is where this repository has found its worst
+bugs before — and one of them was a claim ("`--all` = everything") that was false in the
+same way the old "a skipped check counts as a pass" was.
+
+1. **`./verify.sh --all` did not mean everything.** It set `--kani`, `--cross-exec`,
+   `--miri` and strict mode, while `--deep` set those *plus* `--ctgrind`, `--deny`,
+   `--fuzz` and `--tsan` — and `README.md` described `--all` as "# everything". The two
+   names are now one switch set, and both are strict: a run under either refuses to
+   finish while any stage was skipped.
+2. **No local invocation ran the tool-level gates at all.** The 13-row fault campaign,
+   both instruction sweeps, the cache-profile differential (and its planted-leak
+   control), the planted-bug checks, the Kani cfg check and the 4000-vector differential
+   were wired into CI and into nothing else, so a contributor working locally had no way
+   to reproduce the checks the project's claims rest on. New `--tools` stage, included in
+   `--deep`/`--all`, with the same exit-3-is-a-skip discipline the tools already follow.
+3. **`build.log` and `executables.txt` were committed to the repository.** They are
+   byproducts of the `cross-exec` step, which wrote them into the checkout; running the
+   step body by hand (which is exactly what this repository's own debugging advice says
+   to do — see `tools/README`-style notes in the workflows) dropped them in the working
+   tree, and a later `git add -A` swept them in with a host's local paths inside. The
+   step writes them to `$RUNNER_TEMP` now, the two files are gone, and `.gitignore`
+   covers them so a manual run cannot repeat it.
+4. **`mutants.out.old/` was tracked.** `mutants.out/` is committed on purpose — it is
+   the evidence the mutation step produces and it must match HEAD — but the *previous*
+   run's snapshot is stale by construction: 39 files, ~1 MB, diffs against line numbers
+   from an older revision, and in every mutation run's commit. Ignored now, and
+   `tests/README.md` says why.
+5. **`check.sh` printed `plus: command not found` on every run.** A continuation line in
+   its usage block had lost its `#`, so `plus big-endian powerpc64 via qemu-ppc64` was
+   executed as a command. It survived only because the block sits above `set -e`.
+6. **`check.sh --help` and its own header had drifted**, and `--help` described `--all`
+   as "both of the above" long after that stopped being true; `verify.sh` had no `--help`
+   at all. Both scripts now print their own header text, so there is one copy of the
+   usage to keep true.
+
+7. **"`mutants.out/` must match HEAD" was an aspiration.** The directory is committed as
+   evidence, `tests/README.md` requires that it describe the current source, and nothing
+   checked it — it was refreshed when someone remembered. The CI mutation job now keeps
+   the committed copy aside, runs the campaign, and compares the two with
+   `tools/mutation_evidence.py`: same mutant set, same outcomes, and deliberately *not*
+   the line numbers, durations or log paths that move on every run. (The comparison was
+   verified both ways: a run against its own output passes, and the pre-`ultra` snapshot
+   in `mutants.out.old/` fails with the two mutants that no longer exist.) Refreshing
+   `mutants.out/` locally after this was measured at 1998 changed lines with *zero*
+   change to `caught.txt`/`missed.txt`/`unviable.txt` — which is why the committed copy
+   stayed as it was: the gate says it still describes this revision.
+
+Also: `ultra`'s central claim — that the witness shares nothing with the crate's path
+except the specification — was prose. It is now a test
+(`tests/ultra.rs::the_witness_shares_only_the_specification_with_the_crate`) that reads
+the module's non-test source and forbids `crate::` beyond the one specification import,
+and forbids `blake3`, `subtle`, `zeroize` or `getrandom` entirely; the test was verified
+to fail against a planted `crate::TAG_LEN` use, so it is not vacuous.
+
+### The security argument, written out as a reduction — and two properties it needs, tested — and two properties it needs, tested
 
 New: `SECURITY-ANALYSIS.md`. The construction as a tuple of functions; each assumption as
 an explicit game (ChaCha20's block function, HChaCha20, keyed BLAKE3 — all three assumed,

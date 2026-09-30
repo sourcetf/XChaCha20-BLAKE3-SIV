@@ -300,3 +300,85 @@ fn the_decision_still_answers_correctly_with_every_layer_on() {
     decrypt_in_place_detached(&KEY, &NONCE, b"aad", &mut buf, &tag).unwrap();
     assert_eq!(buf, pt);
 }
+
+/// The witness must be a *separate implementation* — and that is checked, not promised.
+///
+/// `ultra`'s value is that the second answer comes from code sharing nothing with the
+/// first: not `derive_tag`, not the SIMD kernels, and not the `blake3` or `subtle`
+/// dependencies either, because a fault in `blake3`'s compression kernel would move both
+/// answers if the witness hashed through the same crate. What the two *must* share is the
+/// specification — the domain strings, the nonce and tag widths — since those are the
+/// construction rather than an implementation of it.
+///
+/// This is a source-shape test for the reason the others in this file are: a
+/// "simplification" that reached for `crate::zeroize_slice`, or hashed with
+/// `blake3::Hasher`, would leave every behavioural test passing. The witness would still
+/// agree with the crate — it would simply have stopped being a second implementation, and
+/// the fault model `ultra` exists for would quietly be single-implementation again.
+#[test]
+fn the_witness_shares_only_the_specification_with_the_crate() {
+    let src = include_str!("../src/witness.rs");
+    let cut = src.find("mod tests {").expect("the witness test module");
+    // Comments stripped, so a mention in prose neither trips the check nor hides a use.
+    let code: String = src[..cut]
+        .lines()
+        .map(|l| match l.find("//") {
+            Some(i) => &l[..i],
+            None => l,
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    // The one permitted import: the specification's constants.
+    let allowed = "use crate::{DOM_ENC, DOM_TAG, NONCE_LEN, SUBKEY_DOMAIN, TAG_LEN};";
+    assert!(
+        code.contains(allowed),
+        "the witness must import the specification's constants explicitly, and nothing \
+         else; expected to find:\n  {allowed}"
+    );
+    let without_imports = code.replace(allowed, "");
+    assert!(
+        !without_imports.contains("crate::"),
+        "the witness uses crate internals, so it is no longer a second implementation \
+         (the fault model it exists for assumes it shares no *code* with the crate): \
+         {}",
+        without_imports
+            .lines()
+            .filter(|l| l.contains("crate::"))
+            .collect::<Vec<_>>()
+            .join(" | ")
+    );
+
+    // And no use of the crate's dependencies: those are the shared code that a fault
+    // could move both answers with.
+    for dep in [
+        "blake3::",
+        "subtle::",
+        "zeroize::",
+        "getrandom::",
+        "use blake3",
+        "use subtle",
+    ] {
+        assert!(
+            !without_imports.contains(dep),
+            "the witness borrows `{dep}`, which the crate's own path also uses: a fault in \
+             that shared code would move both answers, which is the one thing the second \
+             implementation is there to prevent"
+        );
+    }
+
+    // A sanity floor: the file must actually contain an implementation of each primitive,
+    // so a future refactor cannot satisfy the assertions above by deleting the module.
+    for f in [
+        "fn hchacha20(",
+        "fn block(",
+        "fn compress(",
+        "pub fn decrypt(",
+        "pub fn encrypt_tag(",
+    ] {
+        assert!(
+            code.contains(f),
+            "the witness no longer defines `{f}` — these assertions would pass on an empty module"
+        );
+    }
+}

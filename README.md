@@ -571,11 +571,23 @@ Two entry points, both runnable from a fresh checkout:
 ./check.sh                  # provision deps, build every target, then verify
 ./check.sh --all            # ...including qemu execution and Kani
 
-./verify.sh                 # the verification stages on their own
-./verify.sh --cross-exec    # ...plus executing the aarch64/i686 suites under qemu
+./verify.sh                 # stages 1-4: the reference self-checks, fmt/clippy, the
+                            # test suite, and the cross-target type-checks
+./verify.sh --cross-exec    # ...plus executing the aarch64/i686/ppc64 suites under qemu
 ./verify.sh --kani          # ...plus Kani bounded model checking (slow)
-./verify.sh --all           # everything
+./verify.sh --tools         # ...plus the tool-level gates CI runs on every push: the
+                            # 13-row fault campaign, both instruction sweeps, the
+                            # cache-profile differential and its planted-leak control,
+                            # the planted-bug checks, the Kani cfg check, and the
+                            # 4000-vector differential against the Python reference
+./verify.sh --deep          # every switch above; `--all` is the same set
 ```
+
+`--deep` and `--all` are synonyms, and that is a correction: `--all` used to set *fewer*
+switches than `--deep` (no ctgrind, no cargo-deny, no fuzzing, no TSAN) while this file
+called it "everything", and neither ran the tool-level gates at all — they lived in CI
+alone. Both names now mean the full set, and a run under either refuses to finish while
+any stage was skipped.
 
 `check.sh` is the "just make it work" wrapper: it installs the optional
 dependencies (cross targets, an aarch64 emulator), builds host and cross

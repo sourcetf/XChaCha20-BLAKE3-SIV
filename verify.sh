@@ -11,14 +11,25 @@
 #      harnesses dominate)
 #
 # Usage:
-#   ./verify.sh              # everything except Kani
-#   ./verify.sh --kani       # everything, including Kani
+#   ./verify.sh              # stages 1-4: the reference self-checks, fmt/clippy, the
+#                            # test suite, and the cross-target type-checks
+#   ./verify.sh --kani       # ...plus Kani
 #   ./verify.sh --kani-only  # just Kani (after a code change, to re-prove)
 #
 # Stage switches, all off by default: --cross-exec (aarch64, i686 and
 # powerpc64 big-endian, under qemu), --miri, --ctgrind, --deny, --fuzz,
-# --tsan, --kani.
+# --tsan, --tools (the tool-level gates: the fault campaign, the instruction
+# sweeps, the cache-profile differential, the planted-bug checks, the Kani cfg
+# check and the broad differential), --kani.
+#
 #   ./verify.sh --deep       # all of them
+#   ./verify.sh --all        # the same thing; the name says what it means
+#
+# `--deep`/`--all` are the invocations that claim to leave nothing out, so they
+# refuse to finish while any stage was skipped. Until this was fixed, `--all` set
+# *fewer* switches than `--deep` (no ctgrind, cargo-deny, fuzzing or TSAN) while
+# the README called it "everything", and neither ran the tool-level gates that CI
+# runs on every push.
 
 set -euo pipefail
 
@@ -36,6 +47,7 @@ RUN_CTGRIND=0
 RUN_DENY=0
 RUN_FUZZ=0
 RUN_TSAN=0
+RUN_TOOLS=0
 STRICT=0
 for arg in "$@"; do
   case "$arg" in
@@ -49,8 +61,19 @@ for arg in "$@"; do
     --deny) RUN_DENY=1 ;;
     --fuzz) RUN_FUZZ=1 ;;
     --tsan) RUN_TSAN=1 ;;
-    --deep) RUN_KANI=1; RUN_CROSS_EXEC=1; RUN_MIRI=1; RUN_CTGRIND=1; RUN_DENY=1; RUN_FUZZ=1; RUN_TSAN=1; STRICT=1 ;;
-    --all) RUN_KANI=1; RUN_CROSS_EXEC=1; RUN_MIRI=1; STRICT=1 ;;
+    --tools) RUN_TOOLS=1 ;;
+    # Same trick as `check.sh`: the usage text is this file's own header, so there is
+    # only one copy to keep true. `--help` was not handled at all before, which made
+    # `./verify.sh --help` an error rather than an answer.
+    -h|--help)
+      sed -n '2,/^$/p' "$0" | sed 's/^#\{1,\}//; s/^ //'
+      exit 0 ;;
+    --deep|--all)
+      # One set of switches with two names: `--all` used to set fewer of them than
+      # `--deep` while being documented as "everything", which is the same class of
+      # defect as a skip reported as a pass -- a word claiming more than the code does.
+      RUN_KANI=1; RUN_CROSS_EXEC=1; RUN_MIRI=1; RUN_CTGRIND=1
+      RUN_DENY=1; RUN_FUZZ=1; RUN_TSAN=1; RUN_TOOLS=1; STRICT=1 ;;
     *) echo "unknown option: $arg" >&2; exit 1 ;;
   esac
 done
@@ -400,6 +423,121 @@ if [ "$RUN_FUZZ" -eq 1 ]; then
   fi
 fi
 
+if [ "$RUN_TOOLS" -eq 1 ]; then
+  step "10. tool-level gates (what CI runs on every push)"
+  # Each of these answers 3 for "could not run" and non-zero for "found something",
+  # and the difference is the whole point of the convention `tools/gate_selftest.sh`
+  # checks: a tool that could not run is a *skipped stage* here, never absorbed into a
+  # green run. This stage is where that convention is actually exercised, which is why
+  # it exists -- the tools were all wired into CI and none of them into this script.
+  run_tool() {  # name, tool-path, args...
+    local name="$1" tool="$2"; shift 2
+    if [ ! -f "$tool" ]; then
+      skip "$name" "$tool is missing"
+      return 0
+    fi
+    local rc=0
+    set +e
+    case "$tool" in
+      *.py) python3 "$tool" "$@" ;;
+      *)    bash "$tool" "$@" ;;
+    esac
+    rc=$?
+    set -e
+    case "$rc" in
+      0) : ;;
+      # 3 is the documented "could not run"; 127 is the interpreter itself missing,
+      # which is the same situation from this script's point of view.
+      3|127) skip "$name" "$tool could not run here (its output above says why)" ;;
+      *) echo "FAILED: $name (exit $rc)" >&2; exit "$rc" ;;
+    esac
+  }
+
+  # The fault campaign: thirteen rows, each a source change (or its absence) with an
+  # expected effect on a detector. `tools/mutation_check.sh` is the other direction --
+  # it plants known bugs and requires the *checks* to fail, because a check that cannot
+  # fail is not a check.
+  run_tool "planted bugs (mutation check)" tools/mutation_check.sh
+  run_tool "fault-injection campaign"      tools/fi_check.sh
+
+  # The instruction-level sweeps, in `--quick` mode: every byte of the decision
+  # function, both fault models, three configurations. The full sweep over the whole
+  # entry points is the scheduled `wide` job's (and `tools/fi_instruction.sh`'s).
+  run_tool "instruction sweep (nop)"  tools/fi_instruction.sh --quick
+  run_tool "instruction sweep (bits)" tools/fi_instruction.sh --quick --bits
+
+  # The cache/branch-profile differential, with its planted-leak control, in the two
+  # configurations that matter (the default build and `ultra`, which puts a second
+  # implementation on the key path).
+  run_tool "cache profile"              tools/cache_profile.sh 24
+  run_tool "cache profile self-test"    tools/cache_profile.sh --selftest
+  XSIV_FEATURES=ultra run_tool "cache profile (ultra)"           tools/cache_profile.sh 24
+  XSIV_FEATURES=ultra run_tool "cache profile self-test (ultra)" tools/cache_profile.sh --selftest
+
+  # The mutation campaign over the decision, and the gate that says the committed
+  # `mutants.out/` still describes *this* source (tests/README.md calls it evidence that
+  # must match HEAD; until `tools/mutation_evidence.py` existed, nothing checked).
+  #
+  # `cargo mutants` writes `mutants.out/` in place and has no output-directory flag, so
+  # the committed directory is kept aside first, the campaign runs, and on success the
+  # committed copy is restored -- a verification step that leaves the tree dirty is a
+  # step people stop running. On failure the fresh output stays, because that is the file
+  # to commit.
+  if cargo mutants --version >/dev/null 2>&1; then
+    work_mut="$(mktemp -d)"
+    if [ -d mutants.out ]; then
+      cp -r mutants.out "$work_mut/committed"
+      set +e
+      cargo mutants --features ultra -f src/lib.rs \
+        -F 'decrypt|accept_or_reject' -E 'replace & with \|' \
+        -- --test decision --test security > "$work_mut/campaign.log" 2>&1
+      mut_rc=$?
+      set -e
+      tail -2 "$work_mut/campaign.log"
+      if [ "$mut_rc" -ne 0 ]; then
+        echo "FAILED: the mutation campaign reported an uncaught mutant (exit $mut_rc)" >&2
+        grep -E "MISSED" "$work_mut/campaign.log" | head -5 >&2
+        rm -rf "$work_mut"
+        exit "$mut_rc"
+      fi
+      if python3 tools/mutation_evidence.py "$work_mut/committed" mutants.out; then
+        rm -rf mutants.out && cp -r "$work_mut/committed" mutants.out
+      else
+        echo "      (mutants.out/ now holds the fresh run: commit it, or throw it away"
+        echo "       with 'git checkout -- mutants.out' if this run was not a source change)"
+      fi
+    else
+      skip "mutation evidence" "mutants.out/ is missing"
+    fi
+    rm -rf "$work_mut"
+  else
+    skip "mutation campaign" "cargo-mutants is not installed (cargo install cargo-mutants)"
+  fi
+
+  # The Kani harnesses must still fit the crate's internals, and the random differential
+  # pushes vectors this crate never committed through the Python reference.
+  run_tool "Kani cfg check"     tools/check_kani_cfg.sh
+  run_tool "broad differential" tools/broad_differential.py "${BROAD_VECTORS:-4000}"
+
+  # Advisory, and said out loud rather than silently: what this measures is residue in
+  # frames the *compiler* chose, so a change in layout reports instead of blocking --
+  # CI's `stack-residue` job is `continue-on-error` for the same reason.
+  if [ -f tools/stack_residue.sh ]; then
+    local_rc=0
+    set +e
+    bash tools/stack_residue.sh
+    local_rc=$?
+    set -e
+    if [ "$local_rc" -ne 0 ] && [ "$local_rc" -ne 3 ]; then
+      echo "ADVISORY: tools/stack_residue.sh reported a change (exit $local_rc) -- see" >&2
+      echo "          above. This measures compiler-chosen stack layout, so it does not" >&2
+      echo "          fail the run (CI's stack-residue job is continue-on-error)." >&2
+    fi
+  else
+    skip "stack residue" "tools/stack_residue.sh is missing"
+  fi
+fi
+
 if [ "$RUN_KANI" -eq 1 ]; then
   step "6. Kani bounded model checking"
   # `-Z stubbing` is REQUIRED: several harnesses use #[kani::stub] to replace the
@@ -419,7 +557,8 @@ fi
 
 # Each hint is printed only for the step that was actually skipped.
 if [ "$RUN_KANI" -eq 0 ] || [ "$RUN_CROSS_EXEC" -eq 0 ] || [ "$RUN_MIRI" -eq 0 ] \
-   || [ "$RUN_CTGRIND" -eq 0 ] || [ "$RUN_DENY" -eq 0 ] || [ "$RUN_FUZZ" -eq 0 ]; then
+   || [ "$RUN_CTGRIND" -eq 0 ] || [ "$RUN_DENY" -eq 0 ] || [ "$RUN_FUZZ" -eq 0 ] \
+   || [ "$RUN_TOOLS" -eq 0 ]; then
   echo
   if [ "$RUN_KANI" -eq 0 ]; then
     echo "(Kani skipped; pass --kani to include it.)"
@@ -439,8 +578,11 @@ if [ "$RUN_KANI" -eq 0 ] || [ "$RUN_CROSS_EXEC" -eq 0 ] || [ "$RUN_MIRI" -eq 0 ]
   if [ "$RUN_FUZZ" -eq 0 ]; then
     echo "(fuzzing skipped; pass --fuzz to include it.)"
   fi
-  echo "(Pass --deep for Kani + aarch64 + Miri + ctgrind + deny + fuzz.)"
-  echo "(Run ./verify.sh --all for everything.)"
+  if [ "$RUN_TOOLS" -eq 0 ]; then
+    echo "(the tool-level gates skipped; pass --tools to include them.)"
+  fi
+  echo "(Pass --deep --tools for Kani + qemu execution + Miri + ctgrind + deny + fuzz +"
+  echo " ThreadSanitizer + the tool-level gates; --deep and --all are the same set.)"
 fi
 
 if [ "${#SKIPPED_STAGES[@]}" -eq 0 ]; then

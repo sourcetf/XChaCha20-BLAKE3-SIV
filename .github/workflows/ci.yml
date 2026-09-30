@@ -329,6 +329,12 @@ jobs:
       - name: build ${{ matrix.target }} test binaries
         run: |
           set -euo pipefail
+          # Both files live in `$RUNNER_TEMP`, not in the checkout: they are byproducts of
+          # this step, and writing them into the working tree once put a `build.log` and an
+          # `executables.txt` (with this host's paths) into the repository, where a later
+          # `git add -A` committed them. `$RUNNER_TEMP` also survives between the steps of
+          # this job, which is what the execute step needs.
+          work="${RUNNER_TEMP:-${TMPDIR:-/tmp}}"
           # Three details, all of which made this step fail on every target from the commit
           # that introduced the parse until this one -- while `verify.sh`'s copy of the same
           # code worked locally, which is why it took a failing CI run to find:
@@ -342,20 +348,20 @@ jobs:
           #     `sed` as an escaped backslash -- a *literal* backslash in the pattern, which
           #     the line never contains. `verify.sh` has the single-backslash form and works.
           #
-          # The `grep -q` below is the guard that would have caught all three: a parse that
-          # matches nothing is not the same as a build that produced nothing, and "count > 0"
-          # accepts any non-empty parse, including a wrong one.
+          # The `grep -q` guards are what would have caught all three: a parse that matches
+          # nothing is not the same as a build that produced nothing, and "count > 0" accepts
+          # any non-empty parse, including a wrong one.
           CARGO_TERM_COLOR=never cargo test --target ${{ matrix.target }} --release \
-            --no-run --features ultra,pure 2>&1 | tee build.log
-          sed -n 's/^ *Executable .*(\(.*\))$/\1/p' build.log > executables.txt
-          count="$(grep -c . executables.txt || true)"
+            --no-run --features ultra,pure 2>&1 | tee "$work/build.log"
+          sed -n 's/^ *Executable .*(\(.*\))$/\1/p' "$work/build.log" > "$work/executables.txt"
+          count="$(grep -c . "$work/executables.txt" || true)"
           [ "$count" -gt 0 ] || { echo "cargo reported no executables" >&2; exit 1; }
-          grep -q 'xchacha20_blake3_siv-' executables.txt \
+          grep -q 'xchacha20_blake3_siv-' "$work/executables.txt" \
             || { echo "the parse did not find the library test binary -- check the sed" >&2; exit 1; }
-          grep -q 'differential_reference-' executables.txt \
+          grep -q 'differential_reference-' "$work/executables.txt" \
             || { echo "the parse did not find the differential binary -- check the sed" >&2; exit 1; }
           echo "built $count test binaries"
-          cat executables.txt
+          cat "$work/executables.txt"
 
       - name: execute under qemu
         run: |
@@ -376,7 +382,7 @@ jobs:
             echo "--- $(basename "$bin") ---"
             ${{ matrix.qemu }} "$bin" --test-threads=1 ${extra[@]+"${extra[@]}"}
             ran=$((ran + 1))
-          done < executables.txt
+          done < "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/executables.txt"
           if [ "$ran" -eq 0 ]; then
             echo "no ${{ matrix.target }} test binaries found in $deps" >&2
             exit 1

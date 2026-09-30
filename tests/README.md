@@ -126,7 +126,18 @@ surprise:
   none: it advertises coverage of code that no longer exists. Refreshing it is also
   how the `decrypt_bounded` bound mutants were found to be uncaught — the run named a
   test set that did not witness the new code — so treat "the diffs look old" as a
-  finding, not as cosmetic.
+  finding, not as cosmetic. `cargo mutants` also renames the *previous* run to
+  `mutants.out.old/`, which is ignored rather than committed: it is stale by
+  construction, and the claim is about the current run. (It was tracked until this was
+  noticed, which is ~1 MB of diffs against line numbers from an older revision in every
+  mutation run's commit.)
+  **"Must match HEAD" is now enforced rather than asked for**: the CI mutation job keeps
+  the committed directory aside, runs the campaign, and compares the two with
+  `tools/mutation_evidence.py` — on the mutant set and its outcomes, deliberately not on
+  the fields that move every run (line numbers, durations, log paths). A failure means
+  the file to commit is the refreshed `mutants.out/`, and the tool prints the command.
+  It also catches the other direction: a mutant that exists in the committed evidence and
+  no longer in the source.
 
 - **Valgrind suppressions match functions, not source lines.** That is the whole
   reason `tests/ctgrind.supp` may only name `accept_or_reject`. An entry permits

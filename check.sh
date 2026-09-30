@@ -16,9 +16,14 @@
 #   ./check.sh                 provision, build, verify (fast stages only)
 #   ./check.sh --fast          skip all cross-target work
 #   ./check.sh --cross-exec    also execute the aarch64/i686 suites under qemu,
-                             plus big-endian powerpc64 via qemu-ppc64
+#                              plus big-endian powerpc64 via qemu-ppc64
 #   ./check.sh --kani          also run Kani bounded model checking (slow)
-#   ./check.sh --all           both of the above
+#   ./check.sh --tools         also run the tool-level gates (fault campaign,
+#                              instruction sweeps, cache-profile differential,
+#                              planted-bug checks) -- what CI runs on every push
+#   ./check.sh --all           every verification stage `verify.sh --all` has, which is
+#                              more than cross-exec plus Kani: ctgrind, cargo-deny,
+#                              fuzzing, TSAN and the tool-level gates too
 #   ./check.sh --no-provision  never touch the network or modify the toolchain
 #   ./check.sh --help
 #
@@ -40,33 +45,27 @@ VERIFY_ARGS=()
 PROVISION=1
 FAST=0
 
+# The usage text is the file's own header comment rather than a second copy of it.
+# It *was* a second copy, and the two had drifted: `--help` still described `--all` as
+# "both of the above" (cross-exec plus Kani) after `--all` had grown into the full
+# verify.sh set, and the new `--tools` line was in the header alone. Printing the header
+# makes that impossible; the `#` is stripped and the block runs to the first blank line.
 usage() {
-  cat <<'EOF'
-One-command build + verification for XChaCha20-BLAKE3-SIV.
-
-Usage:
-  ./check.sh                 provision, build, verify (fast stages only)
-  ./check.sh --fast          skip all cross-target work
-  ./check.sh --cross-exec    also execute the aarch64/i686 suites under qemu,
-                             plus big-endian powerpc64 via qemu-ppc64
-  ./check.sh --kani          also run Kani bounded model checking (slow)
-  ./check.sh --all           both of the above
-  ./check.sh --no-provision  never touch the network or modify the toolchain
-  ./check.sh --help
-
-Stages:
-  1. provision   rustup targets, an aarch64 emulator, and a Kani check
-  2. build       host release (default + rng) and aarch64-unknown-linux-musl
-  3. verify      delegated to ./verify.sh (see that file for the stage list)
-
-Exit status is non-zero if any requested stage fails.
-EOF
+  sed -n '2,/^$/p' "$0" | sed 's/^#\{1,\}//; s/^ //'
+  echo
+  echo "Stages:"
+  echo "  1. provision   rustup targets, an aarch64 emulator, and a Kani check"
+  echo "  2. build       host release (default + rng) and aarch64-unknown-linux-musl"
+  echo "  3. verify      delegated to ./verify.sh (see that file for the stage list)"
+  echo
+  echo "Exit status is non-zero if any requested stage fails."
   exit 0
 }
 
 while [ $# -gt 0 ]; do
   case "$1" in
     --all)          VERIFY_ARGS+=(--all) ;;
+    --tools)        VERIFY_ARGS+=(--tools) ;;
     --kani)         VERIFY_ARGS+=(--kani) ;;
     --cross-exec|--aarch64-exec) VERIFY_ARGS+=(--cross-exec) ;;
     --fast)         FAST=1 ;;
@@ -297,9 +296,13 @@ if [ ! -x ./verify.sh ]; then
   exit 1
 fi
 
-# `--fast` means "no cross-target work", so any cross-execution request has to
-# be dropped before delegating.  `--all` implies aarch64 execution, so under
-# --fast it degrades to its Kani half rather than being dropped entirely.
+# `--fast` means "no cross-target work", so any cross-execution request has to be
+# dropped before delegating -- and nothing else may be.  `--all` is a single token to
+# `verify.sh` that sets a dozen switches, so under `--fast` it is expanded into the ones
+# that need no cross target (Kani runs natively; so do ctgrind, cargo-deny, fuzzing,
+# TSAN and the tool-level gates) rather than being replaced by `--kani`, which would
+# have silently dropped the rest.  Note the expansion also drops the strict mode that
+# `--all` implies, which is right: a `--fast` run does not claim to be complete.
 if [ "$FAST" -eq 1 ]; then
   FILTERED=()
   saw_all=0
@@ -311,7 +314,7 @@ if [ "$FAST" -eq 1 ]; then
     esac
   done
   if [ "$saw_all" -eq 1 ]; then
-    FILTERED+=(--kani)
+    FILTERED+=(--kani --ctgrind --deny --fuzz --tsan --tools)
   fi
   VERIFY_ARGS=(${FILTERED[@]+"${FILTERED[@]}"})
 fi

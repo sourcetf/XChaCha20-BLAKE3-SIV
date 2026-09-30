@@ -375,9 +375,26 @@ jobs:
       - name: mutation run over the decision
         run: |
           set -euo pipefail
+          # Keep the committed evidence aside first: the claim `tests/README.md` makes
+          # about `mutants.out/` is that it describes the *current* source, and until
+          # this step existed nothing checked it -- the directory rotted quietly, which
+          # this repository has already been bitten by once (a committed run described
+          # code that no longer existed).
+          work="${RUNNER_TEMP:-${TMPDIR:-/tmp}}"
+          cp -r mutants.out "$work/mutants.committed"
           cargo mutants --features ultra -f src/lib.rs \
             -F 'decrypt|accept_or_reject' -E 'replace & with \|' \
             -- --test decision --test security
+
+      # The comparison ignores everything that moves between runs (durations, line
+      # numbers, log paths) and compares the mutant -> outcome map, so it is a statement
+      # about the source rather than about the machine. A failure here means the file to
+      # commit is the refreshed `mutants.out/`, and the message says so.
+      - name: the committed evidence describes this run
+        run: |
+          set -euo pipefail
+          python3 tools/mutation_evidence.py \
+            "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/mutants.committed" mutants.out
 
       - name: plant bugs and require the checks to fail
         run: ./tools/mutation_check.sh
