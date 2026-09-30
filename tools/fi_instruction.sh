@@ -33,18 +33,25 @@
 #     pinned residual -- the accept decision of any branch-based implementation is one
 #     bit from being wrong -- rather than claimed away.
 #
-# Cost, measured on a 16-core host with `--jobs 16`: the full `nop` sweep for three
-# configurations is under two minutes (it was ~15 sequential), the full `bits` sweep
-# about nine, and `--quick` (every thirteenth byte) 25 and 65 seconds respectively.
-# That is why the full sweeps run in the scheduled `wide` job and `--quick` runs in the
-# mutation job on every push. An earlier estimate of half an hour for the `nop` sweep
-# was really the per-patch *timeout* being hit by branches whose NOP turns a loop into a
-# spin, and a five-second timeout fixed that.
+# What each mode sweeps, because the difference is the point:
 #
-# The stride is 13 rather than 7 because the sweep grew a third configuration and
-# `ultra`'s region is larger than the other two together; a coarser sample keeps the
-# per-push cost where it was, and quick mode asserts nothing about the opt-out control
-# anyway (it says so in its own output).
+#   default (full)  every byte of the two entry points *and* of `accept_or_reject`, in
+#                   three configurations. This is the measurement the README's table
+#                   carries: ~19 KB of region and ~150k faults in the bit-flip model.
+#                   Measured on a 16-core host with `--jobs 16`: under two minutes for
+#                   the `nop` sweep, about nine for `bits`. It runs in the scheduled
+#                   `wide` job and locally.
+#   --quick         every byte of `accept_or_reject` *only*, in the same three
+#                   configurations and both models -- 18-25 bytes each, seconds to a
+#                   minute. It runs in the mutation job on every push. An earlier
+#                   version sampled every thirteenth byte of the whole region and
+#                   measured 47 minutes on a shared runner, which is not a push-time
+#                   check; the decision is where every layer of this crate lives, and the
+#                   residual elsewhere is a nightly number rather than a per-push one.
+#
+# An earlier estimate of half an hour for the `nop` sweep was really the per-patch
+# *timeout* being hit by branches whose NOP turns a loop into a spin, and a five-second
+# timeout fixed that.
 #
 # What this is still not: a fault model. A real glitch can hit a register or a bus
 # rather than the instruction stream, can be timed relative to the data it is meant to
@@ -168,6 +175,20 @@ for line in syms.splitlines():
 if not ranges:
     sys.exit("FAIL: no decrypt or accept_or_reject symbols -- was the binary stripped?")
 
+# `--quick` sweeps the *decision function* only, and every byte of it. The entry points
+# around it are ~19 KB of region in the three configurations, and sweeping even a
+# thirteenth of that on every push measured 47 minutes on a shared runner -- for a
+# sample that asserts nothing the full sweep does not. What the push-time check is for is
+# the decision, which is 18-25 bytes per configuration and where every layer this crate
+# has is implemented; the residual elsewhere is a nightly measurement with a written-down
+# number. So quick mode keeps stride 1 and narrows the ranges instead of coarsening the
+# sample, which also means its opt-out control *can* be asserted (the whole decision is
+# swept either way).
+if quick:
+    ranges = [r for r in ranges if "accept_or_reject" in r[2]]
+    if not ranges:
+        sys.exit("FAIL: no accept_or_reject symbol to sweep in quick mode")
+
 # Which symbol each swept byte belongs to, so an accepting fault can be attributed:
 # "the decision itself" and "the entry point around it" are different findings, and the
 # counts across configurations are only comparable per symbol (`ultra`'s `decrypt` and
@@ -209,12 +230,7 @@ for addr, size, _name in ranges:
 if checked == 0:
     sys.exit("FAIL: no instruction from the swept ranges could be cross-checked")
 total = sum(s for _, s, _ in covered)
-# `--quick` samples every thirteenth byte rather than every seventh: the sweep now covers
-# three configurations, and the largest of them (`ultra`) is bigger than the other two
-# together, so the coarse stride is what keeps the per-push cost near what it was. The
-# full sweeps (stride 1) are the ones that assert anything -- quick mode's own note says so
-# -- and they run in the `wide` job and locally.
-stride = 13 if quick else 1
+stride = 1
 
 def run():
     r = subprocess.run([binpath], capture_output=True, text=True, timeout=5)  # a NOPed
@@ -359,7 +375,7 @@ if [ "$hardened_d" -ne 0 ] || [ "$ultra_d" -ne 0 ]; then
   echo "      accepts. See \$WORK/*.accepted_decision for the bytes." >&2
   ok=0
 fi
-if [ "$MODEL" = "bits" ] && [ -z "$quick" ] && [ "$default_d" -eq 0 ]; then
+if [ "$MODEL" = "bits" ] && [ "$default_d" -eq 0 ]; then
   echo "FAIL: the opt-out build has no accepting bit-flip inside the decision, so this" >&2
   echo "      sweep is not reaching the decision function and the rows above mean nothing." >&2
   echo "      Flipping the opcode bit of its single 'je' is supposed to fall through into" >&2
@@ -377,7 +393,7 @@ printf '                      %-22s %6s total, %4s inside the decision\n' \
 echo "                      (the decision is what the layers are for: zero there in the"
 echo "                       hardened and ultra builds)"
 if [ -n "$quick" ]; then
-  echo "                      quick mode samples every ${stride:-thirteenth} byte, so the"
-  echo "                      opt-out control is only asserted by the full sweep (and only"
-  echo "                      in the bit-flip model -- see the comment above)."
+  echo "                      quick mode sweeps the decision function only (every byte,"
+  echo "                      both models, all three configurations); the entry points"
+  echo "                      around it are the full sweep's region."
 fi

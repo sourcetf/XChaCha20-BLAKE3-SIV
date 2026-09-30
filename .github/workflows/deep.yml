@@ -383,17 +383,18 @@ jobs:
         run: ./tools/mutation_check.sh
 
       # The instruction-level scan is what turns "one skipped instruction accepts a
-      # forgery" from a claim into a measurement, and it is cheap enough in `--quick`
-      # mode (every thirteenth byte, all three builds, sharded across the runner's cores)
-      # to run on every push. The full sweep is in the scheduled `wide` job; a version
-      # of this that ran only weekly was promised as "branches on every push" and was
-      # not.
+      # forgery" from a claim into a measurement. `--quick` sweeps every byte of the
+      # decision function in all three configurations, both fault models -- about a
+      # minute on a runner, which is what makes it a push-time check. The *whole*
+      # region (the two entry points as well, ~19 KB) is the measurement in the README's
+      # table and belongs to the scheduled `wide` job: a sampled version of it here was
+      # measured at 47 minutes a push. A version of this that ran only weekly was
+      # promised as "branches on every push" and was not.
       #
-      # Three configurations now: the opt-out build, `hardened`, and `ultra` -- the last
-      # of which is both the largest (the witness implementation is swept with the
-      # decision, because its symbols are under `decrypt`) and the one that reaches zero
-      # accepting faults, since the accepting sites in the other two live in the shared
-      # KDF/MAC/SIMD code that the witness does not share.
+      # Three configurations: the opt-out build, `hardened`, and `ultra`. The opt-out
+      # row is the control (its single `test`/`je` pair is one flipped bit from falling
+      # through into the accept store) and the other two must be zero inside the
+      # decision, which is what the tool gates on.
       - name: instruction-level faults, quick sweep (neutralised byte)
         run: ./tools/fi_instruction.sh --quick
 
