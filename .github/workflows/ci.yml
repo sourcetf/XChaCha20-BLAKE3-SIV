@@ -329,20 +329,31 @@ jobs:
       - name: build ${{ matrix.target }} test binaries
         run: |
           set -euo pipefail
-          # Two details, both of which made this step fail on every target from the commit
+          # Three details, all of which made this step fail on every target from the commit
           # that introduced the parse until this one -- while `verify.sh`'s copy of the same
           # code worked locally, which is why it took a failing CI run to find:
           #
           #   * `2>&1`, because cargo writes "*Executable*" to **stderr** (only the test
           #     binaries' own output goes to stdout), so `| tee build.log` captured an empty
-          #     file and the `sed` matched nothing. Locally the pipeline had `2>&1` already.
+          #     file. Locally the pipeline had the redirect already.
           #   * `CARGO_TERM_COLOR=never`, because the workflow sets `always` at the top
           #     level and cargo then colours those same lines even through a pipe.
+          #   * the `sed` expression itself: this file carried `\\(` and `\\1`, which reach
+          #     `sed` as an escaped backslash -- a *literal* backslash in the pattern, which
+          #     the line never contains. `verify.sh` has the single-backslash form and works.
+          #
+          # The `grep -q` below is the guard that would have caught all three: a parse that
+          # matches nothing is not the same as a build that produced nothing, and "count > 0"
+          # accepts any non-empty parse, including a wrong one.
           CARGO_TERM_COLOR=never cargo test --target ${{ matrix.target }} --release \
             --no-run --features ultra,pure 2>&1 | tee build.log
-          sed -n 's/^ *Executable .*(\\(.*\\))$/\\1/p' build.log > executables.txt
+          sed -n 's/^ *Executable .*(\(.*\))$/\1/p' build.log > executables.txt
           count="$(grep -c . executables.txt || true)"
           [ "$count" -gt 0 ] || { echo "cargo reported no executables" >&2; exit 1; }
+          grep -q 'xchacha20_blake3_siv-' executables.txt \
+            || { echo "the parse did not find the library test binary -- check the sed" >&2; exit 1; }
+          grep -q 'differential_reference-' executables.txt \
+            || { echo "the parse did not find the differential binary -- check the sed" >&2; exit 1; }
           echo "built $count test binaries"
           cat executables.txt
 
