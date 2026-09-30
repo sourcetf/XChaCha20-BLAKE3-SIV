@@ -14,8 +14,9 @@
 # project does not depend on; `cargo check --target aarch64-unknown-linux-gnu`
 # still works for type-checking because it never links.
 #
-# Run the aarch64 test suite with `./verify.sh --aarch64-exec`
-# (or `--all` to include Kani as well).
+# Run the aarch64 test suite with `./verify.sh --cross-exec` (the older spelling,
+# `--aarch64-exec`, is an alias), or `./verify.sh --deep` for every switch -- which is
+# the same set as `--all`.
 
 [target.aarch64-unknown-linux-musl]
 linker = "rust-lld"
