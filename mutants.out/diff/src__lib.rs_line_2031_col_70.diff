@@ -1,0 +1,21 @@
+--- src/lib.rs
++++ replace & with ^ in decrypt
+@@ -2023,17 +2023,17 @@
+         // `true` in every other configuration -- is folded in *here*, on the one line
+         // that is compiled in all of them, rather than as a `#[cfg]`-selected copy of the
+         // gate below. `cargo mutants` does not evaluate `cfg`: a copy that is not compiled
+         // in a given run reads there as an uncaught mutant, and the `&`s it contains are
+         // then either reported as gaps that are not gaps or (worse) lose their coverage
+         // silently. Measured when this was three arms: six MISSED mutants.
+         let gate_pair = second_gate_comparison(&computed_tag_copy, &tag_copy) & witness_ok;
+         #[cfg(feature = "dual-mac")]
+-        let second = gate_pair & recomputed_tag.ct_eq(&computed_tag) & recomputed_tag.ct_eq(tag);
++        let second = gate_pair & recomputed_tag.ct_eq(&computed_tag) ^ /* ~ changed by cargo-mutants ~ */ recomputed_tag.ct_eq(tag);
+         #[cfg(not(feature = "dual-mac"))]
+         let second = gate_pair;
+ 
+         // The copies are secret-derived (they are the computed MAC), so they are
+         // wiped like every other copy in this function rather than left in the
+         // frame of the `hardened` build.
+         zeroize_array(&mut computed_tag_copy);
+         zeroize_array(&mut tag_copy);

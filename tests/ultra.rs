@@ -75,24 +75,28 @@ fn dual_mac_is_wired_into_both_decrypt_paths() {
         2,
         "both decrypt paths must recompute the tag independently"
     );
-    // Four, not two: the comparison appears in the shared `gate_pair` arm *and* in the
-    // `dual-mac`-without-witness arm, and exactly one of those is compiled -- so this is
-    // "once per entry point, per configuration", read off the source text.
+    // Two, and the count is exact rather than "at least": one comparison of each kind per
+    // entry point, on the single `second` line that every configuration compiles. It was
+    // four when `ultra` had an arm of its own for this expression, which is the shape the
+    // comment in the gate explains was removed.
     assert_eq!(
         body.matches("recomputed_tag.ct_eq(&computed_tag)").count(),
-        4,
-        "the recomputation must be compared against the stored value"
+        2,
+        "the recomputation must be compared against the stored value, once per entry point"
     );
     assert_eq!(
         body.matches("recomputed_tag.ct_eq(tag)").count(),
-        4,
+        2,
         "and against the received tag, which is what catches a rewritten stored value"
     );
     // Under `ultra` the independent *implementation* joins the same gate: the stored tag
     // agreeing with the received one is not enough if both came from a rewritten
-    // computation, so the witness's own answer is required too.
+    // computation, so the witness's own answer is required too. It is folded into
+    // `gate_pair` -- the line every configuration compiles -- rather than into a
+    // `#[cfg]`-selected arm, so `cargo mutants` sees it in every run.
     assert_eq!(
-        body.matches("& witness_ok;").count(),
+        body.matches("second_gate_comparison(&computed_tag_copy, &tag_copy) & witness_ok")
+            .count(),
         2,
         "`ultra`'s witness agreement must be ANDed into the second gate of both entry points"
     );

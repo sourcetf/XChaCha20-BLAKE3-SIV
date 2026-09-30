@@ -237,10 +237,12 @@ fn the_hardened_second_gate_is_recomputed() {
         // The second gate is bound once *per configuration*, from a shared `gate_pair`: the
         // arms are `#[cfg]`-selected, so exactly one of them is compiled. Two bindings with no
         // cfg between them would be two gates over one value, which is the shape this replaced.
-        // `ultra` adds a third arm, because its witness agreement joins the same gate.
+        // `ultra`'s witness agreement is deliberately *not* a third arm: it is folded into
+        // `gate_pair` on the one line every configuration compiles, because `cargo mutants`
+        // does not evaluate `cfg` and an arm that is not compiled in a given run reads there
+        // as an uncaught mutant (measured: six).
         for arm in [
-            "#[cfg(all(feature = \"dual-mac\", feature = \"ultra\"))]",
-            "#[cfg(all(feature = \"dual-mac\", not(feature = \"ultra\")))]",
+            "#[cfg(feature = \"dual-mac\")]",
             "#[cfg(not(feature = \"dual-mac\"))]",
         ] {
             assert!(
@@ -251,7 +253,7 @@ fn the_hardened_second_gate_is_recomputed() {
         }
         assert_eq!(
             block.matches("let second =").count(),
-            3,
+            2,
             "one `second` binding per arm, and no arm without one:\n{block}"
         );
         assert!(
@@ -425,10 +427,15 @@ fn the_decision_outcome_is_fail_closed() {
     // rejection path of its own — both are asserted, because the whole point of the feature is
     // that the agreement is *required* rather than consulted.
     let non_test = &LIB[..LIB.find("mod tests {").expect("test module")];
+    // Four bindings: the witness agreement itself under `ultra`, and the constant `true`
+    // that the other configurations bind instead, in each of the two entry points. The
+    // constant is what keeps the gate a single expression rather than one arm per
+    // configuration (see the comment in the gate).
     assert_eq!(
         non_test.matches("let witness_ok: subtle::Choice").count(),
-        2,
-        "each decrypt entry point must compute the witness agreement"
+        4,
+        "two entry points, each binding the witness agreement and the constant that \
+         replaces it when `ultra` is off"
     );
     assert_eq!(
         non_test.matches("& witness_ok").count(),

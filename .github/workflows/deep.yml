@@ -350,12 +350,15 @@ jobs:
       #
       # One run, with the feature set that compiles the *most* of the decision, because
       # `cargo mutants` does not evaluate `cfg`: a mutant inside a cfg'd-out block is
-      # built, tested, passes, and is reported as uncaught. `hardened,dual-mac` is that
-      # set -- the second gate and the independent recomputation both contain lines the
-      # default build never compiles -- and a run without them reports their mutants as
-      # gaps that are not gaps. This was measured both ways: with `hardened` alone, four
-      # `&` -> `^` mutants on the `dual-mac` line came back MISSED; with the pair, 13 of
-      # 15 are caught and the rest are unviable.
+      # built, tested, passes, and is reported as uncaught. That set is `ultra`, which
+      # implies `hardened` and `dual-mac` and adds the witness -- so one run covers the
+      # second gate, the independent recomputation and the independent *implementation*.
+      # Measured both ways: with `hardened,dual-mac` (before the witness existed) four
+      # `&` -> `^` mutants on the `dual-mac` line were MISSED; with `ultra`, eight more
+      # came back MISSED from the ultra-only lines, and the gate was then restructured so
+      # that every operator in the decision is on a line *every* configuration compiles
+      # (`witness_ok` is bound as a constant `true` when the feature is off, rather than
+      # being a `#[cfg]`-selected copy of the expression).
       # The filter names the decision function explicitly: it used to be
       # `decrypt|passed_gates`, and when the decision moved into `accept_or_reject`
       # that filter kept matching the two entry points and silently stopped covering
@@ -370,7 +373,7 @@ jobs:
       - name: mutation run over the decision
         run: |
           set -euo pipefail
-          cargo mutants --features hardened,dual-mac -f src/lib.rs \
+          cargo mutants --features ultra -f src/lib.rs \
             -F 'decrypt|accept_or_reject' -E 'replace & with \|' \
             -- --test decision --test security
 

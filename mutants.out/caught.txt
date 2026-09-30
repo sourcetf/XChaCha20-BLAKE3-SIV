@@ -1,13 +1,15 @@
-src/lib.rs:1468:5: replace accept_or_reject with ()
-src/lib.rs:1553:45: replace & with ^ in decrypt
-src/lib.rs:1563:60: replace & with ^ in decrypt
-src/lib.rs:1569:70: replace & with ^ in decrypt
-src/lib.rs:1569:32: replace & with ^ in decrypt
-src/lib.rs:1663:25: replace > with == in decrypt_bounded
-src/lib.rs:1663:25: replace > with < in decrypt_bounded
-src/lib.rs:1663:25: replace > with >= in decrypt_bounded
-src/lib.rs:1680:5: replace decrypt_in_place_detached -> Result<(), Error> with Ok(())
-src/lib.rs:1697:45: replace & with ^ in decrypt_in_place_detached
-src/lib.rs:1707:60: replace & with ^ in decrypt_in_place_detached
-src/lib.rs:1713:70: replace & with ^ in decrypt_in_place_detached
-src/lib.rs:1713:32: replace & with ^ in decrypt_in_place_detached
+src/lib.rs:1879:5: replace accept_or_reject with ()
+src/lib.rs:1975:13: replace & with ^ in decrypt
+src/lib.rs:2007:45: replace & with ^ in decrypt
+src/lib.rs:2029:79: replace & with ^ in decrypt
+src/lib.rs:2031:70: replace & with ^ in decrypt
+src/lib.rs:2031:32: replace & with ^ in decrypt
+src/lib.rs:2128:25: replace > with == in decrypt_bounded
+src/lib.rs:2128:25: replace > with < in decrypt_bounded
+src/lib.rs:2128:25: replace > with >= in decrypt_bounded
+src/lib.rs:2145:5: replace decrypt_in_place_detached -> Result<(), Error> with Ok(())
+src/lib.rs:2189:54: replace & with ^ in decrypt_in_place_detached
+src/lib.rs:2207:45: replace & with ^ in decrypt_in_place_detached
+src/lib.rs:2229:79: replace & with ^ in decrypt_in_place_detached
+src/lib.rs:2231:70: replace & with ^ in decrypt_in_place_detached
+src/lib.rs:2231:32: replace & with ^ in decrypt_in_place_detached

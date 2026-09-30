@@ -1961,6 +1961,12 @@ pub fn decrypt(
     // — seven memcheck reports against this crate, caught by `tools/ctgrind.sh --features
     // ultra`. Riding the gate keeps one branch site, keeps it fail-closed, and keeps it
     // audited.
+    //
+    // Without the feature, `witness_ok` is a constant *true* so that the gate below is one
+    // expression in every build rather than a `#[cfg]`-selected copy per configuration:
+    // `cargo mutants` does not evaluate `cfg`, so a copy that is compiled out in a given run
+    // reads there as an uncaught mutant (measured: six `&` -> `^` mutants came back MISSED
+    // when these were two arms).
     #[cfg(feature = "ultra")]
     let witness_ok: subtle::Choice = {
         let witness_tag =
@@ -1970,6 +1976,12 @@ pub fn decrypt(
         zeroize_slice(&mut witness_plaintext);
         agree
     };
+    // The gate's extra operand when `ultra` is off: `Choice::from(1)` is "true", so the
+    // `&` it feeds is a no-op the optimizer folds away. Gated on `hardened` as well,
+    // because that is what compiles the gate that reads it -- without the gate there is
+    // nothing to fold and the binding would be an unused-variable warning.
+    #[cfg(all(not(feature = "ultra"), feature = "hardened"))]
+    let witness_ok: subtle::Choice = subtle::Choice::from(1);
     // `ultra`/`dual-mac`: recompute the tag *independently* and require the
     // recomputation to agree with both the stored value and the received tag. The two
     // gates above compare the same two values, so a fault that sets the stored tag to
@@ -2002,18 +2014,20 @@ pub fn decrypt(
         // SAFETY: as above, for the caller's reference: `tag` is a live `&[u8;
         // TAG_LEN]` and this only reads through it, so aliasing rules hold.
         let mut tag_copy = unsafe { core::ptr::read_volatile(tag) };
-        let gate_pair = second_gate_comparison(&computed_tag_copy, &tag_copy);
         // The independent recomputation joins the second gate: it must match the
         // stored value *and* the received tag, so a fault that corrupted the stored
         // value (or a silently rewritten constant) is caught here even though both
-        // gate expressions read the same memory. Under `ultra` the witness agreement
-        // joins the same gate, so the decision still has exactly two branch sites.
-        #[cfg(all(feature = "dual-mac", feature = "ultra"))]
-        let second = gate_pair
-            & recomputed_tag.ct_eq(&computed_tag)
-            & recomputed_tag.ct_eq(tag)
-            & witness_ok;
-        #[cfg(all(feature = "dual-mac", not(feature = "ultra")))]
+        // gate expressions read the same memory.
+        //
+        // `witness_ok` -- `ultra`'s independent-implementation agreement, a constant
+        // `true` in every other configuration -- is folded in *here*, on the one line
+        // that is compiled in all of them, rather than as a `#[cfg]`-selected copy of the
+        // gate below. `cargo mutants` does not evaluate `cfg`: a copy that is not compiled
+        // in a given run reads there as an uncaught mutant, and the `&`s it contains are
+        // then either reported as gaps that are not gaps or (worse) lose their coverage
+        // silently. Measured when this was three arms: six MISSED mutants.
+        let gate_pair = second_gate_comparison(&computed_tag_copy, &tag_copy) & witness_ok;
+        #[cfg(feature = "dual-mac")]
         let second = gate_pair & recomputed_tag.ct_eq(&computed_tag) & recomputed_tag.ct_eq(tag);
         #[cfg(not(feature = "dual-mac"))]
         let second = gate_pair;
@@ -2177,6 +2191,10 @@ pub fn decrypt_in_place_detached(
         zeroize_slice(&mut witness_ciphertext);
         agree
     };
+    // Constant `true` when `ultra` is off, so the gate below stays one expression; see the
+    // matching binding in `decrypt` for the reasoning (cargo-mutants does not read `cfg`).
+    #[cfg(all(not(feature = "ultra"), feature = "hardened"))]
+    let witness_ok: subtle::Choice = subtle::Choice::from(1);
     // `ultra`/`dual-mac`, as in `decrypt`: an independent recomputation that must agree
     // with both the stored value and the received tag.
     #[cfg(feature = "dual-mac")]
@@ -2196,18 +2214,20 @@ pub fn decrypt_in_place_detached(
         // SAFETY: as above, for the caller's reference: `tag` is a live `&[u8;
         // TAG_LEN]` and this only reads through it, so aliasing rules hold.
         let mut tag_copy = unsafe { core::ptr::read_volatile(tag) };
-        let gate_pair = second_gate_comparison(&computed_tag_copy, &tag_copy);
         // The independent recomputation joins the second gate: it must match the
         // stored value *and* the received tag, so a fault that corrupted the stored
         // value (or a silently rewritten constant) is caught here even though both
-        // gate expressions read the same memory. Under `ultra` the witness agreement
-        // joins the same gate, so the decision still has exactly two branch sites.
-        #[cfg(all(feature = "dual-mac", feature = "ultra"))]
-        let second = gate_pair
-            & recomputed_tag.ct_eq(&computed_tag)
-            & recomputed_tag.ct_eq(tag)
-            & witness_ok;
-        #[cfg(all(feature = "dual-mac", not(feature = "ultra")))]
+        // gate expressions read the same memory.
+        //
+        // `witness_ok` -- `ultra`'s independent-implementation agreement, a constant
+        // `true` in every other configuration -- is folded in *here*, on the one line
+        // that is compiled in all of them, rather than as a `#[cfg]`-selected copy of the
+        // gate below. `cargo mutants` does not evaluate `cfg`: a copy that is not compiled
+        // in a given run reads there as an uncaught mutant, and the `&`s it contains are
+        // then either reported as gaps that are not gaps or (worse) lose their coverage
+        // silently. Measured when this was three arms: six MISSED mutants.
+        let gate_pair = second_gate_comparison(&computed_tag_copy, &tag_copy) & witness_ok;
+        #[cfg(feature = "dual-mac")]
         let second = gate_pair & recomputed_tag.ct_eq(&computed_tag) & recomputed_tag.ct_eq(tag);
         #[cfg(not(feature = "dual-mac"))]
         let second = gate_pair;

@@ -168,8 +168,21 @@ than asserted, because a gate that fails upstream is a gate someone deletes.
   what the entries below have in common. Each of them found something the default run
   could not: `ctgrind` found the encrypt-side branch above; `fi_instruction` found that the
   extra code the witness adds to the two entry points changes the fault numbers and forced
-  the criterion to be scoped to the decision; `cache_profile` had never run `decrypt` at
-  all; the cross-architecture suite had never compiled the witness.
+  the criterion to be scoped to the decision; `cargo mutants` found eight mutants that no
+  single feature set could compile, which restructured the gate; `cache_profile` had never
+  run `decrypt` at all; the cross-architecture suite had never compiled the witness.
+- **The gate is now one expression per configuration, with the configuration a *value*.**
+  `witness_ok` is the witness agreement under `ultra` and a constant `true` otherwise, and
+  it is folded into the `gate_pair` line that every configuration compiles, rather than
+  into a `#[cfg]`-selected third arm of `second`. The reason is `cargo mutants`, which does
+  not evaluate `cfg`: with the old three-arm shape its CI run reported eight `&` → `^`
+  mutants as MISSED — not gaps in the tests, but lines that were not compiled in the
+  configuration under test, and no single run can compile both an arm and its alternatives.
+  The mutation run is now `--features ultra` (the set that compiles the most: it implies
+  `hardened` and `dual-mac` and adds the witness), and it reports **17 mutants, 15 caught,
+  2 unviable, 0 missed** — where the previous shape reported 21 mutants with 8 missed. The
+  semantics are unchanged: with `ultra` off the extra operand is `true`, and with `ultra` on
+  the arm that had it is the one compiled.
 - `tools/ctgrind.sh` now runs in three configurations — default, `--no-default-features`,
   and `--features ultra` — in `deep.yml` and locally. The third is what reported the
   encrypt-side cross-check, and the witness's own code is covered by it too (clean: its
@@ -181,7 +194,7 @@ than asserted, because a gate that fails upstream is a gate someone deletes.
   an extra gate operand, a ciphertext copy), so a longer swept region collects more
   accepting bytes even when every one of them is outside the decision. Measured, full local
   sweep of the final revision, as `(total, inside the decision)`: opt-out `2, 0` (nop) and
-  `117, 3` (bits); `hardened` `0, 0` and `1, 0`; `ultra` `0, 0` and `5, 0`. The property
+  `117, 3` (bits); `hardened` `0, 0` and `1, 0`; `ultra` `0, 0` and `4, 0`. The property
   that is comparable — and the one the three configurations are about — is the decision:
   **zero accepting faults inside `accept_or_reject` for `hardened` and `ultra` in both
   models**, against three in the opt-out build's bit-flip model, which is also the control

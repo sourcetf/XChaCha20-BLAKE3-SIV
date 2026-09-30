@@ -232,7 +232,7 @@ something — it must *fail* when the second gate is replaced by a copy of the f
 | A fault that corrupts one decision *value* | **defended** — the two gates write two independent slots and the caller rejects if either says so; one corrupted slot leaves the other. `tools/fi_check.sh`'s `one-check-neutralised` row is this attack, and it is rejected |
 | Single fault on the decision (a skipped branch, or a corrupted gate *value*) | **defended** — `tools/fi_check.sh` runs this as a campaign row on the hardened build |
 | A single corrupted byte or bit **inside the decision function** | **defended, and measured**: `tools/fi_instruction.sh` sweeps every byte of the compiled `accept_or_reject` — both fault models, three configurations — and attributes each accepting fault to the symbol it sits in. Accepting faults inside the decision: **0 in the `hardened` build and 0 in `ultra`, in both models**. The opt-out build has **3** in the bit-flip model, which is the control that the sweep reaches the decision at all: its single `test`/`je` pair is one flipped bit away from falling through into the accept store, and that is precisely the defect the second gate removes |
-| A single corrupted byte or bit **anywhere in the swept code** (the two entry points and the decision) | **measured, and not zero — the mechanism is not the gate**: last full local sweep, `(total, inside the decision)` — opt-out `2, 0` (nop) and `117, 3` (bits); `hardened` `0, 0` and `1, 0`; `ultra` `0, 0` and `5, 0`. The accepting sites outside the decision are in the shared KDF/MAC/SIMD code, and several are the middle byte of a multi-byte instruction, where corruption desynchronises the decoder and the following bytes execute as different instructions — no source structure prevents that. **The raw totals are not comparable across configurations**, and an earlier revision of this table compared them as if they were: `ultra`'s entry points contain more code than `hardened`'s (the witness call, an extra gate operand, a ciphertext copy), so a longer region naturally collects more accepting bytes even when every one of them is outside the decision. What is comparable is the decision-scoped count, which is why that is what the tool gates on. For scale, the same technique over RustCrypto's `XChaCha20Poly1305` measures 13 of 1081 (nop) and 106 of 8648 (bits) — on a *different region*, its whole tag-verification function rather than a decision helper of 18–25 bytes, so the two are not like-for-like either |
+| A single corrupted byte or bit **anywhere in the swept code** (the two entry points and the decision) | **measured, and not zero — the mechanism is not the gate**: last full local sweep, `(total, inside the decision)` — opt-out `2, 0` (nop) and `117, 3` (bits); `hardened` `0, 0` and `1, 0`; `ultra` `0, 0` and `4, 0`. The accepting sites outside the decision are in the shared KDF/MAC/SIMD code, and several are the middle byte of a multi-byte instruction, where corruption desynchronises the decoder and the following bytes execute as different instructions — no source structure prevents that. **The raw totals are not comparable across configurations**, and an earlier revision of this table compared them as if they were: `ultra`'s entry points contain more code than `hardened`'s (the witness call, an extra gate operand, a ciphertext copy), so a longer region naturally collects more accepting bytes even when every one of them is outside the decision. What is comparable is the decision-scoped count, which is why that is what the tool gates on. For scale, the same technique over RustCrypto's `XChaCha20Poly1305` measures 13 of 1081 (nop) and 106 of 8648 (bits) — on a *different region*, its whole tag-verification function rather than a decision helper of 18–25 bytes, so the two are not like-for-like either |
 | A fault inside the constant-time comparison itself (a shortened loop, a corrupted bound) | **not defended by `hardened`, closed by `ultra`**: with only `hardened`, both gates — and both of `dual-mac`'s recomputations, when it is on — go through the same `subtle` loop, so one fault shortening it disarms every gate at once and a forgery costs `2^(8 * compared bytes)` instead of `2^520`.  **Hand-modelled, not by a committed tool**: no script in `tools/` shortens that loop — the campaign's faults are source-level changes of other kinds (`tools/mutation_check.sh` plants a `==` where `ct_eq` was, which is not a shortened loop) and `tools/fi_instruction.sh` sweeps the compiled bytes uniformly rather than aiming at a loop bound — so both counts in this row came from cutting the comparison down by hand in a throwaway copy.  Hand-measured against that fault: an accept after **2,573 attempts** with the comparison cut to two bytes.  Under `dual-mac`/`ultra` the second gate also `AND`s in `ct_eq_independent`, a differently *written* comparison, and the same hand-made fault then yields **no forgery in 2,000,000 attempts**.  Two faults still defeat both, which is the boundary this row states rather than hides |
 | A fault that replaces the computed tag with a constant, or with the received tag | **not defended by `hardened`, closed by `ultra`/`dual-mac`**: with only `hardened` this is the strongest fault model in the table and it defeats the two gates *together* — either gate is `computed_tag ? tag`, so forcing `computed_tag` to equal `tag` satisfies both at once, and two gates over one value are one gate for this attack, not two witnesses. That half is pinned rather than hidden: `tools/fi_check.sh`'s `computed-tag-replaced` row applies exactly this fault to the hardened build and requires it to be accepted, so a change in either direction is noticed. `dual-mac`, part of `ultra`, closes it by doing the thing an earlier revision of this row said was not done here: computing the tag *twice, independently* — a second MAC pass, and the tag pass is a large part of a short message — and requiring the recomputation to agree with the stored value **and** with the received tag (`recomputed_tag.ct_eq(&computed_tag) & recomputed_tag.ct_eq(tag)`, in both decrypt entry points). A rewritten stored tag then disagrees with the recomputation, and `tools/fi_check.sh`'s `dual-mac-blocks-tag-substitution` row runs that same source fault on the `ultra` build and is rejected there. The residual is the rest of this row's boundary: two faults, one in each derivation, or one aimed at the arithmetic both derivations share (`derive_tag` and the keyed BLAKE3 under it), still defeat it — that is a synchronized two-glitch bench or precision injection, and the answer for a deployment that faces it is a hardware countermeasure — dual-rail logic, an HSM — rather than software |
 | Two independent faults | not defended — this is where the attacker's cost moves to a synchronized two-glitch bench |
@@ -242,22 +242,30 @@ something — it must *fail* when the second gate is replaced by a copy of the f
 | Availability (any single glitch causes a rejection or a crash) | not defended, by anything |
 
 A bounded mutation run over the decision (`cargo mutants -f src/lib.rs -F
-'decrypt|accept_or_reject' --features hardened -- --test decision --test security`, in
-CI) tests the other half of that: every mutant of the decision and of its
-caller-visible limits must be caught, by the decision detector and by the security
-suite. The `&` → `|` mutants in the two-comparison expression are excluded as
-**equivalent under fault-free testing**, and that exclusion is itself informative: the
-two comparisons inside a gate always agree, because they compare the same two arrays,
-so `x | x == x & x`. The exclusion is deliberately *only* `|`: an earlier version also
-excluded `&` → `^`, and since `x ^ x == 0` that mutant makes the gate reject
-everything, which the decision test kills — so the exclusion discarded killable
-mutants and the reason given for it was wrong for half of them. The case where a
-gate's two comparisons *disagree* cannot be reached by any fault-free test, which is
-why it is a row of the fault campaign instead. The run uses `--features hardened,dual-mac`
-on purpose: it is the set that compiles the *most* of the decision, and `cargo mutants`
-does not evaluate `cfg`, so a mutant of a cfg'd-out line is built, tested, passes, and
-reported as uncaught — measured: four such mutants with `hardened` alone, none with the
-pair (13 of 15 caught, 2 unviable).
+'decrypt|accept_or_reject' --features ultra -- --test decision --test security`, in CI)
+tests the other half of that: every mutant of the decision and of its caller-visible
+limits must be caught, by the decision detector and by the security suite. The `&` → `|`
+mutants in the two-comparison expression are excluded as **equivalent under fault-free
+testing**, and that exclusion is itself informative: the two comparisons inside a gate
+always agree, because they compare the same two arrays, so `x | x == x & x`. The
+exclusion is deliberately *only* `|`: an earlier version also excluded `&` → `^`, and
+since `x ^ x == 0` that mutant makes the gate reject everything, which the decision test
+kills — so the exclusion discarded killable mutants and the reason given for it was wrong
+for half of them. The case where a gate's two comparisons *disagree* cannot be reached by
+any fault-free test, which is why it is a row of the fault campaign instead.
+
+The feature set is `ultra`, because that is what compiles the *most* of the decision:
+`cargo mutants` does not evaluate `cfg`, so a mutant of a cfg'd-out line is built,
+tested, passes, and reported as uncaught. Two rounds of that measurement shaped the code
+rather than the run. First, with `hardened` alone, four `&` → `^` mutants on the
+`dual-mac` line came back MISSED — hence `hardened,dual-mac`. Then, with the witness
+added, **eight more** did: `ultra`'s agreement and gate operand sat on `#[cfg]`-selected
+lines of their own, and no single run compiles both an arm and its alternatives. The fix
+was to make the configuration a *value* instead of an arm: `witness_ok` is the witness
+agreement under `ultra` and a constant `true` otherwise, bound in both cases and folded
+into the one `gate_pair` line every configuration compiles. There is now exactly one
+`second` expression per gate, and no operator left on a line that only one configuration
+compiles.
 
 The same question at the level of the *compiled* code: `tools/fi_instruction.sh` damages
 one byte — or one bit — of the decision's machine code at a time and re-runs the decision
@@ -319,7 +327,7 @@ xchacha20-blake3-siv = { version = "0.1", features = ["ultra"] }
 | `rng` | nothing about the cipher; it is how a caller gets a key at all | — |
 
 (§§) Last full sweep, bit-flip model, as `(total, inside the decision)`: the `hardened`
-build is `1, 0` and `ultra` is `5, 0`. The 5 are in `ultra`'s own entry points — which
+build is `1, 0` and `ultra` is `4, 0`. The 4 are in `ultra`'s own entry points — which
 hold more code than `hardened`'s, because the witness call, the extra gate operand and the
 ciphertext copy all live there — and they are the same class as the `hardened` build's 1:
 decoder desynchronisation, where corrupting one byte makes the following bytes execute as

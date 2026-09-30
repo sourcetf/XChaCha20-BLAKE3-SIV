@@ -8,7 +8,7 @@
       "phase_results": [
         {
           "phase": "Build",
-          "duration": 7.918174604,
+          "duration": 8.172601691,
           "process_status": "Success",
           "argv": [
             "/home/dev123/.rustup/toolchains/stable-x86_64-unknown-linux-gnu/bin/cargo",
@@ -16,19 +16,19 @@
             "--no-run",
             "--verbose",
             "--package=xchacha20-blake3-siv@0.1.0",
-            "--features=hardened"
+            "--features=hardened,dual-mac"
           ]
         },
         {
           "phase": "Test",
-          "duration": 2.455814679,
+          "duration": 2.656893827,
           "process_status": "Success",
           "argv": [
             "/home/dev123/.rustup/toolchains/stable-x86_64-unknown-linux-gnu/bin/cargo",
             "test",
             "--verbose",
             "--package=xchacha20-blake3-siv@0.1.0",
-            "--features=hardened",
+            "--features=hardened,dual-mac",
             "--test",
             "decision",
             "--test",
@@ -77,7 +77,7 @@
       "phase_results": [
         {
           "phase": "Build",
-          "duration": 0.552281986,
+          "duration": 0.602227425,
           "process_status": "Success",
           "argv": [
             "/home/dev123/.rustup/toolchains/stable-x86_64-unknown-linux-gnu/bin/cargo",
@@ -85,12 +85,12 @@
             "--no-run",
             "--verbose",
             "--package=xchacha20-blake3-siv@0.1.0",
-            "--features=hardened"
+            "--features=hardened,dual-mac"
           ]
         },
         {
           "phase": "Test",
-          "duration": 0.10113895,
+          "duration": 0.101307148,
           "process_status": {
             "Failure": 101
           },
@@ -99,7 +99,7 @@
             "test",
             "--verbose",
             "--package=xchacha20-blake3-siv@0.1.0",
-            "--features=hardened",
+            "--features=hardened,dual-mac",
             "--test",
             "decision",
             "--test",
@@ -148,7 +148,7 @@
       "phase_results": [
         {
           "phase": "Build",
-          "duration": 0.301565323,
+          "duration": 0.351735992,
           "process_status": {
             "Failure": 101
           },
@@ -158,7 +158,7 @@
             "--no-run",
             "--verbose",
             "--package=xchacha20-blake3-siv@0.1.0",
-            "--features=hardened"
+            "--features=hardened,dual-mac"
           ]
         }
       ]
@@ -203,7 +203,7 @@
       "phase_results": [
         {
           "phase": "Build",
-          "duration": 0.602158863,
+          "duration": 0.602356683,
           "process_status": "Success",
           "argv": [
             "/home/dev123/.rustup/toolchains/stable-x86_64-unknown-linux-gnu/bin/cargo",
@@ -211,12 +211,12 @@
             "--no-run",
             "--verbose",
             "--package=xchacha20-blake3-siv@0.1.0",
-            "--features=hardened"
+            "--features=hardened,dual-mac"
           ]
         },
         {
           "phase": "Test",
-          "duration": 0.101305755,
+          "duration": 0.101456936,
           "process_status": {
             "Failure": 101
           },
@@ -225,7 +225,7 @@
             "test",
             "--verbose",
             "--package=xchacha20-blake3-siv@0.1.0",
-            "--features=hardened",
+            "--features=hardened,dual-mac",
             "--test",
             "decision",
             "--test",
@@ -274,7 +274,7 @@
       "phase_results": [
         {
           "phase": "Build",
-          "duration": 0.452010308,
+          "duration": 0.50212813,
           "process_status": "Success",
           "argv": [
             "/home/dev123/.rustup/toolchains/stable-x86_64-unknown-linux-gnu/bin/cargo",
@@ -282,12 +282,12 @@
             "--no-run",
             "--verbose",
             "--package=xchacha20-blake3-siv@0.1.0",
-            "--features=hardened"
+            "--features=hardened,dual-mac"
           ]
         },
         {
           "phase": "Test",
-          "duration": 0.10153041,
+          "duration": 0.101132924,
           "process_status": {
             "Failure": 101
           },
@@ -296,7 +296,7 @@
             "test",
             "--verbose",
             "--package=xchacha20-blake3-siv@0.1.0",
-            "--features=hardened",
+            "--features=hardened,dual-mac",
             "--test",
             "decision",
             "--test",
@@ -339,13 +339,13 @@
           "genre": "BinaryOperator"
         }
       },
-      "summary": "MissedMutant",
+      "summary": "CaughtMutant",
       "log_path": "log/src__lib.rs_line_1569_col_70.log",
       "diff_path": "diff/src__lib.rs_line_1569_col_70.diff",
       "phase_results": [
         {
           "phase": "Build",
-          "duration": 0.552138182,
+          "duration": 0.501942068,
           "process_status": "Success",
           "argv": [
             "/home/dev123/.rustup/toolchains/stable-x86_64-unknown-linux-gnu/bin/cargo",
@@ -353,19 +353,21 @@
             "--no-run",
             "--verbose",
             "--package=xchacha20-blake3-siv@0.1.0",
-            "--features=hardened"
+            "--features=hardened,dual-mac"
           ]
         },
         {
           "phase": "Test",
-          "duration": 2.456796554,
-          "process_status": "Success",
+          "duration": 0.101195442,
+          "process_status": {
+            "Failure": 101
+          },
           "argv": [
             "/home/dev123/.rustup/toolchains/stable-x86_64-unknown-linux-gnu/bin/cargo",
             "test",
             "--verbose",
             "--package=xchacha20-blake3-siv@0.1.0",
-            "--features=hardened",
+            "--features=hardened,dual-mac",
             "--test",
             "decision",
             "--test",
@@ -408,13 +410,13 @@
           "genre": "BinaryOperator"
         }
       },
-      "summary": "MissedMutant",
+      "summary": "CaughtMutant",
       "log_path": "log/src__lib.rs_line_1569_col_32.log",
       "diff_path": "diff/src__lib.rs_line_1569_col_32.diff",
       "phase_results": [
         {
           "phase": "Build",
-          "duration": 0.451891672,
+          "duration": 0.551900856,
           "process_status": "Success",
           "argv": [
             "/home/dev123/.rustup/toolchains/stable-x86_64-unknown-linux-gnu/bin/cargo",
@@ -422,19 +424,21 @@
             "--no-run",
             "--verbose",
             "--package=xchacha20-blake3-siv@0.1.0",
-            "--features=hardened"
+            "--features=hardened,dual-mac"
           ]
         },
         {
           "phase": "Test",
-          "duration": 2.456371791,
-          "process_status": "Success",
+          "duration": 0.101167739,
+          "process_status": {
+            "Failure": 101
+          },
           "argv": [
             "/home/dev123/.rustup/toolchains/stable-x86_64-unknown-linux-gnu/bin/cargo",
             "test",
             "--verbose",
             "--package=xchacha20-blake3-siv@0.1.0",
-            "--features=hardened",
+            "--features=hardened,dual-mac",
             "--test",
             "decision",
             "--test",
@@ -483,7 +487,7 @@
       "phase_results": [
         {
           "phase": "Build",
-          "duration": 0.301714588,
+          "duration": 0.301555676,
           "process_status": {
             "Failure": 101
           },
@@ -493,7 +497,7 @@
             "--no-run",
             "--verbose",
             "--package=xchacha20-blake3-siv@0.1.0",
-            "--features=hardened"
+            "--features=hardened,dual-mac"
           ]
         }
       ]
@@ -538,7 +542,7 @@
       "phase_results": [
         {
           "phase": "Build",
-          "duration": 0.552016476,
+          "duration": 0.501800801,
           "process_status": "Success",
           "argv": [
             "/home/dev123/.rustup/toolchains/stable-x86_64-unknown-linux-gnu/bin/cargo",
@@ -546,12 +550,12 @@
             "--no-run",
             "--verbose",
             "--package=xchacha20-blake3-siv@0.1.0",
-            "--features=hardened"
+            "--features=hardened,dual-mac"
           ]
         },
         {
           "phase": "Test",
-          "duration": 2.306140083,
+          "duration": 2.506644593,
           "process_status": {
             "Failure": 101
           },
@@ -560,7 +564,7 @@
             "test",
             "--verbose",
             "--package=xchacha20-blake3-siv@0.1.0",
-            "--features=hardened",
+            "--features=hardened,dual-mac",
             "--test",
             "decision",
             "--test",
@@ -609,7 +613,7 @@
       "phase_results": [
         {
           "phase": "Build",
-          "duration": 0.452149802,
+          "duration": 0.502292161,
           "process_status": "Success",
           "argv": [
             "/home/dev123/.rustup/toolchains/stable-x86_64-unknown-linux-gnu/bin/cargo",
@@ -617,12 +621,12 @@
             "--no-run",
             "--verbose",
             "--package=xchacha20-blake3-siv@0.1.0",
-            "--features=hardened"
+            "--features=hardened,dual-mac"
           ]
         },
         {
           "phase": "Test",
-          "duration": 2.456374897,
+          "duration": 2.656453278,
           "process_status": {
             "Failure": 101
           },
@@ -631,7 +635,7 @@
             "test",
             "--verbose",
             "--package=xchacha20-blake3-siv@0.1.0",
-            "--features=hardened",
+            "--features=hardened,dual-mac",
             "--test",
             "decision",
             "--test",
@@ -680,7 +684,7 @@
       "phase_results": [
         {
           "phase": "Build",
-          "duration": 0.501993477,
+          "duration": 0.502175888,
           "process_status": "Success",
           "argv": [
             "/home/dev123/.rustup/toolchains/stable-x86_64-unknown-linux-gnu/bin/cargo",
@@ -688,12 +692,12 @@
             "--no-run",
             "--verbose",
             "--package=xchacha20-blake3-siv@0.1.0",
-            "--features=hardened"
+            "--features=hardened,dual-mac"
           ]
         },
         {
           "phase": "Test",
-          "duration": 2.456462054,
+          "duration": 2.6568874879999997,
           "process_status": {
             "Failure": 101
           },
@@ -702,7 +706,7 @@
             "test",
             "--verbose",
             "--package=xchacha20-blake3-siv@0.1.0",
-            "--features=hardened",
+            "--features=hardened,dual-mac",
             "--test",
             "decision",
             "--test",
@@ -751,7 +755,7 @@
       "phase_results": [
         {
           "phase": "Build",
-          "duration": 0.60213374,
+          "duration": 0.652710343,
           "process_status": "Success",
           "argv": [
             "/home/dev123/.rustup/toolchains/stable-x86_64-unknown-linux-gnu/bin/cargo",
@@ -759,12 +763,12 @@
             "--no-run",
             "--verbose",
             "--package=xchacha20-blake3-siv@0.1.0",
-            "--features=hardened"
+            "--features=hardened,dual-mac"
           ]
         },
         {
           "phase": "Test",
-          "duration": 0.10151466,
+          "duration": 0.101570142,
           "process_status": {
             "Failure": 101
           },
@@ -773,7 +777,7 @@
             "test",
             "--verbose",
             "--package=xchacha20-blake3-siv@0.1.0",
-            "--features=hardened",
+            "--features=hardened,dual-mac",
             "--test",
             "decision",
             "--test",
@@ -822,7 +826,7 @@
       "phase_results": [
         {
           "phase": "Build",
-          "duration": 0.652565246,
+          "duration": 0.602248387,
           "process_status": "Success",
           "argv": [
             "/home/dev123/.rustup/toolchains/stable-x86_64-unknown-linux-gnu/bin/cargo",
@@ -830,12 +834,12 @@
             "--no-run",
             "--verbose",
             "--package=xchacha20-blake3-siv@0.1.0",
-            "--features=hardened"
+            "--features=hardened,dual-mac"
           ]
         },
         {
           "phase": "Test",
-          "duration": 0.101238665,
+          "duration": 0.101135079,
           "process_status": {
             "Failure": 101
           },
@@ -844,7 +848,7 @@
             "test",
             "--verbose",
             "--package=xchacha20-blake3-siv@0.1.0",
-            "--features=hardened",
+            "--features=hardened,dual-mac",
             "--test",
             "decision",
             "--test",
@@ -893,7 +897,7 @@
       "phase_results": [
         {
           "phase": "Build",
-          "duration": 0.502024485,
+          "duration": 0.452207531,
           "process_status": "Success",
           "argv": [
             "/home/dev123/.rustup/toolchains/stable-x86_64-unknown-linux-gnu/bin/cargo",
@@ -901,12 +905,12 @@
             "--no-run",
             "--verbose",
             "--package=xchacha20-blake3-siv@0.1.0",
-            "--features=hardened"
+            "--features=hardened,dual-mac"
           ]
         },
         {
           "phase": "Test",
-          "duration": 0.101524995,
+          "duration": 0.101302337,
           "process_status": {
             "Failure": 101
           },
@@ -915,7 +919,7 @@
             "test",
             "--verbose",
             "--package=xchacha20-blake3-siv@0.1.0",
-            "--features=hardened",
+            "--features=hardened,dual-mac",
             "--test",
             "decision",
             "--test",
@@ -958,13 +962,13 @@
           "genre": "BinaryOperator"
         }
       },
-      "summary": "MissedMutant",
+      "summary": "CaughtMutant",
       "log_path": "log/src__lib.rs_line_1713_col_70.log",
       "diff_path": "diff/src__lib.rs_line_1713_col_70.diff",
       "phase_results": [
         {
           "phase": "Build",
-          "duration": 0.452132962,
+          "duration": 0.502382575,
           "process_status": "Success",
           "argv": [
             "/home/dev123/.rustup/toolchains/stable-x86_64-unknown-linux-gnu/bin/cargo",
@@ -972,19 +976,21 @@
             "--no-run",
             "--verbose",
             "--package=xchacha20-blake3-siv@0.1.0",
-            "--features=hardened"
+            "--features=hardened,dual-mac"
           ]
         },
         {
           "phase": "Test",
-          "duration": 2.455997074,
-          "process_status": "Success",
+          "duration": 0.101378582,
+          "process_status": {
+            "Failure": 101
+          },
           "argv": [
             "/home/dev123/.rustup/toolchains/stable-x86_64-unknown-linux-gnu/bin/cargo",
             "test",
             "--verbose",
             "--package=xchacha20-blake3-siv@0.1.0",
-            "--features=hardened",
+            "--features=hardened,dual-mac",
             "--test",
             "decision",
             "--test",
@@ -1027,13 +1033,13 @@
           "genre": "BinaryOperator"
         }
       },
-      "summary": "MissedMutant",
+      "summary": "CaughtMutant",
       "log_path": "log/src__lib.rs_line_1713_col_32.log",
       "diff_path": "diff/src__lib.rs_line_1713_col_32.diff",
       "phase_results": [
         {
           "phase": "Build",
-          "duration": 0.452135155,
+          "duration": 0.502175937,
           "process_status": "Success",
           "argv": [
             "/home/dev123/.rustup/toolchains/stable-x86_64-unknown-linux-gnu/bin/cargo",
@@ -1041,19 +1047,21 @@
             "--no-run",
             "--verbose",
             "--package=xchacha20-blake3-siv@0.1.0",
-            "--features=hardened"
+            "--features=hardened,dual-mac"
           ]
         },
         {
           "phase": "Test",
-          "duration": 2.306002924,
-          "process_status": "Success",
+          "duration": 0.101290954,
+          "process_status": {
+            "Failure": 101
+          },
           "argv": [
             "/home/dev123/.rustup/toolchains/stable-x86_64-unknown-linux-gnu/bin/cargo",
             "test",
             "--verbose",
             "--package=xchacha20-blake3-siv@0.1.0",
-            "--features=hardened",
+            "--features=hardened,dual-mac",
             "--test",
             "decision",
             "--test",
@@ -1064,12 +1072,12 @@
     }
   ],
   "total_mutants": 15,
-  "missed": 4,
-  "caught": 9,
+  "missed": 0,
+  "caught": 13,
   "timeout": 0,
   "unviable": 2,
   "success": 0,
-  "start_time": "2026-09-27T00:16:19.606914359Z",
-  "end_time": "2026-09-27T00:16:55.44865778Z",
+  "start_time": "2026-09-27T00:20:43.840801174Z",
+  "end_time": "2026-09-27T00:21:11.507272772Z",
   "cargo_mutants_version": "27.1.0"
 }

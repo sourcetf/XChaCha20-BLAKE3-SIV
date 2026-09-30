@@ -1,4 +1,0 @@
-src/lib.rs:1569:70: replace & with ^ in decrypt
-src/lib.rs:1569:32: replace & with ^ in decrypt
-src/lib.rs:1713:70: replace & with ^ in decrypt_in_place_detached
-src/lib.rs:1713:32: replace & with ^ in decrypt_in_place_detached
