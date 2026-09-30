@@ -352,7 +352,7 @@ where every accepting fault in the `hardened` build sits.
 decryption 30.1 → 20.8 MB/s at 64 B, 259 → 121 at 1 KiB, 1462 → 232 at 64 KiB, 1767 → 192
 at 1 MiB, and encryption 46.8 → 32.0, 444 → 247, 2089 → 588, 2406 → 610 on the same
 sizes. The deterministic half of that measurement (cachegrind instruction counts on
-`examples/xsiv_stdin`, per message) agrees: the decrypt path's added work is 17 k
+`examples/xsiv_stdin.rs`, per message) agrees: the decrypt path's added work is 17 k
 instructions at 64 B and 64 M at 1 MiB, i.e. it grows with the message while every other
 layer here is fixed-cost. `ultra` is the mode for callers who have decided that a second
 implementation on the path is worth more than throughput; a caller who wants the other
