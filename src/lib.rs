@@ -4607,14 +4607,18 @@ mod tests {
         );
 
         // One more block than the counter can express is refused, and the refusal is
-        // the length guard's, not a wrap.
-        let one_block_over = MAX_MSG_SIZE + CHACHA20_BLOCK as u64;
+        // the length guard's, not a wrap. The binding is inside the 64-bit arm because
+        // `MAX_MSG_SIZE + CHACHA20_BLOCK` does not fit a 32-bit `usize`, and a 32-bit
+        // build warned (correctly) that it was unused outside it.
         #[cfg(target_pointer_width = "64")]
-        assert_eq!(
-            check_lengths(one_block_over as usize, 0),
-            Err(Error::MessageTooLong),
-            "a message needing one block more than the counter has values must be refused"
-        );
+        {
+            let one_block_over = MAX_MSG_SIZE + CHACHA20_BLOCK as u64;
+            assert_eq!(
+                check_lengths(one_block_over as usize, 0),
+                Err(Error::MessageTooLong),
+                "a message needing one block more than the counter has values must be refused"
+            );
+        }
         // On 32-bit targets no `usize` reaches the limit at all, so the guard cannot
         // fire there — `test_length_guard_cannot_fire_on_32_bit` records that.
 
