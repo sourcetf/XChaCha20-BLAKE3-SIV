@@ -217,7 +217,7 @@ a PRF distinguisher for keyed BLAKE3 — the BLAKE2/BLAKE3 literature has boomer
 rotational attacks on *reduced* rounds only. L3.4: a collision or a PRF distinguisher that
 exploits the tree (this would be a structural attack on BLAKE3, and none is known). L3.5: an
 XOF distinguisher past the first output block (the output counter is part of the root
-compression's input, so this reduces to L3.3/L3.4). A6 (the encoding) is not a conjecture: it
+compression's input, so this reduces to L3.3/L3.4). A4 (the encoding) is not a conjecture: it
 is proven in §4.4.
 
 **The honest bottom line.** Every claim in this document rests on L3.1–L3.5 and nothing else.
@@ -225,8 +225,6 @@ There is no proof of any of the five, and no test in this repository — or any 
 establish them, because they are statements about the infeasibility of computation. What the
 remainder of the document does is make sure that *nothing else* is assumed: that the
 composition adds no conjecture of its own, which is what §4.10 is about.
- No related-key, nonce-respecting-only, or quantum-model claims are
-made here except where §6 states them explicitly.
 
 ---
 
@@ -531,10 +529,12 @@ inventory test (`tests/construction_inventory.rs`) fails if the set changes.
 | U4 | `blake3_keyed_xof` | `enc_seed = mat[32:64]` | `"XSIV-ENC" ‖ T` | `enc_key`, `enc_nonce` | U5 |
 | U5 | `chacha20_keystream` | `enc_key` | `enc_nonce`, counters 0… | keystream | XOR with `M` |
 
-**The values that cross.** Exactly six: `subkey` (U1→U2), `mat` (U2→{U3,U4}), `T` (U3→U4 and
-U3→wire), `enc_key` and `enc_nonce` (U4→U5). Nothing else is passed between calls — that is a
-statement about the code, and it is what the inventory test pins. So the case analysis below is
-over a finite, known set, and no crossing can be missed by construction.
+**The values that cross.** `subkey` (U1→U2), `mat` (U2→{U3,U4}, split on arrival into
+`mac_key` and `enc_seed`), `T` (U3→U4, and U3→the wire), and the pair `enc_key`, `enc_nonce`
+(U4→U5) — five values, or six if the two halves of `mat` are counted separately. Nothing else
+is passed between the calls, and that is a statement about the code which the inventory test
+pins. So the case analysis below is over a finite, known set: no crossing can be missed by
+construction.
 
 **Pairwise separation.** For each pair of uses that could in principle share a key, an input
 point, or an output, the table says what keeps them apart and what kind of argument that is.
