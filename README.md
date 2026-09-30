@@ -166,6 +166,18 @@ assumptions, not theorems, and this particular *composition* has no public
 specification and has not been independently analysed. The formal harnesses in
 `src/proofs.rs` prove properties of the implementation (that the fields reach
 the hash, that every output byte is used, that the tag reaches the ciphertext),
+not cryptographic hardness.
+
+**The reduction, written out.** [SECURITY-ANALYSIS.md](SECURITY-ANALYSIS.md) is the
+mathematical treatment: the construction as a tuple of functions, each assumption as an
+explicit game, the SIV/DAE theorem with its five-hop reduction and concrete bound
+(`q²/2^521 + q²/2^353 + q·2^-520` plus the three PRF advantages), every pair of uses of one
+primitive enumerated with what separates it, and a falsification table — what would refute
+each claim, which refutations have been attempted, and which are out of reach of any test.
+Two properties it needs are pinned by tests added with it:
+`nonce_reuse_does_not_reuse_the_keystream` (the mechanical content of misuse resistance,
+which a keystream derived from `(key, nonce)` alone would fail while every other test in
+the suite still passed) and `the_key_material_block_is_not_the_message_keystream`.
 
 **What no tool here detects: variable-latency operations on secrets.** ctgrind
 reports branches and memory indices that depend on poisoned data; a division, a

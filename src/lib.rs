@@ -4769,4 +4769,176 @@ mod tests {
             "without `dual-mac`, decryption must derive the tag exactly once"
         );
     }
+
+    /// The two ChaCha20 uses inside one call must not be the same keystream.
+    ///
+    /// `derive_material` burns **counter 0** of `(subkey, "XSIV" || N[16..24])` for the
+    /// 64-byte key-material block, and the message keystream is **counter 0** of
+    /// `(enc_key, enc_nonce)`. They are separated by *key* and by *nonce*, not by
+    /// counter: reserving a counter for the derivation would change every ciphertext ever
+    /// produced, and the wire format is frozen (see CHANGELOG, "Wire format").
+    ///
+    /// So the separation rests on a statement about two secret-derived values —
+    /// `enc_key ‖ enc_nonce` is a 44-byte KDF output, `subkey` is an HChaCha20 output —
+    /// differing, which holds with probability `1 - 2^-352` and, importantly, is only
+    /// *computable* by someone who already holds the master key. That makes it
+    /// informational rather than exploitable, but it is also exactly the kind of thing a
+    /// refactor can silently destroy: make `derive_enc` ignore the tag, give the two call
+    /// sites the same nonce, or "simplify" the domain label away, and the two uses
+    /// collapse into one keystream with no other test noticing — the round trip still
+    /// works, and the tags still verify.
+    ///
+    /// This test computes both keystreams for a spread of `(key, nonce, message)` triples
+    /// and requires them to differ. It cannot prove the general statement; it pins the
+    /// behaviour so that the collapse is a test failure rather than a discovery.
+    #[test]
+    fn the_key_material_block_is_not_the_message_keystream() {
+        for i in 0..16u8 {
+            let mut key = [0x11u8; 32];
+            key[0] = i;
+            let mut nonce = [0x22u8; NONCE_LEN];
+            nonce[0] = i.wrapping_mul(7);
+            nonce[23] = i;
+            let aad = [0x33u8; 3];
+            let msg = [0x44u8; 9];
+
+            // The 64-byte block `derive_material` burns under (subkey, subkey_nonce, 0)
+            // *is* the pair it returns -- that is how the block is split.
+            let (mac_key, enc_seed) = derive_material(&key, &nonce);
+            let mut kdf_block = [0u8; 64];
+            kdf_block[..32].copy_from_slice(&mac_key);
+            kdf_block[32..].copy_from_slice(&enc_seed);
+
+            // The message keystream, derived the way `encrypt` derives it.
+            let tag = derive_tag(&mac_key, &key, &nonce, &aad, &msg);
+            let mut enc_key = [0u8; 32];
+            let mut enc_nonce = [0u8; 12];
+            derive_enc(&enc_seed, &tag, &mut enc_key, &mut enc_nonce);
+            let mut msg_ks = [0u8; 64];
+            chacha20_keystream_raw(&enc_key, 0, &enc_nonce, &mut msg_ks);
+
+            assert_ne!(
+                msg_ks, kdf_block,
+                "the key-material block and the message keystream are the same keystream \
+                 (trial {i}): the two ChaCha20 uses at counter 0 are no longer separated"
+            );
+
+            // The nonces must differ as well, and for the right reason: the derivation's
+            // nonce is `SUBKEY_DOMAIN || N[16..24]`, which is *public*, while the message
+            // nonce is a secret KDF output. A message nonce that equals the public one
+            // would be a KDF output that the attacker can predict and check.
+            let mut subkey_nonce = [0u8; 12];
+            subkey_nonce[0..4].copy_from_slice(&SUBKEY_DOMAIN);
+            subkey_nonce[4..12].copy_from_slice(&nonce[16..24]);
+            assert_ne!(
+                enc_nonce, subkey_nonce,
+                "the per-message nonce is the public derivation nonce (trial {i})"
+            );
+
+            // And the keys, which is the separation that actually carries the weight.
+            let subkey = hchacha20(&key, &nonce[0..16].try_into().unwrap());
+            assert_ne!(
+                enc_key, subkey,
+                "the per-message key is the derivation key (trial {i})"
+            );
+        }
+    }
+
+    /// Nonce reuse must not reuse the keystream — the mechanical core of misuse
+    /// resistance.
+    ///
+    /// SIV's degradation under nonce reuse is stated as "the adversary learns whether two
+    /// `(A, M)` pairs are equal, and nothing else". That statement is *false* for a scheme
+    /// whose keystream depends only on `(key, nonce)`: two ciphertexts would differ by the
+    /// XOR of their plaintexts, so the difference of two messages is handed over
+    /// directly — the classic stream-cipher catastrophe, and the reason a naive
+    /// nonce-based stream cipher is unusable under misuse.
+    ///
+    /// This construction avoids it by deriving the per-message key from the tag, so the
+    /// keystream moves whenever `(A, M)` moves. That is the property tested here, in the
+    /// form that cannot be fooled by a coincidence: the ciphertexts must not differ by the
+    /// plaintexts (for a message change) and must not be equal (for an AAD change with the
+    /// message held fixed).
+    ///
+    /// A regression that made the KDF ignore the tag — deriving the key from the message
+    /// *length*, say — passes every other test in this file: the tags would still be
+    /// correct, the round trip would still work, and the `dual-mac`/witness cross-checks
+    /// would still agree with it, because they only compare tags.
+    #[test]
+    fn nonce_reuse_does_not_reuse_the_keystream() {
+        let key = [0x9Au8; 32];
+        let nonce = [0xB4u8; NONCE_LEN];
+        let aad = b"associated data";
+        let mut other_aad = [0u8; 15];
+        other_aad.copy_from_slice(aad);
+        other_aad[0] ^= 0x20; // same length, one bit differs
+
+        // Equal-length messages that differ in one byte: the XOR formulation below is only
+        // meaningful when the two plaintexts line up.
+        let m1 = [0x11u8; 64];
+        let mut m2 = m1;
+        m2[0] ^= 0x40;
+
+        let xor = |a: &[u8], b: &[u8]| -> Vec<u8> { a.iter().zip(b).map(|(x, y)| x ^ y).collect() };
+
+        let (ct1, tag1) = encrypt(&key, &nonce, aad, &m1).unwrap();
+        let (ct2, tag2) = encrypt(&key, &nonce, aad, &m2).unwrap();
+        assert_ne!(tag1, tag2, "different messages must not share a tag");
+        assert_ne!(
+            xor(&ct1, &ct2),
+            xor(&m1, &m2),
+            "the ciphertexts differ by the plaintexts: the keystream depended only on the \
+             key and nonce, so nonce reuse hands over M1 XOR M2"
+        );
+
+        // The same statement for a change confined to the AAD, with the message fixed:
+        // if the keystream ignored the tag, these two ciphertexts would be *identical*.
+        let (ct3, tag3) = encrypt(&key, &nonce, &other_aad, &m1).unwrap();
+        assert_ne!(tag3, tag1);
+        assert_ne!(
+            ct3, ct1,
+            "the AAD does not reach the keystream: two messages that differ only in their \
+             associated data encrypted under one key and nonce produced the same bytes"
+        );
+        // Sharper than "they differ": the *first block* must move. A keystream that
+        // diverged only after the first block would still be a reused prefix, and for a
+        // protocol that frames messages in 64-byte units that is most of the message.
+        assert_ne!(
+            ct1[..64],
+            ct3[..64],
+            "only the tail of the keystream depends on the AAD"
+        );
+
+        // Determinism: the same query twice is the same ciphertext, which is what SIV's
+        // degradation statement allows the adversary to see.
+        let (ct1_again, tag1_again) = encrypt(&key, &nonce, aad, &m1).unwrap();
+        assert_eq!((ct1_again, tag1_again), (ct1.clone(), tag1));
+
+        // The in-place entry point has its own copy of the wiring, so it gets the same
+        // check: a regression that put the tag-independent keystream there would be
+        // invisible to the attached-path assertions above.
+        let mut buf_a = m1.to_vec();
+        let mut buf_b = m1.to_vec();
+        let tag_a = encrypt_in_place_detached(&key, &nonce, aad, &mut buf_a).unwrap();
+        let tag_b = encrypt_in_place_detached(&key, &nonce, &other_aad, &mut buf_b).unwrap();
+        assert_eq!(tag_a, tag1, "the two entry points must agree");
+        assert_ne!(tag_b, tag_a);
+        assert_ne!(
+            buf_a, buf_b,
+            "in place: the AAD does not reach the keystream either"
+        );
+        assert_ne!(buf_a[..64], buf_b[..64], "in place: only the tail moved");
+
+        // And the pairs above are usable, so the assertions are about real ciphertexts
+        // rather than about a broken harness.
+        assert_eq!(
+            decrypt(&key, &nonce, aad, &ct1, &tag1).unwrap(),
+            m1.as_slice()
+        );
+        assert!(decrypt(&key, &nonce, &other_aad, &ct1, &tag1).is_err());
+        assert_eq!(
+            decrypt(&key, &nonce, aad, &buf_a, &tag_a).unwrap(),
+            m1.as_slice()
+        );
+    }
 }

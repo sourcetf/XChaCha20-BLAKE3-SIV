@@ -34,6 +34,12 @@ Anything that breaks the properties claimed in `README.md`:
   sanitizer runs cover, and note that every block carries a `// SAFETY:` comment
   that a CI lint now enforces.
 
+What is *proven*, what is *assumed*, and what would *refute* the claims above is
+written out in [SECURITY-ANALYSIS.md](SECURITY-ANALYSIS.md): the construction as a
+tuple of functions, the assumptions as games, the SIV/DAE reduction with its bound, the
+composition hazards one by one, and a falsification table. A report that shows one of
+those theorems is wrong is the most valuable kind this project can receive.
+
 ## What is explicitly not in scope
 
 Listed so that a report is not needed for them. Everything under "What is not

@@ -141,6 +141,35 @@ What it does **not** buy, stated on the README's row rather than implied: both
 implementations run on one CPU and one compiler, so a fault that hits both, or a
 systematic error in both, is outside what agreement can detect.
 
+### The security argument, written out as a reduction — and two properties it needs, tested
+
+New: `SECURITY-ANALYSIS.md`. The construction as a tuple of functions; each assumption as
+an explicit game (ChaCha20's block function, HChaCha20, keyed BLAKE3 — all three assumed,
+and the document says so in those words — plus the injectivity of the encoding, which is
+*proved* there by inspection); the SIV/DAE theorem with its five-hop reduction, the bound
+`q²/2^521 + q²/2^353 + q·2^-520` plus the three PRF advantages, and the place each
+assumption enters; every pair of uses of one primitive enumerated with what separates it;
+and a falsification table — what would refute each claim, which refutations have been
+attempted, and which are out of reach of any test.
+
+Two findings came out of writing it, both recorded rather than fixed:
+
+* **The two ChaCha20 uses share counter 0.** `derive_material` burns counter 0 of
+  `(subkey, "XSIV" ‖ N[16..24])` for the key-material block, and the message keystream is
+  counter 0 of `(enc_key, enc_nonce)`. They are separated by key and by nonce, not by
+  counter, so the separation is a probability statement (`≈ 2^-352`) about two secret
+  values — not computable, and not detectable, by anyone without the master key, and the
+  format is frozen, so the structural remedy (reserve counter 0, start the message at
+  counter 1) is a note for a future revision rather than a change here.
+* **Two properties the reduction needs had no test.** `nonce_reuse_does_not_reuse_the_keystream`
+  checks the mechanical content of misuse resistance in the form that cannot be fooled by a
+  coincidence — under one key and nonce, `ct₁ ⊕ ct₂` must not equal `M₁ ⊕ M₂`, and a change
+  confined to the AAD must move the *first block* of the keystream; a scheme whose keystream
+  came from `(key, nonce)` alone would fail that assertion while passing every other test in
+  the suite. `the_key_material_block_is_not_the_message_keystream` computes both uses of
+  ChaCha20 for a spread of inputs and requires them to differ, so the collapse described
+  above becomes a test failure rather than a discovery.
+
 ### Zeroization: two copies the wipes could not reach
 
 Fixed in every configuration, because these are copies the wipes should already have
