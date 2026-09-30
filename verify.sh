@@ -257,7 +257,14 @@ if [ "$RUN_CROSS_EXEC" -eq 1 ]; then
     # what the 32-bit target exercises. Building it out on these targets meant the only
     # architecture-dependent code in the crate was the only code never run on another
     # architecture.
-    exes="$(cargo test --target "$target" --release --no-run --features ultra,pure 2>&1 \
+    # `CARGO_TERM_COLOR=never`: this output is *parsed*, and cargo colours its
+    # `Executable` lines when `CARGO_TERM_COLOR=always` is in the environment -- which it
+    # is in every CI workflow, so the same line in `ci.yml`'s equivalent step matched
+    # nothing there and reported "cargo reported no executables" on all three targets from
+    # the commit that introduced the parse. Locally the variable is unset, which is why it
+    # took a failing CI run to find.
+    exes="$(CARGO_TERM_COLOR=never cargo test --target "$target" --release --no-run \
+            --features ultra,pure 2>&1 \
             | sed -n 's/^ *Executable .*(\(.*\))$/\1/p')"
     [ -n "$exes" ] || { echo "cargo reported no $target executables" >&2; exit 1; }
     ran=0

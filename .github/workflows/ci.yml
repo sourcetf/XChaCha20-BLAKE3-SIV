@@ -329,8 +329,15 @@ jobs:
       - name: build ${{ matrix.target }} test binaries
         run: |
           set -euo pipefail
-          cargo test --target ${{ matrix.target }} --release --no-run --features ultra,pure \
-            | tee build.log
+          # `CARGO_TERM_COLOR=never` on this one command, because the output is parsed:
+          # the workflow sets `always` at the top level, so cargo colours its `Executable`
+          # lines even through a pipe, and the `sed` below then matches nothing -- which
+          # reads as "cargo reported no executables" and failed this job on all three
+          # targets from the commit that introduced the parse until this one. (The same
+          # bug is in `verify.sh`, fixed the same way: a local run without
+          # CARGO_TERM_COLOR in the environment never sees it.)
+          CARGO_TERM_COLOR=never cargo test --target ${{ matrix.target }} --release \
+            --no-run --features ultra,pure | tee build.log
           sed -n 's/^ *Executable .*(\\(.*\\))$/\\1/p' build.log > executables.txt
           count="$(grep -c . executables.txt || true)"
           [ "$count" -gt 0 ] || { echo "cargo reported no executables" >&2; exit 1; }
