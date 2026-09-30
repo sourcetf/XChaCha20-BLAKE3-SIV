@@ -204,7 +204,12 @@ for addr, size, _name in ranges:
 if checked == 0:
     sys.exit("FAIL: no instruction from the swept ranges could be cross-checked")
 total = sum(s for _, s, _ in covered)
-stride = 7 if quick else 1
+# `--quick` samples every thirteenth byte rather than every seventh: the sweep now covers
+# three configurations, and the largest of them (`ultra`) is bigger than the other two
+# together, so the coarse stride is what keeps the per-push cost near what it was. The
+# full sweeps (stride 1) are the ones that assert anything -- quick mode's own note says so
+# -- and they run in the `wide` job and locally.
+stride = 13 if quick else 1
 
 def run():
     r = subprocess.run([binpath], capture_output=True, text=True, timeout=5)  # a NOPed
@@ -367,7 +372,7 @@ printf '                      %-22s %6s total, %4s inside the decision\n' \
 echo "                      (the decision is what the layers are for: zero there in the"
 echo "                       hardened and ultra builds)"
 if [ -n "$quick" ]; then
-  echo "                      quick mode samples every ${stride:-seventh} byte, so the"
+  echo "                      quick mode samples every ${stride:-thirteenth} byte, so the"
   echo "                      opt-out control is only asserted by the full sweep (and only"
   echo "                      in the bit-flip model -- see the comment above)."
 fi

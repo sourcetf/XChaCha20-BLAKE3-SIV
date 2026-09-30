@@ -303,12 +303,14 @@ jobs:
   mutation:
     name: verify the verifier (mutation check)
     runs-on: ubuntu-latest
-    # 60, not 30: this job carries the fault campaign (eleven rows, each a build), the
-    # mutation campaign, and the two quick instruction sweeps -- the bit-flip one is
-    # eight times its `nop` sibling and takes about eight minutes on its own. Measured
-    # on the runner rather than guessed; 30 was already close before the second sweep
-    # was added.
-    timeout-minutes: 60
+    # 90, not 60: this job carries the fault campaign (thirteen rows, each a build), the
+    # mutation campaign, and the two quick instruction sweeps. The bit-flip sweep is eight
+    # times its `nop` sibling *and* now sweeps three configurations, one of which (`ultra`)
+    # has the largest swept region -- measured at 3m18s on four cores of a fast machine and
+    # considerably longer on a shared runner, which is why the quick stride is 13 and the
+    # budget is 90. 60 was already close before the third configuration was added; a job
+    # that runs past its `timeout-minutes` reads as `cancelled`, not as `failure`.
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
