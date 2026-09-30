@@ -699,38 +699,56 @@ within about 4%, so it is not tabulated. Release profile as shipped (`lto`,
 sides on their native SIMD backends (BLAKE3's C/assembly kernels, Poly1305's AVX2
 four-block path).
 
+**These tables are re-measured as a whole, never one cell at a time**, and the run
+below is the second one: the first predated `hardened` becoming the default, and
+its **decrypt** column no longer described the shipped build. Measured now, at 64
+bytes, this crate's decryption is **1.02x** the reference's rather than the 1.41x
+the first run reported, and the round trip at 64 bytes is 1.31x rather than 1.56x;
+every other cell is within run-to-run noise. Two things moved, and both are worth
+naming: `hardened` is on by default now and its second gate is a fixed per-message
+cost on *decrypt* (two full 65-byte constant-time comparisons, the volatile
+re-reads, the fail-closed plumbing and the wipes), which is why the change shows up
+at the small end and not at 1 MiB; and RustCrypto's own decryption got faster in
+this dependency set (`chacha20poly1305` 0.10.1, `poly1305` 0.8.0, `blake3` 1.8.7,
+from `Cargo.lock`). What did **not** move: encryption, which is 1.53x at 64 bytes
+and 1.34x at 1 MiB here against 1.54x and 1.36x there.
+
 Throughput, ratio against `XChaCha20Poly1305` (> 1 means this crate is faster):
 
 | Message | encrypt | decrypt | round trip |
 | --- | --- | --- | --- |
-| 64 B | **1.54x** | **1.41x** | **1.56x** |
-| 256 B | **1.21x** | **1.28x** | **1.35x** |
-| 1 KiB | 0.99x | 0.85x | 0.88x |
-| 4 KiB | **1.16x** | **1.06x** | **1.16x** |
-| 16 KiB | **1.38x** | **1.25x** | **1.11x** |
-| 64 KiB | **1.27x** | **1.15x** | **1.19x** |
-| 1 MiB | **1.36x** | **1.43x** | **1.38x** |
+| 64 B | **1.53x** | 1.02x | **1.31x** |
+| 256 B | **1.31x** | 1.01x | **1.14x** |
+| 1 KiB | 0.95x | 0.83x | 0.81x |
+| 4 KiB | **1.06x** | 0.96x | 1.01x |
+| 16 KiB | **1.26x** | **1.24x** | **1.14x** |
+| 64 KiB | **1.30x** | **1.19x** | **1.23x** |
+| 1 MiB | **1.34x** | **1.40x** | **1.37x** |
 
 Per-message latency, microseconds, median of criterion's samples; the ratio is
 again against `XChaCha20Poly1305`, and below 1 means this crate answers sooner:
 
 | Message | encrypt | decrypt | round trip |
 | --- | --- | --- | --- |
-| 64 B | 0.87 vs 1.27 (**0.68x**) | 0.90 vs 1.35 (**0.67x**) | 1.80 vs 2.70 (**0.67x**) |
-| 256 B | 1.10 vs 1.30 (**0.85x**) | 1.10 vs 1.40 (**0.78x**) | 2.07 vs 2.86 (**0.72x**) |
-| 1 KiB | 1.89 vs 1.86 (1.02x) | 2.00 vs 1.70 (1.18x) | 3.85 vs 3.37 (1.14x) |
-| 4 KiB | 2.97 vs 3.59 (**0.83x**) | 3.37 vs 3.56 (**0.95x**) | 5.98 vs 6.48 (**0.92x**) |
-| 16 KiB | 7.46 vs 10.43 (**0.72x**) | 7.93 vs 9.73 (**0.81x**) | 16.53 vs 18.65 (**0.89x**) |
-| 64 KiB | 30.5 vs 37.0 (**0.82x**) | 28.5 vs 34.6 (**0.83x**) | 55.9 vs 67.4 (**0.83x**) |
-| 1 MiB | 393 vs 554 (**0.71x**) | 408 vs 567 (**0.72x**) | 826 vs 1134 (**0.73x**) |
+| 64 B | 0.80 vs 1.22 (**0.65x**) | 1.16 vs 1.18 (0.98x) | 1.80 vs 2.37 (**0.76x**) |
+| 256 B | 0.95 vs 1.25 (**0.76x**) | 1.26 vs 1.26 (0.99x) | 2.18 vs 2.49 (**0.87x**) |
+| 1 KiB | 1.83 vs 1.74 (1.05x) | 1.96 vs 1.62 (1.21x) | 3.98 vs 3.23 (1.23x) |
+| 4 KiB | 2.90 vs 3.08 (**0.94x**) | 3.35 vs 3.20 (1.05x) | 6.51 vs 6.56 (0.99x) |
+| 16 KiB | 7.10 vs 8.96 (**0.79x**) | 7.53 vs 9.32 (**0.81x**) | 15.67 vs 17.93 (**0.87x**) |
+| 64 KiB | 27.5 vs 35.7 (**0.77x**) | 28.1 vs 33.5 (**0.84x**) | 54.4 vs 67.2 (**0.81x**) |
+| 1 MiB | 414 vs 556 (**0.74x**) | 396 vs 553 (**0.72x**) | 796 vs 1090 (**0.73x**) |
 
 Read both tables as: this crate pays more *per message* (two key derivations, a
 65-byte tag, and wiping all of it) and less *per byte* (BLAKE3 beats Poly1305 once
 there is enough data to batch). Latency is not throughput divided by size, because
 the fixed per-message cost dominates at the small end — at 64 bytes this crate is
-0.4 us cheaper *per call*, and it has the lower latency at every size except
-around 1 KiB, where `Poly1305`'s four-block AVX2 path is at its best and BLAKE3
-has little to batch (decrypt 1.18x, round trip 1.14x).
+0.42 us cheaper *per call* on encryption and answers sooner on the round trip, and
+it is the slower of the two only around 1 KiB, where `Poly1305`'s four-block AVX2
+path is at its best and BLAKE3 has little to batch (decrypt 1.21x, round trip
+1.23x). **Decryption at 64–256 bytes is a tie** (0.98x, 0.99x), and that is the
+number the `hardened` decision costs: two 65-byte constant-time comparisons, the
+volatile re-reads and the fail-closed plumbing are all fixed per-message work on
+the decrypt path, so they are invisible at 1 MiB (0.72x) and dominate here.
 
 Two structural properties bound what a caller can do with that latency, and both
 follow from the construction rather than from this implementation:

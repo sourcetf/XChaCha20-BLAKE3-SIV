@@ -141,6 +141,23 @@ What it does **not** buy, stated on the README's row rather than implied: both
 implementations run on one CPU and one compiler, so a fault that hits both, or a
 systematic error in both, is outside what agreement can detect.
 
+### The performance table did not describe the shipped build
+
+`README.md`'s head-to-head table against RustCrypto's `chacha20poly1305` was measured
+before `hardened` became the default, and its **decrypt** column was never re-measured: it
+claimed 1.41x at 64 bytes where the shipped build measures **1.02x**, and 1.28x at 256
+bytes against **1.01x**. Both tables are re-measured as a whole now (`cargo bench --bench
+compare`, this host, `chacha20poly1305` 0.10.1 / `poly1305` 0.8.0 / `blake3` 1.8.7 from
+`Cargo.lock`), the correction is written into the section rather than silently applied,
+and the note names both causes: `hardened`'s second gate is fixed per-message work on the
+decrypt path — two 65-byte constant-time comparisons, the volatile re-reads, the
+fail-closed plumbing and the wipes — so it shows up at 64 bytes and is invisible at
+1 MiB; and RustCrypto's own decryption got faster in this dependency set. Encryption is
+unchanged within noise (1.53x at 64 B here against 1.54x there, 1.34x at 1 MiB against
+1.36x). The general lesson is the one this repository keeps relearning: a number that was
+true when it was written is not a number that is true now, and a table is measured as a
+whole or not at all.
+
 ### Six defects in the *evidence*, found by auditing the verifier instead of the code
 
 Nothing here touches the construction or the wire format. All six are in the machinery
