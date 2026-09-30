@@ -546,13 +546,18 @@ jobs:
             cargo +nightly miri test --release --features pure --lib
 
       # 15 minutes across every core the runner has, versus the two the push-time
-      # job spends. The scheduled run is where coverage-of-time is affordable.
+      # job spends. The scheduled run is where coverage-of-time is affordable. Both
+      # configurations get it: the default build is the shipped one, and `ultra` is the
+      # one that runs the second implementation over the key.
       - name: fifteen minutes of fuzzing on every core
         run: |
           set -euo pipefail
           rustup toolchain install nightly --profile minimal
           workers="$(nproc)"
           cargo +nightly fuzz run roundtrip --target x86_64-unknown-linux-gnu -- \
+            "-workers=$workers" "-jobs=$workers" -max_total_time=900 -print_final_stats=1
+          cargo +nightly fuzz run roundtrip --features xchacha20-blake3-siv/ultra \
+            --target x86_64-unknown-linux-gnu -- \
             "-workers=$workers" "-jobs=$workers" -max_total_time=900 -print_final_stats=1
 
   arm64:
@@ -631,6 +636,36 @@ jobs:
           echo "fuzzing for host triple: $host"
           cargo +nightly fuzz run roundtrip --target "$host" \
             -- -max_total_time=300 -print_final_stats=1
+
+      # The same target with `ultra` on, which is the only configuration that runs the
+      # second implementation (`src/witness.rs`) over the key. It is new code on the
+      # caller-controlled path -- it parses arbitrary lengths and has its own ChaCha20 and
+      # BLAKE3 -- so "no panic, no out-of-bounds address, every corruption rejected" is a
+      # claim about code the run above never reaches. Half the budget, because each input
+      # does strictly more work: a second full decryption.
+      - name: fuzz with ultra
+        run: |
+          set -euo pipefail
+          host="$(rustc +nightly -vV | sed -n 's/^host: //p')"
+          # `--features` here names a *dependency* feature, `xchacha20-blake3-siv/ultra`.
+          # If it were ever silently dropped, this step would be a duplicate of the one
+          # above and nothing would say so -- so build first and require the binary to
+          # actually contain the witness, which exists only under that feature. Same
+          # pattern as `tools/check_kani_cfg.sh`: a check on the artefact, not on the flag.
+          cargo +nightly fuzz build roundtrip --features xchacha20-blake3-siv/ultra \
+            --target "$host"
+          # `grep -c`, not `nm | grep -q`: this shell runs with `-o pipefail`, and `grep -q`
+          # exits at the first match, killing the writer with SIGPIPE and failing the
+          # pipeline even when it matched -- the trap `tools/ctgrind.sh` documents.
+          symbols="$(nm -C "fuzz/target/$host/release/roundtrip" | grep -c 'witness::' || true)"
+          if [ "${symbols:-0}" -eq 0 ]; then
+            echo "FAIL: no witness symbols in the fuzz binary -- the ultra feature did" >&2
+            echo "      not apply, and this run would test nothing new" >&2
+            exit 1
+          fi
+          echo "witness symbols in the fuzz binary: $symbols"
+          cargo +nightly fuzz run roundtrip --features xchacha20-blake3-siv/ultra \
+            --target "$host" -- -max_total_time=150 -print_final_stats=1
 
       # A crashing input is written to fuzz/artifacts; upload it so the failure
       # is reproducible rather than just reported.

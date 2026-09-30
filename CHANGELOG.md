@@ -191,6 +191,19 @@ same way the old "a skipped check counts as a pass" was.
    change to `caught.txt`/`missed.txt`/`unviable.txt` — which is why the committed copy
    stayed as it was: the gate says it still describes this revision.
 
+8. **The fuzz target never ran under `ultra`.** It is the only configuration that
+   exercises `src/witness.rs`, which is new code on the caller-controlled path: it parses
+   arbitrary lengths and carries its own ChaCha20 and BLAKE3, so "no panic, no
+   out-of-bounds, every corruption rejected" was a claim about code the fuzzer never
+   reached. Both the per-push job and the scheduled soak now run the target twice, the
+   second time with `xchacha20-blake3-siv/ultra`, and the second run is preceded by an
+   `nm` check that the binary really contains witness symbols — a silently dropped
+   dependency feature would otherwise turn it into a duplicate of the first run. (That
+   guard's own first version had the bug this repository documents in `tools/ctgrind.sh`:
+   `nm ... | grep -q` under `set -o pipefail` dies of SIGPIPE on the first match and
+   reports failure on a binary that has the symbols. It is `grep -c` and a numeric test
+   now, and the failure message says what it checked.)
+
 Also: `ultra`'s central claim — that the witness shares nothing with the crate's path
 except the specification — was prose. It is now a test
 (`tests/ultra.rs::the_witness_shares_only_the_specification_with_the_crate`) that reads

@@ -417,6 +417,32 @@ if [ "$RUN_FUZZ" -eq 1 ]; then
   FUZZ_SECONDS="${FUZZ_SECONDS:-120}"
   if cargo fuzz --version >/dev/null 2>&1 && cargo +nightly --version >/dev/null 2>&1; then
     cargo +nightly fuzz run roundtrip -- -max_total_time="$FUZZ_SECONDS"
+    # The same target with `ultra`, which is the only configuration that runs the second
+    # implementation over the key: new code on the caller-controlled path, so the
+    # "no panic, no out-of-bounds, every corruption rejected" assertions apply to it too.
+    # Half the budget, because every input does a second full decryption.
+    #
+    # `xchacha20-blake3-siv/ultra` is a *dependency* feature; if it were silently dropped
+    # this would be a second run of the first configuration. Build first and require the
+    # witness symbols to be in the binary, so a dropped flag is a failure rather than a
+    # duplicate.
+    # `grep -c`, not `nm | grep -q`: this script runs with `set -o pipefail`, and `grep
+    # -q` exits at the first match, which kills the writer with SIGPIPE and makes the
+    # *pipeline* fail even though the match was found. The first version of this guard
+    # did exactly that and reported "the ultra feature did not apply" on a binary that
+    # had sixteen witness symbols in it -- the same trap `tools/ctgrind.sh` documents.
+    fuzz_target_dir="fuzz/target/$(rustc +nightly -vV | sed -n 's/^host: //p')/release"
+    cargo +nightly fuzz build roundtrip --features xchacha20-blake3-siv/ultra
+    witness_symbols="$(nm -C "$fuzz_target_dir/roundtrip" 2>/dev/null | grep -c 'witness::' || true)"
+    if [ "${witness_symbols:-0}" -gt 0 ]; then
+      echo "fuzz binary has $witness_symbols witness symbol(s): the ultra feature is on"
+      cargo +nightly fuzz run roundtrip --features xchacha20-blake3-siv/ultra \
+        -- -max_total_time="$((FUZZ_SECONDS / 2))"
+    else
+      echo "FAILED: no witness symbols in $fuzz_target_dir/roundtrip -- the ultra feature" >&2
+      echo "        did not apply, so this run would test the default configuration twice" >&2
+      exit 1
+    fi
   else
     skip "fuzzing" "cargo-fuzz and/or the nightly toolchain not available"
     echo "         (cargo install cargo-fuzz; rustup toolchain install nightly)"
