@@ -141,6 +141,53 @@ What it does **not** buy, stated on the README's row rather than implied: both
 implementations run on one CPU and one compiler, so a fault that hits both, or a
 systematic error in both, is outside what agreement can detect.
 
+### The security analysis now goes down to each primitive conjecture, and proves the combination adds none
+
+`SECURITY-ANALYSIS.md` had the composition theorem and a per-hazard table; it did not push its
+assumptions down to the level where they stop being arguable, and it did not prove the thing a
+reviewer asks first about a *new* pairing of two cipher families: that using ChaCha20 and BLAKE3
+together in this shape introduces nothing the primitives do not already have. Two sections added.
+
+**§2.1, the assumption tree.** Every claim now descends L0 → L4: the L0 claim (MRAE security),
+the L1 composition theorems that carry it (SIV/DAE from Rogaway–Shrimpton 2006; the
+key-derived-from-tag variant from GCM-SIV / RFC 8452; the standard reductions used at the
+joints — PRF ⇒ collision resistance, PRF output splitting, cascade, counter-mode-from-a-PRF),
+the L2 lemmas proved here, and then the L3 primitive conjectures, each with its own falsifier.
+Two of those are worth naming because they are usually conflated:
+
+* **L3.1 (the ChaCha20 block function is a PRF) and L3.2 (HChaCha20 is a PRF) are separate
+  conjectures**, not one. They are the same permutation in two modes — feed-forward
+  (`P(x) + x`, the Even–Mansour shape, a PRF up to the birthday bound and known to fail
+  beyond it) versus truncated, unfed output (`trunc(P(y))`, which is *not* a PRF in general
+  because a truncated permutation can be distinguished by collision counting). Neither implies
+  the other, and this construction uses both.
+* **L3.4 (the BLAKE3 tree preserves PRF-ness) is not inherited from Merkle–Damgård results.**
+  The theorems that an iterated hash from a PRF compression is a PRF (Bellare–Canetti–Krawczyk
+  for HMAC/NMAC) are about sequential iteration. What supports the tree is structural —
+  injective node encodings through the chunk counter, block index and flags — and the document
+  now says so instead of leaving "BLAKE3 is a PRF" as one unexamined item.
+
+**§4.10, the interaction inventory.** The five uses of the primitives are enumerated with their
+keys and inputs; the six values that cross between them are listed; every pair that could share
+a key, a domain point or an output is discharged as either an L1 composition, a *structural*
+disjointness, or a bounded-probability event. Two of the structural ones are proved outright:
+**S1**, the two keyed-BLAKE3 input spaces are disjoint because their 8-byte domain prefixes
+differ (so those two uses stay separate even in the impossible case `mac_key = enc_seed`); and
+**S2**, for one `(K, N)` the key-material block is at a *different* ChaCha20 domain point than
+XChaCha20-Poly1305's first data block, because the label sits exactly where that scheme leaves
+NUL padding — a separation by construction, not a coincidence, and the reason a mixed deployment
+cannot share keystream. Completeness is the load-bearing part, so it is mechanised:
+`tests/construction_inventory.rs` counts the call sites of each primitive and fails when the set
+changes, pins both lemmas, and was verified non-vacuous by planting a sixth use of `hchacha20`
+and by setting `DOM_ENC = DOM_TAG` (both caught). The *value* half of S2 is a unit test, since
+only the crate can reach its internal derivation.
+
+What the document now states explicitly, in §4.10 and §6: a break of this construction must be a
+break of L3.1–L3.5 or of an L1 theorem, because the composition itself assumes nothing joint
+about the two families. A future cryptanalytic relation between ChaCha20 and BLAKE3 would
+present itself as a break of one of those primitive conjectures — the distinction matters
+because a composition flaw is this crate's to fix and a primitive break is not.
+
 ### The performance table did not describe the shipped build
 
 `README.md`'s head-to-head table against RustCrypto's `chacha20poly1305` was measured

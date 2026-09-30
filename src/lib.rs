@@ -4941,4 +4941,64 @@ mod tests {
             m1.as_slice()
         );
     }
+
+    /// **Lemma S2**, at the value level: for one `(K, N)`, the key-material block is at a
+    /// different point of ChaCha20's domain than XChaCha20-Poly1305's first data block.
+    ///
+    /// Both schemes call `HChaCha20(K, N[0..16])` and then continue with a 12-byte nonce at
+    /// counter 0. The draft's schemes leave that nonce's first four bytes as NUL padding; this
+    /// crate puts `SUBKEY_DOMAIN` there. The two ChaCha20 evaluations are therefore at
+    /// *different points of the domain* — a structural separation — rather than at the same
+    /// point with a coincidence that has not happened yet, which is what a scheme relying on
+    /// "the keys differ" would have. The integration test
+    /// (`tests/construction_inventory.rs`) pins the same lemma from outside the crate, where
+    /// only the constants are reachable; this one compares the blocks.
+    #[test]
+    fn the_key_material_block_is_not_xchacha20_poly1305s_first_block() {
+        for i in 0..8u8 {
+            let mut key = [0x5Au8; 32];
+            key[0] = i;
+            let mut nonce = [0xA5u8; NONCE_LEN];
+            nonce[16] = i.wrapping_mul(3);
+
+            // Both schemes derive the subkey the same way (draft-irtf-cfrg-xchacha §2.2).
+            let subkey = hchacha20(&key, &nonce[0..16].try_into().unwrap());
+
+            // XChaCha20 / XChaCha20-Poly1305: 12-byte nonce = 0^4 || N[16..24].
+            let mut draft_nonce = [0u8; 12];
+            draft_nonce[4..12].copy_from_slice(&nonce[16..24]);
+            let draft_block = chacha20_block(&subkey, 0, &draft_nonce);
+
+            // This crate: SUBKEY_DOMAIN || N[16..24].
+            let mut xsi_nonce = [0u8; 12];
+            xsi_nonce[0..4].copy_from_slice(&SUBKEY_DOMAIN);
+            xsi_nonce[4..12].copy_from_slice(&nonce[16..24]);
+            assert_ne!(
+                xsi_nonce, draft_nonce,
+                "the derivation nonce is the NUL-padded draft one (trial {i})"
+            );
+            let xsi_block = chacha20_block(&subkey, 0, &xsi_nonce);
+
+            assert_ne!(
+                xsi_block, draft_block,
+                "the key-material block equals XChaCha20-Poly1305's first keystream block for \
+                 (K, N) = (trial {i}): the two nonces differ in four fixed bytes, so equal \
+                 keystreams would mean ChaCha20's block function is not injective in its \
+                 nonce — which is a collision in a permutation"
+            );
+
+            // And the split of the block is what the derivation uses: the first half is the
+            // tag key, the second is the encryption seed, with nothing shared between the two
+            // uses beyond being two halves of one pseudorandom block (Theorem 1 in
+            // SECURITY-ANALYSIS.md).
+            let (mac_key, enc_seed) = derive_material(&key, &nonce);
+            let mut rebuilt = [0u8; 64];
+            rebuilt[..32].copy_from_slice(&mac_key);
+            rebuilt[32..].copy_from_slice(&enc_seed);
+            assert_eq!(
+                rebuilt, xsi_block,
+                "the material block is not what it is split from"
+            );
+        }
+    }
 }

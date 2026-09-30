@@ -132,6 +132,102 @@ checked from the other side by Kani, see §7.)
 **A5 (standard model).** No related-key, nonce-respecting-only, or quantum-model claims are
 made here except where §6 states them explicitly.
 
+### 2.1 The assumption tree, layer by layer
+
+Numbering the assumptions A1–A5 is not enough to audit a composition: each of those has to be
+pushed down until it rests on something that cannot be pushed further — a theorem with a
+proof and a citation, or a conjecture about a primitive that nobody has proven. This is that
+tree. Every node names its own falsifier, and no node is left as "it's standard".
+
+```
+L0  the claim:  MRAE/DAE security of the AEAD                    (§3 Thm 4)
+     |
+L1  proven composition theorems (no assumption at this level)
+     |-- L1.1  SIV/DAE: PRF tag + IND-CPA IV-based encryption => secure
+     |         (Rogaway-Shrimpton, EUROCRYPT 2006; MRAE form: Namprempre-Rogaway-Shrimpton,
+     |          EUROCRYPT 2014)
+     |-- L1.2  ...and its "per-message key derived from the tag" variant, which is what this
+     |         construction does (Gueron-Lindell, CCS 2015 / RFC 8452, §4)
+     |-- L1.3  the standard reductions used at the joints:
+     |         * PRF => collision resistance (q^2/2^output-bits)
+     |         * PRF output splitting: the halves of one PRF output are jointly pseudorandom
+     |         * cascade: a PRF keyed by a PRF output is a PRF
+     |         * counter-mode encryption from a PRF (a stream cipher is IND-CPA if its block
+     |           function is a PRF at distinct counter values)
+     |         * one-time-pad with pseudorandom keys
+     |
+L2  lemmas proved in §3 from L3 (this document's own contribution)
+     |-- Thm 1  the 512-bit key-material block is a PRF of the nonce
+     |-- Thm 2  the tag is a PRF of (N,A,M), hence collision-resistant and key-committing
+     |-- Thm 3  distinct tags => independent (enc_key, enc_nonce)
+     |-- A4      the encoding is injective                        (proved by inspection, §4.4)
+     |-- the counter lemma: no counter value repeats in one message (§4.6)
+     |-- the acyclicity lemma: the dependency graph is a DAG  (§3, after Thm 4)
+     |-- the two structural separation lemmas                   (§4.10)
+     |
+L3  primitive-level conjectures -- each one a statement about an object, not a mode
+     |-- L3.1  CC(k, n, c) = P(k,n,c) + (k,n,c) is a PRF in (n, c) for random k
+     |         [ChaCha20 = counter-mode + Even-Mansour-style feed-forward over the
+     |         20-round ARX permutation P]
+     |-- L3.2  HChaCha20 = trunc(P(x)) is a PRF in the nonce for random k
+     |         [the *same* permutation, no feed-forward, 8 of 16 words]
+     |-- L3.3  the BLAKE3 compression function, keyed through its key words with the
+     |         KEYED_HASH flag, is a PRF in the message block
+     |-- L3.4  the BLAKE3 tree preserves PRF-ness: the root node's output is a PRF
+     |-- L3.5  the BLAKE3 XOF keeps that property past the first output block
+     |
+L4  implementation properties (constant-time, no reachable panic, wipes, counter range)
+     -- out of scope here; README and tests/README cover them
+```
+
+**Why L3.1 and L3.2 are two conjectures and not one.** They are statements about the same
+permutation, and it is tempting to think the first implies the second. It does not, and the
+literature is the reason: the feed-forward construction `P(x) + x` is a PRF up to the birthday
+bound (that is the Even–Mansour story, and it is *false* beyond it), while a truncated
+permutation output is not a PRF at all in general — it can be distinguished by collision
+counting once more than `2^(output/2)` outputs are available. The two modes have different
+proofs, different bounds and different failure modes, so a construction that uses both needs
+both. (XChaCha20 needs both, which is why the pair is standard practice rather than a
+corollary of anything.)
+
+**Why L3.4 is not inherited from Merkle–Damgård results.** There are real theorems that an
+iterated hash built from a PRF compression function is a PRF — Bellare–Canetti–Krawczyk for
+HMAC/NMAC is the canonical one — but they are about *sequential* iteration. A tree is not
+covered. What supports L3.4 here is structural: every node of a BLAKE3 tree is a keyed
+compression with a distinct, injectively-encoded input (chunk counter, block index, length,
+and the CHUNK_START/CHUNK_END/PARENT/ROOT flags), so two distinct messages cannot produce the
+same node input except by colliding inside the compression function itself. That is an
+argument, not a proof, and it is the one place in this tree where "it is standard practice"
+is doing more work than a citation.
+
+**What each use of a primitive consumes.**
+
+| Use | Consumes | Because |
+| --- | --- | --- |
+| `subkey = HC(K, N₁)` | L3.2 | truncated permutation output, keyed by `K` |
+| `mat = CC(subkey, sn, 0)` | L3.1 | feed-forward block function, counter fixed at 0 |
+| `T = B3(mac_key, ...)` | L3.3, L3.4, L3.5 | keyed compression, tree, 65-byte XOF output |
+| `(enc_key, enc_nonce) = B3(enc_seed, ...)` | L3.3, L3.5 | keyed compression, 44-byte XOF output |
+| `C = M xor KS(enc_key, enc_nonce)` | L3.1 (via L1.3's counter-mode reduction) | distinct counters per block, §4.6 |
+
+**Falsifiers, per node.** L3.1: a distinguisher for ChaCha20's block function (published
+cryptanalysis reaches 7–8 of 20 rounds; a full-round distinguisher would falsify it). L3.2: a
+distinguisher for HChaCha20 (no published attack beyond the same reduced-round results). L3.3:
+a PRF distinguisher for keyed BLAKE3 — the BLAKE2/BLAKE3 literature has boomerang and
+rotational attacks on *reduced* rounds only. L3.4: a collision or a PRF distinguisher that
+exploits the tree (this would be a structural attack on BLAKE3, and none is known). L3.5: an
+XOF distinguisher past the first output block (the output counter is part of the root
+compression's input, so this reduces to L3.3/L3.4). A6 (the encoding) is not a conjecture: it
+is proven in §4.4.
+
+**The honest bottom line.** Every claim in this document rests on L3.1–L3.5 and nothing else.
+There is no proof of any of the five, and no test in this repository — or any other — can
+establish them, because they are statements about the infeasibility of computation. What the
+remainder of the document does is make sure that *nothing else* is assumed: that the
+composition adds no conjecture of its own, which is what §4.10 is about.
+ No related-key, nonce-respecting-only, or quantum-model claims are
+made here except where §6 states them explicitly.
+
 ---
 
 ## 3. What follows
@@ -257,6 +353,37 @@ reason the per-message key is derived from the tag rather than from `(K, N)` alo
 scheme in which it were derived from `(K, N)` would hand over `M₁ ⊕ M₂` on nonce reuse, and
 `src/lib.rs`'s `nonce_reuse_does_not_reuse_the_keystream` test exists to make that failure
 mode impossible to introduce quietly.
+
+### The acyclicity lemma (the construction is a DAG, not a fixed point)
+
+SIV has an unusual dependency shape, and it is worth isolating because a different shape would
+be unbuildable rather than merely weaker:
+
+```
+T = B3(mac_key, DOM_TAG || K || N || |A| || |M| || A || M)      T depends on M
+(enc_key, enc_nonce) = B3(enc_seed, DOM_ENC || T)               the key depends on T
+C = M xor KS(enc_key, enc_nonce)                                C depends on M and T
+```
+
+*Proof of acyclicity.* Read the edges: `T -> key -> C`, and `M -> T`, `M -> C`. There is no
+edge from `C` or from the derived key back into `T`, so the graph is a DAG and each value is
+defined before it is used. ∎
+
+Two consequences, both load-bearing:
+
+* **Encryption needs the whole message before it can produce a byte**, because `T` is a
+  function of `M` and the keystream is a function of `T`. That is why `encrypt` is two serial
+  passes and why its latency does not shrink with more cores (README's performance section).
+* **Decryption must decrypt before it can verify, and cannot be reordered.** The verifier needs
+  `T`, `T` needs `M`, and `M` needs the keystream that `T` selects — so the plaintext necessarily
+  exists in the buffer before any tag comparison happens. That is a property of the *mode*, not
+  of this implementation, and it is the reason the crate wipes the buffer on failure and never
+  returns it, and the reason `tests/ctgrind.supp` exists at all: the accept/reject branch is
+  unavoidable, so instead of removing it the crate isolates it in one function.
+
+A construction that instead verified a tag *before* decrypting would have to commit to the
+ciphertext rather than the plaintext, which is a different mode (and loses the misuse-resistance
+argument above, since the tag would no longer bind the message content).
 
 ---
 
@@ -384,6 +511,86 @@ design); that the tag is secret (it is public, and Thm 3 does not need it to be)
 
 ---
 
+### 4.10 The interaction inventory: why the combination adds no assumption of its own
+
+This is the answer to the question "does putting ChaCha20, HChaCha20 and BLAKE3 together in
+*this* way create a problem that none of them has alone?". The answer is a proof obligation,
+not an opinion, and it has three parts: enumerate every use, enumerate every value that crosses
+between uses, and show that each crossing is either a composition the L1 theorems already cover,
+a *structural* disjointness, or a bounded-probability event. The enumeration has to be complete,
+so the completeness argument is stated last and it is the part that is mechanised (a test).
+
+**The five uses.** Every cryptographic call in the non-test source is one of these, and the
+inventory test (`tests/construction_inventory.rs`) fails if the set changes.
+
+| # | Call | Key | Input | Output | Consumed next by |
+| --- | --- | --- | --- | --- | --- |
+| U1 | `hchacha20` | `K` | `N₁` (16 B) | `subkey` (32 B) | U2 |
+| U2 | `chacha20_keystream_raw` | `subkey` | `"XSIV" ‖ N₂`, counter 0 | `mat` (64 B) | split into U3's and U4's keys |
+| U3 | `blake3_keyed_multi` | `mac_key = mat[0:32]` | `"XSIV-TAG" ‖ K ‖ N ‖ len ‖ A ‖ M` | `T` (65 B) | U4, and the wire |
+| U4 | `blake3_keyed_xof` | `enc_seed = mat[32:64]` | `"XSIV-ENC" ‖ T` | `enc_key`, `enc_nonce` | U5 |
+| U5 | `chacha20_keystream` | `enc_key` | `enc_nonce`, counters 0… | keystream | XOR with `M` |
+
+**The values that cross.** Exactly six: `subkey` (U1→U2), `mat` (U2→{U3,U4}), `T` (U3→U4 and
+U3→wire), `enc_key` and `enc_nonce` (U4→U5). Nothing else is passed between calls — that is a
+statement about the code, and it is what the inventory test pins. So the case analysis below is
+over a finite, known set, and no crossing can be missed by construction.
+
+**Pairwise separation.** For each pair of uses that could in principle share a key, an input
+point, or an output, the table says what keeps them apart and what kind of argument that is.
+
+| Pair | Could they collide? | Separation | Kind |
+| --- | --- | --- | --- |
+| U1, U2 | no | `subkey` is U1's output and U2's key: this is XChaCha20's own structure | composition, L3.2 then L3.1 |
+| U2, U5 | yes, probability `2^-352` | both are ChaCha20 at counter 0; separated by key *and* nonce, not by counter (§4.1). The event needs `enc_key = subkey` **and** `enc_nonce = "XSIV"‖N₂`, both of which are secret-derived, so no one without `K` can compute or detect it | **bounded event, requires K** |
+| U3, U4 | no | different keys (`mac_key` vs `enc_seed`, jointly pseudorandom by Thm 1) **and** input strings that differ in their first 8 bytes | structural (prefix) + Thm 1 |
+| U2, U3 | no | `mac_key` is used only as U3's key; `mat`'s other half goes to U4 | structural (disjoint purposes) |
+| U2, U4 | no | `enc_seed` only keys U4 | structural |
+| U4, U5 | not a collision but a *composition* | U4's output **is** U5's key; nothing is reused | by construction |
+| U3, U5 | no | `T` is public and U5's key is not derived from it in any invertible way: U5's key is `B3(enc_seed, DOM_ENC‖T)`, a PRF value under an unknown key | L3.3 |
+| U1, U3/U4/U5 | no | `subkey` never leaves U2 | structural |
+| U3, U3 (across two messages, same nonce) | yes, `q²/2^521` | PRF collisions (§4.5) — the SIV term, not a composition term | L1.1 term |
+| U4, U4 (two distinct tags, same nonce) | yes, `q²/2^353` | PRF collisions on the KDF output | L1.2/L1.3 term |
+
+**Two structural lemmas worth stating on their own**, because both are proved by inspection and
+neither depends on a primitive being strong:
+
+*Lemma S1 (the two BLAKE3 input spaces are disjoint).* U3's input begins with
+`DOM_TAG = "XSIV-TAG"` and U4's with `DOM_ENC = "XSIV-ENC"`; both are 8 bytes and they differ in
+their third byte, so no byte string is both a tag input and a KDF input. Even in the impossible
+case `mac_key = enc_seed` — one 64-byte block split in half, so a `2^-256` event — the two BLAKE3
+families remain separated by *input space* rather than by key. ∎
+
+*Lemma S2 (no cross-scheme keystream reuse with XChaCha20-Poly1305).* For the same `(K, N)`,
+HChaCha20 gives both schemes the *same* subkey (both use `HC(K, N₁)` with the same `N₁`), so the
+separation has to come from the second half of the nonce. XChaCha20-Poly1305's first data block
+is `CC(subkey, 0⁴ ‖ N₂, 0)`; this crate's key-material block is `CC(subkey, "XSIV" ‖ N₂, 0)`.
+The two nonces differ in four fixed bytes, so these are evaluations of ChaCha20 at **different
+points of its domain** — a structural separation, not a probabilistic one. This is why the label
+sits in the *nonce* rather than the counter, and why it is a fixpoint of the format (§4.3). ∎
+
+**Completeness.** The case analysis is exhaustive because (i) the five uses are all the
+cryptographic calls in the construction — mechanically checked — and (ii) the set of values that
+flow between them is exactly the six listed, so any interaction is a pair in the table above.
+There is no interaction that the table does not cover, and the table's rows are each discharged
+by one of: an L1 theorem, a lemma proved in §3, an inspection-level structural fact, or a
+probability bound.
+
+**Therefore the combination introduces no assumption beyond L3.1–L3.5.** Every joint use is
+covered by the L1 reductions, which need the primitives only with *independent keys*; the keys
+are derived and their independence is a theorem (Thm 1) rather than a hope; and the one place
+where two uses share a point of a primitive's domain (U2/U5, counter 0) needs the master key even
+to detect. Nothing in this construction requires a joint assumption about ChaCha20 and BLAKE3 —
+no "these two are unrelated" conjecture, no "this key is safe to use in both" conjecture.
+
+**What this does *not* prove, stated plainly.** It does not prove that ChaCha20 and BLAKE3 are
+secure, and it cannot rule out a future cryptanalytic relation between them: if someone found a
+relation that made this cascade break, that would be a break of L3.3 (the keyed BLAKE3 PRF
+assumption) or of L3.1/L3.2, not a flaw in the composition — but the distinction would matter to
+a user, so it is written here rather than left to be inferred. "No unknown problem" is not a
+theorem anyone can prove about any construction; what is proven here is the weaker and precise
+statement that *the composition adds no conjunct of its own* to L3.1–L3.5.
+
 ## 5. Falsification programme
 
 A security claim that cannot say what would refute it is not a claim. Each row states the
@@ -402,6 +609,8 @@ refutation, and the status of the attempt.
 | 9 | Nonce reuse leaks only equality | Two distinct `(A,M)` under one nonce with the same tag or keystream | Tested at the keystream level (#4); a tag collision is out of reach |
 | 10 | Cross-scheme separation | Keystream agreement with XChaCha20-Poly1305 for one `(K,N)` | Tested at the derivation level: the label is in the nonce, not the counter (`test_subkey_domain_occupies_nonce_not_counter`) |
 | 11 | The implementation matches the design | A divergence between `src/lib.rs` and the specification above | Differential testing against an independent Python reference, published KATs (RFC 8439, the XChaCha draft, BLAKE3's official keyed vectors), the independent implementation in `src/witness.rs` under `ultra`, and the Kani layout harnesses |
+| 13 | **The combination needs no joint assumption** (§4.10) | A sixth use of a primitive, or two uses sharing a key/domain/point in a way the table does not list | **Mechanised**: `tests/construction_inventory.rs` counts the cryptographic call sites in the non-test source and fails if the set changes, and pins the two structural lemmas (S1: the BLAKE3 input spaces are disjoint by their 8-byte prefixes; S2: this crate's key-material block is at a different ChaCha20 point than XChaCha20-Poly1305's first data block, for the same key and nonce) |
+| 14 | U2/U5 share counter 0 (§4.1) | The key-material block equals the message keystream for one `(K,N,M)` | **Tested** for a spread of inputs (`the_key_material_block_is_not_the_message_keystream`); a real collision needs the master key to compute, so it is a probability statement (`≈2^-352`) rather than an attack |
 | 12 | An adversary cannot get unverified plaintext | A decryption failure that returns bytes, or that returns them for a moment the caller can observe | `tests/security.rs`, the wipe contracts, and `tools/fi_check.sh`'s `wipe-skipped` row |
 
 Rows 1–3 are the honest boundary: **no test in this repository, and none that could be
@@ -424,6 +633,13 @@ scheme makes.
   defects, and both are documented in `README.md`.
 * **Beyond the model.** Side channels, fault injection, a debugger, cold boot, a hostile
   hypervisor: out of scope here and covered where they belong.
+* **What "no unknown problem" can and cannot mean.** A break of this construction must be a
+  break of L3.1–L3.5 or of an L1 composition theorem; §4.10 proves that the *combination* adds
+  no conjunct of its own. But a proof that no unknown cryptanalytic relation exists between
+  ChaCha20 and BLAKE3 is not something any document can supply — such a relation, if found,
+  would present itself as a break of one of those primitive conjectures. The distinction is
+  worth stating because the two failures would look identical from the outside and have
+  different fixes: a composition flaw is this crate's to fix, a primitive break is not.
 * **Not claimed:** that this is a standard, that it has been cryptanalysed by anyone else,
   or that the tag width makes forgery harder than 2^256 — it does not, because forgery is
   bounded by the key, not by the tag (the tag width buys *commitment*, and that is the
@@ -442,6 +658,7 @@ scheme makes.
 | The AAD and the message are separately bound | `test_aad_message_split_is_unambiguous`, `test_tag_covers_every_aad_and_message_byte` |
 | Nonce reuse cannot reuse a keystream | `nonce_reuse_does_not_reuse_the_keystream` |
 | The two ChaCha20 uses are separate | `the_key_material_block_is_not_the_message_keystream` |
+| The set of primitive uses, and the separations between them | `tests/construction_inventory.rs` |
 | The design on the wire is the design in the paper | The differential fixtures, the published KATs, and `src/witness.rs` under `ultra` |
 | The properties here are not silently weakened by a code change | The source-shape tests in `tests/decision_scope.rs`, `tests/variable_latency.rs`, `tests/counter_range.rs` |
 
