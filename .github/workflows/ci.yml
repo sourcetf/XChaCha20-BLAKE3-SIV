@@ -228,7 +228,7 @@ jobs:
       # merely stated. An unverified `rust-version` is a claim that can silently
       # become false -- the code can start using a newer API and nothing notices
       # until someone on an old toolchain tries to build it.
-      - uses: dtolnay/rust-toolchain@3230091d7ef9483f601620abacc570c22cf44d22 # 1.85.0
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # 1.85.0
         with:
           toolchain: 1.85.0
 
