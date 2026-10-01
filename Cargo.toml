@@ -73,7 +73,7 @@ blake3 = { version = "1.8", default-features = false, features = ["zeroize"] }
 # The head-to-head benchmark in `benches/compare.rs`: RustCrypto's
 # XChaCha20-Poly1305 is the natural reference point (same 24-byte nonce), and
 # `aead` supplies the trait both sides are driven through.
-chacha20poly1305 = "0.10"
+chacha20poly1305 = "0.11"
 aead = { version = "0.5", features = ["alloc"] }
 # Property-based tests. The security tests in `tests/security.rs` are the main
 # reason for this: "no single-bit tamper is ever accepted" is a statement over
