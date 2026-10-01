@@ -256,9 +256,9 @@ fn unlocking_restores_core_dump_inclusion() {
         // *is* reported, and this function refuses to proceed unless `lock_range` returned
         // `Ok`), and the *call itself* — the `MADV_DODUMP` line that was missing for as
         // long as the bug existed — is pinned against the shipped source by
-        // `the_dump_advice_is_issued_on_the_right_range` below, which needs no kernel and
-        // no ptrace-able address space. What is genuinely not verified on such a host is
-        // the *effect*, and saying so is the point of printing this.
+        // `the_dump_advice_is_issued_on_the_right_range` below, which needs no kernel
+        // cooperation at all. What is genuinely not verified on such a host is the
+        // *effect*, and saying so is the point of printing this.
         xchacha20_blake3_siv::locked::unlock_range(buf.as_ptr(), buf.len());
         eprintln!(
             "SKIPPED: VmFlags does not report `lo` for the mapping that holds the buffer, so \
