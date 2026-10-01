@@ -1567,15 +1567,16 @@ const TAG_CONCAT_MIN: usize = 2_048;
 ///   attacker must take, at the price of the correlation noted below.
 ///
 ///   One honest caveat belongs here, because it is the one step in the security argument
-///   that no black-box reduction covers (`SECURITY-ANALYSIS.md` §2.1, node L3.6): the key of
-///   the outer PRF is *derived from a value that also appears in its input*. With the
+///   that no black-box reduction covers (`SECURITY-ANALYSIS.md` §2.1, node L3.6): the hash's
+///   *key* and a 32-byte *substring of its input* are two correlated functions of one
+///   secret, where the PRF game assumes a key drawn independently of the input. With the
 ///   derivation idealized the reduction is immediate — a random function does not care what
-///   its input means — but a fully black-box proof would have to work for a hash that could
-///   notice the relation, and such a hash is not a PRF. What supports the step is that
-///   neither primitive is known to have that structure, and that no experiment here
-///   separates the composition from ideal. A format revision could remove the correlation
-///   entirely by dropping `K` from the head — at the cost of re-opening the derivation route
-///   above, which is the trade rather than a free win.
+///   its input means — but a hash that could *notice* the relation would not be a PRF under
+///   this composition, and §2.1's separation shows the gap is real rather than a missing
+///   paragraph. What supports the step is that neither primitive is known to have that
+///   structure, and that no experiment here separates the composition from ideal. A format
+///   revision could remove the correlation entirely by dropping `K` from the head — at the
+///   cost of re-opening the derivation route above, which is the trade rather than a free win.
 /// * **Lengths are encoded and every field is fixed width.** BLAKE3 is not
 ///   vulnerable to length extension (its finalisation is flagged, unlike
 ///   Merkle–Damgård constructions), but `A || M` alone would be ambiguous:

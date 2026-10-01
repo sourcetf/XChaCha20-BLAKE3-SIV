@@ -397,6 +397,45 @@ planted defects (the unlock call reverted to `MADV_DONTDUMP`, and the constant s
 them — the first fails both, the second only the source check, which is the division of labour
 between them.
 
+### A second audit's assumption ledger: one item proved, one already falsified, one made precise
+
+A second reader sent a lettered list of assumptions with a verdict per item. Four of the seven
+verdicts matched this document exactly; the differences are worth recording because two of them
+are corrections *to* it.
+
+* **"The two-level derivation cascade is a PRF"** was listed as assumed, "on record, at the same
+  level as XChaCha20 itself". This document does better than assume it: `Thm 1` *proves* it from
+  L3.1 + L3.2 by a two-step hybrid (replace the HChaCha20 output by a random function, then each
+  block-function evaluation by an independent one — legal because distinct nonces give distinct
+  key/point pairs). One fewer assumption than the audit credited, and the proof is three
+  sentences because the construction is XChaCha20's own derivation.
+* **"The 520-bit XOF output gives more than `2^256` collision resistance"** was marked falsified,
+  and that is right — this document had already corrected it (`2^128`, §4.5). What the audit's
+  phrasing adds is scope: the falsification is not about this crate's tag encoding but about
+  BLAKE3's XOF *as such*, since any two inputs that agree on the final block collide in the
+  output as soon as their chain values do. §4.5 now says so, which also answers "could the
+  encoding have avoided it?" — only by not being a single-root XOF.
+* **"The `K`-in-the-head step needs a proof"** is the one item this round changed. It cannot be
+  proved from the primitives' PRF assumptions, and §2.1 now says why in a form an auditor can
+  check: the reduction would need the preimage of the challenge key, so no black-box reduction
+  exists, and a counterexample hash shows the step is strictly stronger than L3.3. What it *is*
+  immediate under is a random-oracle model of keyed BLAKE3 — strictly stronger than the PRF
+  assumption — and the document declines to buy the proof at that price and says so. L3.6's
+  statement was also rewritten into the well-posed form (`(N, A, M) ↦ T` with the secret inserted
+  by the scheme; "a PRF in `K`" over inputs containing `K` is not a game an adversary can even
+  play), since the loose phrasing invited exactly the "needs proof" reading.
+* **The other four** (ChaCha20 PRF, keyed BLAKE3 PRF, HChaCha20 PRF, SIV composition theorem)
+  match L3.1/L3.3–L3.5 and L1.1–L1.3 as assumed-or-cited. The audit's citation "PSV06" for the
+  DAE theorem does not resolve to a paper; checking it turned up a real defect *here* — this
+  document cited RS06 under a title that is not the paper ("…MAC-then-Encrypt…"). Corrected to
+  *Deterministic Authenticated-Encryption: A Provable-Security Treatment of the Key-Wrap Problem*
+  (EUROCRYPT 2006; full version ePrint 2006/221), with NRS14 noted as the MRAE formulation §3 uses.
+
+New in the document: **§2.2**, a one-table ledger mapping an auditor's lettered list onto this
+document's names and statuses (including the warning that the letters differ from §2's own A1–A5),
+so the next reader does not have to reconstruct which items are proved, which are cited, and which
+are conjectures with falsifiers. No code and no wire format changed.
+
 ### Zeroization: two copies the wipes could not reach
 
 Fixed in every configuration, because these are copies the wipes should already have

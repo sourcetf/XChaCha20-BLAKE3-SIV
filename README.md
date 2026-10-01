@@ -199,7 +199,10 @@ own to declare rather than inherit: binding the key into the tag's *input* as we
 as into its key derivation puts a derived key and the value it is derived from in
 one hash call, which the black-box PRF assumption does not cover. It is stated as
 `L3.6` in [SECURITY-ANALYSIS.md](SECURITY-ANALYSIS.md) §2.1, with the separation
-showing no reduction reaches it and the reason it is still believed. The formal
+showing no reduction reaches it and the reason it is still believed; §2.2 there is a
+ledger mapping an auditor's own lettered list of assumptions onto the document, so
+"which of these do you actually assume, and which are proved or falsified?" has a
+one-table answer. The formal
 harnesses in `src/proofs.rs` prove properties of the implementation (that the fields
 reach the hash, that every output byte is used, that the tag reaches the ciphertext),
 not cryptographic hardness.

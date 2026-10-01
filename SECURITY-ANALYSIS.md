@@ -187,10 +187,12 @@ L3  primitive-level conjectures -- each one a statement about an object, not a m
      |         KEYED_HASH flag, is a PRF in the message block
      |-- L3.4  the BLAKE3 tree preserves PRF-ness: the root node's output is a PRF
      |-- L3.5  the BLAKE3 XOF keeps that property past the first output block
-     |-- L3.6  the *composed* tag map is a PRF in the master key, even though the master
-     |         key is also 32 bytes of the tag input: the key of the inner PRF is derived
-     |         from a value that appears in its own input, which the black-box PRF game
-     |         does not model and no reduction from L3.3 reaches
+     |-- L3.6  for a uniform `K`, the map `(N, A, M) ↦ B3(D(K), P ‖ K ‖ S)` is a PRF,
+     |         where `D(K)` keys the hash and the *scheme* inserts the secret `K` between
+     |         the caller-chosen parts `P` and `S`: the input is a function of the key, a
+     |         shape the black-box PRF game does not model and no reduction from L3.3
+     |         reaches.  Immediate if keyed BLAKE3 is modelled as a random oracle (strictly
+     |         stronger than L3.3); assumed, with a separation, in the standard model
      |
 L4  implementation properties (constant-time, no reachable panic, wipes, counter range)
      -- out of scope here; README and tests/README cover them
@@ -216,16 +218,25 @@ same node input except by colliding inside the compression function itself. That
 argument, not a proof, and it is the one place in this tree where "it is standard practice"
 is doing more work than a citation.
 
-**Why L3.6 is an assumption of its own.** It looks like it should follow from L3.3, and it
-does not. The tag is `B3(mac_key, DOM_TAG ‖ K ‖ …)`, so the key of the outer PRF is *derived
-from* a value that also *appears in its input*: `mac_key` is a function of `K`, and `K` is 32
-bytes of the hashed message. L3.3 is the statement that `x ↦ B3(k, x)` is a PRF for a key `k`
-drawn uniformly **and independently of the input**; here the key and the input are correlated
-functions of the same secret, which is the shape the PRF game deliberately excludes (it is the
-key-dependent-input setting, the cousin of KDM). The reduction that would close the gap cannot
-be written down: it would have to hold `mac_key` as the challenge key of the PRF game while
-*placing `K` in the query string* — but `K` is exactly what the challenge key is derived from,
-and the distinguisher does not get it.
+**Why L3.6 is an assumption of its own.** First, the statement, because the obvious phrasing
+of it is not well posed. "The tag is a PRF in `K`" cannot mean a PRF whose inputs the adversary
+chooses, since the input contains `K` and the adversary does not know it. What the reduction
+actually needs — and what L3.6 asserts — is the game this document's theorems use: `K` is drawn
+uniformly, the adversary chooses `(N, A, M)`, *the scheme* builds the byte string
+`DOM_TAG ‖ K ‖ N ‖ ⟨|A|⟩ ‖ ⟨|M|⟩ ‖ A ‖ M` with the secret inside it, and the output
+`T = B3(D(K), ·)` must be indistinguishable from a uniformly random function of `(N, A, M)`.
+The distinguishing feature of this game, and the reason it is not L3.3, is that the *key* of the
+hash and a 32-byte *substring of its input* are two correlated functions of one secret — the
+key-dependent-input setting, the cousin of KDM.
+
+It looks like it should follow from L3.3, and it does not. L3.3 is the statement that
+`x ↦ B3(k, x)` is a PRF for a key `k` drawn uniformly **and independently of the input**; here
+the key is derived from the very value the input contains. The reduction that would close the
+gap cannot be written down: it would have to hold `D(K)` as the challenge key of the PRF game
+while *placing `K` in the query string*, and the input would have to contain the preimage of a
+value the reduction is not given. (Concretely: the reduction's oracle is `B3(k*, ·)` with `k*`
+uniform and unknown; to answer a query it must build `D(K) ‖ … ‖ K ‖ …`, which needs `K`, and
+`D` is not invertible without `K`.)
 
 That this is a genuine gap rather than a missing paragraph is shown by a separation. Take any
 keyed hash `B3'` that is L3.3-secure but *notices* its input: `B3'(k, x) = 0` if `k` occurs in
@@ -234,6 +245,17 @@ event has probability ≈ `2^-256` per query, so it costs at most `q·2^-256`), 
 map `K ↦ B3'(D(K), P ‖ K ‖ S)` is the constant zero function — distinguishable from random by
 a single query. So no black-box reduction can exist: L3.6 is strictly stronger than L3.3, and a
 construction that gets it wrong is not caught by the PRF assumption on the hash alone.
+
+**Can it be proved instead of assumed?** Not from L3.1–L3.5 — the separation above is a proof of
+*that*. It *is* immediate under a stronger model: if keyed BLAKE3 is modelled as a random oracle
+(or as an ideal cipher applied to the state), then `B3(k, x)` is uniform in `k` and `x` alike and
+the correlation between the key and the input costs nothing. Preferring that model would trade
+one honest assumption for a larger one (a random oracle is strictly stronger than a PRF: it
+implies collision resistance, preimage resistance and PRF security at once), so the document
+states the assumption instead of moving the goalposts. The third option — removing the
+correlation by dropping `K` from the head — is a design change with a price, quantified in §4.10
+and in `derive_tag`'s own docs: it re-opens the `2^256`-birthday route through the key
+derivation. Taking neither is deliberate.
 
 What supports it here is structural, and weaker than a proof. BLAKE3's compression puts the
 key words in the *initial state* (`v[0..8] = k`, with `KEYED_HASH` in the flags) and lets the
@@ -283,6 +305,30 @@ than an earlier revision of this document claimed and one more than the primitiv
 assumptions provide: L3.6 comes from a *choice of encoding* (binding `K` into the tag as well
 as into the key derivation), not from any interaction between ChaCha20 and BLAKE3 — that
 distinction is the whole content of §4.10.
+
+### 2.2 An auditor's lettered list, mapped onto this document
+
+Audits of this construction arrive with their own numbering, and one such list — with the items
+ChaCha20-is-a-PRF, keyed-BLAKE3-is-a-PRF, HChaCha20-is-a-PRF, the two-level cascade-is-a-PRF,
+"the 520-bit XOF output gives more than `2^256` collision resistance", the SIV composition theorem,
+and the `K`-in-the-head key-dependent-input step — maps onto this document as follows. **The
+letters below are the auditor's, not §2's**; this section's own A1–A5 are a different list, and the
+numbers in `Adv^{A1}`–`Adv^{A3}` in the theorems refer to *these* document's, so the mapping is
+worth having in one place:
+
+| Auditor's item | Where it lives here | Status |
+| --- | --- | --- |
+| ChaCha20 is a secure PRF | L3.1 | assumed (L3.1's standing paragraph; no full-round attack, huge deployment) |
+| Keyed BLAKE3 is a secure PRF | L3.3, L3.4, L3.5 | assumed (design argument, not a theorem; the most exposed of the three) |
+| HChaCha20 is a secure PRF | L3.2 | assumed, and a *separate* conjecture from L3.1 though it is the same permutation |
+| The two-level derivation cascade is a PRF | **Thm 1** | **proved** here from L3.1 + L3.2, not assumed — the same construction XChaCha20 rests on, but with the argument written out |
+| "The 520-bit XOF output gives more than `2^256` collision resistance" | §4.5 | **falsified**: the whole output is a function of a 256-bit chain value, so collisions are `2^128`-class and the width cannot raise them. (The claim was never needed for commitment — that is a *target*, §3 Thm 2 — which is why falsifying it does not weaken the scheme's commitment) |
+| The SIV composition theorem applies | L1.1 (RS06), L1.2 (the key-derived-from-tag variant: Gueron–Lindell / RFC 8452), L1.3 | literature, cited; the MRAE form used in §3 is NRS14's |
+| The `K`-in-the-head step is sound (KDI/KDM-flavoured) | **L3.6** | assumed, and *not* implied by L3.3 — there is a separation above showing no black-box reduction exists. Immediate under a random-oracle model of keyed BLAKE3 (strictly stronger than the PRF assumption); the encoding could remove it at the cost of re-opening a `2^256` route (§4.10) |
+
+Nothing in the table is silently assumed: each row either points at a proof in this document, at
+a citation, or at a named conjecture with its own falsifier in §5. The one row an auditor should
+push on is L3.6, and §5's row 15 says exactly what would refute it.
 
 ---
 
@@ -592,6 +638,14 @@ because every output block of the root is a function of the same state. Collidin
 `2^128` in the number of hashes computed, and no tag width can raise it: the tag is not 520
 independent bits, it is a 256-bit state observed through a 520-bit window.
 
+**This is not a property of this crate's encoding** — it is a property of BLAKE3's XOF, and the
+general claim "a 520-bit XOF output gives more than `2^256` collision resistance" is false for
+any input shape an adversary can search: two inputs that agree on the final block collide in the
+output as soon as their chaining values do, whatever the caller's layout is. The same statement
+holds for the derived `(key, nonce)` pair and for any other multi-block output of the same hash.
+What the layout controls is only whether the adversary can hold that tail fixed, and here (as in
+most encodings) it can.
+
 **The collision is reachable by construction, which is why this matters.** The adversary does not
 have to collide the whole input — only the state that enters a block it holds fixed. Take two
 messages of equal length that agree on their final block `S`, and vary the bytes before it: the
@@ -888,10 +942,15 @@ here and in `README.md`.
 
 ## References
 
-* P. Rogaway, T. Shrimpton, *A Provable-Security Treatment of the MAC-then-Encrypt
-  Approach*, EUROCRYPT 2006 — the SIV construction and its theorem.
+* P. Rogaway, T. Shrimpton, *Deterministic Authenticated-Encryption: A Provable-Security
+  Treatment of the Key-Wrap Problem*, EUROCRYPT 2006 (full version: IACR ePrint 2006/221) —
+  the DAE/SIV construction and its theorem. (The title was given here as "…of the
+  MAC-then-Encrypt Approach" in an earlier revision, which is not a paper: corrected after an
+  auditor checked the citation. This document's §3 uses NRS14's MRAE formulation of that
+  theorem.)
 * C. Namprempre, P. Rogaway, T. Shrimpton, *Reconsidering Generic Composition*,
-  EUROCRYPT 2014 — the MRAE formulation used in §3.
+  EUROCRYPT 2014 — the MRAE formulation used in §3, which revisits and generalises the DAE
+  result of RS06.
 * S. Gueron, Y. Lindell, *GCM-SIV: Full Nonce Misuse-Resistant Authenticated Encryption
   at Under One Cycle per Byte*, CCS 2015, and RFC 8452 (*AES-GCM-SIV*) — the same
   "tag first, derive the per-message key from the tag" two-pass structure, with a proof,
