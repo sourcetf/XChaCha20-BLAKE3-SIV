@@ -920,6 +920,35 @@ must not come back, and the fold must not delegate to `subtle` (or there would b
 wearing two hats). The README's fault table row for a shortened comparison, and the layer table
 row it used to carry under `dual-mac`, moved with it.
 
+### The stack requirement is now a value, and the unvalidatable defences have a validation plan
+
+Continuing the rule from the last two entries — cheap and verifiable goes in, everything else is
+written down precisely — two more items land, neither of them a new cipher:
+
+* **`stack_requirement_bytes()` is public.** `dual-mac`'s `scrub_stack` overwrites the derivation
+  region with a single **16 KiB frame**, so a thread with less remaining stack faults inside the
+  function rather than returning; that was a row in a table, and a row in a table does not fail a
+  build. It is now a constant a caller can check — `stack_size(stack_requirement_bytes() + margin)`
+  — documented as zero outside `dual-mac`, and `the_reported_stack_requirement_is_sufficient`
+  spawns a thread with exactly that budget and runs a round trip on it, so the number the crate
+  reports is a measured one rather than advice. (The "too small aborts" half stays a hand
+  measurement: a stack overflow kills the process, which is the reason the constant exists rather
+  than something a test can assert around.)
+* **§9 of `SECURITY-ANALYSIS.md`, "what would validate the defences this repository cannot
+  validate"** — for each item §8.5 called unverifiable here (masking, fault tolerance, the
+  witness's value under fault, speculative execution, Rowhammer, cold boot, Hertzbleed-class
+  frequency channels) it states the *measurement*, the method and standard (TVLA / ISO 17825 for
+  leakage, a timed FI bench grid, PoC Spectre harnesses, hammering harnesses, the cold-boot
+  procedure, a remote-timing harness), the pass criterion, and **the exact sentence the
+  measurement would license** — e.g. "first-order leakage below the detection threshold of
+  100 000 traces on <device>", never "resistant to DPA", because a threshold is not a bound and
+  higher orders are untested. Until a measurement exists the sentence is written nowhere; that is
+  what the section enforces, and it is why the project can say "not validated here" without that
+  reading as "not validatable".
+
+Both entries are the same idea applied twice: a claim without its measurement is not made, and a
+measurement without a stated criterion is not a result.
+
 ### Zeroization: two copies the wipes could not reach
 
 Fixed in every configuration, because these are copies the wipes should already have

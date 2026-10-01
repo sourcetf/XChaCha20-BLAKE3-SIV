@@ -352,6 +352,39 @@ pub const DOM_TAG: [u8; 8] = *b"XSIV-TAG";
 /// invocations cannot be confused for one another.
 pub const DOM_ENC: [u8; 8] = *b"XSIV-ENC";
 
+/// Extra stack, in bytes, that one call into this crate may touch below its entry point.
+///
+/// Non-zero only under `dual-mac` (and therefore `ultra`), where the entry points call
+/// `scrub_stack` to overwrite the call-chain region the key derivations used: that overwrite is
+/// a single **16 KiB frame**, so a thread whose remaining stack is smaller faults inside the
+/// function rather than returning. The README's layer table carries the measurement (a 32 KiB
+/// thread survives ~16 KiB of prior consumption without this feature and fails at 8 KiB with
+/// it); this function is that number as a value a caller can check, because "size your threads
+/// for it" is advice and `stack_size(stack_requirement_bytes() + margin)` is a build step.
+///
+/// Zero means "no large fixed frame" — not a promise that the crate uses no stack at all: the
+/// derivations, the tag buffers and the SIMD kernels are ordinary frames, in the hundreds of
+/// bytes, and a caller that gives a thread a stack smaller than that has a problem no constant
+/// can describe.
+///
+/// ```no_run
+/// # #[cfg(feature = "dual-mac")]
+/// let stack = xchacha20_blake3_siv::stack_requirement_bytes() + 16 * 1024;
+/// # #[cfg(feature = "dual-mac")]
+/// let h = std::thread::Builder::new().stack_size(stack).spawn(|| { /* AEAD here */ }).unwrap();
+/// ```
+#[must_use]
+pub const fn stack_requirement_bytes() -> usize {
+    #[cfg(feature = "dual-mac")]
+    {
+        16 * 1024
+    }
+    #[cfg(not(feature = "dual-mac"))]
+    {
+        0
+    }
+}
+
 // ── Error type ────────────────────────────────────────────────────────
 
 /// Errors returned by [`encrypt`], [`decrypt`] and the detached variants.
@@ -4345,6 +4378,38 @@ mod tests {
         assert!(pt != different);
         assert!(pt != shorter);
         assert!(shorter != pt);
+    }
+
+    /// A thread sized for [`stack_requirement_bytes`] survives a round trip.
+    ///
+    /// The constant exists because "size your threads for the 16 KiB scrub frame" was advice in
+    /// a table row, and advice does not fail a build. This test is the other half: the number
+    /// the crate reports is *sufficient*, measured by spawning a thread with exactly that stack
+    /// plus a small margin and running the AEAD on it.
+    ///
+    /// The "too small" half — that a thread with less than the requirement faults inside
+    /// `scrub_stack` — stays the hand measurement in the README's layer table, because a stack
+    /// overflow is not something a test can catch: the process dies, which is the point of the
+    /// constant rather than something to assert around.
+    #[test]
+    fn the_reported_stack_requirement_is_sufficient() {
+        let need = stack_requirement_bytes();
+        // A margin for the test's own frames, the key/nonce locals and the allocator.
+        let stack = need + 64 * 1024;
+        let handle = std::thread::Builder::new()
+            .stack_size(stack)
+            .spawn(|| {
+                let key = [0x11u8; 32];
+                let nonce = [0x22u8; NONCE_LEN];
+                let pt = vec![0xA5u8; 4096];
+                let (ct, tag) = encrypt(&key, &nonce, b"aad", &pt).unwrap();
+                let back = decrypt(&key, &nonce, b"aad", &ct, &tag).unwrap();
+                assert_eq!(back, pt);
+            })
+            .expect("spawn");
+        handle
+            .join()
+            .expect("the round trip must fit the reported requirement");
     }
 
     #[test]

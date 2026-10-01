@@ -1301,7 +1301,37 @@ The pattern to take away: for each of these the question is not "*can* software 
 "**is the guarantee unconditional, and can it be falsified here**". Masking, tamper-resilient
 encodings and TRESOR are real answers with real models, and none of them is verifiable in this
 repository — no scope, no fault bench, no kernel cooperation. That is a statement about what this
-project can *claim*, not about what cryptography can do.
+project can *claim*, not about what cryptography can do, and §9 is the other half of it: for each
+of these, the measurement that *would* be run, its pass criterion, and the sentence it would
+license.
+
+---
+
+## 9. What would validate the defences this repository cannot validate
+
+§8.5 lists software algorithms whose guarantees need equipment this repository does not have.
+"Cannot be validated here" is not the end of the argument, though: for each one there is a
+*measurement* that would turn it from an unverifiable claim into a stated result, and this
+section writes those measurements down — the method, the pass criterion, and **the exact sentence
+the measurement would license**. Until a measurement exists, the sentence is not written
+anywhere in this repository; that is the rule this section enforces.
+
+| Defence | Measurement | Method / standard | Pass criterion | The sentence it would license |
+| --- | --- | --- | --- | --- |
+| **Masking** (first-order DPA/CPA) | Non-specific fixed-vs-random leakage test on the target device, ≥ 100 000 traces per point, at several operating points (voltage, clock, temperature), plus a **second-order** test, because first-order masking is exactly what invites one | TVLA; ISO/IEC 17825 classes; Welch's t-test with the usual multiplicity correction | `|t| < 4.5` at every sample point, both orders, on every configuration of the design under test — and the traces, power model and device published so someone else can re-run it | "First-order (and second-order) leakage is below the detection threshold of 100 000 traces on <device>, at <operating points>. "*Not* "resistant to DPA": a threshold is not a bound, and higher orders are untested |
+| **Fault tolerance** (multiple, synchronized, laser) | Timed fault injection across a grid of positions × time offsets × glitch strengths, counting (a) accepting forgeries, (b) observable plaintext on a failed decryption, (c) *undetected* wrong outputs | An FI bench (laser, EM, or voltage/clock) driving the crate through its real entry points; the grid must be published with the result | Zero acceptances and zero observable plaintext over the published grid; for the witness, the undetected rate is reported as a number, not as "zero" | "No accepting fault was found in grid G (positions × timings × strengths) on <device>." The grid's boundary is the claim's boundary |
+| **The witness vs `dual-mac` under fault** | Which layer catches which glitch, at what precision, and what the residual undetected rate is | Same bench, both configurations (`hardened,dual-mac` against `ultra`), same grid | A measurable difference in undetected-output rate, which is what the layer's cost is supposed to buy | "The second implementation reduces the undetected-fault rate from X to Y on <device> at <precision>." Today the layer's value is a model, not a measurement |
+| **Speculative execution** | A gadget scan of the *compiled crate* in a Spectre harness on the target CPU: does any secret-derived value cross the architected boundary speculatively, and can it be transmitted? | Existing PoC harnesses (Spectre-v1 patterns) applied to the crate's entry points, plus a static scan of the emitted code for the `if (secret < len) { table[secret] }` shape | No gadget found that transmits a secret-derived value; the scan reported with the toolchain and CPU revision | "No speculative gadget was found in this crate's compiled code on <toolchain, CPU>." It says nothing about the rest of the process, which is where the remaining exposure lives |
+| **Rowhammer** | Bit-flip rate in the locked key page, with and without the mitigations (guard-page placement, periodic re-touch), and whether the `LockedKey` integrity tag fires | A hammering harness (e.g. the published TRRespass/Drama-style patterns) against the target DRAM, with the crate reading its key on every cycle | Zero flips in the key page over N hammer cycles; if a flip occurs, the integrity tag must fire — that half *is* testable here and is tested | "No flip was observed in the key page over N cycles on <DIMM, machine>; the integrity tag detected the injected test faults." |
+| **Cold boot** | DRAM remanence window for the deployment's DIMMs: how long after power-off a page is still readable, at which temperatures | The published cold-boot procedure (power off, cold-spray the DIMMs, read them out), with the key page located by a canary | The key page is unrecoverable within the window the deployment's own response time allows — or it is not, and the deployment needs memory encryption or an HSM | "After power-off and <procedure>, the key page was not recoverable within <window> on <machine>." Which is why the honest default remains: memory encryption or no key in host RAM |
+| **Power/frequency channels on constant-time code** (Hertzbleed-class) | Whether the same instruction stream has a key-dependent *frequency or thermal* signature a remote observer can measure | A remote-timing harness with frequency monitoring, comparing two keys over many trials, with the workload pinned and the CPU frequency governor reported | No key-dependent difference above the noise floor of the harness, at the tested frequency settings | "No key-dependent frequency signature was detected above X over N trials at <settings>." Constant-time code is not evidence here: the channel does not use branches or indices |
+
+Two of the items in §8.5 are **not** in this table, because they have a committed measurement
+already: the stack-residue claim is measured by `tools/stack_residue.sh` (with the residue it
+cannot reach stated on the row), and the second-comparison-shape defence has its cost measured
+(1.4 ns) and its effect hand-modelled in the README's fault table. What those two have in common
+with the table above is the rule: the claim and the measurement are written next to each other,
+and where the measurement is missing the claim is not made.
 
 ---
 
