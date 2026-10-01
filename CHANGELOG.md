@@ -949,6 +949,35 @@ written down precisely — two more items land, neither of them a new cipher:
 Both entries are the same idea applied twice: a claim without its measurement is not made, and a
 measurement without a stated criterion is not a result.
 
+### The three configurations re-measured: three passes, rotated order, and a stated noise floor
+
+The published tables were one run per configuration, and the default build's decision path has
+changed since (the second comparison shape is no longer `dual-mac`-only), so they were
+re-measured — and this time with a method whose error is *stated* rather than hoped for:
+
+* **Three `cargo bench` runs per configuration**, each pinned to one core (`taskset -c 3`), with
+  the configuration order **rotated between passes** (`default, opt-out, ultra` / `ultra,
+  opt-out, default` / `opt-out, ultra, default`) so no configuration is always measured first or
+  last; each cell's published figure is the **median of the three passes**.
+* **The noise floor is measured, not assumed**: the reference implementation is the same code in
+  all nine runs, so its spread is the floor. Over the 189 cell-runs: median pass-to-pass spread
+  **5.9%**, 90th percentile **11%**, worst cell **15%** (small sizes are CPU-boost sensitive,
+  1 MiB shares LLC and DRAM with the host's other work). The README now says that differences
+  smaller than the floor are the same number, which is why several column pairs read as ties.
+* **A fourth table, and one home per number.** The new section adds "what the `ultra` layer
+  costs, relative to the default configuration" — because a ratio against the *reference* and a
+  ratio against the *default* are different quantities, and the layer and fault rows had been
+  quoting the second kind with no table to point at. Those rows now cite that table, and the
+  stale figures scattered through the prose (the in-place-encrypt discussion, the "faster end to
+  end" bullet, the structural-properties section) were updated to the new values, so a future
+  re-measurement has one place to change per quantity.
+
+Headline numbers for the default configuration, median of three passes: encrypt 1.57x the
+reference at 64 B and 1.33x at 1 MiB, decrypt 1.10x and 1.32x. `ultra`'s cost relative to the
+default: decrypt 2.8x at 64 B rising to 11.3x at 1 MiB, encrypt a tie at 4 KiB and beyond (the
+witness runs only on the allocating `encrypt`), round trip 2.3x in place and 2.6x allocating at
+64 B.
+
 ### Zeroization: two copies the wipes could not reach
 
 Fixed in every configuration, because these are copies the wipes should already have
