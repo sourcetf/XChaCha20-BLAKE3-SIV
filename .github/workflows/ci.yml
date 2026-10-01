@@ -22,6 +22,17 @@
 # runs here* to whoever can move that tag — which is the attack this pinning
 # exists to close: in the release job, where the token has `contents: write`,
 # that means the published `.crate` artifact. See the header of dependabot.yml.)
+#
+# One action needs care beyond the pin: `dtolnay/rust-toolchain` takes the
+# toolchain's *name from its ref*, so a bare SHA pin would leave the nightly and
+# 1.85.0 jobs resolving to whatever that SHA's branch happens to be — and when
+# Dependabot groups a bump it replaces all three refs with the default branch's
+# SHA at once, which is how it was found: the update PR's TSAN job failed with
+# `rust-src` missing for the *stable* toolchain, because "nightly" had become
+# stable. Measured on main's logs: the action does resolve the toolchain from the
+# pinned SHA's branch, so the per-branch pins were right; the grouping is what
+# breaks them. Fix: name the toolchain explicitly with `with: toolchain: …` at
+# every use, which makes any SHA safe and keeps the updates flowing.
 
 name: CI
 
@@ -54,6 +65,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
         with:
+          toolchain: stable
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
@@ -140,6 +152,8 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        with:
+          toolchain: stable
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           shared-key: test-${{ matrix.profile }}
@@ -165,6 +179,8 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        with:
+          toolchain: stable
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           shared-key: timing
@@ -191,6 +207,8 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        with:
+          toolchain: stable
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           shared-key: timing
@@ -211,6 +229,8 @@ jobs:
       # become false -- the code can start using a newer API and nothing notices
       # until someone on an old toolchain tries to build it.
       - uses: dtolnay/rust-toolchain@3230091d7ef9483f601620abacc570c22cf44d22 # 1.85.0
+        with:
+          toolchain: 1.85.0
 
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
@@ -262,6 +282,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
         with:
+          toolchain: stable
           targets: ${{ matrix.target }}
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
@@ -292,6 +313,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
         with:
+          toolchain: stable
           targets: ${{ matrix.target }}
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
@@ -473,6 +495,8 @@ jobs:
           fetch-depth: 0
 
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        with:
+          toolchain: stable
 
       # Each job gets a fresh runner, so the lint job's `cargo package` output is
       # not available here: this job must package the crate itself.

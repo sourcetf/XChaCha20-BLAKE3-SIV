@@ -607,6 +607,31 @@ pinning. Both halves are now in place:
   a legitimate push that *looks* like a credential, which is a workflow change rather than a
   hardening toggle.
 
+### The update path found a bug in the pinning, on its first run — which is the point
+
+Dependabot opened five pull requests within minutes of the config landing, and the actions one
+was **failing CI** — not because the new actions are bad, but because of a defect in the pinning
+it was trying to update:
+
+* `dtolnay/rust-toolchain` takes the toolchain's *name from its ref* (`@nightly`, `@1.85.0`,
+  `@stable`). Main's per-branch SHA pins work — verified in the logs, the action resolves the
+  toolchain from the pinned SHA's branch — but when Dependabot groups a bump it rewrites *all
+  three* refs to the default branch's SHA, so `# nightly` becomes stable. The PR's TSAN job failed
+  with `rust-src` missing *for the stable toolchain*: the nightly jobs had silently become stable,
+  which would have taken out Miri, `-Zbuild-std` for TSAN, and the MSRV job (1.85.0 → stable)
+  had it merged. Detected before merge, by the CI run on the PR — which is exactly what the
+  automated update path is for.
+* **Fix, in all 20 `uses:` sites:** name the toolchain explicitly (`with: toolchain: nightly` /
+  `stable` / `1.85.0`). The ref then only selects *code* for the action, any SHA is safe, and
+  Dependabot's grouped bumps become harmless. Verified structurally: a YAML walk over the three
+  workflows asserts every `dtolnay/rust-toolchain` step declares its toolchain.
+* The other four PRs are ordinary dependency bumps and are left open for review — with one caveat
+  worth writing down: `chacha20poly1305` and `aead` are the *benchmark reference* in
+  `benches/compare.rs`, so bumping them (0.10 → 0.11 / 0.5 → 0.6) invalidates the head-to-head
+  numbers in `README.md` until they are re-measured; that is a "review the diff and re-run the
+  benchmark" PR, not a merge. `criterion` (dev-only) and `getrandom` (the optional `rng` feature)
+  are the two that are plausibly mechanical.
+
 ### Zeroization: two copies the wipes could not reach
 
 Fixed in every configuration, because these are copies the wipes should already have
