@@ -574,6 +574,39 @@ procedure an attacker would run? Four additions and one real self-contradiction 
 Documentation only: no code, no tests, no wire format. The claims themselves are unchanged — this
 round adds the obligations that make them *checkable* rather than the conclusions.
 
+### Supply chain: the pinning stays, and the reason it is livable is now automated
+
+The SHA pinning from the previous entry has a real cost, and it is worth naming rather than
+leaving implicit: a tag like `@v7` picks up upstream fixes by itself, while a pinned commit does
+not — so "we are stuck on an old action and did not notice" is a failure mode *introduced* by
+pinning. Both halves are now in place:
+
+* **The pin stays.** Relaxing to `@v7` restores the fix path by handing the decision of *what
+  runs in this repository* to whoever can move that tag — the class of attack the pinning exists
+  to close, and the one that has actually been used in the wild (an action's tags repointed to
+  exfiltrating code, hitting every repository that used them). Here the blast radius is specific
+  and worth stating: no repository secrets exist to steal, every job is `contents: read` except
+  `release`, and that job holds `contents: write` to attach the built `.crate` to a GitHub
+  release — so the asset a repointed tag could tamper with is **the published artifact of a
+  cryptographic library**, plus the CI evidence itself.
+* **`.github/dependabot.yml` is the other half** — new. `github-actions` updates run weekly and
+  rewrite the SHA **and** the `# vX` comment beside it (one grouped PR), so the workflows keep
+  both immutability and a visible version; `cargo` updates do the same for the committed
+  `Cargo.lock`, with minor/patch grouped and majors in their own PR. That is the sync mechanism:
+  an upstream fix arrives as a pull request that CI validates, not as a silent drift.
+* **Two repository settings were off, and are now on:** Dependabot alerts and Dependabot
+  *security* updates (`security_and_analysis.dependabot_security_updates` read `disabled` before,
+  `enabled` after) — the second is the one that proposes a fix promptly when an advisory lands,
+  rather than waiting for the weekly batch. Revert with
+  `curl -X DELETE .../vulnerability-alerts` and `.../automated-security-fixes` if a deployment
+  prefers to track advisories by hand; `cargo-deny` already fails the Deep workflow on an
+  advisory that lands on a locked crate, so the *detection* half was never missing.
+* Not enabled: secret scanning and push protection (both are free for public repositories and
+  would have caught a token in a file — the one thing this project's own instructions forbid).
+  They are one call each, and they are left to the owner because push protection can also block
+  a legitimate push that *looks* like a credential, which is a workflow change rather than a
+  hardening toggle.
+
 ### Zeroization: two copies the wipes could not reach
 
 Fixed in every configuration, because these are copies the wipes should already have

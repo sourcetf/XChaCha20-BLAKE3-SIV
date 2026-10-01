@@ -1,0 +1,46 @@
+# Automated update path for everything this repository pins.
+#
+# Pinning is a deliberate choice here (see the header of ci.yml): a `uses: foo@v7` is a
+# *mutable* reference, and a repointed tag runs arbitrary code in this repository's CI — with
+# `contents: write` in the release job, where it could tamper with the published `.crate`
+# artifact. Pinning to a commit SHA fixes the subject of the trust, and it creates the
+# problem this file exists to solve: a security fix upstream does not arrive by itself.
+#
+# Dependabot closes that loop without giving up the pin. For `github-actions` it updates the
+# SHA *and* the `# vX` comment beside it, so the workflow keeps both properties — immutable
+# subject, visible version — and the update arrives as a pull request that CI validates
+# before anyone merges it. That is the sync mechanism; pinning without it would be the
+# "silently stuck on an old action" failure mode.
+#
+# `cargo` is here for the same reason: `Cargo.lock` is committed, so the dependency set is
+# pinned too, and a fix only arrives if something proposes the bump. (Advisories are already
+# caught automatically — `cargo-deny` runs in the Deep workflow and fails on an advisory that
+# lands on a locked crate — but "caught" and "fixed" are different events.)
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    # One PR for all action bumps: they are all "a SHA moved", they are validated by the
+    # same CI run, and five separate PRs to merge for one weekly batch is friction that
+    # would push people back towards unpinned tags.
+    groups:
+      actions:
+        patterns: ["*"]
+
+  - package-ecosystem: cargo
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    groups:
+      # Patch and minor bumps ride together; a major bump gets its own PR, because that is
+      # the one a human has to read (an MSRV or API change, and `cargo-deny`'s licence and
+      # duplicate policies have bitten on major bumps before).
+      cargo-minor:
+        patterns: ["*"]
+        update-types: ["minor", "patch"]

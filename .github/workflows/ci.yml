@@ -11,9 +11,17 @@
 # comment, so the code CI executes is a fixed object rather than whatever a tag
 # points at this week (an auditor raised this: the repository argues for
 # reproducible builds and then ran unpinned third-party code on every push).
-# To update: fix the SHA in *all three* workflow files in the same commit, and
-# put the tag it came from next to it — e.g.
+#
+# The trade-off is real and it is paid for rather than ignored: pinning also
+# means a security fix upstream does not arrive by itself. `.github/dependabot.yml`
+# is the other half — it updates the SHA *and* the `# vX` comment beside it and
+# opens a PR that CI validates, weekly, so the repository cannot silently sit on
+# an old action. To do it by hand instead:
 #   gh api repos/actions/checkout/commits/v7 --jq .sha
+# (Relaxing to `@v7` would put the fix path back but hand the decision of *what
+# runs here* to whoever can move that tag — which is the attack this pinning
+# exists to close: in the release job, where the token has `contents: write`,
+# that means the published `.crate` artifact. See the header of dependabot.yml.)
 
 name: CI
 
