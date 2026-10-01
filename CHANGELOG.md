@@ -758,6 +758,35 @@ warnings` over all targets, and a build matrix of the feature combinations CI do
 --features rng`, `locked,rng` and `--no-default-features --features locked,rng`): all clean. The
 one defect found is the witness-coverage finding above.
 
+### Every attack class, against every configuration, with the cost of mounting one
+
+Asked for as a list — differential, linear, rotational, integral, algebraic, slide, meet-in-the-middle,
+related-key, length extension, collisions, commitment, forgery, two-time pads, nonce misuse,
+timing, cache, microarchitectural, power/EM, faults (single, multiple, laser, DFA, combined with
+side channels), Rowhammer, cold boot, swap, core dumps, debuggers, compiler-introduced leaks,
+supply chain, replay, length disclosure, the equality oracle, DoS, and the quantum ones — and the
+answer is now `SECURITY-ANALYSIS.md` §8, because a list is only useful with the two evaluations
+attached.
+
+The section is built around one observation that decides most of it: **the three configurations
+are the same object against cryptanalysis** — same construction, same primitives, same bounds —
+and differ only where the *machine* or the *observer* is the adversary. So §8.1 is the
+cryptanalytic and design-level table (identical in all three: differential to quantum, length
+extension to commitment, each row pointing at its bound or its falsifier), §8.2 is the
+implementation and physical table where the configurations actually differ (`opt-out` defends no
+fault; `hardened` defends the decision against single faults; `ultra` adds the shared derivation,
+the rewritten-stored-tag case, swap and core dumps — with the witness's coverage boundary stated
+rather than implied), and §8.3 prices each one on two scales, because a birthday search and a
+voltage glitch are not comparable: **work** (research-grade, `2^256`, `2^128`, free) and
+**access/equipment** (none, co-residency, a few hundred dollars, a laboratory, root).
+
+§8.4 says what the tables mean together: choosing `ultra` does not make a differential attack
+harder and `opt-out` does not make one easier, and the four *free* attacks — a repeated nonce, a
+replay, an equality oracle, a length leak — are the protocol's business, not a feature's. README's
+"What is not defended against" now points at §8 instead of being the only place this is
+discussed. No numbers were duplicated in the process: the fault figures stay in README's fault
+table, the collision and target bounds stay in §4.5, and §8 names them.
+
 ### Zeroization: two copies the wipes could not reach
 
 Fixed in every configuration, because these are copies the wipes should already have

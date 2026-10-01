@@ -1150,6 +1150,112 @@ here and in `README.md`.
 
 ---
 
+## 8. Attack classes, resistance per configuration, and what mounting one costs
+
+The three configurations — `opt-out` (`--no-default-features`), `hardened` (the default) and
+`ultra` — are one wire format and three fault models. That single sentence settles most of this
+section: **against cryptanalysis all three are the same object**, because the same construction
+and the same primitives are compiled, with the same bounds; what differs is what happens when the
+*machine* misbehaves or when an adversary can observe it. So each row below either says "identical
+in the three, bounded in §3/§4.5" or names the layer that differs. Numbers are not repeated here
+where they have a home: the fault-model figures are the README's fault table, the collision and
+target bounds are §4.5's, and each harness named in the last column is described in
+`tests/README.md`.
+
+### 8.1 Cryptanalytic and design-level classes — identical in all three configurations
+
+| Class | What it attacks here | Status |
+| --- | --- | --- |
+| Differential (incl. truncated, impossible, boomerang, rectangle, higher-order) | ChaCha20's 20 rounds, HChaCha20, BLAKE3's compression and tree | **Out of reach**: published results reach 7–8 of 20 ChaCha rounds and reduced-round BLAKE2/BLAKE3. A full-round distinguisher falsifies L3.1–L3.3 and takes everything with it (§5.2, item 1) |
+| Linear (incl. linear hull, zero-correlation, multidimensional) | same | out of reach; same falsifier |
+| Rotational / rotational-XOR | the ARX structure itself | out of reach at full rounds — the per-round constants and the tree's counters/flags are what break the symmetry |
+| Integral / division-property / cube | ChaCha20, BLAKE3 | out of reach at full rounds |
+| Algebraic / SAT / Gröbner | same | no practical result; the systems are far beyond solvable sizes |
+| Slide / invariant-subspace | round self-similarity | the same constants and flags make rounds non-identical; no attack |
+| Meet-in-the-middle / dissection | key recovery | there is no key schedule to split: every derived key is a PRF output, so the generic cost is `2^256` (or `2^128` time with `2^128` memory via a classical trade-off) — the same as exhaustive search |
+| Related-key | key schedule | **not applicable**: the construction is keyed by one uniformly random 256-bit key, and the per-message keys are PRF outputs of distinct nonces (Thm 1). No key class is exposed |
+| Length extension | Merkle–Damgård padding | **not applicable**: BLAKE3 finalises with a flag, and the encoding carries explicit `|A|`/`|M|` (§4.4). Its real descendants — re-splitting `A ‖ M`, trailing zeros — are defeated by A4 and pinned by `test_aad_message_split_is_unambiguous` |
+| Collision (incl. Joux multicollisions, herding) | the tag | `2^128` by birthday over the 256-bit chain value, via the fixed-tail procedure of §4.5; no tag width raises it |
+| Commitment: invisible salamanders (CMT-1), context commitment (CMT-3) | a ciphertext that opens under two keys or contexts | **`2^520` per attempt** — a target, not a birthday; the `K`-in-input binding closes the derivation route (Thm 2) |
+| Forgery (tag guess, second preimage) | the tag | `min(2^256 key search, 2^520 tag guess)` = the key search; the fault-assisted variants are §8.2's subject |
+| Two-time pad | a tag collision between two messages | the same `2^128` event; when it happens the observer pays nothing (§3's Corollary) |
+| Nonce misuse (related nonce, IV reuse) | SIV's misuse model | **by design**: reuse degrades to equality plus the collision term above; a keystream derived from `(K, N)` alone would leak `M₁ ⊕ M₂` always (`nonce_reuse_does_not_reuse_the_keystream`) |
+| Quantum: Grover (key) | key search | `2^128` (§4.5) |
+| Quantum: BHT (collisions) | the 256-bit state | ≈`2^85`, model-dependent (§4.5) |
+| Quantum: claw-finding (commitment) | the `2^520` target | no structure is known that would help; the target bound is unaffected |
+
+### 8.2 Implementation and physical classes — this is where the configurations differ
+
+| Class | `opt-out` | `hardened` | `ultra` | Evidence |
+| --- | --- | --- | --- | --- |
+| Timing: branch or index on a secret | defended — constant-time by construction | defended; more constant-time work | defended | ctgrind in three configurations, `tests/variable_latency.rs`, the timing screens (advisory in CI, strict under `verify.sh --deep`) |
+| Cache-timing (Prime+Probe, Flush+Reload, Evict+Time) | defended — no tables, no secret-dependent indices | same | same | `tools/cache_profile.sh` (counts invariant for two keys, both phases) |
+| Microarchitectural / speculative (Spectre family, port contention, execution-unit timing) | not defended | not defended | not defended | out of scope and stated as such (README) |
+| Power / EM (SPA, DPA, CPA, templates) | not defended | not defended | not defended | needs proximity and equipment; no countermeasure claimed |
+| Single fault, decision *value* | **not defended** — accepting sites exist | defended: two gates, separate branches, fail-closed | defended | README fault table; `tools/fi_check.sh` rows per configuration |
+| Single fault, decision *instruction* (skip or corrupt a byte/bit) | **not defended** (3 accepting in the bit model, inside the decision) | 0 | 0 | `tools/fi_instruction.sh`, both models |
+| Fault that rewrites the stored tag | not defended | not defended | **defended** (`dual-mac`: an independent recomputation compared against both values) | `dual-mac-blocks-tag-substitution` row |
+| Fault in the *shared derivation* (tag, keyed BLAKE3, SIMD) | not defended | not defended | **detected** by the second implementation — with a stated boundary: both decrypt paths and the allocating `encrypt`; the in-place encrypt carries no cross-check | README "What the witness is"; `tests/ultra.rs`'s source-shape test |
+| Two independent faults, synchronized glitch, laser injection | not defended | not defended | not defended | stated boundary; needs hardware countermeasures (dual-rail, HSM) |
+| Fault-assisted key recovery (DFA) | not defended | not defended | not defended | stated |
+| Combined fault + side channel | not defended | not defended | not defended | stated |
+| Rowhammer-class hardware faults | not defended | not defended | not defended | hardware |
+| Swap / hibernation exposure of a key | not defended | not defended | `locked`: `mlock` on the `LockedKey` page | `tests/locked.rs`, read back from the kernel's `VmLck` |
+| Core dumps | not defended | not defended | `locked`: `MADV_DONTDUMP`, and `MADV_DODUMP` restores inclusion on unlock | the `VmFlags` test |
+| Cold boot / memory remanence | not defended | not defended | not defended | needs encryption at rest |
+| Debugger, ptrace, `/proc/self/mem` | not defended | not defended | not defended — a debugger reads the live page, lock or no lock | stated |
+| Wipe optimised away by the compiler | mitigated (volatile stores) | same | same | `zeroize_slice`, Miri tests |
+| UB / miscompilation | mitigated | mitigated | mitigated, **and** a divergence between the two implementations is caught — though a systematic miscompile hits both | Miri under two aliasing models, Kani |
+| Dependency supply chain | pinned lockfile, `cargo-deny`, Dependabot | same | same | CI + Deep workflow |
+
+### 8.3 What mounting each one costs
+
+Two scales, because one number cannot describe both a birthday search and a voltage glitch:
+**work** is compute or cryptanalytic effort; **access** is what the attacker must physically or
+administratively have.
+
+| Class | Work | Access / equipment |
+| --- | --- | --- |
+| Full-round differential, linear, rotational, integral | research-grade — nobody has done it | none, but it is an open problem |
+| Key search (`2^256`, `2^256/Q` multi-target) | large-scale compute | none |
+| Collision (`2^128` hashes, fixed-tail procedure) | beyond any existing compute | none |
+| Commitment break (`2^520` target, `2^-264` over the key space) | out of reach | none |
+| Tag guess (`2^520` tries) | out of reach | a decryption oracle |
+| Nonce reuse | **free** — it is a protocol bug | none |
+| Replay / reordering / reflection | **free** | network position |
+| Equality oracle (deterministic encryption) | **free** for a guesser | a repeated nonce in the protocol |
+| Length-disclosure | **free** | network position (unavoidable for a length-preserving AEAD) |
+| Timing / cache side channel | low *if a leak exists* — none is present in the code | co-residency, or a shared machine |
+| Power / EM | thousands to millions of traces for ARX | proximity plus ≈ 10 k€ of equipment |
+| Single voltage or clock glitch | low | physical access plus a few hundred dollars of hardware |
+| Laser or EM fault injection | high | a laboratory |
+| Debugger / process memory | trivial with privileges | root or `ptrace` |
+| Cold boot | minutes | physical access and cooling |
+| Rowhammer | medium | specific DRAM and co-residency |
+| Supply chain (unpinned dependencies or actions) | low | —, and mitigated here (pinned SHAs, lockfile, `cargo-deny`) |
+
+### 8.4 Reading the two tables together
+
+**The configurations are not a cryptanalytic choice.** Every row of §8.1 is identical in all
+three; choosing `ultra` does not make a differential attack harder, and choosing `opt-out` does
+not make one easier. What the configurations buy is in §8.2, and it is narrow on purpose: the
+integrity of the *decision* and of the *shared derivation* against single faults, and the
+residency of a caller-managed key against swap and core dumps. Everything else in §8.2 —
+power, EM, laser, cold boot, debuggers, speculative execution — is outside what any of the three
+attempts, and no configuration setting will change that; those are answered by hardware and
+deployment, which is why they are listed in README's "What is not defended against" rather than
+in a feature table.
+
+**The cheapest attacks in §8.3 are all in the protocol layer**, and none of them is affected by
+any configuration: a repeated nonce (free), a replay (free), an equality oracle for a guesser
+(free), a length leak (free). The one that can be catastrophic rather than merely leaky — a tag
+collision turning a repeated nonce into a two-time pad — costs `2^128` and is out of reach. So
+the deployment decision that matters most is not `opt-out` versus `ultra`; it is whether the
+protocol manages nonces, freshness and lengths, which is why those four rows point at
+`README.md`'s "What this crate cannot fix for you" and at `SECURITY.md`'s out-of-scope list.
+
+---
+
 ## References
 
 * P. Rogaway, T. Shrimpton, *Deterministic Authenticated-Encryption: A Provable-Security

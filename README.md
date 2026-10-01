@@ -234,7 +234,9 @@ and the table's one entry today divides by the compile-time alignment of `usize`
 glitch that makes the *hardware* execute something other than what the code says —
 is outside this crate's threat model, and outside every tool used to verify it:
 Miri, Kani, ctgrind, ThreadSanitizer and libFuzzer all model *correct* execution,
-and none of them can observe a glitch. The decision a forgery turns on is a branch
+and none of them can observe a glitch. (`SECURITY-ANALYSIS.md` §8 is the systematic
+version of this section: every attack class and how each configuration stands
+against it, with what it costs to mount one.) The decision a forgery turns on is a branch
 on a secret-derived comparison, and no software measure removes that branch; what
 *can* be removed is the failure mode where a fault skips the check entirely. The
 decision therefore writes its outcome through a parameter the caller initialises to
