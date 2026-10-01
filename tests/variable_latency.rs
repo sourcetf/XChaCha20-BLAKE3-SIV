@@ -100,8 +100,13 @@ const ALLOWED: &[(&str, &str)] = &[
 /// returns and one `if !ok(v) { … } else { … }`, every one of them branching on a **syscall
 /// return value** (an errno, a public fact about the environment) and never on key, nonce,
 /// AAD or message content — the same class as `random::fill`'s error branch above.
+///
+/// `if` 34 -> 35 when `LockedKey` gained its integrity check: one branch on the result of a
+/// **constant-time comparison** of the page's stored tag against a recomputed one. Its outcome
+/// is a property of the *page* — whether the hardware corrupted it — and not of any key, nonce,
+/// AAD or message, which is the same publicness argument as the decision itself.
 const CONTROL_FLOW: &[(&str, usize)] = &[
-    ("if", 34),
+    ("if", 35),
     ("while", 10),
     ("for", 26),
     ("loop", 0),

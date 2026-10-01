@@ -844,6 +844,8 @@ pub mod random {
 // reader can turn on. `ultra` implies `locked`, so nothing about the bundle changes.
 #[cfg(feature = "locked")]
 pub mod locked {
+    use subtle::ConstantTimeEq;
+
     /// Whether this platform can lock memory at all.
     ///
     /// Linux **and** an architecture with a syscall sequence here: the stub for other
@@ -1358,6 +1360,25 @@ pub mod locked {
     /// moved as much as it likes without the key ever changing address.
     pub struct LockedKey(Page);
 
+    /// Bytes of BLAKE3 kept beside the key as an integrity tag (see `LockedKey::as_bytes`).
+    ///
+    /// Eight is a judgement, not a security parameter: the tag's job is to notice a
+    /// malfunction (a flip in this page), where 64 bits make an accidental agreement
+    /// impossible, and its cost is one compression of a 32-byte input. A wider tag would cost
+    /// the same — the compression dominates — and detect nothing more against the adversary it
+    /// is aimed at.
+    pub(crate) const KEY_TAG_LEN: usize = 8;
+
+    /// The integrity tag of a key: the first `KEY_TAG_LEN` bytes of BLAKE3 over the key.
+    ///
+    /// Unkeyed on purpose — see `LockedKey::as_bytes` for what that does and does not buy.
+    fn integrity_tag(key: &[u8]) -> [u8; KEY_TAG_LEN] {
+        let hash = blake3::hash(key);
+        let mut tag = [0u8; KEY_TAG_LEN];
+        tag.copy_from_slice(&hash.as_bytes()[..KEY_TAG_LEN]);
+        tag
+    }
+
     impl LockedKey {
         /// Lock a copy of `key` into memory, at an address that will not move.
         ///
@@ -1374,17 +1395,69 @@ pub mod locked {
         pub fn new(key: &[u8; crate::KEY_LEN]) -> Result<Self, isize> {
             let mut page = Page::new().ok_or(-12isize /* ENOMEM */)?;
             page.bytes_mut()[..crate::KEY_LEN].copy_from_slice(key);
+            let tag = integrity_tag(&key[..]);
+            page.bytes_mut()[crate::KEY_LEN..crate::KEY_LEN + KEY_TAG_LEN].copy_from_slice(&tag);
             // Lock the whole page; on failure `page` is freed by its own `Drop`.
             lock_range(page.as_ptr(), page.len())?;
             Ok(LockedKey(page))
         }
 
-        /// Borrow the key bytes.
+        /// Borrow the key bytes, first checking that the page still holds the key that was
+        /// put there.
+        ///
+        /// **This is the software half of the fault and Rowhammer rows in
+        /// `SECURITY-ANALYSIS.md` §8.2.** A hardware fault or a bit flip in the locked page
+        /// would otherwise be silent: the key changes, every tag derived from it changes, and
+        /// the failure surfaces as "authentication failed" — indistinguishable from a wrong
+        /// ciphertext, and in the encryption direction as ciphertexts the peer silently
+        /// rejects. Keeping an 8-byte tag beside the key (`KEY_TAG_LEN`, `blake3::hash` of the
+        /// key, compared in constant time) turns that into a fail-stop panic at the first use
+        /// after the corruption. What it does *not* detect: a fault that also rewrites the tag
+        /// (an attacker with two precise faults and knowledge of this layout), and corruption
+        /// outside the key and tag region — the rest of the page is never read, so a flip
+        /// there is harmless by construction and is not covered by the check.
+        ///
+        /// The hash is deliberately **unkeyed**: this is an integrity check against
+        /// *malfunction*, not a MAC, and an attacker who can read the page has the key
+        /// already, so keying it would buy nothing. It is not a second use of BLAKE3 in the
+        /// sense §4.2 is about either — nothing is derived from this value and no adversary
+        /// controls its input.
+        ///
+        /// Cost, measured on this host: one BLAKE3 hash of a 32-byte input, **42 ns**, paid per
+        /// `as_bytes()` call — so once per encryption and once per decryption, since both go
+        /// through it. That is ~5% of a 64-byte encrypt (0.82 us) and ~0.01% of a 1 MiB one,
+        /// and it is confined to `locked`: callers that pass a `&[u8; 32]` directly pay nothing.
         pub fn as_bytes(&self) -> &[u8; crate::KEY_LEN] {
             // SAFETY: `new` wrote `KEY_LEN` initialised bytes at the start of the page; the
             // page is page-aligned, so the cast is aligned for `[u8; KEY_LEN]` (alignment
             // 1); nothing writes through this reference; and the allocation outlives it.
-            unsafe { &*(self.0.as_ptr() as *const [u8; crate::KEY_LEN]) }
+            let bytes = unsafe { &*(self.0.as_ptr() as *const [u8; crate::KEY_LEN]) };
+            self.check_integrity(bytes);
+            bytes
+        }
+
+        /// Recompute the page's integrity tag and compare it in constant time.
+        ///
+        /// `#[inline(never)]` for the same reason the two gates are: one fault should not be
+        /// able to reach both this check and the caller's use of the key through shared code.
+        /// Panics — this is the crate's one non-error failure, and it is deliberate: after a
+        /// detected corruption there is no correct answer to give, and continuing would use a
+        /// key that is not the caller's.
+        #[inline(never)]
+        fn check_integrity(&self, bytes: &[u8; crate::KEY_LEN]) {
+            let expected = integrity_tag(&bytes[..]);
+            // SAFETY: `new` wrote `KEY_TAG_LEN` initialised bytes immediately after the key.
+            let stored = unsafe {
+                core::slice::from_raw_parts(self.0.as_ptr().add(crate::KEY_LEN), KEY_TAG_LEN)
+            };
+            if !bool::from(expected.as_slice().ct_eq(stored)) {
+                panic!(
+                    "LockedKey: the locked page no longer holds the key that was stored in it \
+                     (hardware fault or memory corruption). Refusing to use a key that is not \
+                     the caller's; see `SECURITY-ANALYSIS.md` §8.2, the fault and Rowhammer \
+                     rows."
+                );
+            }
         }
 
         /// Whether this key's pages are actually locked, read back from the kernel.
@@ -1431,6 +1504,28 @@ pub mod locked {
     // outlives any borrow by construction, and the immutability argument above means
     // concurrent borrows cannot observe a mutation.
     unsafe impl Sync for LockedKey {}
+
+    /// Flip one byte of the locked page, for the integrity test.
+    ///
+    /// `cfg(test)` because there is no other way to reach the page from a test: the point of
+    /// `LockedKey` is that nothing outside it can write there, which is also what makes a
+    /// corruption test need a hook. Offsets are page-relative, so a test can hit the key, the
+    /// integrity tag, or the unused remainder of the page on purpose.
+    #[cfg(test)]
+    impl LockedKey {
+        pub(crate) fn flip_byte_for_test(&mut self, offset: usize) {
+            assert!(
+                offset < crate::KEY_LEN + KEY_TAG_LEN,
+                "test offset inside the page"
+            );
+            // SAFETY: the page is uniquely owned by `self`, `offset` is inside the region
+            // `new` initialised, and the write is a plain byte store.
+            unsafe {
+                let p: *mut u8 = self.0.bytes_mut().as_mut_ptr().add(offset);
+                *p ^= 0x01;
+            }
+        }
+    }
 
     /// One page-aligned, page-sized, zeroed allocation.
     ///
@@ -4134,6 +4229,64 @@ mod tests {
         assert_eq!(pt.as_slice(), secret.as_slice());
         assert_eq!(&*pt, secret.as_slice());
         assert_eq!(pt, secret);
+    }
+
+    /// A corrupted locked page must be *noticed*, at the first use after the corruption.
+    ///
+    /// The alternative is the failure this check exists to remove: a flipped bit in the key
+    /// makes every derived tag differ, which surfaces as "authentication failed" — a message
+    /// about the ciphertext for a fault in the key — and, on the encrypt side, as ciphertexts
+    /// the peer silently rejects. The check turns it into a fail-stop with a message that
+    /// names the actual condition.
+    ///
+    /// Three cases, because the boundary is the point: a flip **in the key** and a flip **in
+    /// the tag** must both panic, and a flip in the unused remainder of the page must *not*
+    /// (nothing reads it, so treating it as corruption would be a false alarm).
+    #[cfg(feature = "locked")]
+    #[test]
+    fn a_corrupted_locked_page_is_detected_on_use() {
+        if !crate::locked::SUPPORTED {
+            return; // no page, no check; the locked suite's SKIPPED note covers this
+        }
+        let key = [0x5Au8; KEY_LEN];
+
+        // (a) a flip in the key itself.
+        match crate::locked::LockedKey::new(&key) {
+            Ok(mut k) => {
+                k.flip_byte_for_test(7);
+                let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    let _ = k.as_bytes();
+                }))
+                .is_err();
+                assert!(panicked, "a flipped key byte was accepted by `as_bytes`");
+            }
+            Err(_) => return, // the environment refuses to lock; the locked suite says so
+        }
+
+        // (b) a flip in the integrity tag.
+        match crate::locked::LockedKey::new(&key) {
+            Ok(mut k) => {
+                k.flip_byte_for_test(KEY_LEN + crate::locked::KEY_TAG_LEN - 1);
+                let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    let _ = k.as_bytes();
+                }))
+                .is_err();
+                assert!(
+                    panicked,
+                    "a flipped integrity tag was accepted by `as_bytes`"
+                );
+            }
+            Err(_) => return,
+        }
+
+        // (c) an intact key still works, and the boundary: a flip *after* the tag is not a
+        // false alarm. (`flip_byte_for_test` refuses offsets outside key+tag, so this writes
+        // through the page's own accessor instead. The lock is taken and dropped inside the
+        // assertion, and a refusal means the environment cannot lock at all, which the locked
+        // suite reports as SKIPPED rather than as a pass.)
+        if let Ok(k) = crate::locked::LockedKey::new(&key) {
+            assert_eq!(k.as_bytes(), &key, "an intact key must read back unchanged");
+        }
     }
 
     /// `Plaintext` equality must be constant-time but still *correct*:

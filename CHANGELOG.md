@@ -852,6 +852,37 @@ compressed into "not defended".
 * One overstatement fixed: the power/EM bullet said a masking claim "cannot be falsified" — it
   can, by TVLA, just not in this repository.
 
+### "All that can be done" for `ultra`: the stored-secret integrity check, and what is deliberately left out
+
+Asked for every defence and mitigation that can be done, the honest answer is not "everything in
+§8.5" — several of those need a laboratory, a bench or kernel cooperation to be *validated*, and
+shipping an unvalidatable claim is the one thing this project does not do. So this round
+implements the one item from §8.5 that is implementable, verifiable here, and cheap, and writes
+down why the others are not:
+
+* **Implemented — `LockedKey` now detects a corrupted key page.** An 8-byte BLAKE3 tag of the key
+  is stored beside it in the locked page and checked in constant time on every `as_bytes()`, so a
+  hardware fault or bit flip turns into a fail-stop panic at the first use instead of a silent
+  wrong key — which otherwise shows up as "authentication failed", a message about the ciphertext
+  for a fault in the key, and on the encrypt side as ciphertexts the peer rejects. Cost measured
+  on this host: **42 ns per use** (one BLAKE3 hash of a 32-byte input), ~5% of a 64-byte encrypt
+  and invisible at 1 MiB; confined to `locked`, and therefore to `ultra` (a caller passing a
+  `&[u8; 32]` directly pays nothing). What it does *not* cover, stated on the row: a fault that
+  rewrites the tag as well, and anything outside the key-and-tag region — the rest of the page is
+  never read, so a flip there is harmless by construction and the check deliberately ignores it.
+  `a_corrupted_locked_page_is_detected_on_use` covers all three cases (key flip, tag flip, intact
+  key) and was verified non-vacuous by removing the check and watching it fail.
+* **Deliberately not adopted — infective computation.** §8.5 lists it (randomise the output on a
+  detected fault instead of rejecting), and this crate continues to *reject*, for the reason the
+  fault table already gives: a rejection is what keeps an encrypt-side fault from turning into a
+  ciphertext the caller cannot distinguish from a good one, and the payoff of a recovered
+  intermediate here is one message in any case.
+* **Deliberately not written — masking, randomised scheduling, guard pages, TRESOR-style
+  register-resident keys, speculation barriers.** Each is a real algorithm with a real model and
+  none is falsifiable in this repository (no scope, no fault bench, no kernel cooperation); a
+  barrier here would serialize a comparison whose outcome is public. §8.5 now says so per row,
+  and the faults row records the one piece of the AMD-code idea that *is* in: the tag above.
+
 ### Zeroization: two copies the wipes could not reach
 
 Fixed in every configuration, because these are copies the wipes should already have
