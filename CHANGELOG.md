@@ -632,6 +632,45 @@ it was trying to update:
   benchmark" PR, not a merge. `criterion` (dev-only) and `getrandom` (the optional `rng` feature)
   are the two that are plausibly mechanical.
 
+### The first five Dependabot pull requests: two merged, two closed with measurements, one parked
+
+Handled by the rules the repository already applies to itself ("a release must not exist for a
+commit that did not pass" — the same holds for a merge), with the evidence taken from each PR's
+own CI run rather than from the version numbers:
+
+* **#1 (actions group: `checkout`, `rust-cache`, `upload-artifact` v4 → v7.0.1) — merged.**
+  27 checks green after the toolchains were named explicitly (§ above; before that fix the PR
+  was red for a reason that had nothing to do with the new versions). `upload-artifact` v5–v7
+  are the Node 24 runtime, ESM and the new direct-upload path; the `name`/`path` inputs this
+  repository uses are unchanged, and the coverage job that uploads through them passed.
+* **#3 (`getrandom` 0.3.4 → 0.4.3) — merged.** 27 checks green, including the MSRV 1.85 job.
+  This is the optional `rng` feature's dependency. One thing worth recording: the crate
+  re-exports `getrandom::Error`, so the major bump changes the *identity* of a type in this
+  crate's public API for `rng` users — allowed at `0.x`, and now written down rather than
+  discovered later.
+* **#2 (`aead` 0.5 → 0.6) — closed.** It fails to compile `benches/compare.rs` on four checks
+  (`E0599`: `ChaChaPoly1305::new`'s trait bounds were not satisfied — the RustCrypto key/trait
+  bounds changed), *and* it is redundant: `chacha20poly1305` 0.11 depends on `aead` 0.6, so the
+  same change arrives with #5. Fixing it means editing the benchmark harness, which is a
+  measurement change rather than a dependency bump.
+* **#4 (`criterion` 0.5 → 0.8) — closed, and ignored in `dependabot.yml` with the reason.**
+  criterion 0.8 pulls in `alloca 0.4.0`, whose build script requires a C cross-compiler
+  (`aarch64-linux-gnu-gcc`). This repository has none on purpose — that is what the `pure`
+  feature and the self-contained musl crates are for — and the bump turned seven checks red
+  (Miri, the mutation check, the i686 and aarch64 qemu executions, three cross-checks).
+  A benchmark-harness version is not worth provisioning a cross C toolchain for.
+* **#5 (`chacha20poly1305` 0.10 → 0.11, + `aead` 0.6) — left open, with the plan in a comment.**
+  It is the benchmark *reference*: the README's head-to-head table is a published number about
+  a specific version of it, so landing this means (i) adapting `benches/compare.rs` to the 0.11
+  API, (ii) re-measuring on the named host with the documented method, and (iii) updating the
+  README table in the same commit. Parked as the reminder that the comparison is against
+  0.10.1; not ignored, so it comes back as a prompt rather than as a surprise.
+
+The rules this settles, so the next batch is a five-minute decision: green and mechanical →
+merge; red → do not; anything touching `chacha20poly1305`, `aead` or `criterion` is an
+engineering task about *evidence* (measurements) rather than a dependency bump; and no PR is
+merged to empty the list.
+
 ### Zeroization: two copies the wipes could not reach
 
 Fixed in every configuration, because these are copies the wipes should already have

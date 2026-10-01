@@ -44,3 +44,21 @@ updates:
       cargo-minor:
         patterns: ["*"]
         update-types: ["minor", "patch"]
+    ignore:
+      # criterion 0.8 pulls in `alloca 0.4.0`, whose build script wants a C cross-compiler:
+      #
+      #   warning: alloca@0.4.0: Compiler family detection failed ... failed to find tool
+      #   "aarch64-linux-gnu-gcc"
+      #   error: failed to run custom build command for `alloca v0.4.0`
+      #
+      # This repository has no cross C toolchain *on purpose* — that is what the `pure`
+      # feature and the self-contained musl crates are for — and the bump turned seven
+      # checks red because of it (Miri, the mutation check, the i686 and aarch64 qemu
+      # executions, three cross-checks). Dependabot PR #4 was closed with this measurement;
+      # the ignore is so it does not come back weekly. A benchmark-harness update, if ever
+      # wanted, is a branch with a provisioning decision in it, not a dependency bump.
+      - dependency-name: criterion
+      # `chacha20poly1305` and `aead` are deliberately *not* ignored: they are the benchmark
+      # reference (and each other's transitive dependency), so their PRs are the reminder
+      # that the README's head-to-head numbers belong to a specific version. See PR #5's
+      # comment for the three-step plan that lands them.
