@@ -829,14 +829,21 @@ and several need hardware to falsify. Both of those are now written down instead
 compressed into "not defended".
 
 * **The correction with the most content: this construction already implements the standard
-  software mitigation for DPA.** Fresh re-keying (Medwed–Standaert) means running each message
-  under a fresh key so that traces cannot be averaged; per-tag key derivation *is* that, arrived
-  at here for the commitment and nonce-reuse reasons. Concretely: the same nonce and message
-  reproduce one identical trace, a different message is a different key, so an attacker cannot
-  average over the payload cipher at all. The residual attackable surface is the per-nonce
-  derivation — about 1.5 ChaCha20 blocks under the **master** key — which is repeatable and is
-  therefore named as the honest target. Structural argument, not a measured claim: no leakage
-  assessment has been run.
+  software mitigation for DPA — for the payload cipher.** Fresh re-keying (Medwed–Standaert)
+  means running each message under a fresh key so that traces cannot be averaged; per-tag key
+  derivation *is* that, arrived at here for the commitment and nonce-reuse reasons. Concretely:
+  the same nonce and message reproduce one identical trace, a different message is a different
+  key, so an attacker cannot average over the payload cipher at all.
+  **This paragraph originally said "the residual attackable surface is the per-nonce
+  derivation", and an auditor correctly pointed out that it is only true when nonces are not
+  reused.** `mac_key` and `enc_seed` are functions of `(K, N)` alone — they must be, or the tag
+  would not be deterministic in `(K, N, A, M)` — so `q` messages under one nonce are `q` traces
+  of the tag pass and the enc-KDF under *fixed* keys with varying, attacker-chosen input, which
+  is the setup CPA/DPA averages; for the tag pass the surface also grows with message length.
+  Under nonce reuse, then, the residual is not 1.5 blocks: it is two of the three BLAKE3 uses.
+  §8.2's row carries the corrected version, including that this is inherent to the frozen format
+  (a revision could re-key the tag from the message and remove it, changing every tag).
+  Structural argument, not a measured claim: no leakage assessment has been run.
 * **The faults rows gained the same treatment**: classic DFA recovers *long-lived* round keys, and
   nothing here is long-lived beyond the master key — every recoverable intermediate (`enc_key`,
   `enc_nonce`, `mac_key`, the tag) is per message, so a fault-assisted recovery buys one message.
@@ -1006,6 +1013,34 @@ possible reason. (The empty-output digest is identical across configurations too
 comparing hashes alone would not have caught it; the check now also fails on empty output.)
 
 `.gitignore` covers `/dist/`, so a local dry run cannot be committed by accident.
+
+### Two audit findings against the last two rounds, both valid
+
+* **F-D1 (§8.2's fresh-re-keying claim was over-broad).** The row said the residual DPA surface
+  is the per-nonce derivation, ~1.5 blocks under the master key. That is true of the **payload
+  cipher** — `enc_key`/`enc_nonce` come from the tag, so they are per message — and false of the
+  other two BLAKE3 uses: `mac_key` and `enc_seed` are functions of `(K, N)` alone (they must be,
+  or the tag would not be deterministic in the quadruple), so under **nonce reuse** — which SIV
+  explicitly supports — `q` messages under one nonce are `q` traces of the tag pass and the
+  enc-KDF under *fixed* keys with varying attacker-chosen input, which is precisely what CPA/DPA
+  averages, with the tag surface growing in message length. The correction is in §8.2 (and §8.4's
+  bullet, and the CHANGELOG entry above that first made the claim), together with two things the
+  finding implies: for DPA, nonce reuse is worse than the "leak of equality" the misuse story
+  describes; and the exposure is **inherent to the frozen format** (a revision could re-key the
+  tag from the message and remove it, at the cost of changing every tag — recorded as a revision
+  option, not applied).
+* **F-D2 (a test promised three boundary cases and implemented two).** As written,
+  `a_corrupted_locked_page_is_detected_on_use`'s doc claimed a flipped key must panic, a flipped
+  tag must panic, and a flip in the *unused* remainder must **not** — but case (c) only checked
+  an intact key, and it carried a parenthetical describing a write that did not exist (draft
+  residue). Worse, the test hook's `assert` refused offsets `>= 40` while its own doc said it
+  could hit "the unused remainder of the page": the two disagreed with each other. Neither has a
+  security impact, and both are the class this project cares most about — a claim in a comment
+  that the code does not keep. Fixed by making the hook accept any offset in the page (and say
+  so), implementing case (c) for real (flip the page's last byte, require `as_bytes` to return
+  the key untouched), keeping case (d) as the intact-key check, and deleting the false sentence.
+  Case (c) was verified non-vacuous the same way the check itself was: making `check_integrity`
+  hash the whole page instead of the key makes the test fail.
 
 ### Zeroization: two copies the wipes could not reach
 

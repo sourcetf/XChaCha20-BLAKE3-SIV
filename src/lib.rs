@@ -1448,7 +1448,9 @@ pub mod locked {
         /// after the corruption. What it does *not* detect: a fault that also rewrites the tag
         /// (an attacker with two precise faults and knowledge of this layout), and corruption
         /// outside the key and tag region — the rest of the page is never read, so a flip
-        /// there is harmless by construction and is not covered by the check.
+        /// there is harmless by construction and is not covered by the check. That second half
+        /// is asserted, not just documented: `a_corrupted_locked_page_is_detected_on_use` case
+        /// (c) flips a byte at the end of the page and requires `as_bytes` to return the key.
         ///
         /// The hash is deliberately **unkeyed**: this is an integrity check against
         /// *malfunction*, not a MAC, and an attacker who can read the page has the key
@@ -1542,17 +1544,22 @@ pub mod locked {
     ///
     /// `cfg(test)` because there is no other way to reach the page from a test: the point of
     /// `LockedKey` is that nothing outside it can write there, which is also what makes a
-    /// corruption test need a hook. Offsets are page-relative, so a test can hit the key, the
-    /// integrity tag, or the unused remainder of the page on purpose.
+    /// corruption test need a hook. Offsets are page-relative and may be anywhere in the page,
+    /// so a test can hit the key, the integrity tag, or the unused remainder on purpose — the
+    /// last of those is how the "no false alarm" half of the boundary is tested.
     #[cfg(test)]
     impl LockedKey {
         pub(crate) fn flip_byte_for_test(&mut self, offset: usize) {
+            // The whole page, not just key+tag: the unused remainder is a case the test needs
+            // to reach (a flip there must *not* be reported), and an earlier version asserted
+            // `offset < KEY_LEN + KEY_TAG_LEN` while its own doc claimed otherwise.
             assert!(
-                offset < crate::KEY_LEN + KEY_TAG_LEN,
-                "test offset inside the page"
+                offset < self.0.len(),
+                "test offset must be inside the page ({} bytes), got {offset}",
+                self.0.len()
             );
-            // SAFETY: the page is uniquely owned by `self`, `offset` is inside the region
-            // `new` initialised, and the write is a plain byte store.
+            // SAFETY: the page is uniquely owned by `self`, the whole page was allocated and
+            // zeroed by `new`, and the write is a plain byte store.
             unsafe {
                 let p: *mut u8 = self.0.bytes_mut().as_mut_ptr().add(offset);
                 *p ^= 0x01;
@@ -4317,11 +4324,28 @@ mod tests {
             Err(_) => return,
         }
 
-        // (c) an intact key still works, and the boundary: a flip *after* the tag is not a
-        // false alarm. (`flip_byte_for_test` refuses offsets outside key+tag, so this writes
-        // through the page's own accessor instead. The lock is taken and dropped inside the
-        // assertion, and a refusal means the environment cannot lock at all, which the locked
-        // suite reports as SKIPPED rather than as a pass.)
+        // (c) the other half of the boundary: a flip in the *unused remainder* of the page must
+        // **not** be reported. Nothing reads that region — the key and the tag are the first
+        // 40 bytes and the check reads only those — so treating a flip there as corruption
+        // would be a false alarm on a page this crate is deliberately not checksumming in full.
+        // This case was promised by the doc comment above and not implemented until an auditor
+        // pointed at the gap (the hook's own assert also refused offsets ≥ 40, contradicting
+        // its documentation).
+        match crate::locked::LockedKey::new(&key) {
+            Ok(mut k) => {
+                let page = crate::locked::page_size_pub();
+                k.flip_byte_for_test(page - 1);
+                assert_eq!(
+                    k.as_bytes(),
+                    &key,
+                    "a flip outside the key and tag region was reported as corruption; the \
+                     check must cover exactly the bytes it verifies"
+                );
+            }
+            Err(_) => return,
+        }
+
+        // (d) an intact key still works.
         if let Ok(k) = crate::locked::LockedKey::new(&key) {
             assert_eq!(k.as_bytes(), &key, "an intact key must read back unchanged");
         }
