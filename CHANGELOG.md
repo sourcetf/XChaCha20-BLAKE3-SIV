@@ -436,6 +436,88 @@ document's names and statuses (including the warning that the letters differ fro
 so the next reader does not have to reconstruct which items are proved, which are cited, and which
 are conjectures with falsifiers. No code and no wire format changed.
 
+### A third audit: two real defects, one false positive in a tripwire, and four gaps closed
+
+Twenty-two items from a third reader. Nine were already fixed or already documented here (the
+collision bound, the two-time-pad consequence, the `MADV_DODUMP` call, the unchecked length sum,
+the counter-ceiling analysis, the 2× allocation peak, the non-blocking timing/stack jobs, the
+self-audit caveat, the post-quantum collision level); the rest are answered below. Two of them
+were defects *here*, one was a defect in a *test*, and four were genuine gaps in the
+user-facing documentation.
+
+**Fixed in the code:**
+
+* **`Plaintext` had no `PartialEq<Plaintext>`.** Comparing two decrypted values did not
+  compile, and the fallback every caller reaches for is `a.as_slice() == b.as_slice()` — a
+  short-circuiting comparison, i.e. exactly the leak the rest of the file spends its
+  constant-time budget closing. (The reader hit the compile error and took the fallback.) The
+  earlier revision left the impl out *deliberately*; the reasoning was sound and the
+  consequence was worse than the impl, so both `Plaintext == Plaintext` and the by-reference
+  spelling now route through `subtle::ConstantTimeEq` like every other comparison. Covered in
+  `test_plaintext_eq_semantics`.
+* **`LockedKey` was neither `Send` nor `Sync`** — it owns a raw pointer, so the compiler
+  derives neither and the module had not stated either by hand. The effect was that an `ultra`
+  user could not hand a locked key to a worker thread: the key-residency feature forced a
+  single-threaded shape on the surrounding program. Both impls are now stated, each with a
+  `// SAFETY:` argument (uniquely owned allocation, no thread-affine state, `mlock`/`munlock`/
+  `madvise` are process-wide, every shared access is an immutable borrow), and
+  `a_locked_key_can_move_to_another_thread` exercises the claim by moving a key to another
+  thread, reading it there, and dropping it there — which is where the wipe, the `munlock` and
+  the `MADV_DODUMP` run. A `SAFETY` comment is not evidence; that test is.
+
+**Fixed in the tests (a false positive, which is worse than a miss):**
+
+* The control-flow tripwire in `tests/variable_latency.rs` skipped `impl` headers with
+  `starts_with("impl ")`, so it counted the `for` in `unsafe impl Send for LockedKey` — and in
+  the pre-existing `impl<const N: usize> PartialEq<…> for Plaintext` — as loops. Adding two
+  `unsafe impl` lines moved the `for` count by two while adding no branch, which is how it was
+  found. `is_impl_header` now recognises all three spellings and the count is 26, four phantom
+  `for`s lighter (28 → 26; `README`/`tests/README` prose updated with the table). A tripwire
+  that fires on false positives is one people learn to update without reading.
+
+**Closed in the documentation** (each was a real gap, not a wording fix):
+
+* **The verification direction is a fixed point, and the lemma's title said it was not.** §3's
+  acyclicity lemma was titled "…is a DAG, not a fixed point", which contradicts Thm 2's
+  commitment bullet two pages later ("it would have to be a fixed point of that coupling as
+  well"). Both are right about different directions, and the document now says so: encryption
+  is a DAG (that is what makes it terminate), verification is the fixed-point test
+  `T* = F_C(T*)`, and it is single-pass computable because the derived key depends on `T` only,
+  not on `M'`.
+* **Multi-key deployments were not quantified.** §3 gains a "Multi-key deployments, quantified"
+  paragraph: the standard hybrid gives the factor `Q` on every term of Thm 4's bound (the
+  collision term becomes `Q·q²/2^257`, i.e. `2^-161` at `2^32` devices × `2^32` messages), the
+  commitment properties are per key and do not weaken, collisions do not cross keys — and
+  multi-target key search divides the cost (`2^256/Q`, so `2^224` for a `2^32`-device fleet),
+  which is the one number in that paragraph a deployment should actually read.
+* **L3.6's blast radius is now stated.** §6 says plainly that if L3.6 fails, every tag-derived
+  property fails with it — forgery, both commitment properties, and the per-tag key separation
+  that makes nonce reuse survivable — while the keystream primitive itself does not depend on
+  it. No partial failure: the tag is one object.
+* **Replay was never mentioned.** `README.md`'s "cannot fix for you" list and `SECURITY.md`'s
+  out-of-scope list now carry it: decryption is a deterministic function of
+  `(K, N, A, C, T)`, so a retransmission authenticates forever, "it authenticated" never means
+  "it is new", and freshness needs protocol state.
+* **The nonce section now says what a repeated nonce can cost**, including the case the reader
+  is most likely to build by accident: varying only part of the 24 bytes (a 64-bit counter in
+  the last 8 is the common shape) makes the *effective* nonce space that part — collisions after
+  2^32 messages rather than 2^96. For SIV that is the survivable case, but the cost of a
+  repetition is the equality leak plus, on a tag collision, the two-time pad, and an application
+  that believes it has 192 bits of separation when it has 64 should know.
+* **The 32-bit length guard is now in `README.md`** rather than only in §4.8 and a test's doc
+  comment: `check_lengths` cannot fire on a 32-bit target (the limit exceeds `u32::MAX`), so the
+  caller is the limit there.
+
+**Supply chain:** every `uses:` in the three workflows is now pinned to a full commit SHA with
+the moving tag in a comment (72 references, resolved through the API and verified against the
+`gh api` recipe in the new header comment). The repository argues for reproducible builds and
+was executing unpinned third-party code on every push; an auditor was right to flag it.
+
+Not changed, with the reason: the tag's width (it is the commitment — see the earlier entry),
+the counter-0 coincidence (§4.1, structural fix costs the format), the `MAX_MSG_SIZE` ceiling
+(§4.6, a build-time binding), and the timing/stack-residue jobs staying non-blocking (shared
+runners cannot gate on a `t`-test, and the strict form is one flag away).
+
 ### Zeroization: two copies the wipes could not reach
 
 Fixed in every configuration, because these are copies the wipes should already have

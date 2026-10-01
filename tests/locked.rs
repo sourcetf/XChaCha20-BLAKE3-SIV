@@ -402,3 +402,34 @@ fn the_dump_advice_is_issued_on_the_right_range() {
         );
     }
 }
+
+/// A locked key can be moved to a worker thread, read there, and dropped there.
+///
+/// `LockedKey` owns a raw pointer, so the compiler derives neither `Send` nor `Sync`, and the
+/// module states both by hand. A `SAFETY` comment is not evidence, so this test uses the
+/// capability instead: the key is created on the test thread, read on another, and dropped
+/// there — which is where the wipe, `munlock`, `MADV_DODUMP` and the free all run, i.e. the
+/// whole of the type's interaction with the kernel happens off the creating thread. Before
+/// the impls existed this file did not compile, so the failure mode is a build error rather
+/// than a subtle one; the impls are `unsafe`, which is why the claim is exercised at all.
+#[test]
+fn a_locked_key_can_move_to_another_thread() {
+    let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+
+    // Compile-time half: runs on every target and under every feature set, including the
+    // ones where `SUPPORTED` is false and the runtime half below returns early.
+    fn assert_send_sync<T: Send + Sync>() {}
+    assert_send_sync::<LockedKey>();
+
+    let Some(key) = lock_or_skip() else {
+        return;
+    };
+
+    let handle = std::thread::spawn(move || {
+        // Read through `&self` here, then let `key` drop here.
+        let first = key.as_bytes()[0];
+        let deref_first = key[0];
+        (first, deref_first)
+    });
+    assert_eq!(handle.join().unwrap(), (KEY[0], KEY[0]));
+}

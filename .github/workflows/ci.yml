@@ -6,6 +6,14 @@
 # publishes a release.  See .github/workflows/formal.yml for the Kani proofs,
 # which are kept separate because they take far longer than everything here
 # combined.
+#
+# Every `uses:` below is pinned to a full commit SHA with the moving tag in a
+# comment, so the code CI executes is a fixed object rather than whatever a tag
+# points at this week (an auditor raised this: the repository argues for
+# reproducible builds and then ran unpinned third-party code on every push).
+# To update: fix the SHA in *all three* workflow files in the same commit, and
+# put the tag it came from next to it — e.g.
+#   gh api repos/actions/checkout/commits/v7 --jq .sha
 
 name: CI
 
@@ -35,11 +43,11 @@ jobs:
     name: fmt, clippy, docs
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
         with:
           components: rustfmt, clippy
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           shared-key: lint
 
@@ -122,9 +130,9 @@ jobs:
           - profile: release, no default features with rng
             args: --release --no-default-features --features rng
     steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           shared-key: test-${{ matrix.profile }}
 
@@ -147,9 +155,9 @@ jobs:
     # instrument has rotted is a green check that means nothing, which is the failure
     # mode this repository keeps finding in other gates.
     steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           shared-key: timing
       - name: the screen can detect a real difference
@@ -173,9 +181,9 @@ jobs:
     # `./verify.sh --deep`, where they report t < 0.4.
     continue-on-error: true
     steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           shared-key: timing
 
@@ -187,16 +195,16 @@ jobs:
     name: minimum supported Rust version
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       # Pinned to the `rust-version` in Cargo.toml. Keep the two in step: the
       # whole point of this job is that the declared MSRV is *enforced*, not
       # merely stated. An unverified `rust-version` is a claim that can silently
       # become false -- the code can start using a newer API and nothing notices
       # until someone on an old toolchain tries to build it.
-      - uses: dtolnay/rust-toolchain@1.85.0
+      - uses: dtolnay/rust-toolchain@3230091d7ef9483f601620abacc570c22cf44d22 # 1.85.0
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           shared-key: msrv
 
@@ -243,11 +251,11 @@ jobs:
           - target: riscv64gc-unknown-linux-musl
             mode: check
     steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
         with:
           targets: ${{ matrix.target }}
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           shared-key: cross-${{ matrix.target }}
 
@@ -273,11 +281,11 @@ jobs:
           - target: powerpc64-unknown-linux-musl
             qemu: qemu-ppc64
     steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
         with:
           targets: ${{ matrix.target }}
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           shared-key: cross-exec-${{ matrix.target }}
 
@@ -393,8 +401,8 @@ jobs:
     name: differential fixture vs reference implementation
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-python@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
         with:
           python-version: "3.x"
 
@@ -427,7 +435,7 @@ jobs:
     # measurement whose target is a compiler's choice.
     continue-on-error: true
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       # Default build: the residue is expected here, and the tool reports it
       # rather than failing -- the assertion is on the master key, which does not
@@ -450,13 +458,13 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           # Full history so the generated notes can be compared against the
           # previous release.
           fetch-depth: 0
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
 
       # Each job gets a fresh runner, so the lint job's `cargo package` output is
       # not available here: this job must package the crate itself.

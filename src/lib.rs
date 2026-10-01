@@ -310,20 +310,11 @@ pub const KEY_LEN: usize = 32;
 /// * **forgery is unchanged**, and is bounded by the key (`2^256`) rather than by the tag:
 ///   key search dominates whatever the tag length, since guessing a 32-byte tag costs `2^-256`
 ///   per attempt and searching the key costs `2^256`.
-/// * **the width is what makes it committing, through the *target* rather than a birthday.** A
-///   candidate key that is not the real one opens a given ciphertext with probability `2^-520`,
-///   so enumerating the whole `2^256` key space succeeds only with probability `≈ 2^-264`. A
-///   32-byte tag would make that `2^256 · 2^-256 ≈ 1`: one second key within reach of a key-space
-///   enumeration, which is exactly the non-committing failure mode of the 16-byte-tag SIV family.
-///   So the width stays, and a revision cannot shorten it without giving up CMT-1/CMTk;
-/// * **a *target* is still 2^520 away.** The state shortcut is a *birthday* search over
-///   *pairs* of tags the adversary may both search; a tag that must be hit as given — a
-///   forgery, or a ciphertext that must also verify under a second key — is unaffected by
-///   it, because there the value is fixed by someone else. So `2^128` bounds collision
-///   properties (§3 Corollary's two-time-pad event) and says nothing about forgery;
-/// * **forgery is unchanged**, and is bounded by the key (`2^256`) rather than by the tag:
-///   key search dominates whatever the tag length, since guessing a 32-byte tag costs `2^-256`
-///   per attempt and searching the key costs `2^256`.
+///
+/// (The bullet list above was duplicated once, verbatim but for the collision entry, in the
+/// revision that introduced the commitment correction — a merge artefact in the one doc
+/// comment that explains a frozen format decision, which is why it is worth a note rather than
+/// a silent fix. An auditor reading this constant found it.)
 pub const TAG_LEN: usize = 65;
 
 /// Nonce length: 24 bytes (192 bits, XChaCha20 extension).
@@ -476,8 +467,8 @@ impl AsRef<[u8]> for Plaintext {
     }
 }
 
-/// Equality against byte sequences is **constant-time** in the plaintext
-/// contents.
+/// Equality against byte sequences — and against another [`Plaintext`] — is **constant-time**
+/// in the plaintext contents.
 ///
 /// [`Plaintext`] holds decrypted secrets, and comparing a decrypted value
 /// against an expected one (a token, a password, a key) is a natural use of
@@ -516,6 +507,32 @@ impl PartialEq<Vec<u8>> for Plaintext {
     #[inline]
     fn eq(&self, other: &Vec<u8>) -> bool {
         bool::from(self.0.as_slice().ct_eq(other.as_slice()))
+    }
+}
+
+/// Two decrypted values compare in constant time as well.
+///
+/// This impl was missing on purpose in an earlier revision, on the reasoning that comparing
+/// two decrypted values is rarely what a caller wants. The reasoning was sound and the
+/// consequence was not: without it, `a == b` does not compile, and the fallback every caller
+/// reaches for is `a.as_slice() == b.as_slice()` — a short-circuiting comparison, which is
+/// exactly the leak the rest of this file spends its constant-time budget closing. (An auditor
+/// hit the compile error while writing a test and took the fallback; that is the evidence.)
+/// Providing the impl removes the trap rather than documenting it: same length, same
+/// [`subtle::ConstantTimeEq`] call as the other comparisons, so `pt1 == pt2` is now both the
+/// shortest and the constant-time way to ask.
+impl PartialEq<Plaintext> for Plaintext {
+    #[inline]
+    fn eq(&self, other: &Plaintext) -> bool {
+        bool::from(self.0.as_slice().ct_eq(other.0.as_slice()))
+    }
+}
+
+/// As above, for the by-reference spelling (`pt == &other`).
+impl PartialEq<&Plaintext> for Plaintext {
+    #[inline]
+    fn eq(&self, other: &&Plaintext) -> bool {
+        bool::from(self.0.as_slice().ct_eq(other.0.as_slice()))
     }
 }
 
@@ -1301,6 +1318,35 @@ pub mod locked {
             LockedKey::as_bytes(self)
         }
     }
+
+    /// A `LockedKey` may be moved to another thread, and borrowed from several.
+    ///
+    /// Neither was true by default: the type owns a raw pointer, so the compiler derives
+    /// neither `Send` nor `Sync`, and an `ultra` user who wants to hand a locked key to a
+    /// worker thread could not compile — the lock layer then forces a single-threaded
+    /// shape on the surrounding program, which is a strange thing for a *harden the key's
+    /// residency* feature to do. (Recorded as a usability limitation by an auditor, which is
+    /// how the missing impls were noticed.)
+    ///
+    /// SAFETY, for both: the pointer in `Page` is uniquely owned — one `alloc` in `new`, one
+    /// `dealloc` in `Page::drop` — and nothing in this module stores thread-affine state.
+    /// `mlock`, `munlock` and `madvise` are process-wide operations with no calling-thread
+    /// requirement, so running `LockedKey::drop` (wipe, `munlock`, `MADV_DODUMP`, free) on a
+    /// different thread than `new` is sound, and that is the whole of the type's thread
+    /// interaction. `Sync` is sound because every shared access is `as_bytes(&self)` returning
+    /// an immutable `&[u8; 32]`: there is no interior mutability to race on, and the
+    /// allocation outlives any borrow by construction.
+    // SAFETY: `Send` — the `Page` pointer is uniquely owned (one `alloc` in `new`, one
+    // `dealloc` in `Page::drop`), and nothing in this module stores thread-affine state:
+    // `mlock`, `munlock` and `madvise` are process-wide with no calling-thread requirement,
+    // so running the whole of `LockedKey::drop` (wipe, `munlock`, `MADV_DODUMP`, free) on a
+    // different thread than `new` is sound.
+    unsafe impl Send for LockedKey {}
+    // SAFETY: `Sync` — every shared access is `as_bytes(&self)`, an immutable
+    // `&[u8; KEY_LEN]`; there is no interior mutability to race on, the allocation
+    // outlives any borrow by construction, and the immutability argument above means
+    // concurrent borrows cannot observe a mutation.
+    unsafe impl Sync for LockedKey {}
 
     /// One page-aligned, page-sized, zeroed allocation.
     ///
@@ -4009,6 +4055,10 @@ mod tests {
     /// `Plaintext` equality must be constant-time but still *correct*:
     /// equal, differing-in-last-byte, differing-in-first-byte and
     /// different-length must all behave as expected.
+    // A `PartialEq<&Plaintext>` impl exists for the same reason the `&[u8]` ones do, and
+    // the `&same` assertion below is what exercises it; clippy's `op_ref` would rewrite it
+    // to the owned form and drop the coverage.
+    #[allow(clippy::op_ref)]
     #[test]
     fn test_plaintext_eq_semantics() {
         let key = [0x01u8; 32];
@@ -4038,6 +4088,21 @@ mod tests {
         longer.push(0);
         assert!(pt != longer);
         assert!(pt != b"");
+
+        // Plaintext-to-Plaintext, both spellings. This is the comparison an auditor was
+        // pushed *away* from before the impl existed: without it `pt == other` does not
+        // compile and the fallback is a short-circuiting slice comparison.
+        let same = decrypt(&key, &nonce, b"", &ct, &tag).unwrap();
+        let (ct2, tag2) = encrypt(&key, &nonce, b"", &last).unwrap();
+        let different = decrypt(&key, &nonce, b"", &ct2, &tag2).unwrap();
+        let (short_ct, short_tag) = encrypt(&key, &nonce, b"", b"TOP").unwrap();
+        let shorter = decrypt(&key, &nonce, b"", &short_ct, &short_tag).unwrap();
+        assert!(pt == same);
+        assert!(pt == &same);
+        assert!(!(pt != same));
+        assert!(pt != different);
+        assert!(pt != shorter);
+        assert!(shorter != pt);
     }
 
     #[test]

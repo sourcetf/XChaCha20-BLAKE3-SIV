@@ -23,6 +23,11 @@ limits it in a way no amount of care removes: the reduction can be checked line 
 enters), and the preconditions can be — and are — enforced by tests, but "the author
 checked their own composition" is not an audit. §7 lists what is mechanically pinned, so
 a reader can see how much of the argument is enforced by something other than prose.
+What has changed since the first revision is that independent readers *have* gone through
+this document and the code, and what they found is in `CHANGELOG.md` (the collision bound
+of §4.5, the two-time-pad consequence in §3, the L3.6 gap, and a `MADV_DODUMP` that was
+never called): that is evidence about the *document*, not independent cryptanalysis of the
+design, and the distinction is the one this paragraph exists to keep.
 
 The falsification programme is §5: every claim has a stated refutation, and the ones that
 can be tested are tested. §4 is the part that answers "does composing these pieces create
@@ -511,7 +516,7 @@ misuse story and not only to the proof's bookkeeping. A scheme that derived the 
 `(K, N)` would hand over the two-time pad *always* under misuse; this one hands it over only
 inside an event an attacker cannot reach.
 
-### The acyclicity lemma (the construction is a DAG, not a fixed point)
+### The acyclicity lemma (encryption is a DAG — while *verification* is deliberately a fixed point)
 
 SIV has an unusual dependency shape, and it is worth isolating because a different shape would
 be unbuildable rather than merely weaker:
@@ -522,11 +527,31 @@ T = B3(mac_key, DOM_TAG || K || N || |A| || |M| || A || M)      T depends on M
 C = M xor KS(enc_key, enc_nonce)                                C depends on M and T
 ```
 
-*Proof of acyclicity.* Read the edges: `T -> key -> C`, and `M -> T`, `M -> C`. There is no
-edge from `C` or from the derived key back into `T`, so the graph is a DAG and each value is
-defined before it is used. ∎
+*Proof of acyclicity (the encryption direction).* Read the edges: `T -> key -> C`, and
+`M -> T`, `M -> C`. There is no edge from `C` or from the derived key back into `T`, so the
+graph is a DAG and each value is defined before it is used. ∎
 
-Two consequences, both load-bearing:
+**The *verification* direction is not a DAG, and the difference is load-bearing.** An earlier
+revision of this lemma was titled "the construction is a DAG, not a fixed point", which
+overclaims in the one direction that matters to the security argument — an auditor reading the
+title against Thm 2's commitment bullet (which says a tag collision alone is not a salamander
+because it "would have to be a fixed point of that coupling as well") finds the two statements
+contradicting each other. They do not, once the directions are separated. A verifier holds
+`(C, T *)` and accepts iff
+
+```
+T* = F_C(T*),   where  F_C(T) = B3(mac_key, … ‖ A ‖ M′(T))   and   M′(T) = C xor KS(B3(enc_seed, DOM_ENC ‖ T))
+```
+
+— a fixed-point test, exactly as the commitment argument says. What makes it *usable* rather
+than a puzzle is that the fixed point is trivially computable and unique in the only sense the
+scheme needs: `F_C(T)` depends on `T` only through the derived key, so a verifier evaluates it
+once, in one pass, with no search (`T*` is an input, not an unknown). The DAG property above is
+what guarantees *encryption* terminates without equation-solving; the fixed-point shape is what
+makes *decryption* single-pass too — and it is also why the decryption entry points decrypt
+before they can verify, which is the next bullet.
+
+Two further consequences, both load-bearing:
 
 * **Encryption needs the whole message before it can produce a byte**, because `T` is a
   function of `M` and the keystream is a function of `T`. That is why `encrypt` is two serial
@@ -541,6 +566,42 @@ Two consequences, both load-bearing:
 A construction that instead verified a tag *before* decrypting would have to commit to the
 ciphertext rather than the plaintext, which is a different mode (and loses the misuse-resistance
 argument above, since the tag would no longer bind the message content).
+
+### Multi-key deployments, quantified
+
+Every theorem above is a single-key statement, and the document used to leave the multi-key case
+to the reader. It does not need its own analysis — the standard hybrid does it — but the numbers
+are worth writing down, because the collision bounds of §4.5 are the ones that move.
+
+Consider `Q` independent keys (one per device is the usual shape), each used for `q` queries, and
+an adversary that wins if it breaks *any* of them. A hybrid over the keys — replacing the `i`-th
+key's scheme by its ideal counterpart, one key at a time — gives
+
+```
+Adv^{priv}_{multi}(Q, q) ≤ Q · Adv^{priv}_{single}(q),      Adv^{auth}_{multi}(Q, q) ≤ Q · Adv^{auth}_{single}(q)
+```
+
+so Thm 4's bound gains the factor `Q` on every term, and in particular the collision term becomes
+`Q · q²/2^257`. At `Q = 2^32` devices and `q = 2^32` messages each — 2^64 messages in total, well
+past any real deployment — that is `2^(32+64-257) = 2^-161`, and the forgery term `Q·q·2^-520` is
+`2^-456`: the multi-user loss is not what a deployment size costs.
+
+Two things do *not* follow that factor, and one that does is worth naming separately:
+
+* **The commitment properties (CMT-1/CMT-3) are per key.** A second key that opens a ciphertext
+  is a statement about *that* pair of keys; a break for one key says nothing about another, so `Q`
+  does not enter the `2^520` target bound at all (it enters as "there are `Q` keys to *try* to
+  attack", which is the next point);
+* **the collision events do not cross keys.** Two tags that collide under *different* keys derive
+  *different* keystreams (the KDF is keyed by that key's `enc_seed`), so the two-time-pad event of
+  §3's Corollary is per key, and the `Q` factor above is a union bound over independent events,
+  not a cross-key collision;
+* **multi-target key search does divide the cost.** An adversary who is satisfied with breaking
+  *any one* of the `Q` keys — and who has a per-key test, which forgery and the determinism
+  property both give — pays `2^256 / Q` instead of `2^256`. That is the standard multi-target
+  caveat, it applies to any 256-bit-keyed scheme, and it is the reason the README's table is a
+  *per-key* statement: a device fleet of `2^32` should read its key strength as `2^224`, not
+  `2^256`.
 
 ---
 
@@ -884,6 +945,12 @@ tests around it check the premises of the derivation rather than the number.
   exposed of the three, because that mode's PRF claim is a design argument rather than an
   inherited proof. L3.6 (§2.1) is part of that exposure: it is a *stronger* statement about
   keyed BLAKE3 than the PRF assumption alone, introduced by putting `K` in the tag's input.
+  **If L3.6 fails, everything that depends on the tag fails together** — forgery resistance, both
+  commitment properties, and the per-tag key separation that makes nonce reuse survivable — since
+  all of them are statements about `(N, A, M) ↦ T`. What does *not* depend on it is the keystream
+  primitive itself (`C = M ⊕ KS(enc_key, …)` is the A1/A3 part), which is why the blow-up is
+  "all tag-derived properties" rather than "the scheme is an XOR cipher". There is no partial
+  failure here: the tag is one object and the assumption is about that object.
 * **Collision properties are 128-bit, not 260-bit, and that is a corrected bound rather than a
   new weakness.** The tag's 65 bytes are a view of a 256-bit chain value (§4.5), so a tag
   collision costs a `2^128` birthday search and the two-time-pad leak of §3's Corollary rides

@@ -56,6 +56,14 @@ defended against" in `README.md`:
 - **nonce reuse by the caller**, and the application's own protocol. The
   construction is misuse-resistant, which is a fail-safe for an occasional slip,
   not a licence to reuse a nonce;
+- **replay, and the freshness of a message.** Decryption is a deterministic
+  function of `(K, N, A, C, T)`, so a byte-identical retransmission authenticates
+  again, forever: a legitimate retry and an attacker's replay are the same bytes,
+  and no symmetric AEAD can tell them apart. "It authenticated" means "someone
+  holding the key produced this at some point", never "this is new". Freshness
+  needs protocol-layer state — a counter, a challenge, a timestamp window — and
+  an application that treats authentication as freshness has a replay hole.
+  `README.md` lists this under "What this crate cannot fix for you";
 - "it differs from scheme X". The README's first section says this is **not a
   standard** and is not interoperable with anything.
 

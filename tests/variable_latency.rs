@@ -89,10 +89,16 @@ const ALLOWED: &[(&str, &str)] = &[
 /// against the witness stopped being a comparison-then-branch at the call site and went
 /// through `accept_or_reject` like the decrypt side (-1 for that `if`, +2 for the
 /// fail-closed checks that replace it, which is the count now).
+///
+/// `for` moved 28 -> 26 without a loop changing: the scanner was counting the `for` in
+/// `unsafe impl Send for LockedKey` and in `impl<const N: usize> PartialEq<…> for Plaintext`
+/// as keywords, because its skip test was `starts_with("impl ")`. Both are impl headers, not
+/// loops; [`is_impl_header`] now recognises all three spellings, and the four phantom counts
+/// are gone.
 const CONTROL_FLOW: &[(&str, usize)] = &[
     ("if", 31),
     ("while", 10),
-    ("for", 28),
+    ("for", 26),
     ("loop", 0),
     ("match", 5),
 ];
@@ -206,12 +212,31 @@ fn variable_latency_operations_are_inventoried() {
     );
 }
 
+/// Whether a line is an `impl` header, in any of the three spellings.
+///
+/// This function exists because the first version of the skip was `starts_with("impl ")`,
+/// which misses `impl<const N: usize> PartialEq<[u8; N]> for Plaintext` (no space after
+/// `impl`) and `unsafe impl Send for LockedKey` (an `unsafe` prefix) — so the `for` in
+/// those headers was counted as a loop, and the table carried phantom `for`s. It was
+/// found by adding two `unsafe impl` lines and watching the `for` count move by two while
+/// adding no loop: a tripwire that fires on a false positive is a tripwire people learn to
+/// update without reading, which is the failure mode this test exists to avoid.
+fn is_impl_header(code: &str) -> bool {
+    let trimmed = code.trim_start();
+    let after_unsafe = trimmed.strip_prefix("unsafe ").unwrap_or(trimmed);
+    match after_unsafe.strip_prefix("impl") {
+        Some(rest) => rest.starts_with(' ') || rest.starts_with('<'),
+        None => false,
+    }
+}
+
 /// Whole-word occurrences of `kw` in code, ignoring comments and string literals.
 ///
-/// `impl Drop for Plaintext` is not a branch, so `impl` headers are skipped.
+/// `impl Drop for Plaintext` is not a branch, so `impl` headers are skipped — see
+/// [`is_impl_header`] for why that test is not just `starts_with("impl ")`.
 fn count_keyword(line: &str, kw: &str) -> usize {
     let code = line.split("//").next().unwrap_or("");
-    if code.trim_start().starts_with("impl ") {
+    if is_impl_header(code) {
         return 0;
     }
 

@@ -483,7 +483,10 @@ deployment.
   (see "No hidden entropy"), and it is why nonce reuse is survivable rather than
   catastrophic — but it also means anyone who can guess a message can confirm it by
   comparing ciphertexts, and equality of two ciphertexts under one `(key, nonce)`
-  says their plaintexts are equal. A protocol that needs ciphertext
+  says their plaintexts are equal. That is a *chosen-plaintext* distinguisher, not
+  just a curiosity, whenever the protocol encrypts plaintext the attacker can
+  influence under a nonce that repeats: the attacker learns, bit for bit, which
+  guesses are right. A protocol that needs ciphertext
   unpredictability has to supply it: a fresh nonce per message (see "Nonces, and
   where randomness comes from"), or its own padding to a fixed length. One caveat
   belongs with the word "survivable": equal tags mean *equal keystreams*, so if two
@@ -497,6 +500,24 @@ deployment.
   tag is fixed-size, so the message length is public to anyone who sees the
   ciphertext. Every length-preserving AEAD has this; hiding a length means padding
   or chunking at the application layer, before the bytes reach this crate.
+- **Replay, and freshness.** Decryption is a deterministic function of
+  `(key, nonce, aad, ciphertext, tag)`: the same bytes authenticate again, every
+  time, forever. A legitimate retransmission and an attacker's replay are
+  byte-identical, and no symmetric AEAD can distinguish them — so "this
+  authenticated" means "someone holding the key produced it at some point", never
+  "this is new". An application that equates the two has a replay hole, and the
+  fix is protocol state this crate does not have: a sequence number inside the
+  AAD, a challenge the sender must echo, or a timestamp window. (`SECURITY.md`
+  lists this under what is explicitly out of scope, so it is not reported as a
+  vulnerability.)
+- **On a 32-bit target the length guard cannot fire.** `check_lengths` compares
+  against `MAX_MSG_SIZE`, which is 2^38 — larger than `u32::MAX`, so on a 32-bit
+  target every length a caller can express is accepted and the *caller* is the
+  limit. The check is unreachable there rather than untested
+  (`test_length_guard_cannot_fire_on_32_bit` records it), the internal arithmetic is
+  written to be safe anyway (`checked_add` on every length sum, no wrapping), and
+  the practical ceiling is the address space; but a 32-bit deployment that wants a
+  bound must impose it itself, e.g. through `decrypt_bounded` and its own check.
 - **A stack scan finds the `blake3` dependency's own frame residue, and this crate
   cannot reach it.** Measured with `tools/stack_residue.sh`: after a full round trip,
   the master key never appears in the call-chain stack region, but the *XOF output* of
@@ -573,7 +594,31 @@ responsibility, and it is the easiest thing to get wrong, so:
 
 Misuse resistance is a fail-safe for an occasional slip, not a licence to
 reuse: security degrades with every repetition, and reusing a nonce with the
-same key, AAD and plaintext reveals that the same triple was encrypted.
+same key, AAD and plaintext reveals that the same triple was encrypted. That
+last sentence is the *equality* leak, and it is not the whole of what a
+repeated nonce can cost: if two *distinct* `(A, M)` pairs under one nonce ever
+land on the same tag — a `2^128` birthday search over the tag's 256-bit chain
+value, `SECURITY-ANALYSIS.md` §4.5 — then both are encrypted with the *same*
+derived keystream, and every observer of both ciphertexts gets `C₁ ⊕ C₂ =
+M₁ ⊕ M₂`, a two-time pad. The event is out of reach (`q²/2^257`, i.e. `2^-129`
+at `q = 2^64` queries), and it is the honest version of "degrades to equality",
+which is only true while the tags differ.
+
+**How much of the nonce you vary is how much nonce entropy you have.** The
+24 bytes are not interchangeable halves: `N[0..16]` goes through HChaCha20 into
+the subkey and `N[16..24]` into the message cipher's nonce, and *all* 192 bits
+are live inputs (differential tests cover the tail bytes). But if an
+application varies only part of the nonce — the common shape is a 64-bit
+counter in the last 8 bytes with the rest fixed — then its effective nonce
+space is that part: collisions, i.e. repetitions of the *whole* nonce, appear
+after about `2^32` messages rather than `2^96`. For a SIV construction that is
+the survivable case and not a break — that is the point of the mode — but the
+cost of the repetition is the one described just above: the equality leak, and
+only if two distinct `(A, M)` pairs under that nonce also collide in the tag
+(the `2^128` event), the two-time pad. An application that
+believes it has 192 bits of separation when it has 64 should know; if the
+full separation is wanted, vary all 24 bytes (or derive them from a counter and
+a per-key label).
 
 Two acceptable strategies:
 
