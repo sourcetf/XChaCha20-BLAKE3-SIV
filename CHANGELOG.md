@@ -821,6 +821,37 @@ answer splits three ways, and each part is now in the document rather than in a 
 §8.2's rows now carry the reason instead of "stated", §8.3 prices the debugger row accordingly
 (root or `CAP_SYS_PTRACE` once the process refuses), and §8.4 has the three-way split above.
 
+### "No algorithm exists" was the wrong sentence: the software answers to §8's hard rows
+
+A fair challenge to the previous entry — *are there really no software algorithms for these?* —
+and the answer is no, there are plenty. What none of them has is a guarantee outside a **model**,
+and several need hardware to falsify. Both of those are now written down instead of being
+compressed into "not defended".
+
+* **The correction with the most content: this construction already implements the standard
+  software mitigation for DPA.** Fresh re-keying (Medwed–Standaert) means running each message
+  under a fresh key so that traces cannot be averaged; per-tag key derivation *is* that, arrived
+  at here for the commitment and nonce-reuse reasons. Concretely: the same nonce and message
+  reproduce one identical trace, a different message is a different key, so an attacker cannot
+  average over the payload cipher at all. The residual attackable surface is the per-nonce
+  derivation — about 1.5 ChaCha20 blocks under the **master** key — which is repeatable and is
+  therefore named as the honest target. Structural argument, not a measured claim: no leakage
+  assessment has been run.
+* **The faults rows gained the same treatment**: classic DFA recovers *long-lived* round keys, and
+  nothing here is long-lived beyond the master key — every recoverable intermediate (`enc_key`,
+  `enc_nonce`, `mac_key`, the tag) is per message, so a fault-assisted recovery buys one message.
+* **New §8.5**, a table of what exists per class, its model and its validation, and why it is not
+  in this crate: masking (probing model, TVLA/ISO 17825 — so *falsifiable*, with a lab),
+  infective computation, tamper-resilient encodings and AMD codes, index masking / `lfence` /
+  Speculative Load Hardening, TRESOR-style register-resident keys, Rowhammer guard pages and
+  integrity checks, tracer detection. The pattern: the question is not "can software do
+  something" but "is the guarantee unconditional, and can it be falsified here".
+* Two rows also got the "what it would take" they were missing: Rowhammer (guard pages, refresh
+  re-touch, a key checksum — partial, and a flip that hits the checksum too is invisible) and cold
+  boot (TRESOR needs kernel cooperation to be sound on a general-purpose OS).
+* One overstatement fixed: the power/EM bullet said a masking claim "cannot be falsified" — it
+  can, by TVLA, just not in this repository.
+
 ### Zeroization: two copies the wipes could not reach
 
 Fixed in every configuration, because these are copies the wipes should already have
