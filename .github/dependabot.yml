@@ -58,7 +58,24 @@ updates:
       # the ignore is so it does not come back weekly. A benchmark-harness update, if ever
       # wanted, is a branch with a provisioning decision in it, not a dependency bump.
       - dependency-name: criterion
-      # `chacha20poly1305` and `aead` are deliberately *not* ignored: they are the benchmark
-      # reference (and each other's transitive dependency), so their PRs are the reminder
-      # that the README's head-to-head numbers belong to a specific version. See PR #5's
-      # comment for the three-step plan that lands them.
+      # `chacha20poly1305` and `aead` are the benchmark reference (and each other's
+      # transitive dependency), and they must move *together*: 0.11 depends on `aead` 0.6,
+      # so bumping either alone leaves the bench importing traits from a major version the
+      # cipher does not implement - which is exactly how PRs #2 and #5 failed (`E0599` on
+      # `ChaChaPoly1305::new`). Paired, they trip the lint gate instead: `aead` 0.6 deprecates
+      # `AeadInPlace`/`encrypt_in_place_detached` in favour of `AeadInOut`, so
+      # `clippy --all-targets -- -D warnings` reports nine errors in `benches/compare.rs`
+      # until those call sites are migrated.
+      #
+      # Measured before deciding (median of two alternating runs, encrypt @ 16 KiB / 1 MiB):
+      # the reference is 9.78 -> 9.65 µs and 551.0 -> 544.4 µs, i.e. ~1% - inside the noise
+      # floor of a two-checkout comparison (the same crate measured up to 8% apart between the
+      # two trees). So the README's ratios, which name the reference version explicitly, do not
+      # go stale, and the upgrade buys a dev-only dependency being current.
+      #
+      # Ignored for *version* updates with the reasoning recorded; advisory detection is not
+      # affected, because `cargo-deny` fails the Deep workflow if an advisory reaches the
+      # lockfile. Do the migration when the performance table is next refreshed - that is the
+      # commit where the numbers are re-measured anyway.
+      - dependency-name: chacha20poly1305
+      - dependency-name: aead

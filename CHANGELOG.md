@@ -671,6 +671,34 @@ merge; red → do not; anything touching `chacha20poly1305`, `aead` or `criterio
 engineering task about *evidence* (measurements) rather than a dependency bump; and no PR is
 merged to empty the list.
 
+### #5 (`chacha20poly1305` 0.11): closed, with the measurement that decided it
+
+The last PR of the batch was parked "with a plan"; it is now closed, and the reason is data
+rather than policy. Working the bump in a scratch worktree:
+
+* **It cannot land alone, and the failure is a pairing problem.** `chacha20poly1305` 0.11
+  depends on `aead` 0.6, and the PR leaves `aead = "0.5"` — so the bench imports the traits of a
+  crates.io `aead` major that the cipher does not implement. That mismatch *is* the `E0599` in
+  both this PR and #2. Bumped together, the bench compiles unchanged.
+* **Paired, it trips the lint gate.** `aead` 0.6 deprecates `AeadInPlace` and
+  `encrypt_in_place_detached`/`decrypt_in_place_detached` in favour of `AeadInOut` and the
+  `InOutBuf` shape, so `clippy --all-targets --all-features -- -D warnings` reports nine errors
+  in `benches/compare.rs`. Landing it is a code migration of that harness, not a dependency bump.
+* **The published numbers do not move.** Measured on this host (median of two alternating runs
+  each, `encrypt_in_place_detached`, 2 s measurement): the reference goes 9.78 → 9.65 µs at
+  16 KiB and 551.0 → 544.4 µs at 1 MiB — about 1%, inside the noise floor of a two-checkout
+  comparison (the *same* crate code measured up to 8% apart between the two trees). The README
+  table compares against a version it names (`chacha20poly1305` 0.10.1, with `poly1305` 0.8.0 and
+  `blake3` 1.8.7), so it stays correct as published.
+
+So: dev-only, no effect on the shipped crate or on any security claim, no effect on the numbers,
+and a real migration to take it. It is now excluded from version updates in
+`.github/dependabot.yml` alongside `aead` and `criterion`, each with its measured reason written
+next to the entry, and the migration is scheduled implicitly where it belongs: the next time the
+performance table is refreshed, which is the commit that re-measures anyway. Advisory detection
+for those crates is unaffected — `cargo-deny` fails the Deep workflow if an advisory reaches the
+lockfile.
+
 ### Zeroization: two copies the wipes could not reach
 
 Fixed in every configuration, because these are copies the wipes should already have
