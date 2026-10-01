@@ -518,6 +518,62 @@ the counter-0 coincidence (§4.1, structural fix costs the format), the `MAX_MSG
 (§4.6, a build-time binding), and the timing/stack-residue jobs staying non-blocking (shared
 runners cannot gate on a `t`-test, and the strict form is one flag away).
 
+### The audit's outstanding obligations: independence, determinism under repetition, and the attacker's procedures
+
+A full mathematical audit pass, asking the three questions that are usually left implicit:
+are the assumptions simultaneously satisfiable, is any of them redundant, and what *is* the
+procedure an attacker would run? Four additions and one real self-contradiction found:
+
+* **§2.3: consistency and non-redundancy of the conjecture set** — new, and the part an
+  assumption audit usually skips. *Consistency*: all six hold together if `CC`/`HC` are random
+  functions and keyed BLAKE3 is a random oracle, since a random function does not care what its
+  input means — which is also the cleanest statement of *why* L3.6 is believed ("close enough to
+  an oracle in this one use" rather than "is an oracle"). *Non-redundancy*: a separating object
+  for each implication that might have been assumed, e.g. keep BLAKE3's compression but ignore
+  half the left chaining value at the root — L3.3 still holds, L3.4 fails *deterministically*, so
+  the tree conjecture is not a consequence of the compression conjecture; and the same trick one
+  level up for L3.5 (blocks past the first defined as constants). Each of the six is shown to be
+  pulling its own weight.
+* **§3: a lemma that each hybrid preserves determinism.** Thm 4's comparison is against an ideal
+  scheme that is *deterministic in* `(N, A, M)` (repeated queries repeat answers — that is the
+  whole content of "misuse degrades to equality"), and the adversary may repeat a nonce. If any
+  hop of the chain had replaced its object with per-query freshness, the hybrid would differ from
+  the real scheme for exactly the adversary the misuse claim is about, and the bound would be
+  vacuous. The lemma shows each hop keeps the oracle a function of the query — with hop 4's
+  replacement keyed by the derived pair rather than by the query, which is also what keeps the
+  collision event visible to the bound instead of erasing it. This was implicit before; an
+  auditor is entitled to it explicitly.
+* **§5.1: the falsification procedures, not just their verdicts.** Per claim, the algorithm an
+  attacker runs and its per-attempt cost in primitive calls: key search at `2^256` (`2^256/Q`
+  multi-target), forgery as a *target* at `2^-520` per fresh tag with key search as the minimum
+  (`min(2^520, 2^256)` is the key search), commitment as `2^-520` per candidate key
+  (`2^-264` over the whole key space — and `≈ 1` with a 32-byte tag, which is the row that makes
+  the width load-bearing), and the tag-collision procedure with the key (2^128 birthday, fixed
+  tail) versus the keyless one (wait for it; then the two-time pad is free). Also the
+  falsification-of-a-falsification: the derivation route through colliding key-material blocks
+  (`≈ 2^256`) *still fails* because `K` is in the tag's head.
+* **§5.2: what we cannot run, in the order it would take the argument down** — a full-round
+  distinguisher (kills the primitive conjectures), a concrete distinguisher for the composed tag
+  map (kills L3.6), a cheaper-than-`2^128` collision search with a fixed tail (kills the
+  nonce-reuse story, and it is the smallest number in the table), and a cheap inversion of the
+  key/input separation (the other side of L3.6). Plus the record that the programme is not
+  vacuous: three implementation defects and one *claim* (the `2^260` bound) were falsified by
+  exactly this kind of reading.
+* **§6: a self-contradiction removed, found by writing the summary.** The "Not claimed" bullet
+  still said, from the first over-corrected draft of the collision fix, that 65 bytes and 32
+  bytes are "equivalent in both properties" — which contradicts the target-bound argument given
+  three sections earlier (§4.5) and, worse, was the kind of sentence a reader would quote. It now
+  says the accurate thing: the width does not raise the *collision* level (2^128 either way) and
+  it *is* what carries the target commitment (2^520 vs the key-search-level 2^256), so it is
+  load-bearing and the frozen format is the second reason, not the only one.
+* **§6: the strongest true sentence about the construction**, in one paragraph: there is no
+  standard-model proof and there cannot be one; what is proved is that the composition is not
+  where the risk is — every risk is one of six named conjectures with falsifiers, and four of the
+  six are about single primitives rather than about this scheme.
+
+Documentation only: no code, no tests, no wire format. The claims themselves are unchanged — this
+round adds the obligations that make them *checkable* rather than the conclusions.
+
 ### Zeroization: two copies the wipes could not reach
 
 Fixed in every configuration, because these are copies the wipes should already have

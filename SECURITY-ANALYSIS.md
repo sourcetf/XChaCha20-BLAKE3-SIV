@@ -335,6 +335,51 @@ Nothing in the table is silently assumed: each row either points at a proof in t
 a citation, or at a named conjecture with its own falsifier in §5. The one row an auditor should
 push on is L3.6, and §5's row 15 says exactly what would refute it.
 
+### 2.3 Is the conjecture set consistent, and is any conjecture redundant?
+
+An assumption list needs two things beyond each entry: the entries must be *simultaneously
+satisfiable* (no contradiction hides in the set) and *non-redundant* (none is a consequence of
+another, or it is doing no work and should be deleted). Both are discharged here, which is the
+part of an assumption audit that usually goes missing.
+
+**Consistency: the six hold together, in one model.** Take `CC` and `HC` to be independent random
+functions of their inputs (each is then a PRF, so L3.1 and L3.2 hold), and take keyed BLAKE3 to
+be a random oracle `R(k, x)` whose output stream is uniform and independent for every distinct
+`(k, x)`. Then:
+
+* L3.3 holds: at a fixed `x`, `k ↦ R(k, x)` is a random function;
+* L3.4 holds: whatever the tree does with chaining values, the root's output is a fresh uniform
+  string per distinct root input — there is no structure left to exploit;
+* L3.5 holds: later output blocks are part of the same uniform stream;
+* L3.6 holds: the map `(N, A, M) ↦ R(D(K), P ‖ K ‖ S)` is uniform per query, and distinct queries
+  give distinct oracle inputs by A4 (the encoding is injective *given* `K`), so the outputs are
+  independent. The correlation between `D(K)` and the `K` inside the input — the whole content of
+  L3.6 — is invisible to a random function.
+
+So no two assumptions contradict each other, and the idealised world the reductions compare
+against is itself a model of the assumptions. (This is also why L3.6 is believed: the only property
+of BLAKE3 it needs is the one a random oracle has by definition, so the assumption is "BLAKE3 is
+close enough to an oracle *in this one use*" rather than "BLAKE3 is an oracle".)
+
+**Non-redundancy: no conjecture follows from another.** Each row is a *separating construction* —
+an object in which the left-hand assumption holds and the right-hand one fails — so the
+implication cannot exist in general. They are sketches, not full definitions, which is what a
+separation needs to be when the two statements are about different objects:
+
+| If … held | … would it give …? | No: the separating object |
+| --- | --- | --- |
+| L3.1 (CC is a PRF) | L3.2 (HC is a PRF) | the object is the *same* permutation `P`; `P(x)+x` is a PRF up to the birthday bound and false beyond it, while `trunc(P(y))` is not a PRF at all (a truncated permutation is distinguished by collision counting). §2.1's "why L3.1 and L3.2 are two conjectures" |
+| L3.2 | L3.1 | the same pair, read the other way: dropping the feed-forward is not a strengthening |
+| L3.3 (keyed compression is a PRF) | L3.4 (the tree preserves it) | keep BLAKE3's compression, change only the *root's input assembly* so that half of the left chaining value is ignored: the compression is still a PRF, but two messages differing in the ignored half have identical roots *deterministically*, and no PRF does that |
+| L3.3 or L3.4 | L3.5 (the XOF keeps it past block 1) | keep the compression and the tree, define output block `i ≥ 1` as a constant: the first block is still a PRF and the tree is untouched, while the multi-block output carries no input-dependence at all |
+| L3.3 | L3.6 (the composed tag map is a PRF) | the grep-the-key hash of §2.1: `B3'(k, x) = 0` if `k` occurs in `x`, else `B3(k, x)`. L3.3 holds up to `q·2^-256`; the composed map is the constant zero function |
+| any of L3.1–L3.3 | any other | different objects: they are statements about three different primitives, so nothing follows in either direction, and the document cites each only for the layer that uses it |
+
+The converse directions are not claimed and not needed: the document never derives a lower layer
+from a higher one. What the table buys is the statement §4.10 makes — the composition adds L3.6
+and *only* L3.6 — with each of the six shown to be pulling its own weight rather than restating
+its neighbour.
+
 ---
 
 ## 3. What follows
@@ -515,6 +560,36 @@ stronger leak than "equality" alone, and it is why §4.5's collision number matt
 misuse story and not only to the proof's bookkeeping. A scheme that derived the keystream from
 `(K, N)` would hand over the two-time pad *always* under misuse; this one hands it over only
 inside an event an attacker cannot reach.
+
+### Lemma (each hybrid preserves determinism — the obligation an MRAE reduction must discharge)
+
+Every hop of Thm 4's chain replaces one object by another, and there is an obligation hiding in
+"another" that is easy to miss: the ideal MRAE scheme is *deterministic in `(N, A, M)`* (a
+repeated query repeats its answer, which is why equality is the only misuse leak), and the
+adversary may repeat a query — including a *nonce*. If any hop replaced its object with
+per-query freshness, the hybrid would answer a repeated query differently from the real scheme,
+and the comparison would be vacuous for exactly the adversary the misuse claim is about.
+
+The lemma is that no hop does that: after every hop the encryption oracle is still a **function**
+of `(N, A, M)`.
+
+* Hop 1 replaces `N₁ ↦ HC(K, N₁)` by a single fixed random function `F*`. A function, not a
+  fresh draw: equal `N₁` gives equal subkeys, distinct `N₁` gives independent ones (§3 Thm 1's
+  argument uses both halves).
+* Hop 2 replaces the tag by `B3(k_N, ·)`, where `k_N` is derived from that fixed `F*`. Equal `N`
+  gives equal `k_N`, so the tag remains a function of `(N, A, M)`.
+* Hop 3 replaces `(enc_key, enc_nonce)` by a function of the tag, which is itself a function of
+  the query.
+* Hop 4 replaces each keystream by a uniform string **keyed by the derived pair**, not by the
+  query: two queries that reach the same derived pair get the same string, and distinct pairs get
+  independent ones. (Keying the replacement by the query instead would be the vacuity the lemma
+  exists to rule out, and it would also erase the collision event the bound is counting.)
+
+Determinism is therefore preserved hop by hop, and the *only* behavioural difference the ideal
+world has — two distinct queries receiving the same answer — is precisely the collision event
+whose probability is the `q²/2^257` term. That is the formal content of the Corollary above, and
+it is the reason the bound may be read as "misuse degrades to equality plus a collision term"
+rather than as a statement about nonce-respecting adversaries only. ∎
 
 ### The acyclicity lemma (encryption is a DAG — while *verification* is deliberately a fixed point)
 
@@ -936,6 +1011,51 @@ written, falsifies or establishes them.** Rows 1 and 15 are the standing bet tha
 symmetric scheme makes (plus the one the layout adds); row 16 is a bound derived by hand, and the
 tests around it check the premises of the derivation rather than the number.
 
+### 5.1 The falsification procedures: what an attacker runs, and what it costs
+
+The table above says what would refute each claim; this says *how* someone would go about
+refuting it, so that "out of reach" is a number attached to an algorithm rather than a feeling.
+Per-attempt costs are in primitive calls (one HChaCha20, one ChaCha20 block, one BLAKE3 tag), and
+the numbers are work, not wall-clock.
+
+| Target | Procedure | Per attempt | Where it dies |
+| --- | --- | --- | --- |
+| **Confidentiality** (fresh nonce, no plaintext oracle) | guess the key: for each `K′ ∈ {0,1}^256`, recompute the tag of one known `(N, A, M)` and compare; on a hit, decrypt everything | ≈ 4 calls (HC, CC, tag, first keystream block) | `2^256` attempts; `2^256/Q` for an attacker satisfied with any of `Q` devices (§3, multi-key) |
+| **Forgery** | submit `(N, A, C, T)` guesses to the decryption oracle, or search the key space and then forge *legitimately* | 1 verify (oracle) or ≈ 4 calls (key search) | `2^-520` acceptance per fresh tag (L3.6), or `2^256` key search — the *minimum* is the key search, which is what "forgery is bounded by the key" means. Note the offline variant needs the key: without it an attacker cannot even test a guess without the oracle |
+| **Key commitment** (a second key that opens a *given* ciphertext) | for each candidate `K′`: derive `(enc_key, enc_nonce)` from the *given* `T`, decrypt `C`, recompute the tag over the recovered `M′`, compare with `T` | ≈ 4 calls | the chance that any one candidate works is `2^-520`, so enumerating the whole `2^256` key space succeeds with probability `≈ 2^-264`: no second key is in reach. **With a 32-byte tag the same procedure expects `≈ 1` success** — this row is what the 65-byte width buys (§4.5) |
+| **Tag collision** (the two-time-pad event of §3's Corollary) | *with the key*: fix `N`, `A`, the lengths and the final block; vary the prefix; hash until two prefixes collide in the 256-bit chaining value. *Without the key*: wait for the birthday event in the traffic | 1 hash per candidate (with the key); zero (without) | `2^128` by birthday. The keyless variant is the one to fear, because at the moment it happens the two-time pad costs the observer *nothing* |
+| **The derivation route to a non-committing ciphertext** (the one the layout closes) | choose `K₁ ≠ K₂` and search for two keys with equal 512-bit key-material blocks | 1 HC + 1 CC per candidate key | `≈ 2^256` candidates produce a collision by birthday — **and the attack still fails**, because `K` is 32 bytes of the tag input, so the two tags differ in their head. Falsifying the falsifier: the cheapest route we know is closed by 32 bytes of input, not by a wider tag (Thm 2, §4.10) |
+| **Encoding and parsing** (length ambiguity, `A`/`M` re-split, trailing zeros, a tag byte that does not reach the ciphertext) | the differential suite's byte-position scans, the KATs, the Kani layout harnesses | — | §4.4 proves injectivity; §7 names the harnesses; §4.7 records the one member of this class that *was* real (a 28-byte tag truncation) |
+| **The implementation** (a divergence from the specification, a secret-dependent branch, a skipped wipe) | `tools/ref_impl.py` differential, `src/witness.rs` under `ultra`, ctgrind, the fault campaign, Kani | — | §7 and `tests/README.md` |
+
+### 5.2 What we cannot run, and in what order the argument would fall
+
+Four programmes are out of reach here, and it is worth naming what each would take down, so the
+weight of the claims is visible:
+
+1. **A full-round distinguisher for ChaCha20, HChaCha20 or keyed BLAKE3.** Kills L3.1/L3.2/L3.3 and
+   with them every claim in this document. Published cryptanalysis reaches 7–8 of ChaCha20's 20
+   rounds and reduced-round BLAKE2/BLAKE3 only; a full-round result would be a major one.
+2. **A concrete distinguisher for the composed tag map** — the L3.6 gap. Nothing in this document
+   can rule it out (there is a separation showing no black-box reduction from L3.3 exists), and
+   it is the one place where "BLAKE3 is a PRF" is *not* the whole of what is assumed. §6 lists
+   what fails with it.
+3. **A collision attack on BLAKE3's 256-bit chaining value cheaper than `2^128`, that can be
+   mounted with the final block held fixed.** Kills the collision bound, and with it the
+   nonce-reuse story (the two-time pad stops being negligible) — this is the most attractive
+   target for a practical attacker, because `2^128` is the smallest number in §4.5's table.
+4. **Anything that makes the `2^520` target cheap** — structure in BLAKE3's key-versus-message
+   separation that a target search could exploit. That is the same structure L3.6 is about, from
+   the other side: L3.6 says the composed map is *unpredictable*; this would say it is
+   *invertible*.
+
+Everything else in this document has been attacked with the tools that exist here, and the
+record shows the programme is not vacuous: three implementation defects were found and fixed by
+exactly this kind of reading (the 28-byte tag truncation, the `madvise` argument count, the
+missing `MADV_DODUMP`), one *claim* was falsified and corrected (the `2^260` collision bound,
+§4.5), and one assumption was added to the list as a result of an audit rather than being found
+missing later (L3.6, §2.1).
+
 ---
 
 ## 6. Residual risk, in one place
@@ -976,11 +1096,34 @@ tests around it check the premises of the derivation rather than the number.
   would present itself as a break of one of those primitive conjectures. The distinction is
   worth stating because the two failures would look identical from the outside and have
   different fixes: a composition flaw is this crate's to fix, a primitive break is not.
-* **Not claimed:** that this is a standard, that it has been cryptanalysed by anyone else,
-  or that the tag width makes forgery harder than 2^256 — it does not, because forgery is
-  bounded by the key, not by the tag. Nor does the width buy commitment beyond `2^128`, which
-  is the correction §4.5 records: 65 bytes and 32 bytes are equivalent in both properties, and
-  the extra 33 are kept only because the wire format is frozen.
+* **Not claimed:** that this is a standard, that it has been cryptanalysed by anyone else, or that
+  the tag width makes forgery harder than `2^256` — it does not, because forgery is bounded by the
+  key: key search dominates whatever the tag length is, and a 32-byte tag would be guessed at
+  exactly the key-search level. Nor does the width raise the *collision* level: 65 bytes and 32
+  bytes both collide at `2^128`, because both are functions of the same 256-bit chaining value
+  (§4.5). What the width *does* buy is the target commitment, and the two sentences coexist
+  because they are about different attacks: a second key that opens a *given* ciphertext costs
+  `2^520` with 65 bytes, and would cost only `2^256` — the key-search level, i.e. not committing
+  at all — with 32. So the width is load-bearing, and the fact that the wire format is frozen is
+  the second reason it stays rather than the only one.
+
+**The strongest true sentence about this construction.** It is worth writing the whole audit's
+conclusion as one paragraph, because it is easy to read the rest as more than it is:
+
+> Given the six conjectures of §2.1 — with L3.6 the only one that this construction's own layout
+> introduces — the scheme is a secure MRAE/DAE authenticated encryption: its confidentiality,
+> authenticity, and both commitment properties follow from those conjectures by the reductions
+> in §3, its collision-limited properties sit at `2^128` and its target-limited ones at `2^520`
+> or the key's own `2^256`, the composition adds no joint assumption about ChaCha20 and BLAKE3
+> (§2.3, §4.10), and the reduction's hybrid chain is valid under nonce repetition as well as
+> under nonce uniqueness (§3's lemma).
+
+There is *no* proof of security in the standard model, and there cannot be one: the six
+conjectures are statements about the infeasibility of computation on primitives nobody has
+proven anything about, and a document that claimed otherwise would be wrong for a reason no
+amount of internal consistency can repair. What the document establishes is the other half — that
+the *construction* is not where the risk is: every risk is one of six named conjectures, each with
+a falsifier, and four of the six are about single primitives rather than about this scheme.
 
 ---
 
