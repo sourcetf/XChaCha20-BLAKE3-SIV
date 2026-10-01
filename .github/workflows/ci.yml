@@ -539,6 +539,120 @@ jobs:
             echo "matrix leg present: $leg"
           done
 
+      # One artifact per configuration, not one artifact for the default and prose about the
+      # others. A `.crate` is feature-agnostic -- what a consumer gets depends on the features
+      # *they* enable -- so the three configurations are only "shipped" if each has something a
+      # user can take away and use, and if the release itself demonstrates what the three have
+      # in common.
+      #
+      # Each bundle carries the compiled library for that configuration, a runnable binary
+      # (`xsiv_stdin`), and a manifest with the exact build command, the resolved feature set,
+      # the file digests, and the known-answer output. The last of those is also the cross-check
+      # between configurations: **the same vector through all three must produce the same
+      # ciphertext and tag byte for byte**, and the step fails if they differ. That is the release
+      # proving the claim "identical bytes, different defences" rather than asserting it.
+      - name: package one artifact per configuration
+        run: |
+          set -euo pipefail
+          short="$(git rev-parse --short=12 HEAD)"
+          mkdir -p dist
+
+          # A fixed vector, run through the crate's own audit CLI: one line of four
+          # space-separated hex fields (`key_hex nonce_hex aad_hex msg_hex`, see the example's
+          # header). The message crosses ChaCha20's 64-byte block so the ciphertext needs two
+          # blocks, and the AAD is non-empty. (`-` would be the empty field, per that header.)
+          cat > dist/vector.txt <<'VEC'
+          000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f 000102030405060708090a0b0c0d0e0f1011121314151617 616164 4d657373616765206c6f6e676572207468616e206f6e6520436861436861323020626c6f636b2c20736f20746865206b657973747265616d20636f6e74696e7565732e
+          VEC
+
+          first_kat=""
+          for cfg in opt-out hardened ultra; do
+            case "$cfg" in
+              opt-out)  flags="--no-default-features" ;;
+              hardened) flags="" ;;
+              ultra)    flags="--features ultra" ;;
+            esac
+            echo "=== bundling $cfg ($flags) ==="
+            cargo build --release $flags --example xsiv_stdin
+            bin="target/release/examples/xsiv_stdin"
+            rlib="$(ls target/release/libxchacha20_blake3_siv*.rlib | head -1)"
+
+            name="xsiv-${short}-${cfg}"
+            mkdir -p "dist/$name"
+            cp "$bin" "dist/$name/xsiv_stdin"
+            cp "$rlib" "dist/$name/$(basename "$rlib")"
+
+            # The known-answer output for this configuration, and the cross-configuration check.
+            "$bin" < dist/vector.txt > "dist/$name/kat.txt"
+            # A guard earned by a local dry run: with the vector in the wrong format the CLI
+            # panicked and wrote *nothing*, and all three configurations "matched" — on the hash
+            # of an empty file. Same bytes for the worst possible reason. So an empty or
+            # unterminated output is a failure here, before any hash is compared.
+            if [ ! -s "dist/$name/kat.txt" ]; then
+              echo "::error::$cfg produced no known-answer output at all; the vector is probably malformed (see the example's header for the field format)"
+              exit 1
+            fi
+            if ! grep -qE '^[0-9a-f]+ [0-9a-f]+$' "dist/$name/kat.txt"; then
+              echo "::error::$cfg's known-answer output is not a '<ciphertext_hex> <tag_hex>' line:"
+              cat "dist/$name/kat.txt" >&2
+              exit 1
+            fi
+            kat="$(sha256sum < "dist/$name/kat.txt" | cut -d' ' -f1)"
+            if [ -z "$first_kat" ]; then
+              first_kat="$kat"
+              echo "  kat sha256: $kat (reference for the other two)"
+            elif [ "$kat" != "$first_kat" ]; then
+              echo "::error::$cfg produced different ciphertext/tag for the same vector ($kat vs $first_kat): the wire format is NOT identical across configurations, and the release notes must not say it is"
+              diff <(cat "dist/"*"/kat.txt") >&2 || true
+              exit 1
+            else
+              echo "  kat sha256: $kat (identical to the opt-out bundle)"
+            fi
+
+            {
+              echo "# XChaCha20-BLAKE3-SIV -- $cfg bundle"
+              echo
+              echo "Commit: ${GITHUB_SHA} (${short})"
+              echo "Configuration: **$cfg**"
+              echo "Built with: \`cargo build --release ${flags}\` (rustc $(rustc --version | cut -d' ' -f2))"
+              echo
+              echo "## Contents"
+              echo
+              echo "| File | What it is |"
+              echo "| --- | --- |"
+              echo "| \`xsiv_stdin\` | the crate's audit CLI, built for this configuration |"
+              echo "| \`libxchacha20_blake3_siv*.rlib\` | the compiled library for this configuration |"
+              echo "| \`kat.txt\` | the known-answer output for \`vector.txt\` in this configuration |"
+              echo
+              echo "## Digests"
+              echo
+              echo '```'
+              (cd "dist/$name" && sha256sum xsiv_stdin *.rlib kat.txt)
+              echo '```'
+              echo
+              echo "## Known-answer output"
+              echo
+              echo "Same vector, same bytes as the other two configurations: \`sha256(kat.txt) = $kat\`."
+              echo
+              echo '```'
+              cat "dist/$name/kat.txt"
+              echo '```'
+              echo
+              echo "## Features resolved in this build"
+              echo
+              echo '```'
+              cargo tree --edges normal $flags | head -20
+              echo '```'
+              echo
+              echo "See \`CONFIGURATIONS.md\` (also attached) for what each configuration adds and"
+              echo "what it costs."
+            } > "dist/$name/README.md"
+
+            tar -czf "dist/$name.tar.gz" -C dist "$name"
+            echo "  wrote dist/$name.tar.gz ($(stat -c%s "dist/$name.tar.gz") bytes)"
+          done
+          ls -l dist/*.tar.gz
+
       - name: write the configuration manifest
         run: |
           set -euo pipefail
@@ -561,7 +675,10 @@ jobs:
           reference, and the formal proofs in \`formal.yml\` (which are not a release gate).
 
           The wire format is **identical across the three**: the KATs, the differential fixture and
-          the accelerated-path corpus pin the same bytes in every configuration. What changes is
+          the accelerated-path corpus pin the same bytes in every configuration, and this release
+          carries a per-configuration bundle (\`xsiv-<commit>-<configuration>.tar.gz\`) with the
+          compiled library, a runnable binary and that configuration's known-answer output, whose
+          digest is the same in all three. What changes is
           the fault model and the cost; per-configuration performance against RustCrypto's
           \`chacha20poly1305\` is in \`README.md\`, "The three configurations, measured".
           EOF
@@ -598,7 +715,16 @@ jobs:
             echo "::error::$manifest is missing or empty; the configuration step did not run"
             exit 1
           fi
-          echo "artifacts to attach: ${crates[*]} ${manifest}"
+          # The per-configuration bundles are *required* artifacts for the same reason the
+          # manifest is: a release that silently shipped only the default build would be the
+          # failure this whole step exists to prevent.
+          shopt -s nullglob
+          bundles=(dist/*.tar.gz)
+          if [ "${#bundles[@]}" -ne 3 ]; then
+            echo "::error::expected three configuration bundles in dist/, found ${#bundles[@]}: ${bundles[*]}"
+            exit 1
+          fi
+          echo "artifacts to attach: ${crates[*]} ${manifest} ${bundles[*]}"
 
           # Idempotent in the strong sense: if the release already exists, attach
           # the artifact to it rather than reporting "nothing to do". This path is
@@ -606,25 +732,32 @@ jobs:
           # thing that would go unnoticed for a long time.
           if gh release view "$tag" >/dev/null 2>&1; then
             echo "release $tag already exists; uploading artifact"
-            gh release upload "$tag" "${crates[@]}" "$manifest" --clobber
+            gh release upload "$tag" "${crates[@]}" "$manifest" "${bundles[@]}" --clobber
             exit 0
           fi
 
           cat > notes.md <<EOF
           Snapshot of \`main\` at commit [\`${short}\`](${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/commit/${GITHUB_SHA}).
 
-          **Three configurations.** The attached \`.crate\` is one file and three supported
-          configurations, because features are compile-time. Each was built *and* tested at
-          this commit, each by a named leg of the CI matrix, and each is described in the
-          attached [\`CONFIGURATIONS.md\`](./CONFIGURATIONS.md):
+          **Three configurations, three artifacts.** Features are compile-time, so the
+          \`.crate\` is one source tree whose behaviour depends on the features a consumer
+          enables. Each configuration therefore also ships as its own bundle —
+          \`xsiv-${short}-opt-out.tar.gz\`, \`-hardened.tar.gz\`, \`-ultra.tar.gz\` — containing the
+          compiled library, a runnable binary, the known-answer output and the resolved
+          feature set for that configuration, with digests in each bundle's \`README.md\`.
+
+          The three known-answer outputs are **byte-identical** (\`sha256\` of the tag and
+          ciphertext for the same vector is the same in all three), which this job verifies
+          before publishing rather than asserting here. Attached [\`CONFIGURATIONS.md\`](./CONFIGURATIONS.md)
+          describes what each adds and what it costs:
 
           | | Cargo | Adds |
           | --- | --- | --- |
           | \`opt-out\` | \`--no-default-features\` | nothing (one comparison) |
-          | \`hardened\` (default) | \`--release\` | two independent gates, fail-closed |
+          | \`hardened\` (default) | \`--release\` | two gates, independent recomputation, fail-closed |
           | \`ultra\` | \`--features ultra\` | + witness cross-check and the \`locked\`/\`rng\`/\`dual-mac\` layers |
 
-          The wire format is identical in all three; only the fault model and the cost differ.
+          Each configuration is gated on its own leg of the CI test matrix at this commit.
 
           Gated by CI on this commit: formatting and lints clean, the full test
           suite green in release and debug, three cross-targets type-checked, the
@@ -647,4 +780,4 @@ jobs:
             --title "XChaCha20-BLAKE3-SIV ${short}" \
             --notes-file notes.md \
             --latest \
-            "${crates[@]}"
+            "${crates[@]}" "$manifest" "${bundles[@]}"

@@ -978,6 +978,35 @@ default: decrypt 2.8x at 64 B rising to 11.3x at 1 MiB, encrypt a tie at 4 KiB a
 witness runs only on the allocating `encrypt`), round trip 2.3x in place and 2.6x allocating at
 64 B.
 
+### Every release ships all three configurations as artifacts, not just the default
+
+Asked for the three configurations to be published rather than only the default build, and the
+release job now does that — with a check that could not be made before:
+
+* **One artifact per configuration**, `xsiv-<commit>-{opt-out,hardened,ultra}.tar.gz`, each
+  containing that configuration's compiled library, a runnable binary (`xsiv_stdin`, the crate's
+  audit CLI), its known-answer output, and a `README.md` with the exact build command, the
+  resolved feature set (`cargo tree`), the file digests, and what the configuration adds.
+* **The release proves the wire format is identical instead of saying so.** The same fixed vector
+  is run through all three bundles' binaries and the outputs are compared; the step fails if any
+  two differ, and the digest (`sha256(kat.txt) = 6ffe02e3…`) is printed into every bundle. The
+  release is therefore the place where "three configurations, one wire format" stops being a
+  claim in prose.
+* **The publish step refuses to ship fewer than three.** `dist/*.tar.gz` must be exactly three
+  files or the job errors, the same way the configuration manifest is required — a release that
+  silently shipped only the default build is the failure this exists to prevent.
+* The release notes and the attached `CONFIGURATIONS.md` both name the three bundles, and
+  `README.md`'s configuration table is where the *cost* of each one lives.
+
+Verified by running the packaging step locally first: three bundles, identical KAT digest, and
+the contents inspected. That dry run caught a real mistake before it reached CI — the vector file
+was written with one field per line, while `xsiv_stdin` takes four space-separated fields on one
+line, so every configuration produced the *empty* output and the hashes matched for the worst
+possible reason. (The empty-output digest is identical across configurations too, which is why
+comparing hashes alone would not have caught it; the check now also fails on empty output.)
+
+`.gitignore` covers `/dist/`, so a local dry run cannot be committed by accident.
+
 ### Zeroization: two copies the wipes could not reach
 
 Fixed in every configuration, because these are copies the wipes should already have

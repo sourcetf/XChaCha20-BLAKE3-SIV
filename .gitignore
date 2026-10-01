@@ -1,6 +1,8 @@
 # Cargo build output.  This is the big one: `target/` reached 3.3 GB here, and
 # it is entirely reproducible from the sources -- never commit it.
 /target/
+# Release bundles, written by the release job (and by a local dry run of that step).
+/dist/
 
 # Python bytecode cache from tools/*.py.
 __pycache__/
