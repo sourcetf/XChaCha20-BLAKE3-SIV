@@ -7,9 +7,11 @@ them is read as another.
 1. **Proven here, from explicit assumptions** — the reduction. Given the primitives are
    the PRFs they are believed to be, the composed scheme has the properties claimed, with
    the exact place where each assumption is used and the concrete loss at each hop.
-2. **Assumed** — the PRF security of ChaCha20, HChaCha20 and keyed BLAKE3. Nobody can
-   prove these; there is no proof of any ARX primitive of this size, and a document that
-   blurred that line would be lying by structure rather than by sentence.
+2. **Assumed** — the PRF security of ChaCha20, HChaCha20 and keyed BLAKE3, plus the one
+   statement the tag's layout adds on top of them (L3.6 in §2.1: the tag is a PRF in the
+   master key even though the master key is also bytes of its input). Nobody can prove these;
+   there is no proof of any ARX primitive of this size, and a document that blurred that line
+   would be lying by structure rather than by sentence.
 3. **Neither** — the implementation, the side channels, the fault models. Those are
    covered elsewhere (`README.md`, `SECURITY.md`, `tests/README.md`, and the tools under
    `tools/`), and nothing here should be read as evidence about them.
@@ -85,7 +87,11 @@ Two structural remarks that the rest of the document depends on:
   from the tag*: this is the SIV construction (Rogaway–Shrimpton 2006), and the ciphertext
   is not a function of the message alone but of the whole quadruple;
 * the tag's input contains `K` and `N` themselves, which is not required by SIV and is what
-  turns the tag into a commitment to the key and the nonce (§4.3).
+  turns the tag into a commitment to the key and the nonce (§3, Thm 2). It is also the one place
+  where the document buys a property with an assumption rather than a theorem: putting `K` in
+  the input means the key of the tag's PRF is derived from a value that is also in that PRF's
+  input, which is L3.6 in §2.1 — declared there, with its (real) reduction gap and its
+  falsifier, rather than counted as free.
 
 ---
 
@@ -129,8 +135,12 @@ place where the whole construction is most exposed to future cryptanalysis.
 that is not about a primitive, and it is the one that is fully discharged here. (It is also
 checked from the other side by Kani, see §7.)
 
-**A5 (standard model).** No related-key, nonce-respecting-only, or quantum-model claims are
-made here except where §6 states them explicitly.
+**A5 (standard model, with one correlation declared).** No related-key, nonce-respecting-only,
+or quantum-model claims are made here except where §6 states them explicitly. The construction
+does introduce one correlation between a key and the data it is used on — the master key keys
+the tag derivation *and* appears in the tag's input — and it is declared rather than hidden: it
+is L3.6 in §2.1, an assumption strictly stronger than A3, with its reason and its falsifier
+given there.
 
 ### 2.1 The assumption tree, layer by layer
 
@@ -149,7 +159,9 @@ L1  proven composition theorems (no assumption at this level)
      |-- L1.2  ...and its "per-message key derived from the tag" variant, which is what this
      |         construction does (Gueron-Lindell, CCS 2015 / RFC 8452, §4)
      |-- L1.3  the standard reductions used at the joints:
-     |         * PRF => collision resistance (q^2/2^output-bits)
+     |         * PRF => collision resistance (q^2/2^s, where `s` is the size of the *state*
+     |           the output is a function of -- for an XOF that is the chaining value, not
+     |           the output width, see §4.5)
      |         * PRF output splitting: the halves of one PRF output are jointly pseudorandom
      |         * cascade: a PRF keyed by a PRF output is a PRF
      |         * counter-mode encryption from a PRF (a stream cipher is IND-CPA if its block
@@ -175,6 +187,10 @@ L3  primitive-level conjectures -- each one a statement about an object, not a m
      |         KEYED_HASH flag, is a PRF in the message block
      |-- L3.4  the BLAKE3 tree preserves PRF-ness: the root node's output is a PRF
      |-- L3.5  the BLAKE3 XOF keeps that property past the first output block
+     |-- L3.6  the *composed* tag map is a PRF in the master key, even though the master
+     |         key is also 32 bytes of the tag input: the key of the inner PRF is derived
+     |         from a value that appears in its own input, which the black-box PRF game
+     |         does not model and no reduction from L3.3 reaches
      |
 L4  implementation properties (constant-time, no reachable panic, wipes, counter range)
      -- out of scope here; README and tests/README cover them
@@ -200,13 +216,46 @@ same node input except by colliding inside the compression function itself. That
 argument, not a proof, and it is the one place in this tree where "it is standard practice"
 is doing more work than a citation.
 
+**Why L3.6 is an assumption of its own.** It looks like it should follow from L3.3, and it
+does not. The tag is `B3(mac_key, DOM_TAG ‖ K ‖ …)`, so the key of the outer PRF is *derived
+from* a value that also *appears in its input*: `mac_key` is a function of `K`, and `K` is 32
+bytes of the hashed message. L3.3 is the statement that `x ↦ B3(k, x)` is a PRF for a key `k`
+drawn uniformly **and independently of the input**; here the key and the input are correlated
+functions of the same secret, which is the shape the PRF game deliberately excludes (it is the
+key-dependent-input setting, the cousin of KDM). The reduction that would close the gap cannot
+be written down: it would have to hold `mac_key` as the challenge key of the PRF game while
+*placing `K` in the query string* — but `K` is exactly what the challenge key is derived from,
+and the distinguisher does not get it.
+
+That this is a genuine gap rather than a missing paragraph is shown by a separation. Take any
+keyed hash `B3'` that is L3.3-secure but *notices* its input: `B3'(k, x) = 0` if `k` occurs in
+`x`, and `B3(k, x)` otherwise. For a fixed query string that function is still a PRF (the bad
+event has probability ≈ `2^-256` per query, so it costs at most `q·2^-256`), yet the composed
+map `K ↦ B3'(D(K), P ‖ K ‖ S)` is the constant zero function — distinguishable from random by
+a single query. So no black-box reduction can exist: L3.6 is strictly stronger than L3.3, and a
+construction that gets it wrong is not caught by the PRF assumption on the hash alone.
+
+What supports it here is structural, and weaker than a proof. BLAKE3's compression puts the
+key words in the *initial state* (`v[0..8] = k`, with `KEYED_HASH` in the flags) and lets the
+message words in only through the round function's `G` mixing; no output byte is a function of
+the message alone, the key words are never re-derived from message words, and the keyed mode is
+separated from the unkeyed one by a flag rather than by convention. That is the same kind of
+design argument as L3.4, and it is the reason the assumption is believed rather than proven.
+Two further things are worth stating because they bound the damage if it is false: the
+correlation is only present because the encoding chose to bind `K` into the tag (a revision
+could drop it, at the cost of the route-closing described at `derive_tag` in `src/lib.rs`), and
+the assumption is *not* about ChaCha20 and BLAKE3 interacting — it lives inside a single BLAKE3
+call. Every HMAC-style or `H(k ‖ m)`-style construction makes the same assumption, so this is
+standard practice; the point of writing it down is that §4.10's claim is "no *joint* assumption
+between the two primitives", and L3.6 is not one of those.
+
 **What each use of a primitive consumes.**
 
 | Use | Consumes | Because |
 | --- | --- | --- |
 | `subkey = HC(K, N₁)` | L3.2 | truncated permutation output, keyed by `K` |
 | `mat = CC(subkey, sn, 0)` | L3.1 | feed-forward block function, counter fixed at 0 |
-| `T = B3(mac_key, ...)` | L3.3, L3.4, L3.5 | keyed compression, tree, 65-byte XOF output |
+| `T = B3(mac_key, ...)` | L3.3, L3.4, L3.5, **L3.6** | keyed compression, tree, 65-byte XOF output; L3.6 because `K` keys the derivation *and* appears in the input |
 | `(enc_key, enc_nonce) = B3(enc_seed, ...)` | L3.3, L3.5 | keyed compression, 44-byte XOF output |
 | `C = M xor KS(enc_key, enc_nonce)` | L3.1 (via L1.3's counter-mode reduction) | distinct counters per block, §4.6 |
 
@@ -217,14 +266,23 @@ a PRF distinguisher for keyed BLAKE3 — the BLAKE2/BLAKE3 literature has boomer
 rotational attacks on *reduced* rounds only. L3.4: a collision or a PRF distinguisher that
 exploits the tree (this would be a structural attack on BLAKE3, and none is known). L3.5: an
 XOF distinguisher past the first output block (the output counter is part of the root
-compression's input, so this reduces to L3.3/L3.4). A4 (the encoding) is not a conjecture: it
-is proven in §4.4.
+compression's input, so this reduces to L3.3/L3.4). **L3.6**: any distinguisher for the
+composed tag map `K ↦ B3(D(K), … ‖ K ‖ …)` that is *not* a distinguisher for `x ↦ B3(k, x)` at
+a fixed input — i.e. a concrete exploit of the key also appearing in the message. The
+separation above shows such distinguishers exist in general (a hash that greps its input for
+the key), so the falsifier is a *real* one; what is not known is any such structure in BLAKE3,
+and the `KEYED_HASH` flag, the key words being the initial state, and the absence of any
+feed-forward from the message into the key schedule are the reasons to expect none. A4 (the
+encoding) is not a conjecture: it is proven in §4.4.
 
-**The honest bottom line.** Every claim in this document rests on L3.1–L3.5 and nothing else.
-There is no proof of any of the five, and no test in this repository — or any other — can
+**The honest bottom line.** Every claim in this document rests on L3.1–L3.6 and nothing else.
+There is no proof of any of the six, and no test in this repository — or any other — can
 establish them, because they are statements about the infeasibility of computation. What the
-remainder of the document does is make sure that *nothing else* is assumed: that the
-composition adds no conjecture of its own, which is what §4.10 is about.
+remainder of the document does is make sure that *nothing else* is assumed. Six is one more
+than an earlier revision of this document claimed and one more than the primitives' own
+assumptions provide: L3.6 comes from a *choice of encoding* (binding `K` into the tag as well
+as into the key derivation), not from any interaction between ChaCha20 and BLAKE3 — that
+distinction is the whole content of §4.10.
 
 ---
 
@@ -256,22 +314,43 @@ material*, even if the caller repeats a message or an AAD.
 
 For a uniformly random `K`, `(N, A, M) ↦ T` is a PRF with 520-bit output.
 
-*Proof.* For each fixed `N`, `mac_key` is pseudorandom (Thm 1), so by one hybrid step we
-may treat it as an independent uniform key `k_N` per *distinct* nonce. `B3(k_N, ·)` is then
-a PRF (A3). Distinct nonces carry independent `k_N` (Thm 1), so the joint statement over
-all queries follows. ∎
+*Proof.* Two hybrids. (i) Replace `N ↦ mac_key` with a uniformly random function, so that per
+distinct nonce the tag is `B3(k_N, ·)` with `k_N` uniform and independent of everything else.
+This is the step that needs L3.6 rather than A3: the key being replaced is *derived from* `K`,
+and `K` is still in the input, so key and input are correlated functions of one secret (§2.1
+states the gap and shows no black-box reduction from A3 closes it). (ii) With `k_N` uniform
+and independent of the input, `x ↦ B3(k_N, x)` is a PRF (A3). Distinct nonces carry independent
+`k_N` (Thm 1), so the joint statement over all queries follows. ∎ The rest of this document
+uses the idealized form of step (i) — it is the only place where the two statements differ.
 
-Consequences:
+Consequences. Two different "collision" quantities live here and the numbers differ by 2^392, so
+they are stated separately:
 
-* **Collision resistance.** Finding two distinct inputs with the same tag requires either
-  breaking the PRF or a birthday event over 520 bits: `q² / 2^521` for `q` queries.
-* **Commitment to the key.** Because `K` (and `N`) are *inputs* to the hash rather than
-  only the key that keys it, a tag that is valid under `K₁` is valid under `K₂ ≠ K₁` only
-  if `B3(k_{N,K₁}, X ‖ K₁ ‖ …) = B3(k_{N,K₂}, X ‖ K₂ ‖ …)` — a collision between two PRF
-  values under independent keys, cost 2^520 per attempt. This is the "invisible
-  salamanders" attack (a ciphertext that opens under two keys) made infeasible by the tag
-  width *and* the key binding; it is a stronger property than plain SIV provides, and it is
-  deliberate.
+* **Collision resistance between two *given* inputs.** For a fixed pair of distinct inputs the
+  two tags agree only if the PRF does, i.e. with probability `2^-520` — this is the statement
+  Thm 3 uses. (It is a *target*, not a birthday: the adversary does not get to search.)
+* **Collision resistance over `q` *chosen* inputs.** Here the tag is not a random 520-bit
+  string: all 65 bytes are functions of BLAKE3's root state — the **256-bit chaining value**,
+  the final block, its length, the counter and the flags — so an adversary who holds the tail
+  fixed and varies the prefix buys a tag collision for the price of a *chaining-value* collision:
+  `q² / 2^257`, i.e. `2^128` at the birthday point, not `2^260`. §4.5 carries the argument and
+  §5 its falsifier. This is the number in Thm 4's bound.
+* **Commitment to the key.** Because `K` (and `N`) are *inputs* to the hash rather than only the
+  key that keys it, a tag that is valid under `K₁` is valid under `K₂ ≠ K₁` only if
+  `B3(k_{N,K₁}, X ‖ K₁ ‖ …) = B3(k_{N,K₂}, X ‖ K₂ ‖ …)`. This is a *target* problem, and the
+  number is not a birthday at all: the adversary publishes a tag `T` and then needs the second
+  key's computation to output *that* value, so the cost is `2^520` per attempt — unchanged by the
+  chaining-value correction below, which helps only when both sides of a collision are the
+  adversary's to search. (The `T`-coupling makes that concrete here: `T` determines the message
+  through the KDF, so a collision found between two arbitrary tags is not a ciphertext that opens
+  under two keys — it would have to be a fixed point of that coupling as well.) This is the
+  "invisible salamanders" attack made infeasible; it is a stronger property than plain SIV
+  provides, and it is deliberate. What the `K`-in-input binding adds is the removal of a cheaper
+  route: without it, an adversary searching over keys *it chooses* for two with the same 512-bit
+  key-material block (`2^256` by birthday, and the search is over keys, not over hash inputs)
+  would get equal `mac_key` *and* equal `enc_seed`, hence equal tags *and* equal keystreams for
+  equal messages — one ciphertext opening under both keys at key-search cost, which is exactly
+  what "not committing" means. With `K` in the head that route is gone. The price is L3.6.
 * **Commitment to the nonce and the lengths.** Same argument, byte for byte, since both
   are inputs to the same hash: a tag cannot be moved to another nonce or reinterpreted
   under a different length split (that is the same statement as §4.4).
@@ -283,7 +362,10 @@ change anywhere in `(K, N, A, M)` changes the tag with probability `1 − 2^-520
 changes the keystream entirely.
 
 *Proof.* Immediate from A3 (multi-query PRF security at distinct points `DOM_ENC ‖ T`) and
-Thm 2. ∎
+Thm 2. The `2^-520` is the *fixed-pair* statement: for one specified change, the two tags agree
+only if the PRF does. It is not the birthday-level number — an adversary free to search over
+many changes gets a collision at `2^128` (§4.5), which is why that bound, and not this one,
+appears in Thm 4. ∎
 
 This is the theorem that makes nonce reuse survivable (see the Corollary below) and that
 makes the ciphertext
@@ -298,26 +380,39 @@ encryption is a uniformly random function of `(N, A, M)` (so repeated queries re
 answer) with the same length profile. Then
 
 ```
-Adv^{priv} ≤ Adv^{A1} + Adv^{A2} + 2·Adv^{A3} + q²/2^521 + q²/2^353
-Adv^{auth} ≤ Adv^{A1} + Adv^{A2} +     Adv^{A3} + q·2^-520 + q²/2^353
+Adv^{priv} ≤ Adv^{A1} + Adv^{A2} + Adv^{A3} + Adv^{L3.6} + q²/2^257
+Adv^{auth} ≤ Adv^{A1} + Adv^{A2} + Adv^{A3} + Adv^{L3.6} + q·2^-520 + q²/2^257
 ```
 
-where `q` bounds the adversary's oracle queries and `Adv^{A1}`, `Adv^{A2}`, `Adv^{A3}` are
-the *multi-query* PRF advantages (each is already defined for a polynomial query bound;
-the tag and the key derivation together account for the `2·` on the third). MRAE security
-is the pair.
+where `q` bounds the adversary's oracle queries and each `Adv` is the *multi-query* PRF
+advantage of the corresponding assumption (each is already defined for a polynomial query
+bound). `Adv^{A1}`/`Adv^{A2}` are the ChaCha20/HChaCha20 terms of the key derivation (Thm 1),
+`Adv^{A3}` is the per-message key derivation, and `Adv^{L3.6}` is the tag — the composed map,
+which needs L3.6 because the master key keys it *and* is in its input. MRAE security is the
+pair.
+
+An earlier revision of this document wrote `2·Adv^{A3}` in place of
+`Adv^{A3} + Adv^{L3.6}` and `q²/2^521` in place of `q²/2^257`. The first papered over the
+L3.6 gap by counting the tag as an ordinary A3 application; the second treated the 65-byte tag
+as 65 independent random bits, which §4.5 shows it is not. Both corrections lower nothing that
+was not already lower: the `q²/2^257` term is `2^-129` at `q = 2^64`.
 
 *Proof (reduction chain, five hops).*
 
 1. Replace the key derivation with two independent random keys per nonce (Thm 1). Nothing
    observable changes except with the stated advantage.
-2. Replace the tag function with a uniformly random function (Thm 2). From here, tags are
-   uniform and independent for distinct `(N, A, M)`; two queries collide in the tag with
-   probability `q²/2^521`.
+2. Replace the tag function with a uniformly random function (L3.6, then A3 as in Thm 2).
+   From here, tags are uniform and independent for distinct `(N, A, M)`; two queries collide
+   in the tag with probability `q²/2^257`, the birthday bound of the 256-bit chaining value
+   the tag is a function of (§4.5), not `q²/2^521`.
 3. Replace `(enc_key, enc_nonce)` with a uniformly random function of the tag (A3). Tags
-   that differ now give independent `(key, nonce)` pairs; a collision in that 352-bit value
-   has probability `q²/2^353`, and even that collision is not a break by itself (it makes
-   two queries share a keystream, which is exactly the event this term bounds).
+   that differ now give independent `(key, nonce)` pairs. A collision in that value is partly
+   covered by hop 2 — equal tags give equal pairs by construction — and between *distinct*
+   tags it needs a collision in the 328-bit state the KDF's root compression sees (`2^164`,
+   §4.5), which is rarer than the tag collision itself, so the bound keeps the one `q²/2^257`
+   term. It is *not* the generic `q²/2^353` of a 352-bit output, and it is not a break by
+   itself either (it makes two queries share a keystream, which is exactly the event the term
+   bounds).
 4. Each query's ciphertext is now `M ⊕ KS(k, n)` under a key pair that is *used once*
    across all queries except with the two collision probabilities above. Replace each such
    keystream with an independent uniform string (A1, one query per key): the ciphertexts
@@ -327,30 +422,48 @@ is the pair.
    forgery consists of `(N, A, C, T)` with `T ≠ T(K, N, A, M')` for the recovered `M'` —
    i.e. the adversary must output the value of a PRF at a point it does not get to choose
    directly, since `M'` depends on `T` itself through the KDF. Each decryption query
-   succeeds with probability at most `2^-520` (fresh `T`, a PRF output) or by colliding
-   with a tag the oracle already produced (≤ `q · 2^-520` in total). The self-referential
+   succeeds with probability at most `2^-520` (fresh `T`, a PRF output) or by hitting a tag
+   the oracle already produced — a *target*, so `≤ q · 2^-520` in total, and the
+   chaining-value shortcut of §4.5 does not apply: it makes pairs of *searchable* tags
+   collide cheaply, and here the value to hit is fixed by someone else. The self-referential
    dependence `M'(T)` does not help: inverting it is as hard as inverting the KDF, and the
    key is secret. ∎
 
 *Where each assumption enters:* A1 in the keystream (hop 4) and in the key material (hop 1);
-A2 in the subkey (hop 1); A3 twice — the tag (hop 2) and the per-message key derivation
-(hop 3). A4 is needed for the *statement* of the game (that the encoded input defines the
+A2 in the subkey (hop 1); A3 in the per-message key derivation (hop 3); **L3.6** in the tag
+(hop 2) — the one place where a key is derived from a value that is also in the PRF's input.
+A4 is needed for the *statement* of the game (that the encoded input defines the
 query) and is discharged in §4.4.
 
-### Corollary (nonce misuse degrades exactly as SIV does)
+### Corollary (nonce misuse degrades exactly as SIV does, with one collision-shaped caveat)
 
 If the adversary repeats a nonce, hops 1–3 are unchanged: the per-query tags still determine
 independent keystreams (Thm 3), so two *different* `(A, M)` pairs under one nonce are still
-encrypted with independent keys. What the adversary learns is exactly:
+encrypted with independent keys. What the adversary learns is:
 
 * whether two `(A, M)` pairs are equal (identical tags ⇒ identical ciphertexts), and
 * the message length.
 
 This is the strongest misuse behaviour a deterministic scheme can have, and it is the whole
 reason the per-message key is derived from the tag rather than from `(K, N)` alone — a
-scheme in which it were derived from `(K, N)` would hand over `M₁ ⊕ M₂` on nonce reuse, and
-`src/lib.rs`'s `nonce_reuse_does_not_reuse_the_keystream` test exists to make that failure
-mode impossible to introduce quietly.
+scheme in which it were derived from `(K, N)` would hand over `M₁ ⊕ M₂` on nonce reuse *by
+construction*, and `src/lib.rs`'s `nonce_reuse_does_not_reuse_the_keystream` test exists to
+make that failure mode impossible to introduce quietly.
+
+**The caveat, stated rather than implied: `M₁ ⊕ M₂` is still what a tag collision hands over.**
+"Degrades to equality" is the statement about what happens *when the tags differ*; it is not a
+claim that two-time-pad leakage is impossible. If two distinct `(A, M)` pairs under one nonce
+land on the same tag — the `q²/2^257` event of §4.5, and the same one Thm 3 rules out for a
+*fixed* pair at `2^-520` — then the two messages are encrypted under the *same* derived
+keystream, and every ciphertext pair satisfies `C₁ ⊕ C₂ = M₁ ⊕ M₂`. An adversary does not even
+need to cause the collision: whoever observes both ciphertexts gets the two-time pad, and can
+then strip any known plaintext from one message off the other. So the honest statement of
+misuse resistance here is: *nonce reuse leaks equality plus, with probability `q²/2^257`, a
+two-time pad* — which is negligible for any feasible `q` (`2^-129` at `q = 2^64`), but is a
+stronger leak than "equality" alone, and it is why §4.5's collision number matters to the
+misuse story and not only to the proof's bookkeeping. A scheme that derived the keystream from
+`(K, N)` would hand over the two-time pad *always* under misuse; this one hands it over only
+inside an event an attacker cannot reach.
 
 ### The acyclicity lemma (the construction is a DAG, not a fixed point)
 
@@ -457,19 +570,90 @@ begin with (its finalisation is flagged), but the explicit lengths mean the cons
 does not rely on that: even a Merkle–Damgård MAC under this encoding would be unambiguous
 *as a function of the encoded input*.
 
-### 4.5 Tag width, and the three "birthday" numbers
+### 4.5 Tag width, and the numbers it does and does not buy
 
-The tag is 520 bits for a stated reason: commitment is a *collision* property, so an
-`n`-bit tag gives at most `2^{n/2}`, and 64 bytes would give exactly `2^256` — not more
-than the key. The numbers that follow from the construction, all with 128-bit margin:
+**What was claimed, and why it was wrong.** The rationale used to read: *commitment is a
+collision property, so an `n`-bit tag caps it at `2^(n/2)`; 64 bytes gives exactly `2^256`, so
+65 bytes gives `2^260`.* Two things are wrong with that. It treats commitment as a birthday
+problem, where a commitment attack must hit the tag *it published* and is therefore a target
+(see the commitment bullet of Thm 2) — the argument names the wrong property even though its
+conclusion, "the tag must be wider than 32 bytes", is right for a different reason, given
+below. And it treats the tag's 520 bits as independent, which they are not: the number it
+produces, `2^260`, is not the birthday level of anything. That level is where collision
+resistance lives, and it is `2^128`. Keyed BLAKE3's XOF output is
+
+```
+compress_xof(cv, tail, |tail|, counter, flags | ROOT)
+```
+
+— a function of the **256-bit chaining value**, the final block, its length, the counter and the
+flags. Two inputs that agree on that state produce *byte-identical* tags, at every output length,
+because every output block of the root is a function of the same state. Colliding that state is
+`2^128` in the number of hashes computed, and no tag width can raise it: the tag is not 520
+independent bits, it is a 256-bit state observed through a 520-bit window.
+
+**The collision is reachable by construction, which is why this matters.** The adversary does not
+have to collide the whole input — only the state that enters a block it holds fixed. Take two
+messages of equal length that agree on their final block `S`, and vary the bytes before it: the
+chaining value entering `S` is a 256-bit value, so a collision in it costs a birthday search over
+that state (`2^128` candidates), and the two colliding inputs then have identical
+`(cv, tail, |tail|, counter, flags)` — hence identical tags, and therefore identical derived keys
+and, for equal-length messages, identical ciphertexts, since `derive_enc` is a function of the
+tag alone. The same argument applies to a multi-chunk input by fixing the subtree that holds the
+tail and colliding the prefix subtree's chaining value. This is a *collision* search, not a
+preimage: the adversary needs the two tags to agree *with each other*. A tag that must be hit *as
+given* — a forged tag, or a ciphertext that must open under a second key — is still a target in
+the 520-bit output and still costs `2^520` per attempt.
+
+**Consequently, the numbers are these, and the pair (target, birthday) is now written out
+wherever the distinction matters. All of them still carry at least 128 bits of margin.**
 
 | Event | Bound |
 | --- | --- |
-| Tag collision (same key, `q` queries) | `q² / 2^521` (≈ 2^260 at the birthday point) |
-| Derived `(key, nonce)` collision | `q² / 2^353` |
-| Forgery (one decryption query) | `2^-520`, plus tag-collision terms |
+| Tag collision, same key, `q` queries | `q² / 2^257` (≈ `2^128` at the birthday point) |
+| Derived `(key, nonce)` collision over `q` queries | `q² / 2^257` — see below: the tag term dominates it, and the KDF's own birthday is over a 328-bit state (256-bit chain value plus the 72-bit tail block), not the 352-bit output |
+| A tag agreeing with a *given* tag (forgery, second open, commitment) | `2^-520` per attempt; ×`q` for `q` targets |
+| Forgery (one decryption query) | `2^-520`, plus the tag-collision terms |
 | Exhaustive key search | `2^256` |
-| Quantum (Grover) on the key / on collisions | `2^128` / `2^260` |
+| Quantum: Grover on the key | `2^128` |
+| Quantum: BHT collision finding on the 256-bit state | ≈`2^85` — model-dependent (it needs large quantum memory), and a property of *any* 256-bit state, SHA-256's collisions included; see the note below |
+
+**Four consequences, stated plainly.**
+
+* **The width is load-bearing for commitment — through the target, not the birthday.** With a
+  65-byte tag, a candidate key that is not the real one opens a given ciphertext with probability
+  `2^-520`, so enumerating the whole `2^256` key space succeeds with probability `≈ 2^-264`: no
+  second key exists in reach. With a 32-byte tag the same enumeration would expect `≈ 1` second
+  key, because `2^256 · 2^-256 ≈ 1` — the ciphertext would stop being *committing* and become
+  merely as hard to double-open as it is to key-search, which is precisely the failure the SIV
+  commitment literature (and the 16-byte tags of AES-SIV / AES-GCM-SIV) is about. So the old
+  rationale reached the right *decision* — the tag must be wider than 32 bytes — through the
+  wrong *property*: it is the target bound, not a birthday bound, and the number to quote is
+  `2^520` per attempt rather than `2^260`.
+* **What the width does *not* buy is collision resistance**, which is `2^128` either way, and
+  forgery, which is `2^256` either way (bounded by key search, which no tag length raises). The
+  width is kept because the format is frozen at revision `v0.2` *and* because it is the
+  commitment; a revision that shortened the tag to 32 bytes would have to give up CMT-1/CMTk.
+* **The KDF's own collision is `2^164`, and it is dominated.** Two *distinct* tags `T₁ ≠ T₂` that
+  yield the same derived pair must collide the state the KDF's root sees: the 256-bit chain value
+  *and* the 72-bit final block (`T[56:65]` plus padding), so the birthday is over 328 bits —
+  `2^164`, not the `2^176` a 352-bit output would suggest and not `2^128` either. It matters
+  little, because a *tag* collision implies this one (equal tags ⇒ equal derived pairs) and is
+  strictly cheaper at `2^128`, so the bound carries one collision term and the tag's number is
+  the right one. What would be wrong is quoting `q²/2^353`: that is the birthday of the output
+  size, and the state that produces the output is what constrains it.
+* **Confidentiality and forgery stay at 128 bits, classically and quantumly** (Grover on the key
+  is `2^128`, which is the number the 256-bit key design targets). What is *not* 128-bit quantum
+  is the collision property: a 256-bit state has a ~`2^85` quantum collision search (BHT), which
+  is inherent to the state size — SHA-256's collisions have the same quantum bound — and is one
+  more reason not to claim that the tag width buys post-quantum margin. The correction changes
+  *bounds*, not a security level anyone could have relied on: `2^128` classical collisions were
+  never reachable, and `2^-129` at `q = 2^64` queries was never the obstacle.
+* **The one property the correction leaves exactly where it was is the escape from a birthday
+  shortcut**: forgery and commitment are target problems, and the chaining-value shortcut of the
+  first bullet above applies only when the adversary can search *both* sides. What it bounds is
+  the adversary's ability to find *two* colliding tags, which is exactly the `q²/2^257` term in
+  Thm 4's bounds and the two-time-pad event of §3's Corollary.
 
 ### 4.6 Counter discipline
 
@@ -501,7 +685,9 @@ that is exactly how such things get lost.
 
 ### 4.9 What the composition does **not** introduce
 
-No step above needed an assumption beyond A1–A3 plus the injectivity of the encoding. In
+No step above needed an assumption beyond A1–A3 plus the injectivity of the encoding — with the
+single exception of L3.6 (§2.1), which is not a step of the composition but a property of the
+tag layout, and is declared rather than assumed silently. In
 particular, none of the following is assumed: that `mac_key` and `enc_seed` are *separately*
 derived (splitting one PRF block is fine, Thm 1); that a nonce is used once (that is the
 misuse case, §3 Corollary); that the encryption is randomized (it is deterministic by
@@ -549,8 +735,8 @@ point, or an output, the table says what keeps them apart and what kind of argum
 | U4, U5 | not a collision but a *composition* | U4's output **is** U5's key; nothing is reused | by construction |
 | U3, U5 | no | `T` is public and U5's key is not derived from it in any invertible way: U5's key is `B3(enc_seed, DOM_ENC‖T)`, a PRF value under an unknown key | L3.3 |
 | U1, U3/U4/U5 | no | `subkey` never leaves U2 | structural |
-| U3, U3 (across two messages, same nonce) | yes, `q²/2^521` | PRF collisions (§4.5) — the SIV term, not a composition term | L1.1 term |
-| U4, U4 (two distinct tags, same nonce) | yes, `q²/2^353` | PRF collisions on the KDF output | L1.2/L1.3 term |
+| U3, U3 (across two messages, same nonce) | yes, `q²/2^257` | tag collisions (§4.5) — the SIV term, not a composition term; the birthday is over the 256-bit chain value, not over the 520-bit output, and a collision here is also the two-time-pad event of §3's Corollary | L1.1 term |
+| U4, U4 (two distinct tags, same nonce) | yes, `q²/2^257` | dominated by the tag collision above: two *distinct* tags collide in the derived pair only through the KDF's own 328-bit state (`2^164`), and a tag collision implies this event, so the tag's `2^128` is the binding number — not the generic `q²/2^353` of the 352-bit output | L1.2/L1.3 term |
 
 **Two structural lemmas worth stating on their own**, because both are proved by inspection and
 neither depends on a primitive being strong:
@@ -576,12 +762,25 @@ There is no interaction that the table does not cover, and the table's rows are 
 by one of: an L1 theorem, a lemma proved in §3, an inspection-level structural fact, or a
 probability bound.
 
-**Therefore the combination introduces no assumption beyond L3.1–L3.5.** Every joint use is
-covered by the L1 reductions, which need the primitives only with *independent keys*; the keys
-are derived and their independence is a theorem (Thm 1) rather than a hope; and the one place
-where two uses share a point of a primitive's domain (U2/U5, counter 0) needs the master key even
-to detect. Nothing in this construction requires a joint assumption about ChaCha20 and BLAKE3 —
-no "these two are unrelated" conjecture, no "this key is safe to use in both" conjecture.
+**Therefore the combination introduces no *joint* assumption about the two primitives.** Every
+joint use is covered by the L1 reductions, which need the primitives only with *independent
+keys*; the keys are derived and their independence is a theorem (Thm 1) rather than a hope; and
+the one place where two uses share a point of a primitive's domain (U2/U5, counter 0) needs the
+master key even to detect. Nothing in this construction requires a joint assumption about
+ChaCha20 and BLAKE3 — no "these two are unrelated" conjecture, no "this key is safe to use in
+both" conjecture.
+
+**The one assumption the *encoding* adds, named rather than folded in.** The tag's input contains
+`K` as well as being keyed by `K`'s derivation, and that is a property of this construction's
+chosen layout, not of BLAKE3 — so it is a seventh thing to assume and it is stated as L3.6 in
+§2.1, with its separation and its falsifier. It is deliberately *not* counted as a composition
+hazard, because it is a statement inside a single primitive: no ChaCha20 object and no BLAKE3
+object are related by it. It is named here so that the sentence above means "no assumption that
+relates the two primitives" rather than the weaker and less useful "no assumption at all". The
+layout that creates it was a choice: putting `K` in the head removes the `2^256`-birthday route
+to a non-committing ciphertext that runs through the key derivation (Thm 2), and the price of
+removing it is this assumption. A revision that dropped `K` from the head would delete L3.6 and
+re-open that route — the trade, not a free win.
 
 **What this does *not* prove, stated plainly.** It does not prove that ChaCha20 and BLAKE3 are
 secure, and it cannot rule out a future cryptanalytic relation between them: if someone found a
@@ -589,7 +788,9 @@ relation that made this cascade break, that would be a break of L3.3 (the keyed 
 assumption) or of L3.1/L3.2, not a flaw in the composition — but the distinction would matter to
 a user, so it is written here rather than left to be inferred. "No unknown problem" is not a
 theorem anyone can prove about any construction; what is proven here is the weaker and precise
-statement that *the composition adds no conjunct of its own* to L3.1–L3.5.
+statement that *the composition adds no conjunct of its own that relates the two primitives*.
+L3.6 is the one conjunct that the layout does add, and it is stated, separated and falsifiable
+rather than counted as zero.
 
 ## 5. Falsification programme
 
@@ -599,23 +800,26 @@ refutation, and the status of the attempt.
 | # | Claim | What would refute it | Status |
 | --- | --- | --- | --- |
 | 1 | A1, A2, A3 (PRF security of the primitives) | A distinguisher for ChaCha20 / HChaCha20 / keyed BLAKE3 | **Not attempted, and not attemptable by test**: these are open problems in cryptanalysis. The evidence is the primitives' standing, their published test vectors (replayed here), and the fact that the construction's use of them is standard |
-| 2 | Tag is a PRF over `(N,A,M)` | Two distinct `(N,A,M)` with equal tags under one key | Out of reach (`q²/2^521`); *structural* variants tested: length ambiguity, A/M swap, trailing zeros, single-byte changes in A and M, key and nonce reaching the tag |
-| 3 | Key commitment | A `(C,T)` that opens under two keys | Out of reach (2^520); *mechanism* tested: the tag binds `K` directly (`test_tag_binds_the_key_directly`) and Kani proves `K` reaches the hash in the specified layout |
+| 2 | Tag is a PRF over `(N,A,M)` | Two distinct `(N,A,M)` with equal tags under one key | A *fixed* pair is out of reach (`2^-520`); *searching* for a pair is the chain-value birthday, `q²/2^257` (§4.5), also out of reach. *Structural* variants tested: length ambiguity, A/M swap, trailing zeros, single-byte changes in A and M, key and nonce reaching the tag. Not testable: both numbers are bounds on computation |
+| 3 | Key commitment | A `(C,T)` that opens under two keys | Against a given `(C,T)` this is a target and stays out of reach (`2^520` per attempt); the *birthday* level for a colliding pair is `2^128` (§4.5), which an invisible-salamander attack against a fixed ciphertext cannot use. *Mechanism* tested: the tag binds `K` directly (`test_tag_binds_the_key_directly`) and Kani proves `K` reaches the hash in the specified layout |
 | 4 | Keystream is tag-dependent | `ct₁ ⊕ ct₂ = M₁ ⊕ M₂` under one nonce, or `ct` invariant under an AAD change | **Tested**: `nonce_reuse_does_not_reuse_the_keystream` (message change, AAD change, first-block check, attached and in-place paths) |
 | 5 | The two ChaCha20 uses are separate | The key-material block equals the message keystream | **Tested**: `the_key_material_block_is_not_the_message_keystream` (16 trials, key, nonce and keystream compared); the residual is §4.1 |
 | 6 | The KDF consumes the whole tag | A tag byte that does not move the derived key | **Proved + tested**: Kani (all 65 bytes consumed), `test_every_tag_byte_reaches_the_ciphertext` |
 | 7 | The encoding is unambiguous | Two quadruples with the same encoding | **Proved by inspection** (§4.4) + `test_aad_message_split_is_unambiguous` |
 | 8 | The counter cannot wrap inside a message | A message length above the bound that still encrypts | `const` assertion (build failure), `tests/counter_range.rs`, Kani |
-| 9 | Nonce reuse leaks only equality | Two distinct `(A,M)` under one nonce with the same tag or keystream | Tested at the keystream level (#4); a tag collision is out of reach |
+| 9 | Nonce reuse leaks only equality | Two distinct `(A,M)` under one nonce with the same tag or keystream | Tested at the keystream level (#4); the tag collision that would *additionally* give `C₁ ⊕ C₂ = M₁ ⊕ M₂` is a `2^128` search (§4.5, §3 Corollary), so that half is a bound rather than a test |
 | 10 | Cross-scheme separation | Keystream agreement with XChaCha20-Poly1305 for one `(K,N)` | Tested at the derivation level: the label is in the nonce, not the counter (`test_subkey_domain_occupies_nonce_not_counter`) |
 | 11 | The implementation matches the design | A divergence between `src/lib.rs` and the specification above | Differential testing against an independent Python reference, published KATs (RFC 8439, the XChaCha draft, BLAKE3's official keyed vectors), the independent implementation in `src/witness.rs` under `ultra`, and the Kani layout harnesses |
 | 13 | **The combination needs no joint assumption** (§4.10) | A sixth use of a primitive, or two uses sharing a key/domain/point in a way the table does not list | **Mechanised**: `tests/construction_inventory.rs` counts the cryptographic call sites in the non-test source and fails if the set changes, and pins the two structural lemmas (S1: the BLAKE3 input spaces are disjoint by their 8-byte prefixes; S2: this crate's key-material block is at a different ChaCha20 point than XChaCha20-Poly1305's first data block, for the same key and nonce) |
 | 14 | U2/U5 share counter 0 (§4.1) | The key-material block equals the message keystream for one `(K,N,M)` | **Tested** for a spread of inputs (`the_key_material_block_is_not_the_message_keystream`); a real collision needs the master key to compute, so it is a probability statement (`≈2^-352`) rather than an attack |
 | 12 | An adversary cannot get unverified plaintext | A decryption failure that returns bytes, or that returns them for a moment the caller can observe | `tests/security.rs`, the wipe contracts, and `tools/fi_check.sh`'s `wipe-skipped` row |
+| 15 | **L3.6**: the tag is a PRF in the master key even though the master key is also in its input (§2.1) | A distinguisher for `K ↦ B3(D(K), … ‖ K ‖ …)` that is not a distinguisher for `x ↦ B3(k, x)` at a fixed input | **Not attempted, and not attemptable by test**: it is a statement about a primitive's internal structure. The evidence is BLAKE3's design (the key words *are* the initial state, the keyed mode is flag-separated, no feed-forward carries message words into the key schedule), a separation showing the black-box reduction cannot exist, and the fact that every `H(k ‖ m)`-shaped MAC rests on the same assumption |
+| 16 | The tag-collision birthday is `2^128`, not `2^260` (§4.5) | An argument that some state other than the 256-bit chain value binds the tag; or a collision search cheaper than `2^128` | **Derived here, not tested**: it is a bound on computation. What the harnesses do pin is the premise — that the tag is exactly the root XOF of the encoded input — through the published keyed-BLAKE3 KATs, the differential reference implementation, and `src/witness.rs` under `ultra` |
 
-Rows 1–3 are the honest boundary: **no test in this repository, and none that could be
-written, falsifies or establishes them.** They are the standing bet that every symmetric
-scheme makes.
+Rows 1, 15 and 16 are the honest boundary: **no test in this repository, and none that could be
+written, falsifies or establishes them.** Rows 1 and 15 are the standing bet that every
+symmetric scheme makes (plus the one the layout adds); row 16 is a bound derived by hand, and the
+tests around it check the premises of the derivation rather than the number.
 
 ---
 
@@ -624,7 +828,17 @@ scheme makes.
 * **Cryptanalytic risk.** The construction is exactly as strong as ChaCha20, HChaCha20 and
   BLAKE3. A break in any of them breaks this; a break in BLAKE3's *keyed* mode is the most
   exposed of the three, because that mode's PRF claim is a design argument rather than an
-  inherited proof.
+  inherited proof. L3.6 (§2.1) is part of that exposure: it is a *stronger* statement about
+  keyed BLAKE3 than the PRF assumption alone, introduced by putting `K` in the tag's input.
+* **Collision properties are 128-bit, not 260-bit, and that is a corrected bound rather than a
+  new weakness.** The tag's 65 bytes are a view of a 256-bit chain value (§4.5), so a tag
+  collision costs a `2^128` birthday search and the two-time-pad leak of §3's Corollary rides
+  on the same event; `q²/2^257` is `2^-129` at `q = 2^64`. Forgery and commitment-against-a-given
+  tag are target problems and remain where they were — `2^520` per attempt for commitment, `2^256`
+  for forgery — because commitment was never a birthday property, so the width still governs it
+  (a 32-byte tag would be enumerated in the key space, §4.5). An earlier
+  revision of this document and of `README.md` advertised `2^260`; that number was wrong, the
+  mechanism is written out in §4.5, and the falsifier is row 16 of §5.
 * **The counter-0 coincidence** (§4.1): probability `≈ 2^-352`, not computable without the
   key, not exploitable. A future revision could remove it structurally at the cost of the
   wire format.
@@ -634,16 +848,18 @@ scheme makes.
 * **Beyond the model.** Side channels, fault injection, a debugger, cold boot, a hostile
   hypervisor: out of scope here and covered where they belong.
 * **What "no unknown problem" can and cannot mean.** A break of this construction must be a
-  break of L3.1–L3.5 or of an L1 composition theorem; §4.10 proves that the *combination* adds
-  no conjunct of its own. But a proof that no unknown cryptanalytic relation exists between
+  break of L3.1–L3.6 or of an L1 composition theorem; §4.10 proves that the *combination* adds
+  no conjunct of its own *that relates the two primitives*, and names L3.6 as the one the
+  encoding adds. But a proof that no unknown cryptanalytic relation exists between
   ChaCha20 and BLAKE3 is not something any document can supply — such a relation, if found,
   would present itself as a break of one of those primitive conjectures. The distinction is
   worth stating because the two failures would look identical from the outside and have
   different fixes: a composition flaw is this crate's to fix, a primitive break is not.
 * **Not claimed:** that this is a standard, that it has been cryptanalysed by anyone else,
   or that the tag width makes forgery harder than 2^256 — it does not, because forgery is
-  bounded by the key, not by the tag (the tag width buys *commitment*, and that is the
-  property that would otherwise cap at 2^256 and does not).
+  bounded by the key, not by the tag. Nor does the width buy commitment beyond `2^128`, which
+  is the correction §4.5 records: 65 bytes and 32 bytes are equivalent in both properties, and
+  the extra 33 are kept only because the wire format is frozen.
 
 ---
 
@@ -659,6 +875,8 @@ scheme makes.
 | Nonce reuse cannot reuse a keystream | `nonce_reuse_does_not_reuse_the_keystream` |
 | The two ChaCha20 uses are separate | `the_key_material_block_is_not_the_message_keystream` |
 | The set of primitive uses, and the separations between them | `tests/construction_inventory.rs` |
+| The premise of the §4.5 bound — the tag is exactly the root XOF of the encoded input, with no extra step that could add entropy | `test_tag_matches_blake3_over_the_documented_input`, the published keyed-BLAKE3 KATs, `src/witness.rs` under `ultra`, and the Kani layout harnesses |
+| The one layout choice that adds an assumption (`K` in the head), with its reason and its caveat | `derive_tag`'s doc comment in `src/lib.rs`, §2.1 (L3.6), §4.10's closing paragraph, and `test_tag_binds_the_key_directly` |
 | The design on the wire is the design in the paper | The differential fixtures, the published KATs, and `src/witness.rs` under `ultra` |
 | The properties here are not silently weakened by a code change | The source-shape tests in `tests/decision_scope.rs`, `tests/variable_latency.rs`, `tests/counter_range.rs` |
 

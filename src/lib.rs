@@ -60,8 +60,11 @@
 //! Key properties:
 //!
 //! - 520-bit tag (65 bytes), key-committing (CMT-1/CMTk) and context-committing
-//!   (CMT-3) at **2^260**.  Read the "Security level" section below before
-//!   relying on a number.
+//!   (CMT-3): an attacker must hit the tag it published, a *target* at `2^520` per
+//!   attempt, and that is what the width buys.  Read the "Security level" section
+//!   below before relying on a number: this crate advertised `2^260` for these for a
+//!   while, and that was wrong — the tag is a function of a 256-bit chaining value, so
+//!   what it *collides* at is `2^128`, well below the key.
 //! - SIV mode: tag computed before encryption, nonce-misuse resistant
 //! - Fault-injection hardening, **on by default** (the `hardened` feature): the
 //!   accept/reject decision becomes two independently recomputed checks with
@@ -87,17 +90,26 @@
 //! | --- | --- | --- |
 //! | Confidentiality | 256-bit | the ChaCha20 key |
 //! | Forgery resistance | **256-bit** | BLAKE3 keyed mode as a PRF over a 256-bit key |
-//! | Key commitment (CMT-1/CMTk) | **2^260** | birthday bound on the 520-bit tag |
-//! | Context commitment (CMT-3) | **2^260** | birthday bound, resting on BLAKE3 |
+//! | Context / key commitment (CMT-3, CMT-1/CMTk) | **`2^520` per attempt** against a given ciphertext | the tag hit as a *target*; the width does not set it |
+//! | Collision resistance of the tag | **2^128** | the 256-bit chaining value the tag is a function of, not the tag's width |
 //!
 //! **Forgery: 256 bits is the ceiling, not a choice.**  Forgery resistance is
 //! bounded by the key's entropy; with a 256-bit key it cannot exceed 256 bits,
-//! and a longer tag does not raise it (it raises commitment).
+//! and a longer tag does not raise it.  **Nor does it raise collision
+//! resistance**: the tag is a function of a 256-bit chaining value, so a
+//! collision costs `2^128` by birthday whatever the output length is.  (Commitment
+//! is not a birthday property at all — see below.)
 //!
-//! **Commitment: the tag is 65 bytes because commitment must exceed 2^256.**
-//! Commitment is a *collision* property, so an `n`-bit tag caps it at `2^(n/2)`.
-//! A 64-byte tag would give exactly `2^256` — not more — so [`TAG_LEN`] is 65,
-//! the smallest byte-aligned size that strictly exceeds it.
+//! **Commitment: the width is what makes the scheme committing, and that is a *target*
+//! property, not a birthday one.** A second key that opens a given ciphertext must make
+//! its tag computation output the tag that was published: a `2^-520` event per candidate
+//! key, so enumerating the whole `2^256` key space yields nothing (`≈ 2^-264`), while a
+//! 32-byte tag would leave `≈ 1` such key in reach and the scheme would no longer be
+//! key-committing.  What the width does *not* buy is collision resistance (`2^128`, the
+//! birthday of the chaining value the tag is a function of) or forgery resistance
+//! (`2^256`, bounded by the key).  [`TAG_LEN`]'s own docs carry both arguments, and
+//! `SECURITY-ANALYSIS.md` §4.5 the derivation; the format is frozen at revision `v0.2`,
+//! which is now a second reason the width cannot move, not the only one.
 //!
 //! These rest on BLAKE3 being a secure PRF and collision-resistant and on
 //! ChaCha20 being a secure stream cipher: standard, heavily analysed assumptions,
@@ -264,14 +276,54 @@ pub const KEY_LEN: usize = 32;
 
 /// Tag length: 65 bytes (520 bits).
 ///
-/// Sized for **more than 256-bit commitment**, which the birthday bound forces:
-/// commitment is a collision property, so an `n`-bit tag caps it at `2^(n/2)`.
-/// A 64-byte (512-bit) tag would give exactly `2^256` and so would not be
-/// *greater* than 256 bits; 65 bytes gives `2^260`, the smallest byte-aligned
-/// value that strictly exceeds it.
+/// # What this width does and does not buy
 ///
-/// This does **not** buy more forgery resistance: forgery is bounded by the
-/// 256-bit key, not by the tag length.
+/// The rationale used to read: *commitment is a collision property, so an `n`-bit tag caps it
+/// at `2^(n/2)`; 64 bytes gives exactly `2^256`, so 65 bytes gives `2^260`.* The decision was
+/// right — the tag does have to be wider than 32 bytes for the scheme to be *committing* — but
+/// the property it named was the wrong one, and the number was wrong with it. Commitment is a
+/// *target*; collisions are a separate matter where a 256-bit state, not the tag's width, sets
+/// the bound. Keyed BLAKE3's XOF output is
+/// `compress(cv, tail, |tail|, counter, flags | ROOT)` — a function of the **256-bit chaining
+/// value**, the final block, its length, the counter and the flags — so two inputs that agree on
+/// that state produce byte-identical tags *of any length*.
+///
+/// So, concretely (see `SECURITY-ANALYSIS.md` §4.5 for the argument and §5 for what a
+/// refutation would look like):
+///
+/// * **the width is what makes it committing, through the *target* rather than a birthday.** A
+///   candidate key that is not the real one opens a given ciphertext with probability `2^-520`,
+///   so enumerating the whole `2^256` key space succeeds only with probability `≈ 2^-264`. A
+///   32-byte tag would make that `2^256 · 2^-256 ≈ 1`: one second key within reach of a key-space
+///   enumeration, which is exactly the non-committing failure mode of the 16-byte-tag SIV family.
+///   So the width stays, and a revision cannot shorten it without giving up CMT-1/CMTk;
+/// * **collision resistance is `2^128`, not `2^260`** — the birthday bound of that chaining
+///   value, since a colliding prefix with a held-fixed tail gives identical tags. That is the
+///   SHA-256-collision class: still far out of reach of a practical attack, but *below* the
+///   256-bit key strength — the part of the old rationale that was simply false, and the one
+///   place where the scheme is weaker than its key;
+/// * **a *target* is still 2^520 away.** The state shortcut is a *birthday* search over
+///   *pairs* of tags the adversary may both search; a tag that must be hit as given — a
+///   forgery, or a ciphertext that must also verify under a second key — is unaffected by
+///   it, because there the value is fixed by someone else. So `2^128` bounds collision
+///   properties (§3 Corollary's two-time-pad event) and says nothing about forgery;
+/// * **forgery is unchanged**, and is bounded by the key (`2^256`) rather than by the tag:
+///   key search dominates whatever the tag length, since guessing a 32-byte tag costs `2^-256`
+///   per attempt and searching the key costs `2^256`.
+/// * **the width is what makes it committing, through the *target* rather than a birthday.** A
+///   candidate key that is not the real one opens a given ciphertext with probability `2^-520`,
+///   so enumerating the whole `2^256` key space succeeds only with probability `≈ 2^-264`. A
+///   32-byte tag would make that `2^256 · 2^-256 ≈ 1`: one second key within reach of a key-space
+///   enumeration, which is exactly the non-committing failure mode of the 16-byte-tag SIV family.
+///   So the width stays, and a revision cannot shorten it without giving up CMT-1/CMTk;
+/// * **a *target* is still 2^520 away.** The state shortcut is a *birthday* search over
+///   *pairs* of tags the adversary may both search; a tag that must be hit as given — a
+///   forgery, or a ciphertext that must also verify under a second key — is unaffected by
+///   it, because there the value is fixed by someone else. So `2^128` bounds collision
+///   properties (§3 Corollary's two-time-pad event) and says nothing about forgery;
+/// * **forgery is unchanged**, and is bounded by the key (`2^256`) rather than by the tag:
+///   key search dominates whatever the tag length, since guessing a 32-byte tag costs `2^-256`
+///   per attempt and searching the key costs `2^256`.
 pub const TAG_LEN: usize = 65;
 
 /// Nonce length: 24 bytes (192 bits, XChaCha20 extension).
@@ -825,6 +877,21 @@ pub mod locked {
         /// `locked_key_is_actually_locked` returned early with `ok`.
         const MADV_DONTDUMP: usize = 16;
 
+        /// `MADV_DODUMP`: undo [`MADV_DONTDUMP`] on the same range. **17**, from the same
+        /// header (`asm-generic/mman-common.h`).
+        ///
+        /// The absence of this constant was a real defect — and one a commit message had
+        /// claimed was fixed. `VM_DONTDUMP` is per-*mapping* and sticky: a range that is
+        /// merely unlocked stays excluded from core dumps, so `munlock` alone can never
+        /// clear it. Because `LockedKey` owns a page-sized allocation that returns to the
+        /// allocator when it is dropped, the consequence was not about the key at all:
+        /// **unrelated** data that later landed on that page was silently excluded from
+        /// every core dump the process wrote for the rest of its life. That is a defect in
+        /// the availability of evidence rather than in the secrecy of the key, and it is
+        /// the kind that only a live probe (`/proc/self/smaps`) shows — which is what
+        /// `tests/locked.rs` now does.
+        const MADV_DODUMP: usize = 17;
+
         /// Raw syscall with two arguments. `-1`..`-4095` is an error; the raw value is
         /// returned so a caller can classify it (`ENOMEM` 12, `EPERM` 1, `EAGAIN` 11).
         ///
@@ -912,14 +979,39 @@ pub mod locked {
             Ok(())
         }
 
-        /// Undo [`lock_range`]. Idempotent for an unlocked range.
+        /// Undo [`lock_range`]: drop the lock **and** put the range back in core dumps.
+        ///
+        /// Both halves matter. `madvise(MADV_DONTDUMP)` is sticky, so a range that is only
+        /// unlocked stays excluded from core dumps — and since `LockedKey` hands its
+        /// page-sized allocation back to the allocator on drop, whatever lands there next is
+        /// silently excluded too. Reverting the advice is therefore part of undoing the
+        /// lock, not an optimization.
+        ///
+        /// The order is `munlock` first, then `MADV_DODUMP`, and that is deliberate: the
+        /// page stays non-dumpable until the lock is released, so the window in which a page
+        /// is locked *and* dumpable never exists. The window that would matter more — a page
+        /// holding a live key becoming dumpable — is closed earlier still, by
+        /// `LockedKey::drop` wiping before it unlocks.
+        ///
+        /// A failure from either syscall is ignored, as in `lock_range`: there is nothing
+        /// useful a caller could do about it, and the caller is about to free or reuse the
+        /// range anyway.
+        ///
+        /// Idempotent for an unlocked range.
         pub fn unlock_range(ptr: *const u8, len: usize) {
             if len == 0 {
                 return;
             }
-            // SAFETY: as `lock_range`.
+            let ps = page_size();
+            let start = (ptr as usize) & !(ps - 1);
+            let end = ((ptr as usize).saturating_add(len).saturating_add(ps - 1)) & !(ps - 1);
+            // SAFETY: as `lock_range`: `ptr`/`len` describe the caller's live allocation, and
+            // neither syscall reads or writes the bytes. `start`/`end` are the whole pages
+            // covering it, which cannot leave the mapping (mappings begin and end on a page
+            // boundary).
             unsafe {
                 let _ = syscall2(NR_MUNLOCK, ptr as usize, len);
+                let _ = syscall3(NR_MADVISE, start, end - start, MADV_DODUMP);
             }
         }
 
@@ -1464,11 +1556,26 @@ const TAG_CONCAT_MIN: usize = 2_048;
 ///
 /// Two properties are load-bearing and easy to lose in a refactor:
 ///
-/// * **The key is an input, not just the MAC key.** Feeding only the derived
-///   `mac_key` would let an adversary look for two keys colliding on that
-///   256-bit value — a 2^128 search — which would bypass the entire point of a
-///   520-bit tag. Putting `K` in the hash input binds the tag to the key
-///   directly.
+/// * **The key is an input, not just the MAC key.** Without `K` in the head, an adversary
+///   who controls two keys could look for a collision in the *derivation* — the 512-bit
+///   `mat` block is `CC(HC(K, N₁), …)`, so two keys with equal `mat` give equal `mac_key`
+///   *and* equal `enc_seed`, hence identical tags for equal messages *and* identical
+///   keystreams: one ciphertext opening under both keys, for a `2^256` birthday search,
+///   which is the key-search level and therefore not committing at all. With `K` in the
+///   head that route is closed — the two tags now have different inputs — and the shortest
+///   route is the `2^520` target of `TAG_LEN`'s docs. So the binding raises the *route* the
+///   attacker must take, at the price of the correlation noted below.
+///
+///   One honest caveat belongs here, because it is the one step in the security argument
+///   that no black-box reduction covers (`SECURITY-ANALYSIS.md` §2.1, node L3.6): the key of
+///   the outer PRF is *derived from a value that also appears in its input*. With the
+///   derivation idealized the reduction is immediate — a random function does not care what
+///   its input means — but a fully black-box proof would have to work for a hash that could
+///   notice the relation, and such a hash is not a PRF. What supports the step is that
+///   neither primitive is known to have that structure, and that no experiment here
+///   separates the composition from ideal. A format revision could remove the correlation
+///   entirely by dropping `K` from the head — at the cost of re-opening the derivation route
+///   above, which is the trade rather than a free win.
 /// * **Lengths are encoded and every field is fixed width.** BLAKE3 is not
 ///   vulnerable to length extension (its finalisation is flagged, unlike
 ///   Merkle–Damgård constructions), but `A || M` alone would be ambiguous:
@@ -3673,8 +3780,9 @@ mod tests {
 
     /// The tag must change when *only* the key changes.
     ///
-    /// Key commitment itself is a security argument from the tag's width (2^260, see
-    /// the README) and cannot be established by sampling; what is testable is that
+    /// Key commitment itself is a security argument about collision bounds (2^128 for the
+    /// context case, at most 2^256 for the key case — see `TAG_LEN` and the README's
+    /// "Security level") and cannot be established by sampling; what is testable is that
     /// the tag is not indifferent to the key, and the mechanism it rests on -- the
     /// key reaching the tag *directly*, not only through `mac_key` -- is what
     /// `test_tag_binds_the_key_directly` checks. The old name claimed the property

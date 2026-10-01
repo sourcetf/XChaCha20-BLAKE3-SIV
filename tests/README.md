@@ -94,6 +94,29 @@ surprise:
   same rule applies to any new tool here: a mapping, a filter or a symbol lookup that can be
   wrong without changing the shape of the output needs a check against a second source of
   truth, not just a plausible-looking result.
+- **Collision bounds are derivations, not tests, and the tests around them check the
+  premises.** `SECURITY-ANALYSIS.md` §4.5 derives the tag-collision level (`2^128`, the
+  birthday bound of the 256-bit chaining value the whole 65-byte tag is a function of) and
+  §3's Corollary derives what a collision would leak (`C₁ ⊕ C₂ = M₁ ⊕ M₂` under one nonce,
+  not merely an equal tag). No harness can falsify either: a collision search is a
+  computation, and the event is out of reach by design. What *is* pinned is the premise of
+  the derivation — that the tag is exactly the root XOF of the encoded input, with no step
+  that could add entropy — by `test_tag_matches_blake3_over_the_documented_input`, the
+  published keyed-BLAKE3 KATs and the `ultra` witness's independent recomputation. §5's rows
+  15 and 16 say the same thing from the falsification side.
+- **`VmFlags` is only faithful on a native host.** `unlocking_restores_core_dump_inclusion`
+  (`tests/locked.rs`) is the only check of `ultra`'s `locked` layer that reads the *kernel's*
+  view — `dd` in `/proc/self/smaps` for the mapping holding the buffer — and that view does not
+  exist under an emulator: measured on this host, `qemu-aarch64` runs a successful `mlock` and
+  `madvise` with `VmFlags` staying `rd wr mr mw`, because the emulator keeps guest mappings in
+  its own bookkeeping and does not synthesize this field. The test therefore skips (loudly,
+  naming this) when the mapping it reads does not even show the `lo` the sibling
+  `the_key_itself_is_locked` has already observed, and the *call* is pinned instead by
+  `the_dump_advice_is_issued_on_the_right_range`, which asserts against the shipped source that
+  `MADV_DONTDUMP`/`MADV_DODUMP` are 16/17, that both are passed to a *three*-argument `madvise`,
+  and that both ranges are page-aligned. Verified non-vacuous by three planted defects: reverting
+  the unlock call to `MADV_DONTDUMP` (caught by both tests), and changing the constant to 4 (caught
+  by the source check). The effect on native aarch64 hardware is *not* covered anywhere here.
 - **The coverage floor is global, not per-path.** 95% over everything measured here
   cannot be satisfied by editing exclusions, but it also cannot tell *which* path was
   lost -- it fails, and the answer is in the lcov artifact and the diff.

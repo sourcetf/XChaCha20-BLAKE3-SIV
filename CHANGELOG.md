@@ -12,7 +12,9 @@ tags have been cut yet.
 **Unchanged.** Every ciphertext and tag this revision produces is byte-identical to
 the previous one; the KATs, the differential fixture against `tools/ref_impl.py` and
 the accelerated-path corpus all still pin the same bytes. Nothing below touches the
-construction — it is hardening, correctness in `ultra`, and evidence quality.
+construction — it is hardening, correctness in `ultra`, evidence quality, and
+corrections to the *documented* security numbers, one of which (the `locked` layer
+never issuing `MADV_DODUMP`) was a real bug in a defence rather than prose.
 
 ### `ultra`: the `locked` layer never worked, and now does
 
@@ -183,10 +185,12 @@ and by setting `DOM_ENC = DOM_TAG` (both caught). The *value* half of S2 is a un
 only the crate can reach its internal derivation.
 
 What the document now states explicitly, in §4.10 and §6: a break of this construction must be a
-break of L3.1–L3.5 or of an L1 theorem, because the composition itself assumes nothing joint
+break of L3.1–L3.6 or of an L1 theorem, because the composition itself assumes nothing joint
 about the two families. A future cryptanalytic relation between ChaCha20 and BLAKE3 would
 present itself as a break of one of those primitive conjectures — the distinction matters
-because a composition flaw is this crate's to fix and a primitive break is not.
+because a composition flaw is this crate's to fix and a primitive break is not. (L3.6 was added
+by the external audit below: it is the one conjecture the *encoding* introduces, and it is about
+BLAKE3 alone, not about the two families together.)
 
 ### The performance table did not describe the shipped build
 
@@ -281,7 +285,8 @@ New: `SECURITY-ANALYSIS.md`. The construction as a tuple of functions; each assu
 an explicit game (ChaCha20's block function, HChaCha20, keyed BLAKE3 — all three assumed,
 and the document says so in those words — plus the injectivity of the encoding, which is
 *proved* there by inspection); the SIV/DAE theorem with its five-hop reduction, the bound
-`q²/2^521 + q²/2^353 + q·2^-520` plus the three PRF advantages, and the place each
+(`q²/2^257 + q·2^-520` plus the PRF advantages — the collision term here is the corrected one;
+this entry originally recorded `q²/2^521 + q²/2^353`, see the audit entry below), and the place each
 assumption enters; every pair of uses of one primitive enumerated with what separates it;
 and a falsification table — what would refute each claim, which refutations have been
 attempted, and which are out of reach of any test.
@@ -303,6 +308,94 @@ Two findings came out of writing it, both recorded rather than fixed:
   the suite. `the_key_material_block_is_not_the_message_keystream` computes both uses of
   ChaCha20 for a spread of inputs and requires them to differ, so the collapse described
   above becomes a test failure rather than a discovery.
+
+### An external audit: four findings, and what each one turned out to be
+
+An independent reader went through `SECURITY-ANALYSIS.md` and `src/lib.rs`. Three of the four
+were security claims that were wrong and one was a real bug in `ultra`. All four are answered
+here rather than argued away.
+
+**1. The tag's collision bound is `2^128`, not `2^260` — the width never bought collisions.**
+Every one of the 65 tag bytes is an output block of the *same* root compression, so the tag is a
+function of BLAKE3's root state: the **256-bit chaining value**, the final block, its length, the
+counter and the flags. Two inputs that agree on that state have byte-identical tags at *any* width,
+which caps *collision* properties at the birthday bound of a 256-bit state — `2^128` — and no
+output length can raise it. Worse, the collision is constructible: hold the final block fixed,
+vary the prefix, and a chaining-value collision (`2^128` by birthday) makes the two tags equal.
+The old rationale ("commitment is a collision property, so an `n`-bit tag caps it at `2^(n/2)`;
+65 bytes gives `2^260`") treated the tag as 65 independent random bits, and the derived
+`(key, nonce)` term was wrong too, in the same way: `q²/2^353` is the birthday of the *output*
+size, while the state the KDF's root compression sees is 328 bits (256-bit chain value plus a
+72-bit final block), so that event's own birthday is `2^164` — and it is dominated by the tag
+collision, which implies it, so the DAE bound keeps one `q²/2^257` term. Corrected in
+`SECURITY-ANALYSIS.md` (§3 Thm 2, §3 Thm 4's bound, §4.5, §4.10's table, §5 row 16, §6), in
+`README.md`'s security table, and in `TAG_LEN`'s doc comment. The corrected bound is
+`q²/2^257`, i.e. `2^-129` at `q = 2^64` queries. The wire
+format is untouched — the frozen `v0.2` tag stays 65 bytes.
+
+Following the correction through exposed one thing the finding got half right, and it is worth
+recording because the first draft of this entry got it wrong in the other direction: **commitment
+is a *target* problem, so the width was never about collisions at all.** A second key that opens
+a given ciphertext must make its tag computation output the *published* tag — a `2^-520` event
+per candidate key, so enumerating the entire `2^256` key space succeeds with probability `≈
+2^-264` and no second key is in reach. With a 32-byte tag the same enumeration expects `≈ 1`
+second key (`2^256 · 2^-256 ≈ 1`), which is the non-committing failure mode of the 16-byte-tag
+SIV family. So the tag's width *is* load-bearing — for the commitment, through the target — the
+old rationale reached the right decision through the wrong property, and the "33 bytes buy
+nothing" line that appeared in a first draft of this correction was itself wrong and has been
+removed. What the width genuinely does not buy is collision resistance (`2^128` either way) and
+forgery resistance (`2^256` either way, key-search-bound).
+
+**2. Under nonce reuse, a tag collision hands over `M₁ ⊕ M₂`, not just equality.** SIV's misuse
+story is "the adversary learns equality, and the length"; the audit pointed out that this holds
+*while the tags differ*. If two distinct messages under one nonce collide in the tag — the same
+`2^128` event — they are encrypted under the same derived keystream, so every ciphertext pair
+satisfies `C₁ ⊕ C₂ = M₁ ⊕ M₂`: a two-time pad, and not one the adversary has to cause, because
+whoever observes both ciphertexts gets it. §3's Corollary now states it, `README.md`'s
+deterministic-encryption bullet states it, and §5 row 9 no longer reads as if a collision were
+merely a duplicated tag.
+
+**3. The master key both keys the tag hash and appears in its input — which is an assumption.**
+`derive_tag` feeds `K` into the head *and* uses `mac_key = f(K)` as BLAKE3's key. The document
+had been reducing the tag to A3 ("for a uniform key `k`, `x ↦ B3(k, x)` is a PRF"), and that
+reduction does not exist: A3's key is independent of its input, while here the key is derived
+from a value the input contains. The audit supplied a separation sketch; `SECURITY-ANALYSIS.md`
+§2.1 now carries it as **L3.6**, with an explicit counterexample hash that is A3-secure yet makes
+the composed map constant (so the gap is real, not a missing paragraph), the reason BLAKE3 is
+still believed to satisfy it (the key words *are* the initial state, the keyed mode is
+flag-separated, nothing carries message words into the key schedule), and its own falsifier.
+§3 Thm 2's proof now names L3.6 as the hop it uses, §4.10's closing claim is narrowed to *no
+joint assumption about the two primitives* (L3.6 is about BLAKE3 alone and about this layout),
+and §5 gained row 15. The design conclusion stands, and with a sharper reason than before: without
+`K` in the head, two keys whose 512-bit key-material blocks collide (`2^256` by birthday) would
+give equal tags *and* equal keystreams, so a ciphertext opening under both keys would cost
+key-search — not committing. Binding `K` removes that route; the price is one declared
+assumption. `TAG_LEN`'s doc comment already pointed at this caveat; the document it points at now
+contains it.
+
+**4. `MADV_DODUMP` was named in a commit message and never called — a real bug.** `lock_range`
+sets `MADV_DONTDUMP` on the key's page so a core dump cannot capture it; `unlock_range` was
+supposed to undo that before the page returned to general use, and did not — the constant existed
+nowhere in the source. `VM_DONTDUMP` is a per-mapping flag, it is sticky, and `munlock` does not
+clear it, so the effect was a `LockedKey` that silently excluded whatever pages it had touched
+from core dumps for the life of the process. `unlock_range` now issues `MADV_DODUMP` (17, from
+`asm-generic/mman-common.h`) over the same page-expanded range it unlocks, and
+`tests/locked.rs::unlocking_restores_core_dump_inclusion` reads `VmFlags:` for the mapping out of
+`/proc/self/smaps` and requires `dd` to be gone. Verified non-vacuous by deleting the call and
+watching it fail with `flags: rd wr mr mw me ac dd sd`.
+
+The commit that added that test also found that the check cannot be a *portable* one: under
+`qemu-aarch64` a successful `mlock` and `madvise` leave `VmFlags` at `rd wr mr mw`, because the
+emulator keeps guest mappings in its own bookkeeping and does not synthesize the field (measured —
+and the reason the first draft of the test failed in stage 5 of `verify.sh`). The test now skips
+loudly, naming that, when the mapping it read does not even show the `lo` the sibling
+`the_key_itself_is_locked` has just observed; and a second test,
+`the_dump_advice_is_issued_on_the_right_range`, pins the call against the shipped source instead —
+the constants (16/17), the three-argument `madvise`, and the page alignment of both ranges — which
+is the half that runs on every host, emulated or not. Both are non-vacuous by construction: two
+planted defects (the unlock call reverted to `MADV_DONTDUMP`, and the constant set to 4) each fail
+them — the first fails both, the second only the source check, which is the division of labour
+between them.
 
 ### Zeroization: two copies the wipes could not reach
 

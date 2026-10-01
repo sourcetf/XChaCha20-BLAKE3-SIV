@@ -113,8 +113,12 @@ before 1.0 would be a revision bump, not a silent one.
 
 - **SIV mode** — the tag is computed before encryption, so nonce reuse degrades
   gracefully instead of catastrophically.
-- **Key- and context-committing** — a 520-bit tag, giving **2^260** committing
-  security (see below).
+- **Key- and context-committing** — the tag binds the key, the nonce, the AAD and the
+  message, so a ciphertext cannot be re-opened under another key or context: a second key
+  would have to reproduce the published tag, which is a `2^-520` event per candidate key
+  (`≈ 2^-264` over the entire key space). That is what the 65-byte width is for. This file
+  claimed `2^260` for a while and that was wrong — see "Security level" below, which also
+  separates this *target* bound from the tag's `2^128` *collision* bound.
 - **Constant-time** — the tag is compared with `subtle::ConstantTimeEq`;
   `Plaintext` compares in constant time too. Decryption is decrypt-then-verify
   (SIV requires the plaintext to recompute the tag), and the unverified
@@ -144,34 +148,67 @@ before 1.0 would be a revision bump, not a silent one.
 | Property | Strength | Determined by |
 | --- | --- | --- |
 | Confidentiality (plaintext recovery) | 256-bit | the ChaCha20 key |
-| Forgery resistance | **256-bit** | BLAKE3 keyed mode as a PRF over a 256-bit key |
-| Key commitment (CMT-1/CMTk) | **2^260** | birthday bound on the 520-bit tag |
-| Context commitment (CMT-3) | **2^260** | birthday bound, resting on BLAKE3 |
+| Forgery resistance | **256-bit** | BLAKE3 keyed mode as a PRF over a 256-bit key; a *target* problem, so no birthday search applies |
+| Context commitment (CMT-3) | `2^520` per attempt against a given ciphertext | a target hit in the 520-bit output: the width is what sets it |
+| Key commitment (CMT-1/CMTk) | `2^520` per attempt against a given ciphertext | the same, plus the key being bound into the tag's *input* as well as its derivation |
+| Tag collision resistance (the DAE bound's collision term) | **2^128** | the *chaining value*, not the tag: keyed BLAKE3's output is a function of its 256-bit state, so a state collision gives byte-identical tags of any length |
 
 **On forgery: 256 bits is the ceiling, not a choice.** Forgery resistance is
 bounded by the key's entropy, so with a 256-bit key it cannot exceed 256 bits.
-A longer tag does not raise it; it raises commitment. (Exceeding 256-bit forgery
-would require a larger key, which would be a different construction.)
+A longer tag does not raise it.
 
-**On commitment: the tag is 65 bytes because commitment must exceed 2^256.**
-Commitment is a *collision* property, so an `n`-bit tag caps it at `2^(n/2)`.
-A 64-byte (512-bit) tag would give exactly `2^256` — not *more* than 256 bits —
-so 65 bytes (520 bits) is the smallest byte-aligned size that strictly exceeds
-it, giving `2^260`.
+**On commitment: this table said `2^260`, and that was wrong twice.** The reasoning was
+"commitment is a collision property, so an `n`-bit tag caps it at `2^(n/2)`, and 65 bytes
+gives `2^260`". First, commitment is not a birthday problem at all: an attacker has to make a
+*given* ciphertext open under a second key, which means hitting the tag it published — a
+target, `2^-520` per candidate key, and *that* is what the width buys (see the bullets below).
+Second, the collision resistance the old rationale was reaching for is not `2^260` either:
+keyed BLAKE3's XOF output is
+`compress(cv, tail, |tail|, counter, flags | ROOT)`, a function of the **256-bit chaining
+value** (plus the final block and the flags), so two inputs that agree on that state produce
+*byte-identical tags of any length*. Colliding that state is `2^128` by birthday, and no tag
+width can raise it. `SECURITY-ANALYSIS.md` §4.5 carries the argument.
+
+Two consequences, stated here because the old claim invited the opposite reading:
+
+* the width **is** load-bearing, but for the *target* and not the birthday: a candidate key that
+  is not the real one opens a given ciphertext with probability `2^-520`, so enumerating the whole
+  `2^256` key space succeeds with probability `≈ 2^-264`. A 32-byte tag would make that
+  `2^256 · 2^-256 ≈ 1` — one second key within reach of a key-space enumeration — which is the
+  non-committing failure mode of the 16-byte-tag SIV family (`AES-GCM-SIV`). So the width stays,
+  and a future revision cannot drop it without giving up CMT-1/CMTk;
+* what the width does **not** buy is collision resistance (`2^128` either way, state-bound) or
+  forgery resistance (`2^256` either way, key-search-bound). `2^128` is still far out of reach of
+  a practical attack, but it is **below** the construction's 256-bit key strength — so "the tag
+  commits more strongly than the key" was never true, and the table now says so.
+
+**`2^128` bounds *collisions*, not *targets*.** The state shortcut above helps only when
+both sides of the collision are the adversary's to search. A tag that has to be hit as
+given — a forged tag, or a tag that must also validate under a *second* key — is a target
+in the 520-bit output, still `2^520` per attempt. So forgery and key commitment against a
+fixed ciphertext are untouched by the correction, and what `2^128` bounds is the
+`q²/2^257` collision term in the DAE bound and the two-time-pad event described under
+"Deterministic encryption" below.
 
 **What is assumed, and what is not proven.** The figures above rest on BLAKE3
 being a secure PRF and collision-resistant, and on ChaCha20 being a secure
 stream cipher. Those are standard, heavily analysed assumptions — but they are
 assumptions, not theorems, and this particular *composition* has no public
-specification and has not been independently analysed. The formal harnesses in
-`src/proofs.rs` prove properties of the implementation (that the fields reach
-the hash, that every output byte is used, that the tag reaches the ciphertext),
+specification and has not been independently analysed. One of them is this crate's
+own to declare rather than inherit: binding the key into the tag's *input* as well
+as into its key derivation puts a derived key and the value it is derived from in
+one hash call, which the black-box PRF assumption does not cover. It is stated as
+`L3.6` in [SECURITY-ANALYSIS.md](SECURITY-ANALYSIS.md) §2.1, with the separation
+showing no reduction reaches it and the reason it is still believed. The formal
+harnesses in `src/proofs.rs` prove properties of the implementation (that the fields
+reach the hash, that every output byte is used, that the tag reaches the ciphertext),
 not cryptographic hardness.
 
 **The reduction, written out.** [SECURITY-ANALYSIS.md](SECURITY-ANALYSIS.md) is the
 mathematical treatment: the construction as a tuple of functions, each assumption as an
 explicit game, the SIV/DAE theorem with its five-hop reduction and concrete bound
-(`q²/2^521 + q²/2^353 + q·2^-520` plus the three PRF advantages), every pair of uses of one
+(`q²/2^257 + q·2^-520` plus the PRF advantages, one of which is `L3.6` and not the
+ordinary keyed-hash one), every pair of uses of one
 primitive enumerated with what separates it, and a falsification table — what would refute
 each claim, which refutations have been attempted, and which are out of reach of any test.
 Two properties it needs are pinned by tests added with it:
@@ -445,7 +482,14 @@ deployment.
   comparing ciphertexts, and equality of two ciphertexts under one `(key, nonce)`
   says their plaintexts are equal. A protocol that needs ciphertext
   unpredictability has to supply it: a fresh nonce per message (see "Nonces, and
-  where randomness comes from"), or its own padding to a fixed length.
+  where randomness comes from"), or its own padding to a fixed length. One caveat
+  belongs with the word "survivable": equal tags mean *equal keystreams*, so if two
+  distinct messages under one nonce ever collided in the tag — a `2^128` birthday
+  search over the tag's 256-bit chain value, `SECURITY-ANALYSIS.md` §4.5 — their
+  ciphertexts would satisfy `C₁ ⊕ C₂ = M₁ ⊕ M₂`, which is a two-time pad and not
+  merely an equality leak. That event is out of reach (`q²/2^257` in queries, i.e.
+  `2^-129` at `q = 2^64`), but "nonce reuse degrades to equality" is only true while
+  the tags differ, and the difference is worth stating rather than glossing.
 - **Length is revealed.** The ciphertext is exactly as long as the plaintext and the
   tag is fixed-size, so the message length is public to anyone who sees the
   ciphertext. Every length-preserving AEAD has this; hiding a length means padding
