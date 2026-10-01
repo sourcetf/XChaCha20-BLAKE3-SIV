@@ -108,6 +108,84 @@ fn dual_mac_is_wired_into_both_decrypt_paths() {
     );
 }
 
+/// Which entry points the witness is actually called from — all of them except one.
+///
+/// This exists because the documentation claimed more than the code did, and the claim was
+/// believed for as long as nobody measured. The README said the witness cross-checks "on every
+/// encrypt"; in fact `encrypt_in_place_detached` has no encrypt-side cross-check, only the
+/// allocating `encrypt` does. It surfaced from the *benchmark*, not from reading: `ultra`'s
+/// in-place encryption measured the same as the default configuration at 1 MiB while its
+/// decryption measured 11.5x slower, which is only possible if the encrypt path is not
+/// re-hashing the message with the scalar witness.
+///
+/// The asymmetry is deliberate (a fault on the encrypt side costs availability, not
+/// authenticity, and the check is a full per-byte re-hash on the API a caller picks for speed),
+/// so the fix was to state it and to pin it here. Both directions fail: a new witness call in
+/// the in-place path means the cost warning in the README is stale, and a removed call in any of
+/// the three covered entry points means a defence disappeared from a path the README promises.
+#[test]
+fn the_witness_is_called_from_exactly_these_entry_points() {
+    let src = include_str!("../src/lib.rs");
+    let cut = src.find("mod tests {").expect("test module");
+    let body = &src[..cut];
+
+    /// The body of `needle`, brace-matched; panics if it is not found exactly once.
+    fn body_of<'a>(src: &'a str, needle: &str) -> &'a str {
+        let start = src.find(needle).unwrap_or_else(|| panic!("no {needle}"));
+        assert_eq!(
+            src.matches(needle).count(),
+            1,
+            "{needle} must appear once in the non-test source"
+        );
+        let after = &src[start..];
+        let open = after.find('{').expect("body");
+        let mut depth = 0usize;
+        for (n, c) in after[open..].char_indices() {
+            match c {
+                '{' => depth += 1,
+                '}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return &after[..=open + n];
+                    }
+                }
+                _ => {}
+            }
+        }
+        panic!("unbalanced braces in {needle}");
+    }
+
+    for entry in [
+        "pub fn decrypt(",
+        "pub fn decrypt_bounded(",
+        "pub fn decrypt_in_place_detached(",
+        "pub fn encrypt(",
+    ] {
+        let b = body_of(body, entry);
+        // `decrypt_bounded` delegates to `decrypt`, so it carries no witness call of its own
+        // and must not: a second one would mean the tag is computed twice on that path.
+        if entry == "pub fn decrypt_bounded(" {
+            assert!(
+                !b.contains("witness::"),
+                "decrypt_bounded delegates to decrypt; it must not cross-check again"
+            );
+            continue;
+        }
+        assert!(
+            b.contains("witness::"),
+            "{entry} must cross-check with the witness under ultra"
+        );
+    }
+
+    let in_place_encrypt = body_of(body, "pub fn encrypt_in_place_detached(");
+    assert!(
+        !in_place_encrypt.contains("witness::"),
+        "if the in-place encrypt gains a witness cross-check, then it costs a full scalar \
+         re-hash per byte (measured ~1.2 ms/MiB) -- update README's 'What the witness is' and \
+         the fault table's witness row, which currently say this path does not carry it"
+    );
+}
+
 /// A locking key is really locked, read back from the kernel.
 ///
 /// The syscall numbers in `locked` are `const`s, and a wrong one would not be caught by

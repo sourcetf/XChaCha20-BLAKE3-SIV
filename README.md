@@ -284,7 +284,7 @@ something — it must *fail* when the second gate is replaced by a copy of the f
 | A fault that corrupts one decision *value* | **defended** — the two gates write two independent slots and the caller rejects if either says so; one corrupted slot leaves the other. `tools/fi_check.sh`'s `one-check-neutralised` row is this attack, and it is rejected |
 | Single fault on the decision (a skipped branch, or a corrupted gate *value*) | **defended** — `tools/fi_check.sh` runs this as a campaign row on the hardened build |
 | A single corrupted byte or bit **inside the decision function** | **defended, and measured**: `tools/fi_instruction.sh` sweeps every byte of the compiled `accept_or_reject` — both fault models, three configurations — and attributes each accepting fault to the symbol it sits in. Accepting faults inside the decision: **0 in the `hardened` build and 0 in `ultra`, in both models**. The opt-out build has **3** in the bit-flip model, which is the control that the sweep reaches the decision at all: its single `test`/`je` pair is one flipped bit away from falling through into the accept store, and that is precisely the defect the second gate removes |
-| A single corrupted byte or bit **anywhere in the swept code** (the two entry points and the decision) | **measured, and not zero — the mechanism is not the gate**: last full local sweep, `(total, inside the decision)` — opt-out `2, 0` (nop) and `117, 3` (bits); `hardened` `0, 0` and `1, 0`; `ultra` `0, 0` and `4, 0`. The accepting sites outside the decision are in the shared KDF/MAC/SIMD code, and several are the middle byte of a multi-byte instruction, where corruption desynchronises the decoder and the following bytes execute as different instructions — no source structure prevents that. **The raw totals are not comparable across configurations**, and an earlier revision of this table compared them as if they were: `ultra`'s entry points contain more code than `hardened`'s (the witness call, an extra gate operand, a ciphertext copy), so a longer region naturally collects more accepting bytes even when every one of them is outside the decision. What is comparable is the decision-scoped count, which is why that is what the tool gates on. For scale, the same technique over RustCrypto's `XChaCha20Poly1305` measures 13 of 1081 (nop) and 106 of 8648 (bits) — on a *different region*, its whole tag-verification function rather than a decision helper of 18–25 bytes, so the two are not like-for-like either |
+| A single corrupted byte or bit **anywhere in the swept code** (the two *decrypt* entry points — `decrypt` and `decrypt_in_place_detached` — and the decision) | **measured, and not zero — the mechanism is not the gate**: last full local sweep, `(total, inside the decision)` — opt-out `2, 0` (nop) and `117, 3` (bits); `hardened` `0, 0` and `1, 0`; `ultra` `0, 0` and `4, 0`. The accepting sites outside the decision are in the shared KDF/MAC/SIMD code, and several are the middle byte of a multi-byte instruction, where corruption desynchronises the decoder and the following bytes execute as different instructions — no source structure prevents that. **The raw totals are not comparable across configurations**, and an earlier revision of this table compared them as if they were: `ultra`'s entry points contain more code than `hardened`'s (the witness call, an extra gate operand, a ciphertext copy), so a longer region naturally collects more accepting bytes even when every one of them is outside the decision. What is comparable is the decision-scoped count, which is why that is what the tool gates on. For scale, the same technique over RustCrypto's `XChaCha20Poly1305` measures 13 of 1081 (nop) and 106 of 8648 (bits) — on a *different region*, its whole tag-verification function rather than a decision helper of 18–25 bytes, so the two are not like-for-like either |
 | A fault inside the constant-time comparison itself (a shortened loop, a corrupted bound) | **not defended by `hardened`, closed by `ultra`**: with only `hardened`, both gates — and both of `dual-mac`'s recomputations, when it is on — go through the same `subtle` loop, so one fault shortening it disarms every gate at once and a forgery costs `2^(8 * compared bytes)` instead of `2^520`.  **Hand-modelled, not by a committed tool**: no script in `tools/` shortens that loop — the campaign's faults are source-level changes of other kinds (`tools/mutation_check.sh` plants a `==` where `ct_eq` was, which is not a shortened loop) and `tools/fi_instruction.sh` sweeps the compiled bytes uniformly rather than aiming at a loop bound — so both counts in this row came from cutting the comparison down by hand in a throwaway copy.  Hand-measured against that fault: an accept after **2,573 attempts** with the comparison cut to two bytes.  Under `dual-mac`/`ultra` the second gate also `AND`s in `ct_eq_independent`, a differently *written* comparison, and the same hand-made fault then yields **no forgery in 2,000,000 attempts**.  Two faults still defeat both, which is the boundary this row states rather than hides |
 | A fault that replaces the computed tag with a constant, or with the received tag | **not defended by `hardened`, closed by `ultra`/`dual-mac`**: with only `hardened` this is the strongest fault model in the table and it defeats the two gates *together* — either gate is `computed_tag ? tag`, so forcing `computed_tag` to equal `tag` satisfies both at once, and two gates over one value are one gate for this attack, not two witnesses. That half is pinned rather than hidden: `tools/fi_check.sh`'s `computed-tag-replaced` row applies exactly this fault to the hardened build and requires it to be accepted, so a change in either direction is noticed. `dual-mac`, part of `ultra`, closes it by doing the thing an earlier revision of this row said was not done here: computing the tag *twice, independently* — a second MAC pass, and the tag pass is a large part of a short message — and requiring the recomputation to agree with the stored value **and** with the received tag (`recomputed_tag.ct_eq(&computed_tag) & recomputed_tag.ct_eq(tag)`, in both decrypt entry points). A rewritten stored tag then disagrees with the recomputation, and `tools/fi_check.sh`'s `dual-mac-blocks-tag-substitution` row runs that same source fault on the `ultra` build and is rejected there. The residual is the rest of this row's boundary: two faults, one in each derivation, or one aimed at the arithmetic both derivations share (`derive_tag` and the keyed BLAKE3 under it), still defeat it — that is a synchronized two-glitch bench or precision injection, and the answer for a deployment that faces it is a hardware countermeasure — dual-rail logic, an HSM — rather than software |
 | Two independent faults | not defended — this is where the attacker's cost moves to a synchronized two-glitch bench |
@@ -374,7 +374,7 @@ xchacha20-blake3-siv = { version = "0.1", features = ["ultra"] }
 | `dual-mac` | the tag being pinned to a constant or to the received tag — the one model the two gates fail *together* on | +30% at 64 B, +40% at 1 KiB, +24% at 1 MiB on decryption; +8–25% on a round trip |
 | `dual-mac` | a fault inside the shared constant-time comparison (a shortened loop): the second gate uses a differently *written* comparison, so one fault reaches only one of them | one extra 65-byte comparison, ~+2.7% at 64 B |
 | `dual-mac` | the `blake3` dependency's XOF output surviving in its own stack frames: `scrub_stack()` overwrites the 16 KiB below the entry point after the last derivation | ~16 KiB of volatile stores, ~0.5–1 µs per operation, **and ~16 KiB of stack per call**. Measured on a thread with a 32 KiB stack: the default build still runs after 16 KiB of the stack is already consumed, this one does not survive 8 KiB. A caller that spawns threads with small stacks must size them for it — the scrub is a 16 KiB frame, so it can fault the thread it is protecting |
-| `witness` (in `ultra` only) | a fault aimed at the **derivation arithmetic both tag computations share** — `derive_tag`, the keyed BLAKE3 under it, and the SIMD kernels: the one model `dual-mac` alone cannot close, and where every accepting fault the sweep finds in the `hardened` build sits | decryption **1.4x at 64 B, 2.1x at 1 KiB, 6.3x at 64 KiB, 9.2x at 1 MiB** (§). It is a *scalar* implementation, so its cost is per byte; the encrypt-side cross-check is ~+20% of the encrypt path's instructions. It does not make the *totals* in the fault table zero — it removes accepting faults from the decision and from the shared derivation, and the `ultra` build has a handful elsewhere (§§) |
+| `witness` (in `ultra` only) | a fault aimed at the **derivation arithmetic both tag computations share** — `derive_tag`, the keyed BLAKE3 under it, and the SIMD kernels: the one model `dual-mac` alone cannot close, and where every accepting fault the sweep finds in the `hardened` build sits | decryption costs **2.7x at 64 B, 4.0x at 1 KiB, 10.1x at 64 KiB, 11.5x at 1 MiB** against the default configuration (measured; the table is "The three configurations, measured" below — an earlier revision of this row quoted 1.4x–9.2x from a differently-scoped run). It is a *scalar* implementation, so its cost is per byte, and on the encrypt side it is present **only on the allocating `encrypt`** (round trip, same sizes: 2.8x/3.2x/5.8x/7.2x allocating versus 2.3x/2.8x/5.4x/6.1x in place) — see "What the witness is" for why the in-place path does not carry it. It does not make the *totals* in the fault table zero — it removes accepting faults from the decision and from the shared derivation, and the `ultra` build has a handful elsewhere (§§) |
 | `locked` | key pages readable out of **swap** or a **core dump** | ~7 µs once per key (`mlock`+`munlock`), not per message. The key is heap-allocated so its address is stable: `mlock` is address-based, and a key returned by value moves after being locked, which left this layer protecting a dead stack slot |
 | `rng` | nothing about the cipher; it is how a caller gets a key at all | — |
 
@@ -408,10 +408,10 @@ for nothing.
 **What the witness is, and what "independent" means here.** `src/witness.rs` is a second
 implementation of the whole construction — ChaCha20, HChaCha20 and keyed BLAKE3 with the
 reference CV-stack tree logic, written from the specification rather than by adapting the
-crate's code — and `ultra` compares its answer to the crate's bit for bit on every decrypt
-(`witness_tag == computed_tag` **and** `witness_plaintext == plaintext`) and on every
-encrypt (its tag against the one about to be returned). It shares no code with the crate's
-crypto: not the `blake3` dependency, not the SIMD kernels, not `derive_tag`, not the
+crate's code — and `ultra` compares its answer to the crate's bit for bit on **every decrypt
+path** (`witness_tag == computed_tag` **and** `witness_plaintext == plaintext`) and on **the
+allocating `encrypt`** (its tag against the one about to be returned). It shares no code with
+the crate's crypto: not the `blake3` dependency, not the SIMD kernels, not `derive_tag`, not the
 buffering. That is exactly what makes the model above reachable — a single fault in the
 shared derivation changes one answer and not the other, and the gate that `AND`s the
 agreement in rejects. It is not two physically independent machines: same CPU, same
@@ -419,6 +419,19 @@ compiler, same source file tree, so a *systematic* fault (a compiler bug, a wron
 in both implementations, a fault that hits both code paths in one glitch) is still outside
 what this can see. What it does not share, and what makes it worth 4x on a large message,
 is the *machine code that computes the tag*.
+
+**`encrypt_in_place_detached` has no encrypt-side cross-check, and that asymmetry is now stated
+rather than implied.** The earlier revision of this paragraph said "on every encrypt", which was
+false for the in-place path — found by *measuring*, when the three-configuration benchmark showed
+`ultra`'s in-place encryption costing the same as the default at 1 MiB while its decryption cost
+11.5x. Two reasons not to close the gap in code: what an encrypt-side witness can see is a fault
+that produces a ciphertext the *peer* will reject, which is availability rather than authenticity
+(the tag is over the plaintext the caller supplied, and the peer recomputes it over what it
+decrypts), and the check is a full re-hash with the scalar witness — per byte, measured at about
++1.2 ms per MiB — which is the wrong trade on the API a caller picks for speed. The allocating
+`encrypt` keeps it because that is the convenient-by-default path. `tests/ultra.rs` pins both
+halves by source shape (`the_witness_is_called_from_exactly_these_entry_points`), so the
+documentation cannot drift from the code again.
 
 Two things follow, and both are asserted rather than promised: the agreement is a `Choice`
 folded into the second gate (so a disagreement is a rejection on the same branch as
@@ -784,63 +797,91 @@ Measured head-to-head against RustCrypto's `chacha20poly1305` — the natural
 reference point, since `XChaCha20Poly1305` has the same 24-byte nonce and the same
 ChaCha20 core. Reproduce with `cargo bench --bench compare`, which drives both
 sides through `aead`'s in-place interface so neither pays for an API shape the
-other does not have. Every figure below comes from one run of that harness; the
+other does not have. Release profile as shipped (`lto`, `codegen-units = 1`), AMD
+Ryzen 9 7945HX under WSL2, 3 bytes of AAD, and both sides on their native SIMD
+backends (BLAKE3's C/assembly kernels, Poly1305's AVX2 four-block path). The
 12-byte-nonce `ChaCha20Poly1305` is measured too and tracks `XChaCha20Poly1305`
-within about 4%, so it is not tabulated. Release profile as shipped (`lto`,
-`codegen-units = 1`), AMD Ryzen 9 7945HX under WSL2, 3 bytes of AAD, and both
-sides on their native SIMD backends (BLAKE3's C/assembly kernels, Poly1305's AVX2
-four-block path).
+within about 4%, so it is not tabulated.
 
-**These tables are re-measured as a whole, never one cell at a time**, and the run
-below is the second one: the first predated `hardened` becoming the default, and
-its **decrypt** column no longer described the shipped build. Measured now, at 64
-bytes, this crate's decryption is **1.02x** the reference's rather than the 1.41x
-the first run reported, and the round trip at 64 bytes is 1.31x rather than 1.56x;
-every other cell is within run-to-run noise. Two things moved, and both are worth
-naming: `hardened` is on by default now and its second gate is a fixed per-message
-cost on *decrypt* (two full 65-byte constant-time comparisons, the volatile
-re-reads, the fail-closed plumbing and the wipes), which is why the change shows up
-at the small end and not at 1 MiB; and RustCrypto's own decryption got faster in
-this dependency set (`chacha20poly1305` 0.10.1, `poly1305` 0.8.0, `blake3` 1.8.7,
-from `Cargo.lock`). What did **not** move: encryption, which is 1.53x at 64 bytes
-and 1.34x at 1 MiB here against 1.54x and 1.36x there.
+### The three configurations, measured
+
+**One `cargo bench` run per configuration** (`cargo bench --bench compare --
+[--no-default-features | --features ultra] -- --warm-up-time 2 --measurement-time 4`,
+criterion's median of 100 samples, sizes 64 B to 1 MiB). The three runs are not
+interchangeable in what they measure — that is the point — so each is shown
+separately, and the *reference* is the same code in all three, which is what makes
+the noise floor visible: its measured latency differed by **0.3% to 7.5%** between
+the runs (mean about 4%). Differences smaller than that are the same number.
+
+`opt-out` is `--no-default-features` (one comparison), `hardened` is the default
+(two independent gates, fail-closed), `ultra` adds the witness cross-check and the
+`locked`/`rng`/`dual-mac` layers. All three produce **identical bytes** — the KATs
+and the differential fixture pin that in every configuration — so what the table
+below prices is exactly the defences.
 
 Throughput, ratio against `XChaCha20Poly1305` (> 1 means this crate is faster):
 
-| Message | encrypt | decrypt | round trip |
-| --- | --- | --- | --- |
-| 64 B | **1.53x** | 1.02x | **1.31x** |
-| 256 B | **1.31x** | 1.01x | **1.14x** |
-| 1 KiB | 0.95x | 0.83x | 0.81x |
-| 4 KiB | **1.06x** | 0.96x | 1.01x |
-| 16 KiB | **1.26x** | **1.24x** | **1.14x** |
-| 64 KiB | **1.30x** | **1.19x** | **1.23x** |
-| 1 MiB | **1.34x** | **1.40x** | **1.37x** |
+| Message | opt-out enc | opt-out dec | **hardened enc** | **hardened dec** | ultra enc | ultra dec |
+| --- | --- | --- | --- | --- | --- | --- |
+| 64 B | 1.55x | 1.40x | **1.44x** | **1.12x** | 0.96x | 0.43x |
+| 256 B | 1.27x | 1.12x | **1.22x** | 0.94x | 0.79x | 0.33x |
+| 1 KiB | 0.94x | 0.96x | **1.00x** | 0.83x | 0.74x | 0.21x |
+| 4 KiB | 1.01x | 1.07x | **1.09x** | **1.05x** | 0.94x | 0.16x |
+| 16 KiB | 1.23x | 1.24x | **1.27x** | **1.16x** | 1.17x | 0.14x |
+| 64 KiB | 1.19x | 1.16x | **1.21x** | **1.27x** | 1.19x | 0.13x |
+| 1 MiB | 1.26x | 1.37x | **1.32x** | **1.38x** | 1.41x | 0.12x |
 
-Per-message latency, microseconds, median of criterion's samples; the ratio is
-again against `XChaCha20Poly1305`, and below 1 means this crate answers sooner:
+Round trip (encrypt then decrypt, in place), same ratio:
 
-| Message | encrypt | decrypt | round trip |
+| Message | opt-out | hardened | ultra |
 | --- | --- | --- | --- |
-| 64 B | 0.80 vs 1.22 (**0.65x**) | 1.16 vs 1.18 (0.98x) | 1.80 vs 2.37 (**0.76x**) |
-| 256 B | 0.95 vs 1.25 (**0.76x**) | 1.26 vs 1.26 (0.99x) | 2.18 vs 2.49 (**0.87x**) |
-| 1 KiB | 1.83 vs 1.74 (1.05x) | 1.96 vs 1.62 (1.21x) | 3.98 vs 3.23 (1.23x) |
-| 4 KiB | 2.90 vs 3.08 (**0.94x**) | 3.35 vs 3.20 (1.05x) | 6.51 vs 6.56 (0.99x) |
-| 16 KiB | 7.10 vs 8.96 (**0.79x**) | 7.53 vs 9.32 (**0.81x**) | 15.67 vs 17.93 (**0.87x**) |
-| 64 KiB | 27.5 vs 35.7 (**0.77x**) | 28.1 vs 33.5 (**0.84x**) | 54.4 vs 67.2 (**0.81x**) |
-| 1 MiB | 414 vs 556 (**0.74x**) | 396 vs 553 (**0.72x**) | 796 vs 1090 (**0.73x**) |
+| 64 B | 1.49x | **1.31x** | 0.58x |
+| 256 B | 1.32x | **1.14x** | 0.43x |
+| 1 KiB | 0.95x | 0.90x | 0.32x |
+| 4 KiB | 1.08x | **1.00x** | 0.27x |
+| 16 KiB | 1.25x | **1.23x** | 0.23x |
+| 64 KiB | 1.22x | **1.20x** | 0.22x |
+| 1 MiB | 1.33x | **1.33x** | 0.22x |
+
+Latency in microseconds at three sizes, the three configurations and the
+reference (median of criterion's samples):
+
+| | opt-out | hardened | ultra | XChaCha20Poly1305 |
+| --- | --- | --- | --- | --- |
+| encrypt 64 B | 0.78 | 0.82 | 1.26 | 1.18 |
+| encrypt 16 KiB | 7.32 | 7.13 | 7.71 | 9.06 |
+| encrypt 1 MiB | 404 | 379 | 377 | 501 |
+| decrypt 64 B | 0.88 | 1.05 | 2.86 | 1.18 |
+| decrypt 16 KiB | 7.24 | 7.76 | 69.9 | 8.99 |
+| decrypt 1 MiB | 374 | 381 | 4372 | 526 |
 
 Read both tables as: this crate pays more *per message* (two key derivations, a
 65-byte tag, and wiping all of it) and less *per byte* (BLAKE3 beats Poly1305 once
-there is enough data to batch). Latency is not throughput divided by size, because
-the fixed per-message cost dominates at the small end — at 64 bytes this crate is
-0.42 us cheaper *per call* on encryption and answers sooner on the round trip, and
-it is the slower of the two only around 1 KiB, where `Poly1305`'s four-block AVX2
-path is at its best and BLAKE3 has little to batch (decrypt 1.21x, round trip
-1.23x). **Decryption at 64–256 bytes is a tie** (0.98x, 0.99x), and that is the
-number the `hardened` decision costs: two 65-byte constant-time comparisons, the
-volatile re-reads and the fail-closed plumbing are all fixed per-message work on
-the decrypt path, so they are invisible at 1 MiB (0.72x) and dominate here.
+there is enough data to batch). Two costs are visible in the configuration
+comparison, and both are the price of a defence rather than an accident:
+
+* **`hardened`'s second gate is a fixed per-message cost on decrypt** — two 65-byte
+  constant-time comparisons, the volatile re-reads and the fail-closed plumbing — so
+  it shows at the small end (0.88 → 1.05 us at 64 B, i.e. 1.40x → 1.12x against the
+  reference) and is gone by 1 MiB (374 → 381 us, both inside the noise floor).
+  Encryption pays nothing for it: 0.78 → 0.82 us.
+* **`ultra`'s witness is a per-byte cost on decrypt**, because it is a scalar
+  re-implementation: 2.7x the default at 64 B, 4.0x at 1 KiB, 10.1x at 64 KiB, 11.5x
+  at 1 MiB — which is why the round trip above ends at 0.22x. Its in-place
+  *encryption* is untouched (377 us against 379 us at 1 MiB) because that path
+  carries no witness; the allocating `encrypt`, which does, lands at 7.2x the
+  default on the round trip at 1 MiB. If a deployment wants the fault model and not
+  the cost, `hardened,dual-mac` (everything `ultra` has except the witness) is the
+  configuration to measure against — the table's `opt-out` and `hardened` columns
+  bracket it, since `dual-mac` costs one extra tag pass.
+
+Latency is not throughput divided by size, because the fixed per-message cost
+dominates at the small end: at 64 bytes the default build is 0.36 us cheaper *per
+call* on encryption and answers sooner on the round trip, and it is the slower of
+the two only around 1 KiB, where `Poly1305`'s four-block AVX2 path is at its best
+and BLAKE3 has little to batch. **Decryption at 64–256 bytes is a tie** (1.12x,
+0.94x — inside the noise floor either way), and that tie is what the `hardened`
+decision costs.
 
 Two structural properties bound what a caller can do with that latency, and both
 follow from the construction rather than from this implementation:
@@ -849,7 +890,8 @@ follow from the construction rather than from this implementation:
   been hashed.** The tag covers the plaintext, the encryption key is derived from
   the tag, and only then does the ChaCha20 pass start: two serialized passes, no
   early output, and a single message's latency does not shrink with more cores.
-  It is still faster end to end — 393 us against 554 us at 1 MiB — because BLAKE3
+  It is still faster end to end — 379 us against 501 us at 1 MiB in the default
+  configuration — because BLAKE3
   hashes faster than ChaCha20 streams, but a caller cannot overlap the work with
   its own processing the way a one-pass AEAD allows.
 * **Decryption starts immediately but decides late.** The encryption key depends
@@ -874,8 +916,9 @@ none of it. For large messages, use the in-place API.
 
 **Every number above is the default build.** `ultra` is a different trade and is
 measured separately in its own section: its independent second implementation costs
-1.4x at 64 bytes and 9.2x at 1 MiB on decryption, because it is scalar and re-runs
-both passes. Nothing above changes if you turn `ultra` on and then off again — the
+2.7x at 64 bytes and 11.5x at 1 MiB on decryption, because it is scalar and re-runs
+the tag pass per byte (the figures are the `ultra` column of "The three
+configurations, measured"). Nothing above changes if you turn `ultra` on and then off again — the
 default build's machine code is untouched by the feature.
 
 **Where the remaining headroom is, and where it is not.** Measured, so that nobody

@@ -699,6 +699,65 @@ performance table is refreshed, which is the commit that re-measures anyway. Adv
 for those crates is unaffected — `cargo-deny` fails the Deep workflow if an advisory reaches the
 lockfile.
 
+### The three configurations are measured, and what a defence costs is now a number
+
+Three things asked for together, and they turned out to be one piece of work: a benchmark against
+RustCrypto's `chacha20poly1305`, run *per configuration* (opt-out, `hardened`, `ultra`), so that
+"every release has three configurations" is a statement with prices attached rather than a list of
+feature flags.
+
+**Measured, one `cargo bench` run per configuration** (`--warm-up-time 2 --measurement-time 4`,
+criterion median of 100 samples, 64 B to 1 MiB, shipped release profile, same host as before).
+The built-in control is the reference implementation: identical code in all three runs, and it
+measured 0.3%–7.5% apart between them — that is the noise floor, and the README now says so
+instead of leaving the reader to guess. Ratios against `XChaCha20Poly1305`, `hardened` (default):
+encrypt 1.44x at 64 B, 1.00x at 1 KiB, 1.32x at 1 MiB; decrypt 1.12x, 0.83x, 1.38x. What the
+configuration comparison *adds* is the price of each defence: `hardened`'s second gate is a fixed
+per-message cost on decrypt (0.88 → 1.05 us at 64 B, invisible at 1 MiB), and `ultra`'s witness is
+a per-byte cost on decrypt, because it is a scalar re-implementation (2.7x at 64 B, 4.0x at
+1 KiB, 10.1x at 64 KiB, 11.5x at 1 MiB — the round trip ends at 0.22x). Both tables in the README
+were replaced by these, whole, as the section's own rule requires.
+
+**Finding: the README claimed the witness runs "on every encrypt", and it does not.**
+`encrypt_in_place_detached` carries no encrypt-side cross-check; only the allocating `encrypt`
+does. It surfaced from the *benchmark*, not from reading: `ultra`'s in-place encryption measured
+the same as the default at 1 MiB (377 us against 379 us) while its decryption measured 11.5x
+slower — only possible if the encrypt path is not re-hashing the message with the scalar witness.
+The asymmetry is defensible (what an encrypt-side witness detects is a fault that produces a
+ciphertext the peer rejects: availability, not authenticity; and the check is a full per-byte
+re-hash, about +1.2 ms per MiB, on the API a caller picks for speed), so the fix is to state it
+rather than to close it in code:
+
+* the README's "What the witness is" now names the paths it covers and gives the reason for the
+  one it does not, with the measured cost of the check;
+* the fault table's witness row quotes the measured per-configuration numbers instead of an
+  unverified "+20% of the encrypt path's instructions", and says which API has the check;
+* `tests/ultra.rs::the_witness_is_called_from_exactly_these_entry_points` pins it both ways — a
+  witness call added to the in-place path fails the test with a message pointing at the two
+  documentation sites that must then change, and a call removed from `encrypt`, `decrypt` or
+  `decrypt_in_place_detached` fails it too. Verified non-vacuous by planting a `witness::` token
+  inside the in-place body;
+* the same round fixed the fault table's sweep scope ("the two entry points" now reads "the two
+  *decrypt* entry points — `decrypt` and `decrypt_in_place_detached`").
+
+**The release now carries the three configurations as artifacts, not as prose.** The release job
+gains two steps: it builds `--no-default-features`, default and `--features ultra` itself, and
+asserts that the `test` matrix still names all three legs (a matrix entry dropped in a refactor
+would otherwise take a configuration out of the release gate silently — the same source-shape
+idea the tests use, applied to the workflow); and it writes `CONFIGURATIONS.md`, which is attached
+to the release next to the `.crate` and is *required* — the publish step fails if it is missing.
+The release notes carry the same table. One `.crate` file, three supported configurations, each
+built and tested at the tagged commit.
+
+**Bug-hunting round, run alongside the above.** A longer fuzz (2,212,603 executions in 481 s
+across 8 workers, no crash, 1400 edges covered), the broad differential at 4000 random vectors
+and again at 1500 with `--features pure` (zero mismatches), an exhaustive witness sweep — every
+length to 4200 bytes plus the chunk-count boundaries to 200 chunks — as a new test, `clippy -D
+warnings` over all targets, and a build matrix of the feature combinations CI does not cover
+(`--no-default-features --features locked`, `--features dual-mac` alone, `--no-default-features
+--features rng`, `locked,rng` and `--no-default-features --features locked,rng`): all clean. The
+one defect found is the witness-coverage finding above.
+
 ### Zeroization: two copies the wipes could not reach
 
 Fixed in every configuration, because these are copies the wipes should already have

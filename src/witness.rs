@@ -692,4 +692,44 @@ mod tests {
             assert_eq!(mine, theirs, "keyed BLAKE3 XOF disagrees at length {len}");
         }
     }
+
+    /// The same comparison at *every* length up to four chunks and a bit.
+    ///
+    /// The list above is enough to catch a wrong key schedule — it did, at the empty input —
+    /// but not enough for the tree. This witness keeps a chaining-value stack and merges when
+    /// the chunk count's low bits are zero, so the merge *pattern* depends on the number of
+    /// trailing zeros of the chunk count: a bug can live at 3072 bytes (three chunks) while
+    /// 2048 (two) and 4096 (four) both pass. Enumerating every length to 4200 removes that
+    /// whole class where boundaries are dense, and the chunk-count powers of two above it
+    /// (up to 200 chunks) cover the deepest merges the stack can perform.
+    #[test]
+    fn blake3_keyed_xof_agrees_at_every_length() {
+        const MAX: usize = 204_807; // 200 chunks and 7 bytes
+        let data: Vec<u8> = (0..MAX).map(|i| (i % 251) as u8).collect();
+        let mut mine = [0u8; 65];
+        let mut theirs = [0u8; 65];
+
+        fn compare(data: &[u8], mine: &mut [u8; 65], theirs: &mut [u8; 65], len: usize) {
+            let key = [0x11u8; 32];
+            keyed_xof(&key, &[&data[..len]], mine);
+            crate::blake3_keyed_xof(&key, &data[..len], theirs);
+            assert_eq!(*mine, *theirs, "keyed BLAKE3 XOF disagrees at length {len}");
+        }
+
+        for len in 0..=4200 {
+            compare(&data, &mut mine, &mut theirs, len);
+        }
+        // Chunk-count boundaries (1024·k) at the block and chunk edges.
+        for chunks in [1usize, 2, 3, 4, 7, 8, 15, 16, 31, 32, 63, 64, 127, 128, 200] {
+            let base = chunks * 1024;
+            for delta in [0usize, 1, 63, 64, 65] {
+                if base + delta <= MAX {
+                    compare(&data, &mut mine, &mut theirs, base + delta);
+                }
+                if base >= delta {
+                    compare(&data, &mut mine, &mut theirs, base - delta);
+                }
+            }
+        }
+    }
 }

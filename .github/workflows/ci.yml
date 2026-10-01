@@ -506,6 +506,67 @@ jobs:
           cargo package
           ls -l target/package/*.crate
 
+      # Every release has three configurations, and this step is what makes that a
+      # claim rather than a hope. Features are compile-time, so "three versions" for a
+      # library means three *supported configurations*, each built here, each tested by
+      # a named leg of the `test` matrix, and each described in the artifact attached
+      # below:
+      #
+      #   * `opt-out`   --release --no-default-features
+      #   * `hardened`  --release                          (the default)
+      #   * `ultra`     --release --features ultra
+      #
+      # Two things are checked. First, the three build *in this job*, from the same
+      # commit the release is cut from: the matrix proved they pass their tests, this
+      # proves they are buildable in the release environment too. Second, the `test`
+      # matrix still names all three -- `needs: [test]` only means something while those
+      # legs exist, and a matrix entry dropped in a refactor would otherwise take a
+      # configuration out of the gate silently. The same idea as the source-shape tests
+      # in `tests/`, applied to the workflow itself.
+      - name: build the three configurations, and prove the matrix still names them
+        run: |
+          set -euo pipefail
+          cargo build --release --no-default-features
+          cargo build --release
+          cargo build --release --features ultra
+          for leg in 'profile: release, default features' \
+                     'profile: release, no default features' \
+                     'profile: release, ultra'; do
+            if ! grep -Fq "$leg" .github/workflows/ci.yml; then
+              echo "::error::the test matrix no longer contains '$leg', so this release would not be gated on that configuration"
+              exit 1
+            fi
+            echo "matrix leg present: $leg"
+          done
+
+      - name: write the configuration manifest
+        run: |
+          set -euo pipefail
+          short="$(git rev-parse --short=12 HEAD)"
+          cat > target/CONFIGURATIONS.md <<EOF
+          # The three configurations of this release
+
+          Built and tested from commit \`${short}\`. Features are compile-time, so all three come
+          from the *same* \`.crate\` file; what differs is what the compiler includes.
+
+          | Configuration | Cargo | What it adds |
+          | --- | --- | --- |
+          | \`opt-out\` | \`--no-default-features\` | Nothing: one accept/reject comparison. The fault-model boundary is the README's "What is not defended against" table. |
+          | \`hardened\` (default) | \`--release\` | Two independently recomputed gates with separate branches, fail-closed, through \`subtle\`. |
+          | \`ultra\` | \`--features ultra\` | Everything above plus the independent second implementation cross-checking the tag on both decrypt paths and on the allocating \`encrypt\` (the in-place \`encrypt_in_place_detached\` carries no cross-check — see README, "What the witness is"), two differently-written comparisons, and the \`locked\`/\`rng\`/\`dual-mac\` layers. |
+
+          Each row is gated on a named leg of the \`test\` matrix at this commit
+          (\`release, default features\`, \`release, no default features\`, \`release, ultra\`), plus the
+          cross-target and qemu executions, the differential fixture against the independent
+          reference, and the formal proofs in \`formal.yml\` (which are not a release gate).
+
+          The wire format is **identical across the three**: the KATs, the differential fixture and
+          the accelerated-path corpus pin the same bytes in every configuration. What changes is
+          the fault model and the cost; per-configuration performance against RustCrypto's
+          \`chacha20poly1305\` is in \`README.md\`, "The three configurations, measured".
+          EOF
+          cat target/CONFIGURATIONS.md
+
       # The tag is the commit, as requested: an immutable, unambiguous pointer
       # at exactly the tree that passed CI. A *moving* tag such as `latest`
       # would silently change what it points at, which is the wrong property for
@@ -529,7 +590,15 @@ jobs:
             echo "::error::no .crate artifact found to attach"
             exit 1
           fi
-          echo "artifacts to attach: ${crates[*]}"
+          # The configuration manifest is a *required* artifact: it is the statement that
+          # this release is the three-configuration release, and a release that quietly
+          # shipped without it would be the failure mode this whole step exists to stop.
+          manifest=target/CONFIGURATIONS.md
+          if [ ! -s "$manifest" ]; then
+            echo "::error::$manifest is missing or empty; the configuration step did not run"
+            exit 1
+          fi
+          echo "artifacts to attach: ${crates[*]} ${manifest}"
 
           # Idempotent in the strong sense: if the release already exists, attach
           # the artifact to it rather than reporting "nothing to do". This path is
@@ -537,12 +606,25 @@ jobs:
           # thing that would go unnoticed for a long time.
           if gh release view "$tag" >/dev/null 2>&1; then
             echo "release $tag already exists; uploading artifact"
-            gh release upload "$tag" "${crates[@]}" --clobber
+            gh release upload "$tag" "${crates[@]}" "$manifest" --clobber
             exit 0
           fi
 
           cat > notes.md <<EOF
           Snapshot of \`main\` at commit [\`${short}\`](${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/commit/${GITHUB_SHA}).
+
+          **Three configurations.** The attached \`.crate\` is one file and three supported
+          configurations, because features are compile-time. Each was built *and* tested at
+          this commit, each by a named leg of the CI matrix, and each is described in the
+          attached [\`CONFIGURATIONS.md\`](./CONFIGURATIONS.md):
+
+          | | Cargo | Adds |
+          | --- | --- | --- |
+          | \`opt-out\` | \`--no-default-features\` | nothing (one comparison) |
+          | \`hardened\` (default) | \`--release\` | two independent gates, fail-closed |
+          | \`ultra\` | \`--features ultra\` | + witness cross-check and the \`locked\`/\`rng\`/\`dual-mac\` layers |
+
+          The wire format is identical in all three; only the fault model and the cost differ.
 
           Gated by CI on this commit: formatting and lints clean, the full test
           suite green in release and debug, three cross-targets type-checked, the
