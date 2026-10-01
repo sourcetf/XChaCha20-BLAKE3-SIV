@@ -4394,8 +4394,18 @@ mod tests {
     #[test]
     fn the_reported_stack_requirement_is_sufficient() {
         let need = stack_requirement_bytes();
-        // A margin for the test's own frames, the key/nonce locals and the allocator.
-        let stack = need + 64 * 1024;
+        // The margin covers the *ordinary* frames — the derivations, the SIMD kernels, the
+        // allocator, this test's own closure — which are not what the constant describes, and
+        // which are several times larger in a debug build. Sizing it as one number for both is
+        // how this test first failed: 16 KiB + 64 KiB overflowed in CI's `debug, all features`
+        // job (SIGABRT, "has overflowed its stack"), because unoptimized frames and the `pure`
+        // BLAKE3 backend are far larger than the release measurement the README quotes.
+        let margin = if cfg!(debug_assertions) {
+            1024 * 1024
+        } else {
+            64 * 1024
+        };
+        let stack = need + margin;
         let handle = std::thread::Builder::new()
             .stack_size(stack)
             .spawn(|| {
