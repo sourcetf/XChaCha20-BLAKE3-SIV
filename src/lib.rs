@@ -2086,42 +2086,46 @@ pub fn encrypt_in_place_detached(
 
 /// The second gate's comparison of the two volatile copies.
 ///
-/// Always `subtle`'s loop, both ways round; under `dual-mac` it is `AND`-ed with
-/// `ct_eq_independent`, a *differently written* constant-time comparison.
+/// `AND`-ed from two *differently written* constant-time comparisons: `subtle`'s byte loop
+/// (both ways round) and [`ct_eq_independent`]'s eight-bytes-at-a-time fold.
 ///
-/// The reason is a boundary worth naming: with only `hardened`, every comparison in
-/// every gate is the same `subtle` byte loop, so one fault that shortens that loop
-/// makes them all say "equal" for different tags — one fault reaching two gates — and
-/// `dual-mac`'s recomputations do not help, because they are compared through the same
-/// function again. Measured before this existed: a forgery accepted after 2,573
-/// attempts with the comparison cut to two bytes, in both the default and the `ultra`
-/// build. With the second, differently-written comparison in place, one fault can only
-/// disarm one of them, so a forgery needs two faults.
+/// The reason is a boundary worth naming: every other comparison in every gate is the same
+/// `subtle` byte loop, so one fault that shortens that loop would make them all say "equal"
+/// for different tags — one fault reaching two gates — and `dual-mac`'s recomputations do not
+/// help either, because they are compared through the same function again. Measured before
+/// the second comparison existed: a forgery accepted after **2,573 attempts** with the
+/// comparison cut to two bytes, in both the default and the `ultra` build; with both shapes in
+/// place, the same hand-made fault yields **no forgery in 2,000,000 attempts**. Two faults
+/// still defeat both, which is the boundary the README's table states.
 ///
-/// This is an `ultra` defence. `hardened` on its own keeps the plain form, and the
-/// README's fault table states that boundary rather than implying the two gates are
-/// independent witnesses when they are not.
+/// **The second comparison is now in every configuration, not only `dual-mac`.** It used to be
+/// gated on `dual-mac` — so the *default* build had one comparison shape and one shortened-loop
+/// fault was enough — until the costs were put side by side: this is one extra 65-byte fold,
+/// **measured at 1.4 ns** (0.1% of a 64-byte decryption, 1.05 us) against a measured change from
+/// "forgery after 2,573 attempts" to "none in 2,000,000". A defence with that ratio belongs in
+/// the default.
 #[inline(always)]
 #[cfg(feature = "hardened")]
 fn second_gate_comparison(a: &[u8; TAG_LEN], b: &[u8; TAG_LEN]) -> subtle::Choice {
     let plain = a.ct_eq(b) & b.ct_eq(a);
-    #[cfg(feature = "dual-mac")]
     let also = ct_eq_independent(a, b);
-    #[cfg(not(feature = "dual-mac"))]
-    let also = subtle::Choice::from(1);
     plain & also
 }
 
-#[cfg(feature = "dual-mac")]
 /// A second, independent constant-time equality over two tags.
 ///
 /// Deliberately a different *shape* from `subtle`'s comparison, which walks the
 /// bytes one at a time: this folds eight bytes at a time into a `u64` and tests
-/// the accumulator once. The reason is that both gates of the `hardened` decision
-/// otherwise call the *same* `subtle` loop, so a single fault that shortens that
-/// loop disarms both gates at once — one fault reaching two gates defeats the
-/// purpose of having two — and `dual-mac` does not help, because its two
-/// recomputations are compared through the same function again.
+/// the accumulator once. The reason is that every other comparison in the
+/// `hardened` decision calls the *same* `subtle` loop, so a single fault that
+/// shortens that loop would disarm the gates together — one fault reaching two
+/// gates defeats the purpose of having two.
+///
+/// Unconditional since the cost was measured: one 65-byte fold, tens of
+/// nanoseconds, in exchange for turning a hand-modelled shortened-loop forgery
+/// from "accepted after 2,573 attempts" into "none in 2,000,000". It was
+/// `dual-mac`-only before that comparison, which left the *default* build on one
+/// comparison shape.
 ///
 /// This is not a claim of fault-injection resistance. An adversary who can fault
 /// this loop *and* `subtle`'s has two faults and defeats both, which is what the
@@ -2133,6 +2137,7 @@ fn second_gate_comparison(a: &[u8; TAG_LEN], b: &[u8; TAG_LEN]) -> subtle::Choic
 /// `acc.ct_eq(&0)` is a single `u64` comparison with no loop of its own to
 /// shorten. `#[inline(never)]` keeps the compiler from merging it with the other
 /// comparison, which would put both gates back on shared code.
+#[cfg(feature = "hardened")]
 #[inline(never)]
 fn ct_eq_independent(a: &[u8; TAG_LEN], b: &[u8; TAG_LEN]) -> subtle::Choice {
     let mut acc = 0u64;

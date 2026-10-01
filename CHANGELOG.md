@@ -883,6 +883,43 @@ down why the others are not:
   barrier here would serialize a comparison whose outcome is public. §8.5 now says so per row,
   and the faults row records the one piece of the AMD-code idea that *is* in: the tag above.
 
+### One defence was cheap enough to leave `ultra`: the second comparison shape is now the default
+
+Asked which items are expensive and which are cheap, and whether anything cheap belongs in
+`hardened`. Costs, measured on this host, for everything the crate does at runtime:
+
+| Defence | Cost | Where it is |
+| --- | --- | --- |
+| Constant-time discipline, no tables, no secret indices | free (a design property) | all three |
+| Volatile wipes | free | all three |
+| Second gate (two recomputed comparisons, fail-closed) | +10.8% at 64 B, +0.4% at 1 MiB | `hardened` |
+| **Second comparison *shape* (8-byte fold vs `subtle`'s loop)** | **+1.4 ns per decryption (0.1% at 64 B)** | **was `dual-mac`-only; now every configuration** |
+| `deny_debugging` (`prctl`) | one syscall, once, opt-in | `locked` (ultra) |
+| Key integrity tag | +42 ns per use | `locked` (ultra) |
+| `mlock` + dump exclusion | ~7 µs once per key | `locked` (ultra) |
+| `dual-mac` (second independent tag recomputation) | +24–40% on decryption, per byte | `dual-mac` (ultra) |
+| `scrub_stack` | ~0.5–1 µs **and 16 KiB of stack** | `dual-mac` (ultra) |
+| `witness` (scalar second implementation) | 2.7x at 64 B, 11.5x at 1 MiB | `witness` (ultra) |
+
+So: exactly one item was cheap enough to move into the default, and it moved.
+**`ct_eq_independent` — the differently-written constant-time comparison — is no longer gated on
+`dual-mac`.** It costs **1.4 ns**, and the defence it buys was measured by hand: with a single
+comparison shape, a fault that shortens it yields a forgery after 2,573 attempts; with both
+shapes, none in 2,000,000. A defence with that ratio does not belong behind an opt-in feature.
+
+Why the rest did not move, in cost order: `dual-mac` and `witness` are per-byte (a second hash
+pass and a scalar re-implementation); `scrub_stack` is cheap in *time* but reserves 16 KiB of
+stack per call, which can fault the very thread it protects, so it stays opt-in; `deny_debugging`
+is free but is *process* policy (it removes core dumps for the whole process) and stays a call
+the application makes; the key integrity tag protects a page that only `locked` has; and `rng` is
+a dependency, kept optional for `no_std` users.
+
+`tests/decision_scope.rs::the_second_gate_uses_two_comparison_shapes_in_every_configuration`
+pins the new default: the fold comparison must be unconditional, the `dual-mac`-only placeholder
+must not come back, and the fold must not delegate to `subtle` (or there would be one shape
+wearing two hats). The README's fault table row for a shortened comparison, and the layer table
+row it used to carry under `dual-mac`, moved with it.
+
 ### Zeroization: two copies the wipes could not reach
 
 Fixed in every configuration, because these are copies the wipes should already have

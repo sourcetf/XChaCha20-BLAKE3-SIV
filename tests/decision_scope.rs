@@ -280,6 +280,52 @@ fn the_hardened_second_gate_is_recomputed() {
     );
 }
 
+/// The second gate compares through two *differently written* comparisons, in every
+/// configuration — not only under `dual-mac`.
+///
+/// This is a boundary that was wrong once and is cheap to keep right: the differently written
+/// comparison (an 8-byte fold into a `u64`, against `subtle`'s per-byte loop) used to be gated
+/// on `dual-mac`, which left the *default* build with a single comparison shape — so one fault
+/// that shortened that shape disarmed every gate at once, and the hand-measured result was an
+/// accept after 2,573 attempts. With both shapes present the same hand-made fault produced no
+/// forgery in 2,000,000 attempts, for **1.4 ns** per decryption, which is why the fold is now
+/// unconditional.
+///
+/// The assertion is deliberately about the *shape* rather than the call site: the defence used
+/// to live in a `#[cfg]`-selected arm, and a `#[cfg]` is exactly what a build configuration
+/// silently drops.
+#[test]
+fn the_second_gate_uses_two_comparison_shapes_in_every_configuration() {
+    let body = brace_blocks("fn second_gate_comparison(");
+    assert_eq!(body.len(), 1, "one `second_gate_comparison` expected");
+    let body = &body[0];
+
+    assert!(
+        body.contains("a.ct_eq(b) & b.ct_eq(a)"),
+        "the `subtle` comparison must stay: it is the shape the fold is independent of:\n{body}"
+    );
+    assert!(
+        body.contains("let also = ct_eq_independent(a, b);"),
+        "the fold comparison must be unconditional -- a `#[cfg]` here is how the default build \
+         lost this defence before:\n{body}"
+    );
+    assert!(
+        !body.contains("subtle::Choice::from(1)"),
+        "the `dual-mac`-only placeholder (`Choice::from(1)`) must not come back: it is how the \
+         default build ended up with a single comparison shape:\n{body}"
+    );
+
+    // The fold must be a different *shape* from `subtle`'s loop rather than a call to it, or
+    // the two "comparisons" are one comparison wearing two hats.
+    let fold = brace_blocks("fn ct_eq_independent(");
+    assert_eq!(fold.len(), 1, "one `ct_eq_independent` expected");
+    assert!(
+        fold[0].contains("u64::from_le_bytes") && fold[0].contains("acc |= x"),
+        "the fold must accumulate 8-byte words into one comparison:\n{}",
+        fold[0]
+    );
+}
+
 /// A skipped decision call must leave a rejection standing.
 ///
 /// The outcome is written *through* `out`, which the caller initialises before the
