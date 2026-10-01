@@ -787,6 +787,40 @@ replay, an equality oracle, a length leak — are the protocol's business, not a
 discussed. No numbers were duplicated in the process: the fault figures stay in README's fault
 table, the collision and target bounds stay in §4.5, and §8 names them.
 
+### `ultra` against the attacks it does not answer: one more is now answered in software
+
+Asked which of §8's "not defended" rows a configuration could be made to answer. The honest
+answer splits three ways, and each part is now in the document rather than in a reply:
+
+* **Answerable in software, and now answered**: a **debugger**. The kernel already enforces the
+  policy — `PTRACE_MODE_ATTACH` fails for a non-dumpable process even from the same user, and
+  `/proc/<pid>/mem` goes with it — so `locked::deny_debugging()` issues `prctl(PR_SET_DUMPABLE,
+  0)` and the README's layer table gains the row. It is **opt-in, not automatic even under
+  `ultra`**, because it is *process* policy: a library that silently removed core dumps and
+  blocked `strace`/`gdb` for its host would break crash reporting and the operator's own tooling.
+  `deny_debugging_is_enforced_by_the_kernel_and_reversible` reads the flag back from the kernel,
+  observes `/proc/self/mem` being refused (measured: it is), and restores the flag on every path,
+  because leaving the shared test binary non-dumpable would silently cost every later test its
+  core dump. Root, `CAP_SYS_PTRACE`, a hypervisor or a probe are unaffected, and the docs say so.
+* **Not answerable here, and the reason is now precise rather than a bare "not defended"**:
+  * *speculative execution* — this crate presents no known gadget (no secret-dependent index or
+    memory access; the one secret-dependent branch has a *public* outcome, so speculating past it
+    reveals what the caller learns anyway). What remains belongs to the CPU, the OS inside the
+    process's other code, and to power/frequency channels that constant-time code does not
+    address at all. A barrier added here would be theatre, so none was added.
+  * *power / EM* — masking is the known mitigation and is **not claimed**: 10–100x cost, a
+    compiler free to undo it, and a claim that cannot be falsified without a leakage-assessment
+    lab. That belongs in a separate feature with its own measurements, not in a defence list.
+  * *multiple / synchronized / laser faults, DFA* — software redundancy (which `ultra` already
+    has twice over) cannot cover a fault that hits both computations or the arithmetic beneath
+    them; the answers are a validated fault bench and hardware countermeasures, neither of which
+    exists here.
+  * *cold boot, Rowhammer, hypervisor, root* — memory encryption, ECC/TRR, isolation. A crate can
+    shrink the window (wipe early, lock pages, refuse to be debugged) and cannot close it.
+
+§8.2's rows now carry the reason instead of "stated", §8.3 prices the debugger row accordingly
+(root or `CAP_SYS_PTRACE` once the process refuses), and §8.4 has the three-way split above.
+
 ### Zeroization: two copies the wipes could not reach
 
 Fixed in every configuration, because these are copies the wipes should already have

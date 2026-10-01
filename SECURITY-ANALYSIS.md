@@ -1190,20 +1190,20 @@ target bounds are §4.5's, and each harness named in the last column is describe
 | --- | --- | --- | --- | --- |
 | Timing: branch or index on a secret | defended — constant-time by construction | defended; more constant-time work | defended | ctgrind in three configurations, `tests/variable_latency.rs`, the timing screens (advisory in CI, strict under `verify.sh --deep`) |
 | Cache-timing (Prime+Probe, Flush+Reload, Evict+Time) | defended — no tables, no secret-dependent indices | same | same | `tools/cache_profile.sh` (counts invariant for two keys, both phases) |
-| Microarchitectural / speculative (Spectre family, port contention, execution-unit timing) | not defended | not defended | not defended | out of scope and stated as such (README) |
-| Power / EM (SPA, DPA, CPA, templates) | not defended | not defended | not defended | needs proximity and equipment; no countermeasure claimed |
+| Microarchitectural / speculative (Spectre family, port contention, execution-unit timing) | not defended | not defended | not defended | out of scope. Two separate statements, both worth keeping apart: this crate contributes **no known gadget** — the constant-time discipline removes secret-dependent branches and indices, and the one secret-dependent branch (the decision) has a *public* outcome, so speculating past it reveals what the caller learns anyway (ctgrind, `cache_profile.sh`) — and no software in the process can bound what the CPU's speculative machinery does with *other* code, nor what a power/frequency channel (Hertzbleed-class) leaks from constant-time code. Answered by CPU and OS mitigations, not here |
+| Power / EM (SPA, DPA, CPA, templates) | not defended | not defended | not defended | needs proximity and equipment. Software masking is the known mitigation, and it is not claimed here: it costs 10–100x, the compiler can undo it, and without a leakage assessment (TVLA on real hardware) a claim of resistance would be unfalsifiable — which is the opposite of this document's standard |
 | Single fault, decision *value* | **not defended** — accepting sites exist | defended: two gates, separate branches, fail-closed | defended | README fault table; `tools/fi_check.sh` rows per configuration |
 | Single fault, decision *instruction* (skip or corrupt a byte/bit) | **not defended** (3 accepting in the bit model, inside the decision) | 0 | 0 | `tools/fi_instruction.sh`, both models |
 | Fault that rewrites the stored tag | not defended | not defended | **defended** (`dual-mac`: an independent recomputation compared against both values) | `dual-mac-blocks-tag-substitution` row |
 | Fault in the *shared derivation* (tag, keyed BLAKE3, SIMD) | not defended | not defended | **detected** by the second implementation — with a stated boundary: both decrypt paths and the allocating `encrypt`; the in-place encrypt carries no cross-check | README "What the witness is"; `tests/ultra.rs`'s source-shape test |
-| Two independent faults, synchronized glitch, laser injection | not defended | not defended | not defended | stated boundary; needs hardware countermeasures (dual-rail, HSM) |
-| Fault-assisted key recovery (DFA) | not defended | not defended | not defended | stated |
-| Combined fault + side channel | not defended | not defended | not defended | stated |
-| Rowhammer-class hardware faults | not defended | not defended | not defended | hardware |
+| Two independent faults, synchronized glitch, laser injection | not defended | not defended | not defended | redundancy in software cannot cover a fault that hits both computations or the hardware underneath them; the countermeasures are hardware (dual-rail logic, an HSM, a validated FI bench), and no software claim is made |
+| Fault-assisted key recovery (DFA) | not defended | not defended | not defended | same: an attacker with repeatable, precise faults is outside every software model used here (Miri, Kani, ctgrind, TSAN, libFuzzer all assume correct execution) |
+| Combined fault + side channel | not defended | not defended | not defended | the composition of two out-of-scope models |
+| Rowhammer-class hardware faults | not defended | not defended | not defended | ECC or TRR in hardware; a library can neither detect nor prevent it |
 | Swap / hibernation exposure of a key | not defended | not defended | `locked`: `mlock` on the `LockedKey` page | `tests/locked.rs`, read back from the kernel's `VmLck` |
 | Core dumps | not defended | not defended | `locked`: `MADV_DONTDUMP`, and `MADV_DODUMP` restores inclusion on unlock | the `VmFlags` test |
-| Cold boot / memory remanence | not defended | not defended | not defended | needs encryption at rest |
-| Debugger, ptrace, `/proc/self/mem` | not defended | not defended | not defended — a debugger reads the live page, lock or no lock | stated |
+| Cold boot / memory remanence | not defended | not defended | not defended | memory encryption at rest, or a key that never exists in the host's RAM (an HSM); the window can be narrowed (wipe, lock) and is not closed |
+| Debugger, ptrace, `/proc/<pid>/mem` | not defended | not defended | **opt-in defence**: `locked::deny_debugging()` sets `PR_SET_DUMPABLE = 0`, after which the kernel refuses `PTRACE_MODE_ATTACH` and `/proc/<pid>/mem` even for the same user without `CAP_SYS_PTRACE`. Not automatic — it is process-wide policy that also removes core dumps — and root (or `CAP_SYS_PTRACE`, or a hypervisor) is unaffected | `deny_debugging_is_enforced_by_the_kernel_and_reversible`, which reads the flag back from the kernel and observes `/proc/self/mem` being refused |
 | Wipe optimised away by the compiler | mitigated (volatile stores) | same | same | `zeroize_slice`, Miri tests |
 | UB / miscompilation | mitigated | mitigated | mitigated, **and** a divergence between the two implementations is caught — though a systematic miscompile hits both | Miri under two aliasing models, Kani |
 | Dependency supply chain | pinned lockfile, `cargo-deny`, Dependabot | same | same | CI + Deep workflow |
@@ -1229,7 +1229,7 @@ administratively have.
 | Power / EM | thousands to millions of traces for ARX | proximity plus ≈ 10 k€ of equipment |
 | Single voltage or clock glitch | low | physical access plus a few hundred dollars of hardware |
 | Laser or EM fault injection | high | a laboratory |
-| Debugger / process memory | trivial with privileges | root or `ptrace` |
+| Debugger / process memory | trivial with privileges — **unless** the process called `locked::deny_debugging()`, after which `ptrace` and `/proc/<pid>/mem` need root or `CAP_SYS_PTRACE` | root or `ptrace`, or a kernel-level vantage point |
 | Cold boot | minutes | physical access and cooling |
 | Rowhammer | medium | specific DRAM and co-residency |
 | Supply chain (unpinned dependencies or actions) | low | —, and mitigated here (pinned SHAs, lockfile, `cargo-deny`) |
@@ -1253,6 +1253,28 @@ collision turning a repeated nonce into a two-time pad — costs `2^128` and is 
 the deployment decision that matters most is not `opt-out` versus `ultra`; it is whether the
 protocol manages nonces, freshness and lengths, which is why those four rows point at
 `README.md`'s "What this crate cannot fix for you" and at `SECURITY.md`'s out-of-scope list.
+
+**Which of these could a configuration actually be made to answer?** Asked directly, because the
+table's "not defended" is not the same statement as "unanswerable in software". Taking the rows
+that no configuration currently covers:
+
+* **Debugger / ptrace** — *done*, above: `PR_SET_DUMPABLE` is the kernel's own enforcement and a
+  library can ask for it. It is opt-in because it is process policy.
+* **Speculative execution** — *partly structural already*: this crate has no secret-dependent
+  index or memory access, so it presents no known Spectre-v1 gadget, and the one secret-dependent
+  branch has a public outcome. What remains is not this crate's to fix (the CPU's speculation, the
+  OS's mitigations, other code in the process), so a barrier added here would be theatre.
+* **Power / EM** — *software mitigations exist and are not claimed*: masking with fresh
+  randomness is the known answer, at 10–100x cost, with the compiler free to undo it, and with a
+  claim that cannot be falsified without a leakage-assessment lab. The honest place for that is a
+  separate feature with its own measurements, not a line in `ultra`.
+* **Multiple / laser faults, DFA** — *bounded by hardware*: software redundancy (which `ultra`
+  already has twice over) cannot cover a fault that hits both computations or the arithmetic
+  beneath them. A validated fault bench and hardware countermeasures are the only answers, and
+  neither exists in this repository.
+* **Cold boot, Rowhammer, a hypervisor, root** — *not software at all*: memory encryption, ECC
+  or TRR, and isolation respectively. A crate can shrink the window (wipe early, lock pages,
+  refuse to be debugged) and cannot close it.
 
 ---
 

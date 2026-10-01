@@ -95,8 +95,13 @@ const ALLOWED: &[(&str, &str)] = &[
 /// as keywords, because its skip test was `starts_with("impl ")`. Both are impl headers, not
 /// loops; [`is_impl_header`] now recognises all three spellings, and the four phantom counts
 /// are gone.
+///
+/// `if` moved 31 -> 34 when `locked` gained `deny_debugging`/`is_dumpable`: two `if !ok(…)`
+/// returns and one `if !ok(v) { … } else { … }`, every one of them branching on a **syscall
+/// return value** (an errno, a public fact about the environment) and never on key, nonce,
+/// AAD or message content — the same class as `random::fill`'s error branch above.
 const CONTROL_FLOW: &[(&str, usize)] = &[
-    ("if", 31),
+    ("if", 34),
     ("while", 10),
     ("for", 26),
     ("loop", 0),

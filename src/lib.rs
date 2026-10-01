@@ -879,6 +879,16 @@ pub mod locked {
         #[cfg(not(target_arch = "x86_64"))]
         const NR_MADVISE: usize = 233;
 
+        /// `prctl(2)`: 157 on x86_64, 167 in the generic table aarch64 uses.
+        #[cfg(target_arch = "x86_64")]
+        const NR_PRCTL: usize = 157;
+        #[cfg(not(target_arch = "x86_64"))]
+        const NR_PRCTL: usize = 167;
+
+        /// `PR_SET_DUMPABLE` / `PR_GET_DUMPABLE` (`linux/prctl.h`).
+        const PR_SET_DUMPABLE: usize = 4;
+        const PR_GET_DUMPABLE: usize = 3;
+
         /// `MADV_DONTDUMP`: exclude the range from core dumps.
         ///
         /// **16**, from `asm-generic/mman-common.h` (`#define MADV_DONTDUMP 16`),
@@ -1029,6 +1039,59 @@ pub mod locked {
             unsafe {
                 let _ = syscall2(NR_MUNLOCK, ptr as usize, len);
                 let _ = syscall3(NR_MADVISE, start, end - start, MADV_DODUMP);
+            }
+        }
+
+        /// Make this process **non-dumpable**: another process can no longer `ptrace` it, read
+        /// `/proc/<pid>/mem`, or obtain its memory through a core dump, unless it holds
+        /// `CAP_SYS_PTRACE` (or is otherwise privileged).
+        ///
+        /// This is the one entry in this crate's attack-class table that *is* a software
+        /// measure: every other class in SECURITY-ANALYSIS.md §8.2 that the configurations do
+        /// not answer — power, EM, laser faults, cold boot, Rowhammer, speculative execution —
+        /// is a property of the machine, and no line of Rust changes it. A debugger is not: the
+        /// kernel enforces this flag, and `PTRACE_MODE_ATTACH` fails for a non-dumpable process
+        /// even from the same user. `prctl(PR_SET_DUMPABLE, 0)` is what `sshd`, `sudo` and every
+        /// setuid program set for the same reason.
+        ///
+        /// **It is not called automatically, not even by `ultra`, because it is *process*
+        /// policy rather than crate policy.** A library that silently makes its host
+        /// un-debuggable and un-dumpable breaks crash reporters, `strace`, and the operator's
+        /// own tooling — that is a decision for the application, so it is one call the caller
+        /// makes deliberately. What it does *not* do, stated plainly: an attacker with root (or
+        /// `CAP_SYS_PTRACE`), a hypervisor, or a hardware probe is unaffected, and a process that
+        /// was already being traced keeps its tracer.
+        ///
+        /// Returns the previous dumpable state, so a caller can restore it (which is what the
+        /// test does) — the value is `0` or `1`, or a negative errno on failure.
+        pub fn deny_debugging() -> Result<u32, isize> {
+            // SAFETY: `prctl` with `PR_SET_DUMPABLE` takes an integer in `arg2` and reads no
+            // pointer; `syscall2` passes it in the second argument slot.
+            let previous = unsafe { syscall2(NR_PRCTL, PR_GET_DUMPABLE, 0) };
+            if !ok(previous) {
+                return Err(previous);
+            }
+            // SAFETY: as above.
+            let set = unsafe { syscall2(NR_PRCTL, PR_SET_DUMPABLE, 0) };
+            if !ok(set) {
+                return Err(set);
+            }
+            Ok(previous as u32)
+        }
+
+        /// Read the process's dumpable flag: `true` (1) or `false` (0), `None` if the kernel
+        /// refuses to say.
+        ///
+        /// Exists so that [`deny_debugging`] is testable without a second process to attack —
+        /// and so a caller can check the state it inherited rather than assume it.
+        pub fn is_dumpable() -> Option<bool> {
+            // SAFETY: `PR_GET_DUMPABLE` reads no pointer and writes none; the syscall returns
+            // the flag itself, or a negative errno.
+            let v = unsafe { syscall2(NR_PRCTL, PR_GET_DUMPABLE, 0) };
+            if !ok(v) {
+                None
+            } else {
+                Some(v != 0)
             }
         }
 
@@ -1204,7 +1267,7 @@ pub mod locked {
         target_os = "linux",
         any(target_arch = "x86_64", target_arch = "aarch64")
     ))]
-    pub use imp::{lock_range, locked_bytes, unlock_range};
+    pub use imp::{deny_debugging, is_dumpable, lock_range, locked_bytes, unlock_range};
 
     /// Elsewhere locking is unsupported: `lock_range` reports `ENOSYS` rather than
     /// pretending, so a caller cannot mistake a no-op for protection.
@@ -1233,6 +1296,27 @@ pub mod locked {
         any(target_arch = "x86_64", target_arch = "aarch64")
     )))]
     pub fn locked_bytes() -> Option<u64> {
+        None
+    }
+
+    /// Unsupported on this target: `ENOSYS`, and deliberately not a silent `Ok`. Making a
+    /// process un-debuggable is Linux's `prctl`; elsewhere the caller must use the platform's
+    /// own mechanism, and returning success here would tell it the process is protected when
+    /// it is not.
+    #[cfg(not(all(
+        target_os = "linux",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    )))]
+    pub fn deny_debugging() -> Result<u32, isize> {
+        Err(-38) // ENOSYS
+    }
+
+    /// Unsupported on this target: `None`, because there is no flag to read.
+    #[cfg(not(all(
+        target_os = "linux",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    )))]
+    pub fn is_dumpable() -> Option<bool> {
         None
     }
 

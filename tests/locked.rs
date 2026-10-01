@@ -14,7 +14,7 @@
 
 #![cfg(feature = "locked")]
 
-use xchacha20_blake3_siv::locked::{LockedKey, SUPPORTED};
+use xchacha20_blake3_siv::locked::{deny_debugging, is_dumpable, LockedKey, SUPPORTED};
 use xchacha20_blake3_siv::{decrypt, encrypt};
 
 const KEY: [u8; 32] = [0x11u8; 32];
@@ -432,4 +432,124 @@ fn a_locked_key_can_move_to_another_thread() {
         (first, deref_first)
     });
     assert_eq!(handle.join().unwrap(), (KEY[0], KEY[0]));
+}
+
+/// `deny_debugging` changes what the *kernel* allows, and the change can be undone.
+///
+/// This is the one attack class from `SECURITY-ANALYSIS.md` §8.2 that a library can answer in
+/// software. Power, EM, laser faults, cold boot, Rowhammer and speculative execution are
+/// properties of the machine; ptrace is not — the kernel refuses `PTRACE_MODE_ATTACH` for a
+/// non-dumpable process even from the same user, and `/proc/<pid>/mem` goes with it.
+///
+/// The flag is read back from the kernel (`PR_GET_DUMPABLE`) rather than trusted from our own
+/// bookkeeping, and **every path restores it**: this test runs inside the shared test binary,
+/// and leaving it non-dumpable would remove core dumps for every other test in the process and
+/// stop `strace`/`gdb` from attaching to a run that is failing — which is exactly when someone
+/// wants them.
+#[test]
+fn deny_debugging_is_enforced_by_the_kernel_and_reversible() {
+    let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+
+    if !SUPPORTED {
+        eprintln!("SKIPPED: prctl is not wired for this target/architecture");
+        return;
+    }
+
+    let Some(before) = is_dumpable() else {
+        eprintln!("SKIPPED: the kernel would not report the dumpable flag here");
+        return;
+    };
+    if !before {
+        eprintln!(
+            "SKIPPED: the process is already non-dumpable, so this test cannot observe the \
+             transition (something in the environment set it)"
+        );
+        return;
+    }
+
+    let previous = match deny_debugging() {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!(
+                "SKIPPED: prctl(PR_SET_DUMPABLE, 0) refused with errno {}",
+                -e
+            );
+            return;
+        }
+    };
+    assert_eq!(previous, 1, "the previous state should have been dumpable");
+    assert_eq!(
+        is_dumpable(),
+        Some(false),
+        "the kernel still reports the process as dumpable after `deny_debugging`"
+    );
+
+    // The consequence, observed rather than assumed: a non-dumpable process cannot open its
+    // own memory through procfs. (Same-user `ptrace` fails for the same kernel check, which
+    // would take a second process to demonstrate.)
+    let mem = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open("/proc/self/mem");
+    let denied = mem.is_err();
+    if !denied {
+        // Not asserted: procfs behaviour differs between kernels and container
+        // configurations (an early kernel, or a namespace where the check passes). What *is*
+        // asserted is the flag, which is the kernel's own account of the policy.
+        eprintln!("NOTE: /proc/self/mem still opened while non-dumpable; flag check is the assert");
+    }
+
+    // Undo, and verify the undo. There is deliberately no public API for setting the flag
+    // back — a library that can make a process *more* debuggable is a footgun — so the test
+    // issues the syscall itself.
+    let restored = set_dumpable(1);
+    assert!(
+        restored,
+        "could not restore the dumpable flag: the rest of this test binary now runs without \
+         core dumps or ptrace"
+    );
+    assert_eq!(is_dumpable(), Some(true), "the restore did not take");
+}
+
+/// `prctl(PR_SET_DUMPABLE, value)`, for the test's own cleanup.
+///
+/// `#[cfg]`-selected inline asm rather than a crate API: see the comment above.
+fn set_dumpable(value: usize) -> bool {
+    #[cfg(target_arch = "x86_64")]
+    {
+        let ret: isize;
+        // SAFETY: prctl with PR_SET_DUMPABLE takes integers only and reads no pointer.
+        unsafe {
+            core::arch::asm!(
+                "syscall",
+                inlateout("rax") 157isize => ret,
+                in("rdi") 4usize,
+                in("rsi") value,
+                lateout("rcx") _,
+                lateout("r11") _,
+                options(nostack),
+            );
+        }
+        return ret >= 0;
+    }
+    #[cfg(target_arch = "aarch64")]
+    {
+        let ret: isize;
+        // SAFETY: as above; 167 is prctl in the generic syscall table.
+        unsafe {
+            core::arch::asm!(
+                "svc 0",
+                inlateout("x8") 167isize => _,
+                inlateout("x0") 4isize => ret,
+                in("x1") value,
+                options(nostack),
+            );
+        }
+        return ret >= 0;
+    }
+    #[allow(unreachable_code)]
+    {
+        let _ = value;
+        false
+    }
 }
