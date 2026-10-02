@@ -461,8 +461,13 @@ jobs:
     # not editable that way: it falls when code is added that nothing runs, which is
     # the change worth stopping.
     #
-    # 95 is deliberately loose against the measured 97.46% (1458/1496 lines, this
-    # command, `--all-features`, on the development host). It is not there to be
+    # 95 is deliberately loose against the measured 97.89% (113 of 5353 lines
+    # missed, this command, `--all-features`, on the development host, re-measured
+    # 2026-10-02). The line *total* moves when `cargo-llvm-cov` changes what it
+    # counts -- an earlier revision of this comment quoted 97.46% (1458/1496) from a
+    # much older tool -- which is why the claim is a percentage against this command
+    # rather than a line count that has to be edited whenever the tool is upgraded.
+    # It is not there to be
     # approached; it is there so that dropping a whole path -- a feature combination
     # that stops being tested, a module that loses its tests -- fails here instead of
     # showing up as a few points in an artifact nobody diffs.

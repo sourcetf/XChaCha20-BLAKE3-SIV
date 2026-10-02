@@ -14,10 +14,12 @@ reference point, since `XChaCha20Poly1305` has the same 24-byte nonce and the sa
 ChaCha20 core. Reproduce with `cargo bench --bench compare`, which drives both
 sides through `aead`'s in-place interface so neither pays for an API shape the
 other does not have. Release profile as shipped (`lto`, `codegen-units = 1`), AMD
-Ryzen 9 7945HX under WSL2, 3 bytes of AAD, and both sides on their native SIMD
-backends (BLAKE3's C/assembly kernels, Poly1305's AVX2 four-block path). The
-12-byte-nonce `ChaCha20Poly1305` is measured too and tracks `XChaCha20Poly1305`
-within about 4%, so it is not tabulated.
+Ryzen 9 7945HX under WSL2, 16 bytes of AAD (`b"associated data"`, the benchmark's
+single constant), and both sides on their native SIMD backends (BLAKE3's
+C/assembly kernels, Poly1305's AVX2 four-block path). The 12-byte-nonce
+`ChaCha20Poly1305` is measured too and tracks `XChaCha20Poly1305` closely — re-measured
+2026-10-02 over three passes and all nine sizes, the median cell differs by **1.4%** and the
+worst by 8.4% (256 B decryption) — so it is not tabulated.
 
 ## The three configurations, measured
 
@@ -26,7 +28,9 @@ the configuration order rotated between passes (`default, opt-out, ultra` then `
 default` then `opt-out, ultra, default`) so no configuration is always measured first or last;
 the reported figure per cell is the **median of the three passes**. Criterion's median of 100
 samples per pass, `--warm-up-time 2 --measurement-time 4`, sizes 64 B to 1 MiB, shipped release
-profile.
+profile. The benchmark also runs 700 B and 5000 B — the two non-power-of-two sizes that keep the
+SIMD tails visible — and they are not tabulated below; the seven sizes in the tables are the
+ones the noise floor was computed over.
 
 **Noise floor, measured rather than assumed**: the reference implementation is the *same code*
 in all nine runs (three configurations × three passes), so the spread of its own cells is the

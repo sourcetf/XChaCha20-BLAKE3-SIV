@@ -104,6 +104,69 @@ finding, and two more were in the suite:
   is in `tests/timing.rs`; `ci.yml`'s `--skip timing` for `security-*` is vestigial but harmless,
   and now says so).
 
+### Numeric consistency audit: every number in the documentation, re-derived
+
+The third audit of the round above — the one that checks *numbers* rather than code — did not
+return, so this round re-ran it by hand: every security bound, every count, and every benchmark
+figure in `README.md`, `SECURITY-ANALYSIS.md`, `performance.md`, `tests/README.md`, the crate
+docs and the workflow comments was re-derived from the source or re-measured, and each was
+checked against every other place it appears. The security argument came through unchanged, and
+that is worth stating as a result rather than a claim: `2^520`/`2^-520`, `≈2^-264` over `2^256`,
+`q²/2^257` = `2^-129` at `q = 2^64`, the `2^164` KDF birthday over its 328-bit state, the
+`2^176` a 352-bit output would suggest, `MAX_MSG_SIZE = 2^38 = 2^32` blocks, and the multi-key
+union bounds `2^-161` and `2^-456` all reconcile with each other **and with the code** — the
+KDF's 328-bit state is the 256-bit chaining value plus the 9-byte tail of its
+`"XSIV-ENC" ‖ T` (73-byte) input, and the 352-bit output is `km[0..44]`, because `enc_nonce` is
+12 bytes, not the 24 the API takes. The counts reconcile too: the control-flow table
+(`tests/variable_latency`, 35/10/26/0/5 and 3/5/21/0/0), the 32 `from_le_bytes`/`to_le_bytes`
+call sites, the thirteen-row fault campaign (ten `--test decision`, two `mac_commitment`, one
+`security`), the committed mutation evidence (17 mutants, 15 caught, 2 unviable, 0 missed), and
+the 95% coverage floor under `--all-features`. `performance.md`'s two tables also validate each
+other: dividing its "ultra over default" column into its "over `XChaCha20Poly1305`" column
+reproduces the published ultra column at every size.
+
+Seven numbers were wrong, or described a measurement that no longer describes itself:
+
+- **`performance.md` said the benchmark uses 3 bytes of AAD.** It uses 16 — `b"associated
+  data"`, in `benches/compare.rs`, in every one of its cells and in every revision of the file.
+- **Its "the 12-byte `ChaCha20Poly1305` tracks `XChaCha20Poly1305` within about 4%" was
+  unsubstantiated**, and the only criterion data on disk (from a later experiment, single-pass)
+  disagreed with it, ±16%. Re-measured properly — three passes, all nine sizes, same core —
+  the median cell differs by 1.4% and the worst by 8.4% (256 B decryption), which is now what
+  the file says, with the date.
+- **Its noise floor is "across the 189 cell-runs",** which is 7 sizes × 3 measures × 3
+  configurations × 3 passes. The benchmark also runs 700 B and 5000 B, which are not tabulated;
+  the file now says so rather than leaving a reproducer to reconcile 27 cells against 21.
+- **The README's summary said the default build is "ahead of `XChaCha20Poly1305` from 1 KiB up
+  on both encrypt and decrypt".** The table it points at says otherwise: decryption is 0.82x at
+  1 KiB and 0.98x at 4 KiB. It is ahead on encryption at every size (level at 1–4 KiB, inside
+  the noise floor) and on decryption from 16 KiB up; that is what it says now.
+- **"on the host above"** in the fault-injection section pointed at the performance text that
+  moved to `performance.md` last round. It points at the file.
+- **The same section claimed the second implementation is "worth 4x on a large message."** The
+  measurement immediately above it gives 6.3x at 64 KiB and 9.2x at 1 MiB (witness against
+  `ultra` minus the witness); 4x matched neither that nor the 11.3x that figure elsewhere in
+  the file measures, against a different baseline.
+- **`tests/README.md` said CI bounds the fuzzer "by `FUZZ_SECONDS` (default 120 s)".** CI passes
+  libFuzzer's `-max_total_time` directly — 300 s for the default build, 150 s for `ultra`,
+  900 s in the scheduled job. `FUZZ_SECONDS` is `verify.sh`'s own knob, default 120 s. The row
+  also carried a "~1100 exec/s locally" that no longer describes this host — the fuzz stage of
+  this round's `verify.sh --all` reports ~4,900/s — and it is gone with the sentence that
+  introduced it.
+
+Two attributions and one stale figure, same pass:
+
+- The nonce budget ("2^48 messages … 2^-32", "randomly generate nonces with a CSPRNG", the
+  prohibition on XORing a counter with a random value) is quoted from c2sp.org's
+  **ChaCha20-Poly1305-SIV** specification, which is vendored here as `standard.txt`; the
+  sentences said "the c2sp.org specification this construction extends", which contradicts this
+  README's own statement that this is *not* that construction. The document is now named, and
+  the numbers were checked against the live text (verbatim, including the NIST link).
+- `deep.yml`'s coverage comment quoted 97.46% (1458/1496) from a much older `cargo-llvm-cov`,
+  whose line accounting no longer matches. Re-measured with the job's own command:
+  **97.89%, 113 of 5353 lines missed**. The comment now states the percentage and notes that
+  the total moves with the tool, so it is not a number that has to be hand-edited on upgrade.
+
 A note on **how the last group was found**, because it is the honest part: the audits ran as
 read-only subagents, and one of them applied two of its own findings — to
 `tools/broad_differential.py` and to the campaign-count comment in `tests/decision.rs` — despite

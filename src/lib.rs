@@ -766,14 +766,16 @@ impl core::fmt::Debug for Key {
 /// * **A counter**, incremented after every encryption and never allowed to
 ///   wrap.  Deterministic, testable, and free of any collision bound.  Prefer
 ///   this whenever the application has somewhere to store the counter.
-/// * **[`random::generate_nonce`] (random)**.  The c2sp.org specification this
-///   construction extends RECOMMENDS "randomly generate\[d\] nonces with a
+/// * **[`random::generate_nonce`] (random)**.  The c2sp.org
+///   **ChaCha20-Poly1305-SIV** specification — a different construction from this
+///   crate's, which shares its misuse-resistant, key-committing design, and is
+///   vendored as `standard.txt` — RECOMMENDS "randomly generate\[d\] nonces with a
 ///   CSPRNG" and gives the budget as 2^48 messages under one key with a
 ///   collision probability of 2^-32, aligning with NIST guidance.  (The bare
 ///   birthday bound for a 192-bit nonce is far more generous than that; the
 ///   specification's figure is the conservative one and is the one to follow.)
 ///
-/// Do **not** form a nonce by XORing a counter with a random value: the c2sp.org
+/// Do **not** form a nonce by XORing a counter with a random value: the same
 /// specification calls that approach out explicitly as unsuitable for
 /// commitment.
 ///

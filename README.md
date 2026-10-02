@@ -378,7 +378,7 @@ and the allocating one rests on reading the code (the first version of that row
 mutated the unobservable one and the campaign reported "expected fail, got pass",
 which is what a mutation nothing can catch looks like).
 
-Measured cost, in-place round trip on the host above: **+10.8% at 64 bytes, +8.9% at 256, +3.6% at 1 KiB, +4.1% at 4 KiB, +2.5% at 16 KiB, +1.0% at 64 KiB, +0.4% at 1 MiB** — the added work
+Measured cost, in-place round trip on the host `performance.md` describes: **+10.8% at 64 bytes, +8.9% at 256, +3.6% at 1 KiB, +4.1% at 4 KiB, +2.5% at 16 KiB, +1.0% at 64 KiB, +0.4% at 1 MiB** — the added work
 is four 65-byte constant-time comparisons, so it does not scale with the message. That is the cost of the *default* build over `--no-default-features`; the default build is byte-for-byte identical on the wire (the KATs and
 both differential fixtures replay unchanged), which is what keeps every other piece
 of evidence in this file valid for it.
@@ -449,8 +449,9 @@ shared derivation changes one answer and not the other, and the gate that `AND`s
 agreement in rejects. It is not two physically independent machines: same CPU, same
 compiler, same source file tree, so a *systematic* fault (a compiler bug, a wrong constant
 in both implementations, a fault that hits both code paths in one glitch) is still outside
-what this can see. What it does not share, and what makes it worth 4x on a large message,
-is the *machine code that computes the tag*.
+what this can see. What it does not share, and what makes it worth its price on a large
+message — 6x at 64 KiB and 9x at 1 MiB on decryption, measured against `ultra` minus the
+witness above — is the *machine code that computes the tag*.
 
 **`encrypt_in_place_detached` has no encrypt-side cross-check, and that asymmetry is now stated
 rather than implied.** The earlier revision of this paragraph said "on every encrypt", which was
@@ -671,14 +672,15 @@ Two acceptable strategies:
 - **A counter** — incremented after every encryption, never allowed to wrap.
   Deterministic, testable, and free of any collision bound. Prefer this when
   the application has somewhere to store the counter.
-- **Random nonces** — the c2sp.org specification this construction extends
-  RECOMMENDS "randomly generate[d] nonces with a CSPRNG" and gives the budget
-  as 2^48 messages under one key at a collision probability of 2^-32, aligning
-  with NIST guidance. (The bare birthday bound for a 192-bit nonce is far more
+- **Random nonces** — the c2sp.org **ChaCha20-Poly1305-SIV** specification (vendored as
+  `standard.txt`; this crate is a different construction from it, but shares its
+  misuse-resistant, key-committing design) RECOMMENDS "randomly generate[d] nonces with a
+  CSPRNG" and gives the budget as 2^48 messages under one key at a collision probability of
+  2^-32, aligning with NIST guidance. (The bare birthday bound for a 192-bit nonce is far more
   generous; the specification's figure is the conservative one.)
 
-Do **not** form a nonce by XORing a counter with a random value: the c2sp.org
-specification calls that out explicitly as unsuitable for commitment.
+Do **not** form a nonce by XORing a counter with a random value: the same specification
+calls that out explicitly as unsuitable for commitment.
 
 With the opt-in `rng` feature the crate will draw from the OS CSPRNG for you:
 
@@ -834,10 +836,11 @@ configurations, the measured noise floor, and the cost of each defence — are i
 the security argument. The short version, so a reader need not open it: this crate pays
 **more per message** (two key derivations, a 65-byte tag, and wiping all of it) and **less
 per byte** (BLAKE3 beats Poly1305 once there is data to batch), so in the default
-configuration it is ahead of `XChaCha20Poly1305` from 1 KiB up on both encrypt and decrypt.
-The two costs it prices are a fixed per-message cost on `hardened` decryption (two 65-byte
-constant-time comparisons; gone by 1 MiB) and a per-byte cost on `ultra` decryption, whose
-scalar witness is **2.8x at 64 B and 11.3x at 1 MiB**.
+configuration it is ahead of `XChaCha20Poly1305` on encryption at every size measured — level
+at 1–4 KiB, where the noise floor is a tie — and ahead on decryption from 16 KiB up, the small
+sizes being a tie and 1–4 KiB behind. The two costs it prices are a fixed per-message cost on
+`hardened` decryption (two 65-byte constant-time comparisons; gone by 1 MiB) and a per-byte
+cost on `ultra` decryption, whose scalar witness is **2.8x at 64 B and 11.3x at 1 MiB**.
 
 Two structural properties constrain a caller, and both follow from the construction rather
 than from this implementation:
