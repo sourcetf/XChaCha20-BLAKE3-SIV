@@ -853,7 +853,7 @@ cost, is **not worked out here**. So the honest statement is: *the target bound 
 attacker-chosen-game bound is **not derived**, the `2^128` collision is the cost of the one step
 this document can price (a lower bound on the search that starts the attack, not a bound on the
 attack), and the construction's commitment in that game rests on the design argument above rather
-than on a computed probability.* §5.1 row 17 records this as an open obligation, which is where a
+than on a computed probability.* §5 row 17 records this as an open obligation, which is where a
 reader looking for "what would settle it" should go.
 
 **Four consequences, stated plainly.**
@@ -949,7 +949,7 @@ so the completeness argument is stated last and it is the part that is mechanise
 **The five uses.** Every cryptographic call **in the construction** is one of these, and the
 inventory test (`tests/construction_inventory.rs`) fails if the set changes. There is one further
 cryptographic call in the non-test source that is *not* part of the construction — the unkeyed
-`blake3::hash` behind `locked`'s key-integrity tag — and it is inventoried by the same test and
+unkeyed BLAKE3 hash behind `locked`'s key-integrity tag — and it is inventoried by the same test and
 argued separately below; the sentence here is scoped to the construction because that is what
 §4.10's case analysis is about.
 
@@ -968,7 +968,9 @@ is passed between the calls, and that is a statement about the code which the in
 pins. So the case analysis below is over a finite, known set: no crossing can be missed by
 construction.
 
-**The one call outside the construction.** `locked::integrity_tag` calls unkeyed `blake3::hash`
+**The one call outside the construction.** `locked::integrity_tag` calls unkeyed BLAKE3
+(`blake3::Hasher::new`, not `blake3::hash` — the explicit hasher is used so its state can be
+zeroized)
 on the 32-byte key, to store an 8-byte tag beside it in the locked page (`src/lib.rs`, and §8.2's
 Rowhammer row). It is inventoried by the same test (so a change to it fails there too), and it is
 *not* in the table above because it is not part of the construction's composition: it is unkeyed
@@ -1245,7 +1247,7 @@ target bounds are §4.5's, and each harness named in the last column is describe
 | Length extension | Merkle–Damgård padding | **not applicable**: BLAKE3 finalises with a flag, and the encoding carries explicit `|A|`/`|M|` (§4.4). Its real descendants — re-splitting `A ‖ M`, trailing zeros — are defeated by A4 and pinned by `test_aad_message_split_is_unambiguous` |
 | Collision (incl. Joux multicollisions, herding) | the tag | `2^128` by birthday over the 256-bit chain value, via the fixed-tail procedure of §4.5; no tag width raises it |
 | Commitment **against a given ciphertext** (the target game — what the `2^520` belongs to) | a ciphertext that opens under two keys or contexts, with the ciphertext *given* | **`2^520` per attempt** — a target, not a birthday; the `K`-in-input binding closes the derivation route (Thm 2) |
-| Commitment in the **attacker-chosen** games (invisible salamanders, CMT-1/CMT-3) | a ciphertext the *adversary* chooses, opening under two keys or contexts it also chooses | **not derived here** — not a target, so `2^520` does not describe it; the colliding-tag search is `2^128` (state birthday) and the completion is an unanalysed fixed point. §4.5, "The two commitment games", and §5.1 row 17 |
+| Commitment in the **attacker-chosen** games (invisible salamanders, CMT-1/CMT-3) | a ciphertext the *adversary* chooses, opening under two keys or contexts it also chooses | **not derived here** — not a target, so `2^520` does not describe it; the colliding-tag search is `2^128` (state birthday) and the completion is an unanalysed fixed point. §4.5, "The two commitment games", and §5 row 17 |
 | Forgery (tag guess, second preimage) | the tag | `min(2^256 key search, 2^520 tag guess)` = the key search; the fault-assisted variants are §8.2's subject |
 | Two-time pad | a tag collision between two messages | the same `2^128` event; when it happens the observer pays nothing (§3's Corollary) |
 | Nonce misuse (related nonce, IV reuse) | SIV's misuse model | **by design**: reuse degrades to equality plus the collision term above; a keystream derived from `(K, N)` alone would leak `M₁ ⊕ M₂` always (`nonce_reuse_does_not_reuse_the_keystream`) |

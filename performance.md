@@ -3,8 +3,11 @@
 Provenance and method for every performance number this repository quotes, split
 out of [`README.md`](README.md) so the README stays about the construction and the
 security argument. The figures, the noise floor and the methodology are unchanged;
-wherever a layer table, the fault table or the security analysis cites a cost, the
-number resolves to a table here.
+the configuration and throughput figures that the README's tables cite resolve to a
+table here. (Some per-layer *costs* — the fold's 1.4 ns, the integrity tag's 42 ns,
+`mlock`'s ~7 µs, `scrub_stack`'s 16 KiB of stack — are stated on the README's layer
+rows themselves, because each is a property of one layer rather than a configuration
+measurement; those are not repeated here.)
 
 Measured head-to-head against RustCrypto's `chacha20poly1305` — the natural
 reference point, since `XChaCha20Poly1305` has the same 24-byte nonce and the same

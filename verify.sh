@@ -299,7 +299,7 @@ if [ "$RUN_CROSS_EXEC" -eq 1 ]; then
       "$QEMU" "$bin" --test-threads=1 ${extra[@]+"${extra[@]}"}
       ran=$((ran + 1))
     done
-    [ "$ran" -gt 0 ] || { echo "no $target test binaries found in $deps" >&2; exit 1; }
+    [ "$ran" -gt 0 ] || { echo "no $target test binaries were executed under qemu (the built set was empty, or every binary was excluded)" >&2; exit 1; }
     echo "executed $ran $target test binaries under qemu"
     total=$((total + ran))
   done
@@ -526,8 +526,19 @@ if [ "$RUN_TOOLS" -eq 1 ]; then
         rm -rf "$work_mut"
         exit "$mut_rc"
       fi
-      if python3 tools/mutation_evidence.py "$work_mut/committed" mutants.out; then
+      # `mutation_evidence.py` exits 3 for "could not compare" (missing or unparseable
+      # directory), which is NOT the same as "the committed evidence is stale". Collapsing
+      # the two made a could-not-run print "commit the fresh run" and silently leave the
+      # committed `mutants.out/` un-restored -- a green stage over a skipped check.
+      # `|| ev_rc=$?` rather than a bare call: under `set -e` a non-zero exit (1 *or* 3)
+      # would abort the script here before the branch below could run.
+      ev_rc=0
+      python3 tools/mutation_evidence.py "$work_mut/committed" mutants.out || ev_rc=$?
+      if [ "$ev_rc" -eq 0 ]; then
         rm -rf mutants.out && cp -r "$work_mut/committed" mutants.out
+      elif [ "$ev_rc" -eq 3 ]; then
+        echo "      could not compare the committed evidence with this run (exit 3);"
+        echo "      leaving mutants.out/ as the fresh run rather than pretending it matched"
       else
         echo "      (mutants.out/ now holds the fresh run: commit it, or throw it away"
         echo "       with 'git checkout -- mutants.out' if this run was not a source change)"

@@ -1,4 +1,8 @@
-//! Security tests: property-based, statistical-timing, and fuzz.
+//! Security tests: property-based and fuzz. (The statistical timing screen is
+//! *not* here — it lives in `tests/timing.rs`, as the paragraph below says; this
+//! header used to list "statistical-timing" among this file's contents, which was
+//! stale, and `ci.yml`'s qemu step still carries a now-vestigial `--skip timing`
+//! for `security-*` on that assumption.)
 //!
 //! These cover the classes of defect that a fixed known-answer vector cannot:
 //! statements quantified over *all* inputs (property tests), statements about

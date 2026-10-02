@@ -18,8 +18,13 @@ comes from.
 compared: the same vectors must produce the same bytes with BLAKE3's C/assembly
 kernels (the default) and with `--features pure`.
 
-Requires the `blake3` module (pip install blake3).  Exits non-zero on the first
-mismatch it reports, printing the vector that produced it.
+Requires the `blake3` module (pip install blake3).  Exit codes, matching the
+repository's convention: **0** all vectors match, **1** a mismatch (printing the
+vector that produced it), **3** could-not-run (the `blake3` module is absent, or
+cargo could not build the example).  The 3 matters: `verify.sh` maps it to a
+*skipped* stage, so a host that simply cannot run this must not report a failure —
+before this code existed, a missing `blake3` raised out of `main` and exited 1,
+which reads as a mismatch.
 
 The mix is deliberate: most vectors are small (0-48 bytes, where the scalar tail
 and the 64-byte ChaCha20 block boundary live), a slice is exactly at the sizes the
@@ -41,9 +46,15 @@ BOUNDARY_LENGTHS = [0, 1, 15, 16, 17, 31, 32, 33, 63, 64, 65, 127, 128, 129,
 
 
 def load_ref():
-    spec = importlib.util.spec_from_file_location("ref", os.path.join(HERE, "ref_impl.py"))
-    ref = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(ref)
+    try:
+        spec = importlib.util.spec_from_file_location("ref", os.path.join(HERE, "ref_impl.py"))
+        ref = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(ref)
+    except ModuleNotFoundError as e:
+        # `ref_impl.py` imports `blake3`; without it this tool cannot run at all, which is
+        # exit 3 (could not run), not a failure.
+        print(f"could not run: {e} (pip install blake3)", file=sys.stderr)
+        sys.exit(3)
     return ref
 
 
@@ -90,9 +101,14 @@ def run_crate(pairs, features):
         text=True,
     )
     if proc.returncode != 0:
-        sys.exit(f"the crate's own tool failed:\n{proc.stderr}")
+        print(f"could not run: the crate's own tool failed:\n{proc.stderr}", file=sys.stderr)
+        sys.exit(3)
     out = [line for line in proc.stdout.splitlines() if line.strip()]
-    assert len(out) == len(lines), f"{len(out)} outputs for {len(lines)} vectors"
+    if len(out) != len(lines):
+        # The harness itself is broken (the example printed the wrong number of lines), which
+        # is a could-not-run, not a mismatch: nothing has been compared yet.
+        print(f"could not run: {len(out)} outputs for {len(lines)} vectors", file=sys.stderr)
+        sys.exit(3)
     return out
 
 

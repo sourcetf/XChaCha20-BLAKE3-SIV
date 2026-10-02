@@ -70,11 +70,14 @@
 # decision reveals exactly one bit that is already public — whether this
 # ciphertext authenticates.
 #
-# `--features hardened` compiles a second definition of the same function, with
-# two recomputed gates and therefore two branches; both are inside it, and the
-# entry below matches it too (v0 mangling encodes the path, not the signature, so
-# both definitions carry this same name — only one of them exists in any given
-# build).
+# `accept_or_reject` is a *single* function body in every configuration: under
+# `hardened` the second gate sits inside it under `#[cfg(feature = "hardened")]`,
+# so the function contains two comparison branches and two `if decision.is_ok()`
+# branches, and under the opt-out build one of each — all of them inside this one
+# function, which is why the single entry below covers them. It is not two
+# `#[cfg]`-selected *definitions* of the function; an earlier revision compiled it
+# that way and this comment described that, and the comment was not updated when
+# the shape changed. `tests/decision_scope.rs` pins the one-body shape.
 #
 # This must NOT be read as "the tag comparison is unchecked". The comparison
 # *feeding* the branch is verified separately and mechanically:

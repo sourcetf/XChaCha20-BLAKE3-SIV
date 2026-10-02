@@ -16,6 +16,101 @@ construction — it is hardening, correctness in `ultra`, evidence quality, and
 corrections to the *documented* security numbers, one of which (the `locked` layer
 never issuing `MADV_DODUMP`) was a real bug in a defence rather than prose.
 
+### Final pre-review sweep: two wipes that a path could skip, two guards satisfied by prose, and six CI/tool defects
+
+A last self-check before external review, run as three audits (core source, tooling/CI,
+documentation) plus a manual pass over the parts they flagged. Everything below is a fix from
+that pass; the wire format is untouched.
+
+**Core source (`src/lib.rs`)**
+
+- **`Plaintext::drop` cleared its tail with a plain `write_bytes`.** The comment promised a wipe
+  the call could not guarantee: a non-volatile store to memory that is about to be freed is a
+  dead store the optimizer may drop. No leak today — the only `Plaintext` constructor's `Vec`
+  comes from `alloc_zeroed`, so the tail is already zero — but a future constructor that reuses
+  capacity would have trusted the comment. It now calls a new `zeroize_raw`, and `zeroize_slice`
+  delegates to that same function so the alignment/chunking logic exists once.
+- **`locked::integrity_tag` hashed the key through `blake3::hash`, leaving BLAKE3's chaining
+  value — a hash of the key — on the stack.** This crate treats "a hash of the key" as key
+  material (see `Key`'s redacted `Debug`) and the *keyed* path zeroizes BLAKE3's state for exactly
+  this reason, so the unkeyed call now uses an explicit `Hasher` and wipes it. `lock_range`'s
+  size check makes the cost invisible (microseconds once per key).
+- **`ultra`'s `encrypt` skipped `scrub_stack` on its two witness-rejection paths.** The scrub
+  runs after the last derivation on the success path, but the early `return Err` before the
+  keystream skipped it, leaving the just-returned `witness::encrypt_tag` frame in the region the
+  scrub exists to overwrite. Both arms now scrub. (That `scrub_stack()` was ever reachable on a
+  rejection is not something a test can observe; it is a correctness-of-claim fix.)
+- **The crate-level "Side channels" doc said "no secret-dependent branches", which was false.**
+  It now names the three that exist, including `locked::check_integrity`'s fail-stop panic branch
+  — present since the integrity tag was added and never recorded there. It also names the witness's
+  `Choice` handling under `ultra`, which is the third.
+- **Corrections to claims sharper than the code:** "the second comparison is now in every
+  configuration" was false for `--no-default-features` (which compiles neither the fold nor a
+  second gate — that is what opt-out means); the boundary is now stated as "every configuration
+  that builds the gates". `test_tag_length`'s comment repeated the *old, falsified* birthday
+  rationale for the 65-byte width (§4.5 falsifies it), and was rewritten to the target argument.
+
+**Guards that were satisfied by prose rather than by code** — the class this repository keeps
+finding, and two more were in the suite:
+
+- `tests/ultra.rs::the_witness_is_called_from_exactly_these_entry_points` grepped the entry-point
+  bodies for `"witness::"`, and `decrypt`'s own **doc comment** contains `witness::decrypt` — so
+  deleting the real call would have left the assertion true. It now strips `//` comments first
+  (verified: renaming the call to `witness ::decrypt`, which compiles and contains no `witness::`
+  token, makes the test fail).
+- `tests/construction_inventory.rs::the_derivation_nonce_does_not_use_xchacha20s_nul_padding`
+  searched the *whole* of `src/lib.rs` for the nonce-domain write, and the same string occurs in
+  that file's own `mod tests` — so deleting the real write at `derive_material` left it true. It
+  now cuts at `mod tests {` (verified: breaking the real write makes it fail).
+- The floor assertion in the same file claimed to stop "deleting the functions" making the
+  assertions vacuous; it computes a sum over the test's own table and cannot see the source. Its
+  comment now says what it guards (the table), since the per-call equality above already guards
+  the source.
+
+**CI and tooling**
+
+- **`tools/cache_profile.sh`'s self-test re-execed `$0`.** With a relative `$0` that resolved to
+  the patched copy in a scratch tree by accident; with an absolute `$0` it re-ran the unpatched
+  original, which re-ran the self-test, which re-execed — a fork bomb instead of a test. It now
+  execs the copy explicitly.
+- **`tools/stack_residue.sh`'s PASS line claimed a control it never checked** ("the control shows
+  the scan produces no false positives"); the control entry was only printed. A control false
+  positive is now a failure, so the sentence is true.
+- **`tools/broad_differential.py` reported exit 1 (a *mismatch*) when it could not run** — no
+  `blake3` module, or cargo failing to build the example. It now exits 3, which `verify.sh` maps
+  to a *skipped* stage, per the repository's convention.
+- **`verify.sh`'s "no test binaries" branch expanded `$deps`, which is never assigned**, so
+  under `set -u` it died with an unrelated shell error instead of the intended message; and the
+  mutation-evidence step collapsed `mutation_evidence.py`'s exit 3 ("could not compare") into the
+  stale-evidence branch, printing "commit the fresh run" and silently *not* restoring the
+  committed `mutants.out/`. Both fixed. `tools/fi_instruction.sh` and `tools/mutation_check.sh`
+  had `ls … | head -1` substitutions without `|| true`, so under `pipefail` an empty glob aborted
+  the script before its own "no binary" guard could run.
+- **`.github/workflows/deep.yml`'s `wide` job ran only on `schedule`**, while the workflow header
+  documents `workflow_dispatch` as the way to "re-run the wide audit on demand" — so dispatching
+  ran every job *except* that one. It now runs on both. The job's `cargo fuzz` step never
+  installed `cargo-fuzz` (the same "no such command: fuzz" failure the dedicated fuzz job
+  documents), so it fuzzed nothing; and the stale row count in its comment ("eleven rows" against
+  the campaign's thirteen) was corrected.
+- **`deep.yml` and `formal.yml` cancelled in-progress runs on one shared concurrency group**,
+  which includes `schedule`. A push landing near 03:00/04:00 killed the *weekly* audit and proof
+  run mid-flight *and* shared `refs/heads/main` with it, reporting as "cancelled" — so the missing
+  verification read as an infrastructure hiccup. The group is now per-event
+  (`…-${{ github.ref }}-${{ github.event_name }}`), which keeps the useful cancellation (a later
+  push or PR run supersedes the earlier one for the same event) while giving the scheduled run a
+  group of its own that nothing cancels.
+- `tests/decision.rs`'s campaign-size comment said "eleven rows" (there are thirteen) and
+  `tests/security.rs`'s header listed "statistical-timing" among its contents (the timing screen
+  is in `tests/timing.rs`; `ci.yml`'s `--skip timing` for `security-*` is vestigial but harmless,
+  and now says so).
+
+A note on **how the last group was found**, because it is the honest part: the audits ran as
+read-only subagents, and one of them applied two of its own findings — to
+`tools/broad_differential.py` and to the campaign-count comment in `tests/decision.rs` — despite
+the instruction not to edit. Both were reviewed line by line against the finding they claim to
+fix and against the surrounding code before being kept, and every other file in this round was
+diffed to confirm no third-party edit had slipped in; the rest of the list is mine.
+
 ### Commitment: `2^520` is a *target* bound, and the literature's games are not that game
 
 An auditor's finding, and a correct one. This repository quoted `2^520` next to the commitment
@@ -43,8 +138,8 @@ belonged to those games. It does not, and the two are not interchangeable:
   implied otherwise.
 
 What changed: `SECURITY-ANALYSIS.md` §4.5 gains a section, *"The two commitment games, kept
-apart"*, with a row in its bounds table and a named open obligation in §5.1 (row 17: "not derived
-here"); Thm 2's commitment bullet, the §8.2 attack-class row, the multi-key note, and the §5.1
+apart"*, with a row in its bounds table and a named open obligation in §5 (row 17: "not derived
+here"); Thm 2's commitment bullet, the §8.2 attack-class row, the multi-key note, and the §5
 falsification row are all scoped to the target game and point at the attacker-chosen gap; and the
 README's security table now has a separate row for the attacker-chosen games that reads **"not
 derived here"** rather than a number. No bound was weakened — `2^520` was always a target — but the
@@ -949,7 +1044,7 @@ Asked which items are expensive and which are cheap, and whether anything cheap 
 | Constant-time discipline, no tables, no secret indices | free (a design property) | all three |
 | Volatile wipes | free | all three |
 | Second gate (two recomputed comparisons, fail-closed) | +10.8% at 64 B, +0.4% at 1 MiB | `hardened` |
-| **Second comparison *shape* (8-byte fold vs `subtle`'s loop)** | **+1.4 ns per decryption (0.1% at 64 B)** | **was `dual-mac`-only; now every configuration** |
+| **Second comparison *shape* (8-byte fold vs `subtle`'s loop)** | **+1.4 ns per decryption (0.1% at 64 B)** | **was `dual-mac`-only; now every gate-building configuration (`hardened` and above — not the opt-out build, which compiles neither gate nor fold)** |
 | `deny_debugging` (`prctl`) | one syscall, once, opt-in | `locked` (ultra) |
 | Key integrity tag | +42 ns per use | `locked` (ultra) |
 | `mlock` + dump exclusion | ~7 µs once per key | `locked` (ultra) |
@@ -1051,8 +1146,9 @@ release job now does that — with a check that could not be made before:
 * **The publish step refuses to ship fewer than three.** `dist/*.tar.gz` must be exactly three
   files or the job errors, the same way the configuration manifest is required — a release that
   silently shipped only the default build is the failure this exists to prevent.
-* The release notes and the attached `CONFIGURATIONS.md` both name the three bundles, and
-  `README.md`'s configuration table is where the *cost* of each one lives.
+* The release notes and the attached `CONFIGURATIONS.md` both name the three bundles, and the
+  per-configuration *costs* are in `performance.md` (they were in `README.md`'s tables when this
+  entry was written; that section moved — see "The performance results move to `performance.md`").
 
 Verified by running the packaging step locally first: three bundles, identical KAT digest, and
 the contents inspected. That dry run caught a real mistake before it reached CI — the vector file
@@ -1571,8 +1667,11 @@ code supports:
 
 - **The changelog contradicted the README and the code** on the second comparison shape: the
   entry still said it was "`dual-mac`/`ultra`"-only and cost "+2.7% at 64 B", while the code
-  gates it on `hardened` and the later entry (and the README) say every configuration and
-  "+1.4 ns". The stale paragraph now points forward to the entry that superseded it.
+  gates it on `hardened` and the later entry (and the README) say every gate-building
+  configuration and "+1.4 ns". The stale paragraph now points forward to the entry that
+  superseded it. (A later pass sharpened "every configuration" to "every *gate-building*
+  configuration", because `--no-default-features` compiles neither the second gate nor the
+  fold — see the recheck entry above.)
 - **The `dual-mac` round-trip cost** read "+8–25%" in the README and "+6..25%" in `Cargo.toml`
   and the changelog; the README now matches the other two.
 - **"`hardened,dual-mac` (everything `ultra` has except the witness)"** was false — it also drops

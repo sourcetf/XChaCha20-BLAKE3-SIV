@@ -1,7 +1,8 @@
 //! The accept/reject decision, as a test that a *fault* can break.
 //!
-//! `tools/fi_check.sh` runs this in ten configurations — the ten rows of its campaign
-//! that name `--test decision` (its eleventh row drives `tests/security.rs` instead) —
+//! `tools/fi_check.sh` runs this in ten configurations — the ten rows of its
+//! **thirteen-row** campaign that name `--test decision` (two further rows drive
+//! `tests/mac_commitment.rs` and one drives `tests/security.rs`) —
 //! each one a fault written down as a source change and applied to a fresh copy of the
 //! crate. On the clean `hardened` and opt-out (`--no-default-features`) builds it must
 //! pass, and the rows that must *fail* are the real faults: a neutralised gate on the
@@ -10,9 +11,9 @@
 //! both call-site checks neutralised. The rows that must pass are the countermeasures:
 //! the same neutralised, corrupted or substituted value on the `hardened` build, and the
 //! substituted tag on the `ultra` build, where the independent recomputation disagrees
-//! with it. (An earlier revision of this comment said "three configurations"; the
-//! campaign has grown since, and ten of its eleven rows name this test binary as the
-//! detector.)
+//! with it. (This comment has twice carried a stale count — first "three configurations",
+//! then "eleven rows" when the campaign already had thirteen — so the numbers here are
+//! written to be checkable against `tools/fi_check.sh`'s `run_row` lines.)
 //!
 //! It is also a plain test: a tag or ciphertext with one bit flipped must be
 //! rejected, through both entry points, at the sizes where the tag is hashed in

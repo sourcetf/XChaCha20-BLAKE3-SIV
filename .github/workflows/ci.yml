@@ -418,8 +418,14 @@ jobs:
           # `locked`, `ultra` and `variable_latency` built but never executed on the cross
           # targets -- including `counter_range`, whose 32-bit assertions exist for the
           # i686 run, and `locked`, whose syscall numbers are per-architecture. The two
-          # exclusions need something the emulator cannot provide: `timing-*` a real clock
-          # (and `security-*`'s timing screen with it), `ctgrind-*` valgrind on x86_64.
+          # exclusions need something the emulator cannot provide: `timing-*` a real clock,
+          # `ctgrind-*` valgrind on x86_64.
+          #
+          # `security-*` is executed here, with `--skip timing` kept as a belt: the
+          # statistical timing screen lives in `tests/timing.rs` (its binary is `timing-*`,
+          # already excluded above), so the flag is currently a no-op -- but it costs
+          # nothing and keeps this step correct if a timing test moves back into
+          # `security.rs`, which is where it used to live.
           while IFS= read -r bin; do
             case "$(basename "$bin")" in timing-*|ctgrind-*) continue ;; esac
             extra=()

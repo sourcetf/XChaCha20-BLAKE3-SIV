@@ -104,7 +104,7 @@ scan() {  # label, features
   cargo test --release --test decision --no-run \
     --config 'profile.release.strip=false' $features > /dev/null 2>&1
   local bin
-  bin="$(ls -t "$CARGO_TARGET_DIR"/release/deps/decision-* | grep -v '\.d$' | head -1)"
+  bin="$(ls -t "$CARGO_TARGET_DIR"/release/deps/decision-* 2>/dev/null | grep -v '\.d$' | head -1 || true)"
   [ -n "$bin" ] || { echo "FAIL: no decision binary" >&2; exit 1; }
 
   local shard pids=()

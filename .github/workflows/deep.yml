@@ -28,7 +28,16 @@ on:
     - cron: "0 4 * * 1"
 
 concurrency:
-  group: deep-${{ github.ref }}
+  # The event name is part of the group, which is the point. This workflow runs on
+  # push, on PRs *and* on a weekly `schedule`, and push/schedule both use
+  # `github.ref == refs/heads/main` — so with one group per ref, a push landing at
+  # 04:00 cancelled the weekly audit mid-run: the run the schedule exists for, and
+  # the one nothing else replaces. It also reported as "cancelled", which reads as
+  # noise rather than as an audit that never finished. Splitting the group per event
+  # keeps the useful cancellation (a later push or PR run supersedes the earlier one
+  # for the same event) while giving the scheduled run a group of its own, which
+  # nothing cancels.
+  group: deep-${{ github.ref }}-${{ github.event_name }}
   cancel-in-progress: true
 
 permissions:
@@ -341,7 +350,7 @@ jobs:
           sudo apt-get install --no-install-recommends -y valgrind
           valgrind --version
 
-      # The fault-injection counterpart: a campaign of eleven rows written down as
+      # The fault-injection counterpart: a campaign of thirteen rows written down as
       # source changes, each with the build it applies to, the test that acts as its
       # detector, and the outcome that is expected. Three of the rows are the
       # interesting ones: one skipped branch accepts a forgery on the default build
@@ -514,7 +523,12 @@ jobs:
     # covers the fuzz target), and the full Miri suite under Tree Borrows -- the
     # aliasing model that is *not* the default, so nothing else exercises it at
     # this scale.
-    if: github.event_name == 'schedule'
+    # Runs on the schedule *and* on a manual dispatch. The workflow header says
+    # `workflow_dispatch` is there for "re-running the wide audit on demand", and this
+    # condition used to be `== 'schedule'` alone — so dispatching the workflow ran every
+    # job *except* the one the dispatch was documented for. Found by reading the header
+    # against the condition.
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
@@ -572,6 +586,11 @@ jobs:
         run: |
           set -euo pipefail
           rustup toolchain install nightly --profile minimal
+          # `cargo-fuzz` is not part of the nightly toolchain, so the call below failed with
+          # "no such command: fuzz" until this was added -- the same failure mode the
+          # dedicated fuzz job documents. The fallback matters because
+          # `@cargo-fuzz` is not an install-action tool tag (it warns and exits 0).
+          command -v cargo-fuzz >/dev/null || cargo install --locked cargo-fuzz
           workers="$(nproc)"
           cargo +nightly fuzz run roundtrip --target x86_64-unknown-linux-gnu -- \
             "-workers=$workers" "-jobs=$workers" -max_total_time=900 -print_final_stats=1

@@ -178,7 +178,10 @@ PY
   echo "self-test: planted a secret-dependent table access into a throwaway copy"
   echo "self-test: the copy is built with the same features as this run (${FEATURES:-default})"
   inner=0
-  if ( cd "$work" && exec "$0" $mode "$count" ) > "$work/selftest.log" 2>&1; then
+  # Exec the *copy*, not `$0`. With a relative `$0` this worked by accident (the copy is
+  # in `$work/tools/`), but an absolute `$0` would re-exec the unpatched original, which
+  # re-runs this self-test and re-execs again -- a fork bomb instead of a test.
+  if ( cd "$work" && exec "$work/tools/cache_profile.sh" $mode "$count" ) > "$work/selftest.log" 2>&1; then
     echo "FAIL: the planted leak left the profile identical, so $mode_name cannot detect" >&2
     echo "      that class and its PASS elsewhere means correspondingly less." >&2
     tail -20 "$work/selftest.log" >&2

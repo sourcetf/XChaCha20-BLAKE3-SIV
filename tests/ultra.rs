@@ -161,7 +161,16 @@ fn the_witness_is_called_from_exactly_these_entry_points() {
         "pub fn decrypt_in_place_detached(",
         "pub fn encrypt(",
     ] {
-        let b = body_of(body, entry);
+        // Strip `//` comments before looking for the call. Without this the check is
+        // satisfied by *prose*: the doc comment on `decrypt` names `witness::decrypt`, so
+        // deleting the real call would have left the assertion true — the
+        // guard-satisfied-by-a-comment shape. (`the_witness_shares_only_the_specification_
+        // with_the_crate` in this file strips comments for the same reason.)
+        let b: String = body_of(body, entry)
+            .lines()
+            .map(|l| l.split("//").next().unwrap_or(""))
+            .collect::<Vec<_>>()
+            .join("\n");
         // `decrypt_bounded` delegates to `decrypt`, so it carries no witness call of its own
         // and must not: a second one would mean the tag is computed twice on that path.
         if entry == "pub fn decrypt_bounded(" {

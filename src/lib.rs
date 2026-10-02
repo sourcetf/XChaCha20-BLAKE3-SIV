@@ -118,9 +118,10 @@
 //!
 //! # Side channels
 //!
-//! The cryptographic code paths contain **no secret-dependent branches and no
-//! secret-dependent memory indexing**.  Every secret-derived quantity is
-//! handled with straight-line arithmetic or `subtle` primitives:
+//! The cryptographic code paths contain **no secret-dependent memory indexing,
+//! and no secret-dependent branch except three, each of which is named here**.
+//! Every other secret-derived quantity is handled with straight-line arithmetic
+//! or `subtle` primitives:
 //!
 //! * Tag comparison — `subtle::ConstantTimeEq` over all [`TAG_LEN`] (65) bytes.
 //! * [`Plaintext`] equality — every `PartialEq` impl routes through
@@ -132,6 +133,25 @@
 //! * BLAKE3 is likewise ARX with no data-dependent lookups.  Its `pure` backend
 //!   selects a SIMD kernel at run time from CPU features, which is
 //!   data-independent: the dispatch depends on the CPU, not on any secret.
+//!
+//! The three secret-dependent branches, stated rather than glossed:
+//!
+//! 1. **The SIV accept/reject decision** (`accept_or_reject`).  SIV decrypts
+//!    before it verifies, so "does this ciphertext authenticate?" is a branch on
+//!    secret-derived data.  It is unavoidable — that one bit is exactly what the
+//!    mode is designed to reveal — and it is isolated in a function of its own,
+//!    `#[inline(never)]`, so `tests/ctgrind.supp` can permit this one branch and
+//!    nothing else.  See that file and `tests/ctgrind.rs`.
+//! 2. **`locked::check_integrity`** (the `locked`/`ultra` layer).  It compares an
+//!    integrity tag of the stored key against the stored value in constant time
+//!    and then *branches* on the result, panicking when they differ.  The branch
+//!    is on a value derived from the key, so it is a secret-dependent branch —
+//!    but under no-fault operation it is never taken, so it reveals only whether
+//!    corruption was detected, never a bit of the key, and it is the crate's
+//!    deliberate fail-stop (`LockedKey::as_bytes` documents why).  It carries no
+//!    data-dependent *comparison*: the `ct_eq` feeding it is constant-time.
+//! 3. **`witness`'s `Choice`/`Result` handling under `ultra`** reduces to the same
+//!    decision as (1), through an independent implementation.
 //!
 //! Two caveats, stated plainly:
 //!
@@ -585,14 +605,21 @@ impl Drop for Plaintext {
         if cap > len {
             // Bytes past `len` belong to this allocation but were never written,
             // so no reference may be formed over them (a `&mut [u8]` into
-            // uninitialized memory is not a valid reference).  Writing through
-            // the raw pointer is the sound way to clear them.
-            // SAFETY: `len` is in bounds of the allocation and `cap - len` bytes
-            // from there are owned by this `Vec` (still alive: we are in its
-            // owner's `Drop`), so the stores are in bounds and cannot alias a
-            // live reference.
-            unsafe { core::ptr::write_bytes(self.0.as_mut_ptr().add(len), 0, cap - len) };
-            core::sync::atomic::compiler_fence(core::sync::atomic::Ordering::SeqCst);
+            // uninitialized memory is not a valid reference).  The raw-pointer
+            // wipe writes through the pointer instead of borrowing them, and it is
+            // a *volatile* store for the same reason every other wipe in this
+            // crate is: a plain `write_bytes` here is a dead store the optimizer
+            // may drop before the `Vec` is freed, which would defeat the point of
+            // clearing the tail at all.  (Found by reading the comment back
+            // against the code: the comment promised a wipe this call could not
+            // guarantee.  No leak today — the only `Plaintext` constructor gets
+            // `alloc_zeroed` capacity — but a future one that reuses capacity
+            // would have trusted it.)
+            // SAFETY: `len <= cap`, so `ptr + len` is at most one past the end of
+            // the allocation and `cap - len` bytes from there are owned by this
+            // `Vec` (still alive: we are in its owner's `Drop`); no live reference
+            // covers that region.
+            unsafe { zeroize_raw(self.0.as_mut_ptr().add(len), cap - len) };
         }
     }
 }
@@ -878,6 +905,7 @@ pub mod random {
 #[cfg(feature = "locked")]
 pub mod locked {
     use subtle::ConstantTimeEq;
+    use zeroize::Zeroize;
 
     /// Whether this platform can lock memory at all.
     ///
@@ -1406,9 +1434,19 @@ pub mod locked {
     ///
     /// Unkeyed on purpose — see `LockedKey::as_bytes` for what that does and does not buy.
     fn integrity_tag(key: &[u8]) -> [u8; KEY_TAG_LEN] {
-        let hash = blake3::hash(key);
+        // An explicit hasher rather than `blake3::hash`, so its internal state can be
+        // wiped. `blake3::hash` builds and drops a hasher with no handle, which leaves the
+        // chaining value it produced while absorbing the *key* on the stack — and this
+        // crate treats "a hash of a key" as key material (see `Key`'s redacted `Debug`).
+        // The keyed path zeroizes BLAKE3's state for exactly this reason
+        // (`blake3_keyed_multi`); this is the same discipline on the unkeyed call.
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(key);
         let mut tag = [0u8; KEY_TAG_LEN];
-        tag.copy_from_slice(&hash.as_bytes()[..KEY_TAG_LEN]);
+        let mut reader = hasher.finalize_xof();
+        reader.fill(&mut tag);
+        reader.zeroize();
+        hasher.zeroize();
         tag
     }
 
@@ -1654,8 +1692,25 @@ pub mod locked {
 /// `write_volatile` requires natural alignment, so the leading bytes are
 /// written singly until the pointer is `usize`-aligned.
 fn zeroize_slice(slice: &mut [u8]) {
-    let len = slice.len();
-    let ptr = slice.as_mut_ptr();
+    // SAFETY: `slice` is a live `&mut [u8]` of exactly `len` bytes, so the pointer
+    // is valid for writes of that many bytes, and no other reference to them
+    // exists while `slice` is borrowed.
+    unsafe { zeroize_raw(slice.as_mut_ptr(), slice.len()) };
+}
+
+/// Overwrite `len` bytes at `ptr` with volatile zero stores, through a raw pointer.
+///
+/// The raw-pointer form of [`zeroize_slice`], for bytes that may **not** be
+/// borrowed as a `&mut [u8]` — the uninitialised capacity past a `Vec`'s length,
+/// say, where forming a slice reference would be undefined behaviour. Same
+/// chunking and alignment reasoning as `zeroize_slice`, which delegates here so
+/// the two cannot drift.
+///
+/// # Safety
+///
+/// `ptr` must be valid for writes of `len` bytes, and those bytes must not be
+/// reachable through a live reference for the duration of the call.
+unsafe fn zeroize_raw(ptr: *mut u8, len: usize) {
     let chunk = core::mem::size_of::<usize>();
     let align = core::mem::align_of::<usize>();
 
@@ -1664,22 +1719,22 @@ fn zeroize_slice(slice: &mut [u8]) {
     // written: starting the loop at the aligned offset instead would silently
     // leave `align - 1` bytes of secret material un-wiped.
     while i < len && (ptr as usize).wrapping_add(i) % align != 0 {
-        // SAFETY: `i < len` and `ptr` is the base of a slice of `len` bytes, so
-        // `ptr.add(i)` is in bounds and writable for the whole loop.
-        unsafe { core::ptr::write_volatile(ptr.add(i), 0) };
+        // SAFETY: `i < len`, and the caller guarantees `ptr` is valid for writes
+        // of `len` bytes, so `ptr.add(i)` is in bounds and writable.
+        core::ptr::write_volatile(ptr.add(i), 0);
         i += 1;
     }
     while i + chunk <= len {
         // SAFETY: `i + size_of::<usize>() <= len` keeps the store in bounds, and
         // the loop above left the pointer `usize`-aligned, which `write_volatile`
         // on a `*mut usize` requires.
-        unsafe { core::ptr::write_volatile(ptr.add(i) as *mut usize, 0) };
+        core::ptr::write_volatile(ptr.add(i) as *mut usize, 0);
         i += chunk;
     }
     // Trailing bytes.
     while i < len {
         // SAFETY: as in the leading loop: `i < len`, so the store is in bounds.
-        unsafe { core::ptr::write_volatile(ptr.add(i), 0) };
+        core::ptr::write_volatile(ptr.add(i), 0);
         i += 1;
     }
     core::sync::atomic::compiler_fence(core::sync::atomic::Ordering::SeqCst);
@@ -2077,12 +2132,21 @@ pub fn encrypt(
             // zeroized on this path anyway rather than left to `Drop`, so the two rejection
             // paths out of this function differ only in what they have derived.
             zeroize_slice(&mut ciphertext);
+            // `scrub_stack` is called on the *success* path below, after the last
+            // derivation; this early return skips it, so the `witness::encrypt_tag` frame
+            // that just ran (it held the key and the tag it derived) is left in the region
+            // the scrub exists to overwrite. Cheap (0.5-1 us) and only on a path that
+            // should never be taken, so it is paid here too.
+            #[cfg(feature = "dual-mac")]
+            scrub_stack();
             return Err(Error::AuthenticationFailed);
         }
         if decision1.is_err() {
             zeroize_array(&mut mac_key);
             zeroize_array(&mut enc_seed);
             zeroize_slice(&mut ciphertext);
+            #[cfg(feature = "dual-mac")]
+            scrub_stack();
             return Err(Error::AuthenticationFailed);
         }
     }
@@ -2152,12 +2216,16 @@ pub fn encrypt_in_place_detached(
 /// place, the same hand-made fault yields **no forgery in 2,000,000 attempts**. Two faults
 /// still defeat both, which is the boundary the README's table states.
 ///
-/// **The second comparison is now in every configuration, not only `dual-mac`.** It used to be
+/// **The second comparison is now in every configuration that builds the gates — `hardened` (the
+/// default) and everything above it — not only `dual-mac`.** It used to be
 /// gated on `dual-mac` — so the *default* build had one comparison shape and one shortened-loop
 /// fault was enough — until the costs were put side by side: this is one extra 65-byte fold,
 /// **measured at 1.4 ns** (0.1% of a 64-byte decryption, 1.05 us) against a measured change from
 /// "forgery after 2,573 attempts" to "none in 2,000,000". A defence with that ratio belongs in
-/// the default.
+/// the default. (The `--no-default-features` build is deliberately the single-gate, single-shape
+/// baseline — it compiles neither this function nor `ct_eq_independent` — which is why the
+/// boundary is stated as "every configuration that builds the gates" rather than "every
+/// configuration": an earlier revision said the latter and the opt-out build did not satisfy it.)
 #[inline(always)]
 #[cfg(feature = "hardened")]
 fn second_gate_comparison(a: &[u8; TAG_LEN], b: &[u8; TAG_LEN]) -> subtle::Choice {
@@ -2175,11 +2243,12 @@ fn second_gate_comparison(a: &[u8; TAG_LEN], b: &[u8; TAG_LEN]) -> subtle::Choic
 /// shortens that loop would disarm the gates together — one fault reaching two
 /// gates defeats the purpose of having two.
 ///
-/// Unconditional since the cost was measured: one 65-byte fold, tens of
-/// nanoseconds, in exchange for turning a hand-modelled shortened-loop forgery
-/// from "accepted after 2,573 attempts" into "none in 2,000,000". It was
-/// `dual-mac`-only before that comparison, which left the *default* build on one
-/// comparison shape.
+/// Unconditional *within the `hardened` family* since the cost was measured: one
+/// 65-byte fold, tens of nanoseconds, in exchange for turning a hand-modelled
+/// shortened-loop forgery from "accepted after 2,573 attempts" into "none in
+/// 2,000,000". It was `dual-mac`-only before that comparison, which left the
+/// *default* build on one comparison shape. It is not compiled at all under
+/// `--no-default-features`, whose single comparison is the documented baseline.
 ///
 /// This is not a claim of fault-injection resistance. An adversary who can fault
 /// this loop *and* `subtle`'s has two faults and defeats both, which is what the
@@ -4124,9 +4193,14 @@ mod tests {
         let nonce = [0u8; 24];
         let (_, tag) = encrypt(&key, &nonce, b"", b"").unwrap();
         assert_eq!(tag.len(), TAG_LEN);
-        // 65 bytes = 520 bits. Sized so commitment exceeds 2^256: the birthday
-        // bound caps commitment at 2^(n/2) bits for an n-bit tag, and 64 bytes
-        // would give exactly 2^256 rather than more.
+        // 65 bytes = 520 bits. Sized so the *target* form of commitment (a second key
+        // that opens a *given* ciphertext) has margin: each candidate key hits the
+        // published tag with probability 2^-520, so the whole 2^256 key space succeeds
+        // with probability ~2^-264. (An earlier comment here said "the birthday bound
+        // caps commitment at 2^(n/2) bits", which is the rationale §4.5 falsifies --
+        // commitment is not a birthday problem, and the tag's birthday is 2^128 over
+        // its 256-bit chaining value regardless of width. See `SECURITY-ANALYSIS.md`
+        // §4.5 and the README's "Security level".)
         assert_eq!(TAG_LEN, 65);
     }
 

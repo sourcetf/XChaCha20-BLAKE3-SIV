@@ -144,10 +144,17 @@ fn main() {
             }
             // The master key is the one thing this scan can check that matters: it
             // is the caller's secret, and it is supposed to reach the cipher only
-            // through copies the crate wipes.
+            // through copies the crate wipes.  The `control` entry is a symbol that
+            // is *never* placed on the stack, so a run that "finds" it is a false
+            // positive and the scan cannot be trusted — it is counted as a failure
+            // too, because the PASS text below claims exactly that control (and,
+            // until this branch existed, claimed a check the code did not perform).
             if label.starts_with("master KEY") && best >= 16 {
                 failures += 1;
                 line.push_str(&format!(" | KEY RESIDUE: {}-byte run @{}", best, at));
+            } else if label.starts_with("control") && best >= 16 {
+                failures += 1;
+                line.push_str(&format!(" | CONTROL FALSE POSITIVE: {}-byte run @{}", best, at));
             } else {
                 line.push_str(&format!(" | {}: {} B", label.split(' ').next().unwrap(), best));
             }

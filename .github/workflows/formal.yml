@@ -33,7 +33,12 @@ on:
   workflow_dispatch:
 
 concurrency:
-  group: formal-${{ github.ref }}
+  # Per-event group for the same reason as `deep.yml`: a push to `main` and the
+  # weekly `schedule` share `refs/heads/main`, so a push at 03:00 used to cancel the
+  # weekly proof run — and it reported as "cancelled", so the missing verification
+  # looked like an infrastructure hiccup. Isolating the schedule keeps the proofs
+  # (and keeps superseding a previous push or PR run for the same event).
+  group: formal-${{ github.ref }}-${{ github.event_name }}
   cancel-in-progress: true
 
 permissions:

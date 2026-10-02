@@ -71,7 +71,7 @@ run_ctgrind() {
       cargo test --release --target x86_64-unknown-linux-gnu --test ctgrind --no-run \
         --no-default-features >/dev/null 2>&1
     local bin
-    bin="$(ls -t "$dir"/target-ctgrind/x86_64-unknown-linux-gnu/release/deps/ctgrind-* 2>/dev/null | grep -vE '\.(d|o)$' | head -1)"
+    bin="$(ls -t "$dir"/target-ctgrind/x86_64-unknown-linux-gnu/release/deps/ctgrind-* 2>/dev/null | grep -vE '\.(d|o)$' | head -1 || true)"
     [ -n "$bin" ] || { echo "could not build the ctgrind binary"; return 2; }
     # The same classification the real check uses: a report inside this crate
     # means the leak was seen.

@@ -9,7 +9,7 @@
 //! every behavioural test.
 //!
 //! The inventory therefore also counts the one cryptographic call that is *not* part of that
-//! composition — the unkeyed `blake3::hash` behind `locked`'s key-integrity tag, which §4.10
+//! composition — the unkeyed BLAKE3 hash behind `locked`'s key-integrity tag, which §4.10
 //! argues separately — so that adding or moving *that* call is caught here too. What the count
 //! pins is "the set of primitive call sites has not changed", not "these are all construction
 //! uses".
@@ -32,9 +32,11 @@ use xchacha20_blake3_siv::{DOM_ENC, DOM_TAG, SUBKEY_DOMAIN};
 ///   `blake3_keyed_multi` from `derive_tag`, which also has the two concatenation shapes;
 /// * `chacha20_keystream` and `chacha20_apply` — U5, the data keystream, in the allocating
 ///   and in-place entry points;
-/// * `blake3::hash` — *not* a construction use: the unkeyed hash behind `locked`'s
+/// * `blake3::Hasher::new` (unkeyed) — *not* a construction use: the hash behind `locked`'s
 ///   key-integrity tag (§4.10, "the one call outside the construction"). Counted here so a
-///   change to it fails this test too, not because it is part of the composition.
+///   change to it fails this test too, not because it is part of the composition. (It was
+///   `blake3::hash` until the state-wipe fix; the explicit hasher is used so its state can be
+///   zeroized, and `blake3::Hasher::new_keyed` does not match this pattern.)
 ///
 /// A count that changes is not automatically a defect. It is a signal that §4.10's table, the
 /// assumption tree in §2.1, and the L1 reductions it cites have to be re-checked for the new
@@ -46,7 +48,7 @@ const PRIMITIVE_CALLS: &[(&str, usize)] = &[
     ("blake3_keyed_multi(", 3),
     ("chacha20_keystream(", 2),
     ("chacha20_apply(", 4),
-    ("blake3::hash(", 1),
+    ("blake3::Hasher::new(", 1),
 ];
 
 #[test]
@@ -81,9 +83,17 @@ fn the_primitive_uses_are_the_ones_the_analysis_covers() {
         );
     }
 
-    // A floor, so deleting the functions cannot make the assertions above vacuous.
+    // A floor on the *table*, so shrinking the inventory itself cannot go unnoticed. It is
+    // deliberately computed from `PRIMITIVE_CALLS` and not from the source: the per-call
+    // `assert_eq!(found, expected)` above already fails if a call site is deleted from
+    // `src/lib.rs`, so a source-reading floor here would be redundant, and an earlier comment
+    // claiming this "stops deleting the functions from making the assertions vacuous" was
+    // describing work the loop above does. What this line actually guards is the table.
     let total: usize = PRIMITIVE_CALLS.iter().map(|(_, n)| n).sum();
-    assert!(total >= 13, "the inventory itself shrank: {total}");
+    assert!(
+        total >= 13,
+        "the inventory table shrank below the recorded total: {total}"
+    );
 }
 
 /// **Lemma S1**: the two keyed-BLAKE3 families have disjoint input spaces.
@@ -139,13 +149,21 @@ fn the_derivation_nonce_does_not_use_xchacha20s_nul_padding() {
     );
     // And the placement is in the *nonce*, not the counter: a label in the counter slot would
     // not separate this scheme from XChaCha20-Poly1305, which leaves the counter at 0.
+    //
+    // Cut at `mod tests {` before searching. The searched string occurs in this file's *own*
+    // test module too (the nonce-reuse unit test writes the same line), so searching the whole
+    // file made the assertion true even with the real write at `derive_material` deleted — a
+    // guard satisfied by the test that was supposed to need it. The sibling test above already
+    // cuts at `mod tests {`; this one did not.
     let src = include_str!("../src/lib.rs");
+    let cut = src.find("mod tests {").expect("the test module must exist");
+    let body = &src[..cut];
     assert!(
-        src.contains("subkey_nonce[0..4].copy_from_slice(&SUBKEY_DOMAIN);"),
+        body.contains("subkey_nonce[0..4].copy_from_slice(&SUBKEY_DOMAIN);"),
         "the label is no longer written into the nonce's first four bytes"
     );
     assert!(
-        src.contains("chacha20_keystream_raw(&subkey, 0, &subkey_nonce, &mut material);"),
+        body.contains("chacha20_keystream_raw(&subkey, 0, &subkey_nonce, &mut material);"),
         "the key-material block no longer uses counter 0 with that nonce"
     );
 }
