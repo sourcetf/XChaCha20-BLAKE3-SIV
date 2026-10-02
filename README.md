@@ -592,11 +592,15 @@ deployment.
   process's stack gets per-message encryption keys, not the master key — and such an
   attacker can usually read the caller's own key copy anyway. It is written down here
   because the crate's own claim ("no copy of the MAC key survives the call") is about
-  the MAC key, and a reader should not extend it to the encryption key. Two source
-  changes in this crate reduce the residue that *is* reachable — `derive_enc` writes
-  through caller slices instead of returning a 44-byte aggregate, and
-  `chacha20_rounds` mutates in place instead of taking the key state by value — and
-  both were found by exactly this scan.
+  the MAC key, and a reader should not extend it to the encryption key. The same scan
+  covers `locked`'s integrity tag — a hash of the master key — and reaches the same
+  conclusion: the crate's own copies are wiped, the residue is the dependency's XOF
+  buffer, and the tool attributes it with a blake3-only control. Three source changes
+  in this crate reduce the residue that *is* reachable — `derive_enc`, `derive_material`
+  and `integrity_tag` all write through caller slices instead of returning an aggregate
+  (the last one's return value was a copy of `BLAKE3(key)` in a frame no wipe could
+  reach), and `chacha20_rounds` mutates in place instead of taking the key state by
+  value — and each was found by exactly this scan.
 - **Zeroization is a volatile-store wipe.** It clears the bytes this crate owns, when
   it drops them. It does not reach a page that had already been swapped out, a core
   dump or a hibernation image the OS writes, a debugger attached to the process, or

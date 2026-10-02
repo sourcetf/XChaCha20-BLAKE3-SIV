@@ -1460,10 +1460,21 @@ pub mod locked {
     /// is aimed at.
     pub(crate) const KEY_TAG_LEN: usize = 8;
 
-    /// The integrity tag of a key: the first `KEY_TAG_LEN` bytes of BLAKE3 over the key.
+    /// The integrity tag of a key: the first `KEY_TAG_LEN` bytes of BLAKE3 over the key,
+    /// written into `out`.
     ///
     /// Unkeyed on purpose — see `LockedKey::as_bytes` for what that does and does not buy.
-    fn integrity_tag(key: &[u8]) -> [u8; KEY_TAG_LEN] {
+    ///
+    /// **It writes through `out` rather than returning, and the caller wipes `out`.** The
+    /// value is a hash of the key, i.e. key material by this crate's classification (see
+    /// `Key`'s redacted `Debug`). A returning version put a copy in this function's own frame
+    /// — a local the function cannot wipe, because it is the return value — and that copy sat
+    /// on the ordinary stack. `tools/stack_residue.sh` measured it: an 8-byte `TAG RESIDUE`
+    /// run in the `locked` case, in the frame of *this* function, after the callers' copies
+    /// had already been wiped. Writing into the caller's buffer leaves exactly one copy, and
+    /// both callers wipe it (`new` before its fallible `lock_range`, `check_integrity` before
+    /// its branch, so the `panic!` path is covered too).
+    fn integrity_tag(key: &[u8], out: &mut [u8; KEY_TAG_LEN]) {
         // An explicit hasher rather than `blake3::hash`, so its internal state can be
         // wiped. `blake3::hash` builds and drops a hasher with no handle, which leaves the
         // chaining value it produced while absorbing the *key* on the stack — and this
@@ -1472,12 +1483,10 @@ pub mod locked {
         // (`blake3_keyed_multi`); this is the same discipline on the unkeyed call.
         let mut hasher = blake3::Hasher::new();
         hasher.update(key);
-        let mut tag = [0u8; KEY_TAG_LEN];
         let mut reader = hasher.finalize_xof();
-        reader.fill(&mut tag);
+        reader.fill(out);
         reader.zeroize();
         hasher.zeroize();
-        tag
     }
 
     impl LockedKey {
@@ -1496,8 +1505,14 @@ pub mod locked {
         pub fn new(key: &[u8; crate::KEY_LEN]) -> Result<Self, isize> {
             let mut page = Page::new().ok_or(-12isize /* ENOMEM */)?;
             page.bytes_mut()[..crate::KEY_LEN].copy_from_slice(key);
-            let tag = integrity_tag(&key[..]);
+            let mut tag = [0u8; KEY_TAG_LEN];
+            integrity_tag(&key[..], &mut tag);
             page.bytes_mut()[crate::KEY_LEN..crate::KEY_LEN + KEY_TAG_LEN].copy_from_slice(&tag);
+            // The tag is `BLAKE3(key)` truncated, i.e. key material by this crate's own
+            // classification, and the copy in the page is covered by the page's own wipe on
+            // drop. This local is the copy that is *not*: wipe it before the fallible
+            // `lock_range`, so the `?` cannot return through it either.
+            crate::zeroize_array(&mut tag);
             // Lock the whole page; on failure `page` is freed by its own `Drop`.
             lock_range(page.as_ptr(), page.len())?;
             Ok(LockedKey(page))
@@ -1548,12 +1563,20 @@ pub mod locked {
         /// key that is not the caller's.
         #[inline(never)]
         fn check_integrity(&self, bytes: &[u8; crate::KEY_LEN]) {
-            let expected = integrity_tag(&bytes[..]);
+            let mut expected = [0u8; KEY_TAG_LEN];
+            integrity_tag(&bytes[..], &mut expected);
             // SAFETY: `new` wrote `KEY_TAG_LEN` initialised bytes immediately after the key.
             let stored = unsafe {
                 core::slice::from_raw_parts(self.0.as_ptr().add(crate::KEY_LEN), KEY_TAG_LEN)
             };
-            if !bool::from(expected.as_slice().ct_eq(stored)) {
+            let ok = expected.as_slice().ct_eq(stored);
+            // Wipe *before* the branch, so the copy survives on neither path: the `panic!`
+            // below unwinds without running any later statement, so a wipe placed after it
+            // would cover the success path only — and this function runs on every `as_bytes`,
+            // i.e. on every encryption and decryption through this key. `ok` is a `Choice`
+            // and does not alias the buffer, so clearing it first is sound.
+            crate::zeroize_array(&mut expected);
+            if !bool::from(ok) {
                 panic!(
                     "LockedKey: the locked page no longer holds the key that was stored in it \
                      (hardware fault or memory corruption). Refusing to use a key that is not \

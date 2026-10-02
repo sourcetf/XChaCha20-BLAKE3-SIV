@@ -332,6 +332,56 @@ fn brace_blocks(needle: &str) -> Vec<String> {
     out
 }
 
+/// The `BLAKE3(key)` integrity tag is wiped in **both** callers, before any early exit.
+///
+/// The value is a hash of the key — key material by this crate's own classification — and
+/// `integrity_tag` returning it leaves a copy in the caller's frame that the function cannot
+/// reach. `check_integrity` is `#[inline(never)]` and runs on every `as_bytes()`, i.e. on
+/// every encryption and decryption through a `LockedKey`, so a missed wipe there is a residue
+/// on the ordinary stack on the hot path; and its `panic!` path unwinds without running any
+/// statement after it, so the wipe has to come *before* the branch. A wiped stack local is not
+/// observable from a test, so this is a source-shape assertion, like the ones above.
+#[test]
+fn the_integrity_tag_is_wiped_in_both_callers() {
+    // `integrity_tag` must not *return* the tag: a returning version kept a copy in its own
+    // frame, which no caller can reach, and `tools/stack_residue.sh` measured exactly that as
+    // an 8-byte residue in the `locked` case. Writing through the caller's slice is what
+    // leaves a single copy for the caller to wipe.
+    assert!(
+        LIB.contains("fn integrity_tag(key: &[u8], out: &mut [u8; KEY_TAG_LEN])"),
+        "integrity_tag no longer writes through a caller slice, so it keeps its own copy of \
+         a hash of the key in a frame no wipe reaches"
+    );
+
+    let news = brace_blocks("pub fn new(key: &[u8; crate::KEY_LEN])");
+    assert_eq!(news.len(), 1, "expected exactly one `LockedKey::new`");
+    let new = &news[0];
+    let wipe = new
+        .find("crate::zeroize_array(&mut tag);")
+        .expect("LockedKey::new no longer wipes the integrity tag it computed");
+    let fallible = new
+        .find("lock_range(page.as_ptr(), page.len())?;")
+        .expect("LockedKey::new no longer calls lock_range");
+    assert!(
+        wipe < fallible,
+        "the tag wipe must precede the fallible `lock_range`, or the `?` returns through it"
+    );
+
+    let checks = brace_blocks("fn check_integrity(&self, bytes: &[u8; crate::KEY_LEN])");
+    assert_eq!(checks.len(), 1, "expected exactly one `check_integrity`");
+    let check = &checks[0];
+    let wipe = check
+        .find("crate::zeroize_array(&mut expected);")
+        .expect("check_integrity no longer wipes the tag it computed");
+    let branch = check
+        .find("if !bool::from(ok)")
+        .expect("check_integrity no longer branches on the comparison");
+    assert!(
+        wipe < branch,
+        "the wipe must precede the `if`, or the panic path leaves the tag in the frame"
+    );
+}
+
 /// The advice constants are the ABI's, and both are actually passed to `madvise`.
 ///
 /// This exists because the effect of `MADV_DODUMP` is only *observable* on a host whose

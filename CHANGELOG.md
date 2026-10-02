@@ -7,7 +7,36 @@ tags have been cut yet.
 
 ## Unreleased
 
-### Follow-up audit of `v0.3`: a false commitment number corrected, the last of the aggregate returns removed, and consistency fixes
+### `locked`'s integrity tag survived on the stack — and the scan now measures it
+
+An auditor found the one wipe the `07043de` sweep did not reach, and this is a real leak of key
+material, not a documentation point.
+
+- **The defect.** `LockedKey::new` and `LockedKey::check_integrity` each held the integrity tag —
+  the first 8 bytes of `BLAKE3(key)`, i.e. a hash of the master key — in a local that was never
+  wiped. `check_integrity` is `#[inline(never)]` and runs on **every** `as_bytes()`, so the copy
+  sat in its own frame on the ordinary stack on every encryption and decryption through a
+  `LockedKey`; and its `panic!` path unwinds without running any later statement, so even a wipe
+  placed after the comparison would have covered only the success path. The `07043de` change had
+  wiped the *hasher's* state for exactly this reason but not the 8 bytes it produced.
+- **The fix, in two parts.** `integrity_tag` now writes through a caller slice rather than
+  returning (`fn integrity_tag(key: &[u8], out: &mut [u8; KEY_TAG_LEN])`): a returning version
+  kept a copy in *its own* frame, which no caller can reach — confirmed by measurement, not
+  assumed. Both callers then wipe their buffer — `new` before its fallible `lock_range` (so the
+  `?` cannot return through it) and `check_integrity` before its branch (so the panic path is
+  covered).
+- **The measurement.** `tools/stack_residue.sh` now scans for `BLAKE3(key)[0..8]` as well as the
+  master key, exercises `LockedKey::new`/`as_bytes`, and carries a **blake3-only attribution
+  control**: the same XOF call and wipe discipline with no crate code. The control shows the
+  remaining 8-byte residue is the `blake3` dependency's XOF output buffer — the same finding the
+  README already records for the derived values, in a frame this crate cannot wipe — so the tool
+  reports it as attributable rather than as a crate failure. The crate's own copies are gone.
+- **The guard.** `tests/locked.rs::the_integrity_tag_is_wiped_in_both_callers` is a source-shape
+  assertion (a wiped stack local is not observable from a test): it pins the write-through
+  signature, and that each caller's wipe precedes the fallible `?` and the branch respectively.
+- **Wire format unchanged.**
+
+### Follow-up audit of `v0.3`: a false commitment number corrected, an aggregate return removed, and consistency fixes
 
 A wide audit of revision `v0.3` (core source, witness, Kani, the test guards, the docs, the
 tooling, and an adversarial crypto pass). It found **one substantive defect** — a wrong security
@@ -29,9 +58,10 @@ format is unchanged** (still `v0.3`): the code changes below are internal.
 - **`derive_material` no longer returns its keys by value.** It returned a 96-byte aggregate —
   the same shape `derive_enc` was changed away from after a stack scan found the tail of its
   return surviving — and is now a write-through-caller-slices function, so the caller's named
-  locals are the only copies. (Whether the aggregate actually left residue was not confirmed; the
-  fix is for consistency with the crate's own established pattern, not because a leak was
-  measured.)
+  locals are the only copies. (This function's own residue was not independently measured at the
+  time; the shape was, shortly after, when the same audit found `integrity_tag`'s return leaving a
+  measured 8-byte run — see the entry above. The fix is the crate's established pattern, and that
+  entry is the measurement.)
 - **The `ultra` witness tag is now wiped at every call site** (it is a secret-derived MAC); the
   witness's module doc no longer claims every buffer is wiped, since its scalar primitive state
   (`block`/`hchacha20`/`compress`) is not, and no longer claims the domain strings are duplicated
