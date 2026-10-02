@@ -477,6 +477,13 @@ fn deny_debugging_is_enforced_by_the_kernel_and_reversible() {
             return;
         }
     };
+    // Arm the restore *now*, so it happens on a panic as well as on the success path. The doc
+    // above says every path restores the flag, and until this guard existed that was false:
+    // the two assertions below, or anything else that panicked in between, would have returned
+    // through `Drop` without ever reaching the explicit restore at the end — leaving the whole
+    // test binary non-dumpable, which costs every later test its core dump and stops `gdb` and
+    // `strace` attaching to a run that is failing. That is exactly when someone wants them.
+    let _armed = RestoresDumpable;
     assert_eq!(previous, 1, "the previous state should have been dumpable");
     assert_eq!(
         is_dumpable(),
@@ -551,5 +558,20 @@ fn set_dumpable(value: usize) -> bool {
     {
         let _ = value;
         false
+    }
+}
+
+/// Puts the process's dumpable flag back to `1` when it goes out of scope.
+///
+/// The safety net behind `deny_debugging_is_enforced_by_the_kernel_and_reversible`: a test that
+/// flips process-wide state and then panics would otherwise leave every *later* test in the same
+/// binary without core dumps and without a debuggable process, which is the opposite of what a
+/// failing test needs. `Drop` runs on the panic path, so "every path restores it" is true by
+/// construction rather than by discipline.
+struct RestoresDumpable;
+
+impl Drop for RestoresDumpable {
+    fn drop(&mut self) {
+        let _ = set_dumpable(1);
     }
 }

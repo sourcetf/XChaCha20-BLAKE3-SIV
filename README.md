@@ -374,7 +374,7 @@ xchacha20-blake3-siv = { version = "0.1", features = ["ultra"] }
 | --- | --- | --- |
 | `hardened` (already default) | a single corrupted decision value or instruction | +10.8% at 64 B, +3.6% at 1 KiB, +0.4% at 1 MiB |
 | `hardened` (moved here from `dual-mac`) | a fault inside the shared constant-time comparison (a shortened loop, a corrupted bound): the second gate `AND`s a differently *written* comparison (an 8-byte fold into a `u64`, rather than `subtle`'s per-byte loop), so one fault reaches only one of the two shapes and a forgery needs two faults | **+1.4 ns** per decryption, measured (0.1% at 64 B). It was `dual-mac`-only until the two numbers were put side by side: this cost against a hand-modelled change from "forgery accepted after 2,573 attempts" to "no forgery in 2,000,000" |
-| `dual-mac` | the tag being pinned to a constant or to the received tag — the one model the two gates fail *together* on | +30% at 64 B, +40% at 1 KiB, +24% at 1 MiB on decryption; +8–25% on a round trip |
+| `dual-mac` | the tag being pinned to a constant or to the received tag — the one model the two gates fail *together* on | +30% at 64 B, +40% at 1 KiB, +24% at 1 MiB on decryption (a +21–40% range); +6–25% on a round trip (the two ranges `Cargo.toml` and the changelog state) |
 | `dual-mac` | the `blake3` dependency's XOF output surviving in its own stack frames: `scrub_stack()` overwrites the 16 KiB below the entry point after the last derivation | ~16 KiB of volatile stores, ~0.5–1 µs per operation, **and ~16 KiB of stack per call**. Measured on a thread with a 32 KiB stack: the default build still runs after 16 KiB of the stack is already consumed, this one does not survive 8 KiB. A caller that spawns threads with small stacks must size them for it — the scrub is a 16 KiB frame, so it can fault the thread it is protecting. The number is public as `stack_requirement_bytes()` (zero outside `dual-mac`), and `the_reported_stack_requirement_is_sufficient` measures that a thread given that budget survives a round trip |
 | `witness` (in `ultra` only) | a fault aimed at the **derivation arithmetic both tag computations share** — `derive_tag`, the keyed BLAKE3 under it, and the SIMD kernels: the one model `dual-mac` alone cannot close, and where every accepting fault the sweep finds in the `hardened` build sits | decryption costs **2.8x at 64 B, 4.1x at 1 KiB, 9.7x at 64 KiB, 11.3x at 1 MiB** against the default configuration, and the round trip 2.3x/2.8x/5.5x/5.7x in place or 2.6x/3.1x/6.4x/7.1x allocating (measured; the four tables are "The three configurations, measured" below, and that section's "what the `ultra` layer costs" table is the one to read for this row). It is a *scalar* implementation, so its cost is per byte, and on the encrypt side it is present **only on the allocating `encrypt`** — see "What the witness is" for why the in-place path does not carry it. It does not make the *totals* in the fault table zero — it removes accepting faults from the decision and from the shared derivation, and the `ultra` build has a handful elsewhere (§§) |
 | `locked` | key pages readable out of **swap** or a **core dump** | ~7 µs once per key (`mlock`+`munlock`), not per message. The key is heap-allocated so its address is stable: `mlock` is address-based, and a key returned by value moves after being locked, which left this layer protecting a dead stack slot |
@@ -883,9 +883,11 @@ comparison, and both are the price of a defence rather than an accident:
   *encryption* is untouched (418 us against 392 us at 1 MiB) because that path
   carries no witness; the allocating `encrypt`, which does, lands at 7.1x the
   default on the round trip at 1 MiB. If a deployment wants the fault model and not
-  the cost, `hardened,dual-mac` (everything `ultra` has except the witness) is the
-  configuration to measure against — the table's `opt-out` and `hardened` columns
-  bracket it, since `dual-mac` costs one extra tag pass.
+  the cost, `hardened,dual-mac` — `ultra`'s two fault-model layers, without the witness
+  and without the `locked`/`rng` layers — is the configuration to measure against; the
+  table's `opt-out` and `hardened` columns bracket it, since `dual-mac` costs one extra
+  tag pass. (`ultra` minus *only* the witness is `hardened,dual-mac,locked,rng`, the
+  configuration the "what the `ultra` layer costs" table below measures.)
 
 Latency is not throughput divided by size, because the fixed per-message cost
 dominates at the small end: at 64 bytes the default build is 0.47 us cheaper *per

@@ -1604,6 +1604,20 @@ pub mod locked {
 
     impl Drop for Page {
         fn drop(&mut self) {
+            // Wipe the whole page before freeing it, so *every* path that ends a page's life
+            // leaves no key material in memory the allocator will hand out again.
+            //
+            // `LockedKey::drop` already wipes — before it unlocks, for a swap-window reason —
+            // but `LockedKey::new`'s failure path drops the page *directly*, with the key and
+            // its integrity tag already written and `mlock` having just refused. That path used
+            // to free the bytes unwiped: a `?` returning through live key material, which is the
+            // same defect class the entry points were fixed for. Doing it here is the one place
+            // that cannot be forgotten when another early return is added to `new`.
+            //
+            // Cost: one page of volatile stores, once per key lifetime. It is a *volatile*
+            // store rather than a plain one for the same reason the other wipes are: a plain
+            // store to memory that is about to be freed is a dead store the optimizer may drop.
+            crate::zeroize_slice(self.bytes_mut());
             // SAFETY: the pointer and layout `new` allocated, freed exactly once.
             unsafe { alloc::alloc::dealloc(self.ptr, self.layout) }
         }

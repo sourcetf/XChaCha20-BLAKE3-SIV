@@ -43,10 +43,17 @@ on:
   workflow_dispatch:
 
 # One run per ref: a new push supersedes an in-flight run rather than queueing
-# behind it.
+# behind it -- but **only for pull requests**. On `main` a run carries the
+# `release` job, which tags the commit and uploads the `.crate`, the manifest and
+# the three bundles; `gh release create`/`upload` is not atomic, so superseding a
+# main run mid-publish can leave a partially-populated release -- the exact
+# outcome the publish step works to prevent. So pushes to `main` are not
+# cancelled; they queue, and each publishes its own `sha-<commit>` tag, which is
+# safe. (Found while auditing the release job: the unconditional
+# `cancel-in-progress: true` reached the release too.)
 concurrency:
   group: ci-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
   contents: read
@@ -422,7 +429,7 @@ jobs:
             ran=$((ran + 1))
           done < "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/executables.txt"
           if [ "$ran" -eq 0 ]; then
-            echo "no ${{ matrix.target }} test binaries found in $deps" >&2
+            echo "no ${{ matrix.target }} test binaries were executed (executables.txt was empty or all entries were excluded)" >&2
             exit 1
           fi
           echo "executed $ran ${{ matrix.target }} test binaries under qemu"
@@ -482,7 +489,13 @@ jobs:
     name: tag the commit and publish a release
     # Gate on every verification job: a release must not exist for a commit that
     # did not pass. `needs` also means a failure anywhere blocks this.
-    needs: [lint, test, msrv, cross, cross-exec, differential]
+    #
+    # `timing-instrument` is in the list because it is *blocking* (no
+    # `continue-on-error`) and was previously omitted, so a commit whose timing
+    # instrument had rotted could still cut a release -- contradicting this comment.
+    # The two advisory jobs (`timing`, `stack-residue`) are `continue-on-error: true`
+    # and are deliberately not gates.
+    needs: [lint, test, msrv, cross, cross-exec, differential, timing-instrument]
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     permissions:
@@ -529,14 +542,23 @@ jobs:
           cargo build --release --no-default-features
           cargo build --release
           cargo build --release --features ultra
+          # The `- ` prefix *and* the `$` anchor are both load-bearing, not cosmetic.
+          # Without them the search string matches *this loop's own literals* on the
+          # lines above (so the grep always succeeds and the guard can never fire --
+          # measured: deleting a leg from the matrix still printed "matrix leg present"),
+          # and without the anchor `- profile: release, no default features` also matches
+          # the longer `- profile: release, no default features with rng` row. A matrix
+          # row is exactly `- profile: ...`; anchoring both ends makes the check mean what
+          # it says. (Same class as the other vacuous gates this repo has found: a check
+          # that cannot fail reads as a pass.)
           for leg in 'profile: release, default features' \
                      'profile: release, no default features' \
                      'profile: release, ultra'; do
-            if ! grep -Fq "$leg" .github/workflows/ci.yml; then
-              echo "::error::the test matrix no longer contains '$leg', so this release would not be gated on that configuration"
+            if ! grep -q -- "- $leg\$" .github/workflows/ci.yml; then
+              echo "::error::the test matrix no longer contains a '- $leg' entry, so this release would not be gated on that configuration"
               exit 1
             fi
-            echo "matrix leg present: $leg"
+            echo "matrix leg present: - $leg"
           done
 
       # One artifact per configuration, not one artifact for the default and prose about the
@@ -546,8 +568,9 @@ jobs:
       # in common.
       #
       # Each bundle carries the compiled library for that configuration, a runnable binary
-      # (`xsiv_stdin`), and a manifest with the exact build command, the resolved feature set,
-      # the file digests, and the known-answer output. The last of those is also the cross-check
+      # (`xsiv_stdin`), the input vector it was run on, and a manifest with the exact build
+      # command, the resolved feature set, the file digests, and the known-answer output. The
+      # last of those is also the cross-check
       # between configurations: **the same vector through all three must produce the same
       # ciphertext and tag byte for byte**, and the step fails if they differ. That is the release
       # proving the claim "identical bytes, different defences" rather than asserting it.
@@ -573,7 +596,18 @@ jobs:
               ultra)    flags="--features ultra" ;;
             esac
             echo "=== bundling $cfg ($flags) ==="
-            cargo build --release $flags --example xsiv_stdin
+            # `--lib` is required, not incidental. Building *only* the example does not
+            # regenerate the root `target/release/libxchacha20_blake3_siv.rlib`: that
+            # artifact is uplifted only when the lib target is built. Measured on this
+            # workflow before the fix: after `cargo build --release --no-default-features
+            # --example xsiv_stdin` the root rlib still had the feature set of the last
+            # plain `cargo build` (the `ultra` one, three steps earlier), so all three
+            # bundles shipped the same `ultra` library while their manifest claimed "the
+            # compiled library for this configuration" -- and the three `.rlib` digests in
+            # the per-bundle tables would have been identical. With `--lib` each iteration
+            # rewrites the root rlib to the matching feature set: the three digests are
+            # then distinct (verified by running this loop locally).
+            cargo build --release $flags --lib --example xsiv_stdin
             bin="target/release/examples/xsiv_stdin"
             rlib="$(ls target/release/libxchacha20_blake3_siv*.rlib | head -1)"
 
@@ -581,6 +615,9 @@ jobs:
             mkdir -p "dist/$name"
             cp "$bin" "dist/$name/xsiv_stdin"
             cp "$rlib" "dist/$name/$(basename "$rlib")"
+            # Ship the input the KAT is the answer for, so a consumer can re-derive it
+            # instead of taking the bundled digest on faith.
+            cp dist/vector.txt "dist/$name/vector.txt"
 
             # The known-answer output for this configuration, and the cross-configuration check.
             "$bin" < dist/vector.txt > "dist/$name/kat.txt"
@@ -603,7 +640,12 @@ jobs:
               echo "  kat sha256: $kat (reference for the other two)"
             elif [ "$kat" != "$first_kat" ]; then
               echo "::error::$cfg produced different ciphertext/tag for the same vector ($kat vs $first_kat): the wire format is NOT identical across configurations, and the release notes must not say it is"
-              diff <(cat "dist/"*"/kat.txt") >&2 || true
+              # Print all three outputs side by side. `diff <(cat dist/*/kat.txt)` looked
+              # like a comparison but passed a single operand to `diff`, which printed
+              # "missing operand" and exited 2 -- swallowed by `|| true`, so the one
+              # failure path that matters showed nothing useful.
+              echo "per-bundle known-answer output:" >&2
+              for f in dist/*/kat.txt; do printf '%s: ' "$f" >&2; cat "$f" >&2; done
               exit 1
             else
               echo "  kat sha256: $kat (identical to the opt-out bundle)"
@@ -621,13 +663,14 @@ jobs:
               echo "| File | What it is |"
               echo "| --- | --- |"
               echo "| \`xsiv_stdin\` | the crate's audit CLI, built for this configuration |"
-              echo "| \`libxchacha20_blake3_siv*.rlib\` | the compiled library for this configuration |"
+              echo "| \`libxchacha20_blake3_siv*.rlib\` | the compiled library for this configuration, **for inspection** — an \`rlib\` is not self-contained: linking it needs the same toolchain and the same dependency \`rlib\`s. The supported way to use this crate is the \`.crate\` attached to the release, with the features you want |"
               echo "| \`kat.txt\` | the known-answer output for \`vector.txt\` in this configuration |"
+              echo "| \`vector.txt\` | the input \`kat.txt\` is the answer for — one line, four space-separated hex fields (\`key nonce aad msg\`), the format \`xsiv_stdin\` reads on stdin |"
               echo
               echo "## Digests"
               echo
               echo '```'
-              (cd "dist/$name" && sha256sum xsiv_stdin *.rlib kat.txt)
+              (cd "dist/$name" && sha256sum xsiv_stdin *.rlib kat.txt vector.txt)
               echo '```'
               echo
               echo "## Known-answer output"

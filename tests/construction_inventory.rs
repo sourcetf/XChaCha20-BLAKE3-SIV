@@ -8,6 +8,12 @@
 //! nothing else in the suite would notice — a sixth use of a correct primitive still passes
 //! every behavioural test.
 //!
+//! The inventory therefore also counts the one cryptographic call that is *not* part of that
+//! composition — the unkeyed `blake3::hash` behind `locked`'s key-integrity tag, which §4.10
+//! argues separately — so that adding or moving *that* call is caught here too. What the count
+//! pins is "the set of primitive call sites has not changed", not "these are all construction
+//! uses".
+//!
 //! So the completeness claim is pinned here, the way `tests/variable_latency.rs` pins its
 //! inventories: a change fails this file until somebody updates the analysis. The *value*
 //! level half of the argument — that the two ChaCha20 uses really are at different points —
@@ -18,14 +24,17 @@ use xchacha20_blake3_siv::{DOM_ENC, DOM_TAG, SUBKEY_DOMAIN};
 
 /// The cryptographic calls in the non-test source, with how many call sites each has.
 ///
-/// These are the five uses of §4.10, and the counts are the inventory:
+/// These are the five uses of §4.10, plus the one call outside the construction:
 ///
 /// * `hchacha20` — U1, the subkey;
 /// * `chacha20_keystream_raw` — U2, the 64-byte key-material block (counter 0);
 /// * `blake3_keyed_xof` — U4, the per-message key; U3 (the tag) goes through
 ///   `blake3_keyed_multi` from `derive_tag`, which also has the two concatenation shapes;
 /// * `chacha20_keystream` and `chacha20_apply` — U5, the data keystream, in the allocating
-///   and in-place entry points.
+///   and in-place entry points;
+/// * `blake3::hash` — *not* a construction use: the unkeyed hash behind `locked`'s
+///   key-integrity tag (§4.10, "the one call outside the construction"). Counted here so a
+///   change to it fails this test too, not because it is part of the composition.
 ///
 /// A count that changes is not automatically a defect. It is a signal that §4.10's table, the
 /// assumption tree in §2.1, and the L1 reductions it cites have to be re-checked for the new
@@ -37,10 +46,11 @@ const PRIMITIVE_CALLS: &[(&str, usize)] = &[
     ("blake3_keyed_multi(", 3),
     ("chacha20_keystream(", 2),
     ("chacha20_apply(", 4),
+    ("blake3::hash(", 1),
 ];
 
 #[test]
-fn the_primitive_uses_are_the_five_the_analysis_covers() {
+fn the_primitive_uses_are_the_ones_the_analysis_covers() {
     let src = include_str!("../src/lib.rs");
     let cut = src.find("mod tests {").expect("the test module must exist");
     let body = &src[..cut];
@@ -73,7 +83,7 @@ fn the_primitive_uses_are_the_five_the_analysis_covers() {
 
     // A floor, so deleting the functions cannot make the assertions above vacuous.
     let total: usize = PRIMITIVE_CALLS.iter().map(|(_, n)| n).sum();
-    assert!(total >= 12, "the inventory itself shrank: {total}");
+    assert!(total >= 13, "the inventory itself shrank: {total}");
 }
 
 /// **Lemma S1**: the two keyed-BLAKE3 families have disjoint input spaces.

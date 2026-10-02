@@ -49,17 +49,22 @@ disarmed every gate at once — `dual-mac` included, because it compares through
 function. Measured: a forgery is accepted after **2,573 attempts** with the comparison
 cut to two bytes.
 
-Under `dual-mac`/`ultra`, the second gate now `AND`s in `ct_eq_independent`, a
+Under *every* configuration, the second gate now `AND`s in `ct_eq_independent`, a
 differently *written* constant-time comparison (an 8-byte fold into a `u64`, one
 comparison at the end). Re-measured against the same fault: **no forgery in 2,000,000
 attempts**. One fault can now only disarm one of the two comparisons, so a forgery needs
 two faults — which is the boundary the README's table states.
 
-**The default builds are deliberately unchanged here.** `hardened` on its own still
-compares both gates through `subtle`, and still accepts that forgery; this is an
-`ultra` defence, and the README's fault table says so on the row rather than leaving
-the reader to infer that two gates over one comparison are two witnesses. Cost under
-`ultra`: one extra 65-byte comparison, about +2.7% at 64 B and +0.1% at 1 MiB.
+**The fold was `dual-mac`/`ultra`-only when this entry was first written, and is not any
+more.** It moved into the default in the *"One defence was cheap enough to leave `ultra`"*
+entry below: one extra 65-byte comparison, measured at **+1.4 ns per decryption (0.1% at
+64 B)**, which is worth having in every build rather than behind an opt-in feature. Read
+that entry for the current cost and gating; this paragraph is kept only so the sequence of
+decisions is legible, and it does **not** describe the default build as it stands. (An
+earlier version of this paragraph said the default builds were "deliberately unchanged
+here" and quoted "+2.7% at 64 B" — both were true of the intermediate revision and false
+of the shipped one, which is how the contradiction with the README's fault table was
+found.)
 
 ### `ultra`: the stack region the key derivations used is overwritten
 
@@ -1445,6 +1450,104 @@ both counts printed.
   sources is a failure, so the check stays non-vacuous.
 - Missing doc comments on the module's unsupported-target fallbacks (`missing_docs` caught
   them on i686, where that arm compiles and the host arm does not).
+
+### Recheck after the `ultra` work: a page freed unwiped, and a test that restored on one path only
+
+Two defects, both found by reading the code back against what it claims rather than by a
+tool — which is the same reason the earlier `Page::drop` gap survived the tests that touch
+this module.
+
+- **`Page::drop` freed the page without wiping it.** `LockedKey::drop` wipes the bytes, then
+  unlocks and drops the page, so the *normal* path was scrubbed. But `LockedKey::new`'s
+  failure path — the key bytes and their integrity tag already written, `mlock` just refused
+  — drops the `Page` **directly**, and a `?` there returned through live key material that
+  the allocator then handed out again. That is the same defect class the entry points were
+  fixed for, in the one place a `Drop` impl could be relied on to cover instead. The wipe is
+  now in `Page::drop`, where it cannot be forgotten when another early return is added to
+  `new`; it is a **volatile** store for the same reason the other wipes are (`CHANGELOG`,
+  *Zeroization: two copies the wipes could not reach*). Cost: one page of volatile stores,
+  once per key lifetime.
+- **`deny_debugging_is_enforced_by_the_kernel_and_reversible` claimed to restore the process's
+  dumpable flag on every path, and restored it on one.** The restore was an explicit call at
+  the end of the test; the two assertions between `deny_debugging()` and that call could
+  panic straight out through `Drop`, leaving the whole test *binary* non-dumpable — which
+  costs every later test its core dump and stops `gdb`/`strace` attaching to a run that is
+  failing, exactly when someone wants them. The restore is now an RAII guard armed before the
+  first assertion, so "every path restores it" is true by construction. Verified non-vacuous
+  with a planted panic: with the guard the probe passes, with the guard's body emptied it
+  fails with *"the guard did not restore the flag on the panic path"*.
+
+Both are in the `locked`/`ultra` layer and neither is a wire-format change.
+
+### The release job: six defects, including one that shipped the wrong compiled library
+
+The same re-check went over `.github/workflows/ci.yml`, which had grown the three-configuration
+release. Six defects, ordered by what they would have cost:
+
+- **Every bundle shipped the `ultra` `.rlib`.** The packaging loop built only the example
+  (`cargo build --release $flags --example xsiv_stdin`) and then copied
+  `target/release/libxchacha20_blake3_siv*.rlib`. Building an example does not uplift the lib's
+  root `rlib`, so the root artifact left on disk still had the feature set of the last plain
+  `cargo build` — the `ultra` one, three steps earlier (measured: after an example-only opt-out
+  build the root `rlib` was byte-identical to the `ultra` build's). The `opt-out` and `hardened`
+  bundles therefore contained the `ultra` library while their manifest said "the compiled library
+  for this configuration", and the three `.rlib` digests in the per-bundle tables would have been
+  identical. Fixed by adding `--lib`; running the loop locally, the three `.rlib` digests are now
+  distinct, and the three KATs are still byte-identical (`sha256 = 6ffe02e3…`).
+- **The "matrix still names them" guard could not fail.** It grepped the workflow for
+  `profile: release, default features` and two sibling strings — which appear as literals in the
+  loop *doing the grepping*, three lines above the `grep`. So the guard passed unconditionally;
+  deleting a configuration's test-matrix leg would still have printed "matrix leg present". Fixed
+  by anchoring the search to a matrix row (leading `- ` and end-of-line `$`), so the loop's own
+  literals no longer match and the longer `… with rng` row no longer matches the shorter leg.
+- **`publish` was not gated on the blocking `timing-instrument` job.** Its `needs` list omitted
+  it, so a release could be cut from a commit whose timing instrument had rotted, contradicting
+  the comment above `needs` ("a failure anywhere blocks this"). Added.
+- **The workflow-level `cancel-in-progress: true` reached the `release` job.** A push to `main`
+  while a release was uploading assets cancelled it mid-publish, and `gh release create`/`upload`
+  is not atomic — the partial release the publish step otherwise works to prevent. Now
+  `cancel-in-progress` is `${{ github.event_name == 'pull_request' }}`: PR runs still cancel,
+  `main` runs queue and each publishes its own `sha-<commit>` tag.
+- **The cross-configuration failure diagnostic was a no-op.** `diff <(cat dist/*/kat.txt)` passes
+  a *single* operand to `diff`, which printed "missing operand" and exited 2 behind `|| true`, so
+  the one failure path that matters printed nothing useful. Replaced with a loop that prints all
+  three outputs.
+- **`$deps` was undefined** in the qemu step's "no binaries ran" branch, so `set -u` aborted with
+  an unrelated message instead of the intended diagnosis. Reworded.
+
+Also: each bundle now ships `vector.txt` (the input `kat.txt` is the answer for, with its digest
+in the manifest), so a consumer can re-derive the KAT rather than take the bundled digest on
+faith.
+
+### Documentation: numbers and claims that disagreed across files
+
+The same pass cross-checked the prose against the code and against itself, and found several
+places where a claim was stated twice with different values, or stated more strongly than the
+code supports:
+
+- **The changelog contradicted the README and the code** on the second comparison shape: the
+  entry still said it was "`dual-mac`/`ultra`"-only and cost "+2.7% at 64 B", while the code
+  gates it on `hardened` and the later entry (and the README) say every configuration and
+  "+1.4 ns". The stale paragraph now points forward to the entry that superseded it.
+- **The `dual-mac` round-trip cost** read "+8–25%" in the README and "+6..25%" in `Cargo.toml`
+  and the changelog; the README now matches the other two.
+- **"`hardened,dual-mac` (everything `ultra` has except the witness)"** was false — it also drops
+  `locked` and `rng`. The README now says what the configuration is, and names
+  `hardened,dual-mac,locked,rng` for the "`ultra` minus the witness" configuration.
+- **§4.10 said "every cryptographic call in the non-test source is one of these five"**, but
+  `locked`'s integrity tag calls unkeyed `blake3::hash` — a sixth call. It is now enumerated as
+  "the one call outside the construction" (arguments for why it adds no assumption), counted by
+  `tests/construction_inventory.rs`, and the "a seventh thing to assume" slip for L3.6 (which is
+  the sixth of L3.1–L3.6) is corrected.
+- **§8's Rowhammer rows** (three of them, in §8.2, §8.5 and §9) said a "flipped key page" or
+  "corrupted page" is detected; the check covers only the 40-byte key-and-tag region, and a flip
+  in the unused remainder is deliberately *not* reported (the test asserts that). Corrected in
+  all three, and the "AMD-code" framing for what is an unkeyed hash is qualified.
+- **§8.2's DFA row** listed `mac_key` as per-message; it is per-*nonce* (Thm 1), as the power row
+  two lines up says. Corrected. The Debugger row's "observes `/proc/self/mem` being refused"
+  overstated the test, which reads the flag back but does not assert the procfs refusal.
+- **§8.2's "Swap / hibernation"** row now says swap only: `mlock` does not keep a page out of a
+  suspend-to-disk image.
 
 ### Release policy
 
