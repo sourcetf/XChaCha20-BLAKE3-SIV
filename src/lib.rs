@@ -4284,9 +4284,17 @@ mod tests {
     /// the peer silently rejects. The check turns it into a fail-stop with a message that
     /// names the actual condition.
     ///
-    /// Three cases, because the boundary is the point: a flip **in the key** and a flip **in
-    /// the tag** must both panic, and a flip in the unused remainder of the page must *not*
-    /// (nothing reads it, so treating it as corruption would be a false alarm).
+    /// Four cases, because the boundary is the point — and the count is written here because an
+    /// auditor caught this doc promising three while the body implemented two, with a sentence
+    /// describing a write that did not exist:
+    ///
+    /// * **(a)** a flip **in the key** must panic;
+    /// * **(b)** a flip **in the tag** must panic;
+    /// * **(c)** a flip in the **unused remainder** of the page must *not* panic — nothing reads
+    ///   that region, so treating it as corruption would be a false alarm (this is the case that
+    ///   was missing, and case (c) was verified non-vacuous by making `check_integrity` hash the
+    ///   whole page: the test then fails);
+    /// * **(d)** an intact key reads back unchanged.
     #[cfg(feature = "locked")]
     #[test]
     fn a_corrupted_locked_page_is_detected_on_use() {
