@@ -7,6 +7,35 @@ tags have been cut yet.
 
 ## Unreleased
 
+### Production-readiness pass: every gate in the repository passes, and two documentation defects fixed
+
+Ran the repository's own verification, end to end, on this tree. **All of it passes**, and no
+functional defect was found:
+
+- `verify.sh --cross-exec --miri --deny --tsan --tools` — cross-architecture *execution* under
+  qemu (aarch64 NEON, i686 32-bit, powerpc64 big-endian), Miri on both accelerated targets (SSE2
+  and AVX2) over the unsafe paths, `cargo-deny` (advisories, licences, bans, sources),
+  ThreadSanitizer with its deliberate-race negative control, and the tool-level gates (the fault
+  campaign over all three configurations, the cache/branch-profile self-test, the mutation-evidence
+  gate, and the `#[cfg(kani)]` harness type check). "All requested checks passed."
+- `tools/ctgrind.sh` in the default and `ultra` configurations — clean, with the control leak
+  observed and the self-test confirming the suppression names only the decision.
+- `cargo-llvm-cov --all-features` — 96.71% of lines, 97.92% of regions.
+
+Two documentation defects were found and fixed:
+
+- **A duplicated sentence in `lock_range`'s doc comment** (a merge artefact: the same clause
+  written twice, once as "Elsewhere locking is unsupported" and once as "Unsupported on this
+  target"). Removed; the surviving sentence is the one that matches the `cfg` it documents.
+- **The coverage note in `deep.yml` was stale** — it quoted 97.89% (113 of 5353), from before the
+  two-level tag change. Refreshed to the measured figures above, stated as both the line and region
+  percentages so the reader can see which one `--fail-under-lines` compares against. (The gate
+  itself is unchanged at 95 and passed throughout.)
+
+Still outstanding, unchanged from the entries below: `performance.md`'s tables are `v0.2` figures
+awaiting a full three-pass re-measurement (the fixed `v0.3` cost is measured and stated in that
+file), and `mutants.out/` predates `v0.3`.
+
 ### `locked`'s integrity tag survived on the stack — and the scan now measures it
 
 An auditor found the one wipe the `07043de` sweep did not reach, and this is a real leak of key

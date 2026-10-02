@@ -1362,8 +1362,6 @@ pub mod locked {
     ))]
     pub use imp::{deny_debugging, is_dumpable, lock_range, locked_bytes, unlock_range};
 
-    /// Elsewhere locking is unsupported: `lock_range` reports `ENOSYS` rather than
-    /// pretending, so a caller cannot mistake a no-op for protection.
     /// Unsupported on this target: reports `ENOSYS` rather than pretending, so a caller
     /// cannot mistake a no-op for protection.
     #[cfg(not(all(
