@@ -14,7 +14,7 @@ reference point, since `XChaCha20Poly1305` has the same 24-byte nonce and the sa
 ChaCha20 core. Reproduce with `cargo bench --bench compare`, which drives both
 sides through `aead`'s in-place interface so neither pays for an API shape the
 other does not have. Release profile as shipped (`lto`, `codegen-units = 1`), AMD
-Ryzen 9 7945HX under WSL2, 16 bytes of AAD (`b"associated data"`, the benchmark's
+Ryzen 9 7945HX under WSL2, **15 bytes** of AAD (`b"associated data"`, the benchmark's
 single constant), and both sides on their native SIMD backends (BLAKE3's
 C/assembly kernels, Poly1305's AVX2 four-block path). The 12-byte-nonce
 `ChaCha20Poly1305` is measured too and tracks `XChaCha20Poly1305` closely — re-measured
@@ -46,9 +46,10 @@ ChaCha20 derivation block per message, a **fixed** cost that does not scale with
 Measured directly (single pass, 2026-10-02, this host): the added primitives cost **+101 ns**
 (one keyed-BLAKE3 XOF call, 40 B in / 65 B out) and **+72 ns** (one ChaCha20 block), less about
 40 ns saved by the shorter inner-hash input — call it **≈ +130 ns per message** — and criterion's
-comparison against the stored `v0.2` baseline shows **+15% on 64-byte encryption**, falling to
-within the noise floor (≤2%) by 4 KiB (16 KiB measured at 7.80 µs against the `v0.2` median of
-7.42 µs, a 5% move inside the 5.9% floor). So the 64–256 B rows below read optimistically by
+comparison against the stored `v0.2` baseline shows **+15% on 64-byte encryption**. Because the
+cost is fixed, its *relative* weight falls with size: ≈4% at 4 KiB, ≈2% at 16 KiB, and inside the
+**5.9%** noise floor from 4 KiB up (16 KiB measured at 7.80 µs against the `v0.2` median of
+7.42 µs — a 5% move, itself inside the floor). So the 64–256 B rows below read optimistically by
 roughly that fixed term, while the per-byte throughput and the ≥16 KiB rows are unchanged within
 noise. A full three-pass re-measurement of every cell is outstanding; `CHANGELOG.md` records the
 change and `benches/compare.rs` reproduces it.

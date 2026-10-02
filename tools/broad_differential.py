@@ -67,7 +67,9 @@ def vectors(count, seed):
 
         roll = rng.random()
         if roll < 0.05:
-            # Long enough to take the tag's contiguous path (>= 2048 - 80 bytes).
+            # Long enough to take the tag's contiguous path. The inner head is now
+            # 48 bytes (8 + 24 + 8 + 8), so a message this long exceeds
+            # TAG_CONCAT_MIN (2048) once the head and AAD are added.
             msg_len = rng.randrange(2048, 4096)
             aad_len = rng.randrange(0, 64)
         elif roll < 0.25:
@@ -131,7 +133,9 @@ def main():
     for (key, nonce, aad, msg), line in zip(pairs, got):
         want_ct, want_tag = ref.encrypt_x(key, nonce, aad, msg)
         want = f"{want_ct.hex() or '-'} {want_tag.hex()}"
-        if 80 + len(aad) + len(msg) >= 2048:
+        # The inner head is 48 bytes now (it was 80 in v0.2, when the head held K).
+        # This is a diagnostic counter only; the mismatch check below is what gates.
+        if 48 + len(aad) + len(msg) >= 2048:
             contiguous += 1
         if line.strip() != want:
             mismatches.append((key, nonce, aad, msg, line.strip(), want))

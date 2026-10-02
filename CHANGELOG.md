@@ -7,6 +7,57 @@ tags have been cut yet.
 
 ## Unreleased
 
+### Follow-up audit of `v0.3`: a false commitment number corrected, the last of the aggregate returns removed, and consistency fixes
+
+A wide audit of revision `v0.3` (core source, witness, Kani, the test guards, the docs, the
+tooling, and an adversarial crypto pass). It found **one substantive defect** — a wrong security
+number and a wrong conclusion in the `v0.3` entry itself — and a set of smaller ones. **The wire
+format is unchanged** (still `v0.3`): the code changes below are internal.
+
+- **The `v0.3` commitment rationale was wrong, and this is the one that matters.** The entry (and
+  `README.md`, `SECURITY-ANALYSIS.md`, `src/lib.rs` and `tools/ref_impl.py`) said the equal-material
+  route was closed by requiring a collision in all of `(k_in, k_out, enc_seed)` — "a 768-bit
+  birthday (`2^384`)". It is not: all three are deterministic functions of the single **256-bit**
+  `subkey = HChaCha20(K, N₁)`, so two keys agreeing on the triple need a `subkey` collision — a
+  **`2^128`** birthday, the same order as the tag's own collision bound. Worse, that means `v0.3`
+  **reopens** a complete invisible-salamander at `2^128` (equal material ⇒ equal tags *and* equal
+  keystreams) that `v0.2`'s `K`-in-input step had closed; the two-level tag does not close it.
+  The route is in the *attacker-chosen* commitment game this crate never priced, and it is
+  `2^128` (infeasible), so the *target* commitment (`2^-520` per candidate key) is untouched — but
+  the claim and the number were both false and are corrected in every file that carried them, with
+  the trade recorded rather than described as a free win.
+- **`derive_material` no longer returns its keys by value.** It returned a 96-byte aggregate —
+  the same shape `derive_enc` was changed away from after a stack scan found the tail of its
+  return surviving — and is now a write-through-caller-slices function, so the caller's named
+  locals are the only copies. (Whether the aggregate actually left residue was not confirmed; the
+  fix is for consistency with the crate's own established pattern, not because a leak was
+  measured.)
+- **The `ultra` witness tag is now wiped at every call site** (it is a secret-derived MAC); the
+  witness's module doc no longer claims every buffer is wiped, since its scalar primitive state
+  (`block`/`hchacha20`/`compress`) is not, and no longer claims the domain strings are duplicated
+  as literals (they are imported — which is why the cross-check cannot catch a wrong domain, and
+  the differential fixture is the anchor for that).
+- **`tests/counter_range.rs`'s literal-1 allowance is now scoped by position**, not by function
+  name: it must be a `chacha20_keystream_raw` call *inside `derive_material`'s body*, and there
+  must be exactly one, so a new helper can no longer inherit the allowance.
+- **`tests/construction_inventory.rs`'s lemma S1 now checks the domains are used at the right
+  places** (inner head, outer head, key derivation), not only that the constants differ.
+- **Kani/proofs corrections**: the module doc no longer claims the nonce `N` is covered by the
+  harnesses (it is not — `N` occupies `head[8..32]` and no harness inspects it, so that property
+  rests on the differential fixture); the arity comment and the dead contiguous-branch comment are
+  corrected.
+- **Documentation/consistency**: the benchmark's AAD is **15** bytes, not 16 (an earlier
+  correction of "3 → 16" was itself off by one); the `v0.3` cost is **+15%** at 64 B, not +18%;
+  the release policy is `v0.3` and "changed twice", not `v0.2`/once; the primitive use count is
+  **seven** everywhere; the §4.9 assumption list is A1–A4; `proofs.rs`/`CHANGELOG` no longer name
+  the removed `test_tag_binds_the_key_directly`; `tools/broad_differential.py`'s header constant
+  is 48 (was 80); the CI release-note prose says the format "changed twice"; `performance.md`'s
+  `v0.3` note now states the fixed cost's *relative* fall (≈4% at 4 KiB, ≈2% at 16 KiB) rather
+  than "≤2% by 4 KiB".
+- **Not changed, recorded**: `mutants.out/` evidence predates `v0.3` and should be regenerated;
+  `tools/gen_test_vectors.py`'s `(79,1)/(80,1)/(81,1)` pairs are vestigial but harmless. Neither
+  is a defect.
+
 ### Wire format: revision `v0.3` — the tag becomes two-level, and the key-dependent-input assumption (L3.6) is removed
 
 **The wire format changes: every tag, and therefore every ciphertext, differs from the previous
@@ -40,26 +91,37 @@ two-level structure — with no published theorem in that shape. The two-level f
 correlation outright: in both calls the message is a value the reduction can construct, so the
 standard PRF and cascade reductions apply and **L3.6 is gone from the assumption list.**
 
-**Commitment survives, for a structural reason rather than a probabilistic one.** The
-equal-material route required two keys with equal derived material; with three independent values
-the attacker must now collide `k_in` **and** `k_out` **and** `enc_seed` together — a 768-bit
-birthday (`2^384`), unreachable over a `2^256` key space, versus the 512-bit (`2^256`, the
-key-search level) one a single 64-byte block allowed. The `2^520` *target* bound is unchanged, and
-so is the `2^128` collision bound.
+**The commitment trade, stated honestly (an earlier revision of this entry got the number and the
+conclusion wrong).** The equal-material route is a chosen-key search for two keys with equal
+derived material, which gives one ciphertext that opens under both. `v0.2` defeated it by binding
+`K` into the tag input — two keys with equal material still produced different tags. The two-level
+tag does not bind `K`, and deriving three values instead of one does **not** restore the closure:
+all three are deterministic functions of the single 256-bit `subkey = HChaCha20(K, N₁)`, so the
+route costs a `2^128` **subkey** birthday over the `2^256` key space — the same order as the tag's
+own collision bound, **not** a 768-bit `2^384` event. So `v0.3` reopens a complete
+invisible-salamander at `2^128` in the *attacker-chosen* commitment game (the literature's
+CMT-1/CMT-3) that `v0.2`'s `K`-in-input had closed. It is `2^128` — infeasible today — and it is a
+game this crate never priced, so the bound it does claim is untouched: the **target** commitment
+(a *given* ciphertext) stays `2^-520` per candidate key, and the `2^128` collision bound is
+unchanged. The trade for removing L3.6 is real rather than free, and a revision that wanted both
+would have to break the `subkey` bottleneck (e.g. derive the tag keys from `K` directly).
+`SECURITY-ANALYSIS.md` Thm 1 (c), Thm 2's commitment bullet and §4.10 record it.
 
 **What else moved with it.**
 
-- `DOM_PRE` is a new domain constant (`XSIV-PRE`); `DOM_TAG` now keys the **outer** hash.
+- `DOM_PRE` is a new domain constant (`XSIV-PRE`); `DOM_TAG` now heads the **outer** hash
+  (it is that hash's domain prefix; the key is `k_out`).
 - `derive_material` returns `(k_in, k_out, enc_seed)` and burns counters 0 and 1 of the derivation
   block, not only counter 0. `tests/counter_range.rs`'s "counter starts at zero" rule now names
   that one scoped exception rather than being loosened.
-- Cost: **one extra ChaCha20 block and one extra BLAKE3 call per message** — measured +18% at
-  64 B and under 2% from 4 KiB up (see `performance.md`); the message-length-dependent work is
-  unchanged.
+- Cost: **one extra ChaCha20 block and one extra BLAKE3 call per message** — measured **+15%** on
+  64-byte encryption and under 2% from 4 KiB up (see `performance.md`, which carries the figures and
+  the outstanding full re-measurement); the message-length-dependent work is unchanged.
 - `tools/ref_impl.py` (the independent reference, anchored to the published RFC 8439,
-  HChaCha20-draft and official-BLAKE3 vectors) was updated first; the KATs, the differential
-  fixture and the in-crate corpus digest were regenerated from it. The duplicated KAT in
-  `tests/security.rs` was regenerated too, from the same reference.
+  HChaCha20-draft and official-BLAKE3 vectors) was updated first; the KATs and **both** differential
+  fixtures were regenerated from it, and the in-crate accelerated-path corpus digest
+  (`src/lib.rs`) was refreshed to match. The duplicated KAT in `tests/security.rs` was regenerated
+  too, from the same reference.
 - `tests/construction_inventory.rs`'s primitive-call count moved from 13 to 15: two ChaCha20
   derivation blocks (was one) and three BLAKE3 tag calls (was two).
 
@@ -192,8 +254,10 @@ reproduces the published ultra column at every size.
 
 Seven numbers were wrong, or described a measurement that no longer describes itself:
 
-- **`performance.md` said the benchmark uses 3 bytes of AAD.** It uses 16 — `b"associated
+- **`performance.md` said the benchmark uses 3 bytes of AAD.** It uses **15** — `b"associated
   data"`, in `benches/compare.rs`, in every one of its cells and in every revision of the file.
+  (The first correction of this said 16, which was itself wrong: `"associated data"` is 15
+  bytes. Corrected again.)
 - **Its "the 12-byte `ChaCha20Poly1305` tracks `XChaCha20Poly1305` within about 4%" was
   unsubstantiated**, and the only criterion data on disk (from a later experiment, single-pass)
   disagreed with it, ±16%. Re-measured properly — three passes, all nine sizes, same core —
@@ -1539,7 +1603,9 @@ than asserted, because a gate that fails upstream is a gate someone deletes.
   `test_message_swap_under_a_reused_nonce_is_rejected`, which checks the property SIV
   actually provides — a ciphertext must not authenticate under another message's tag —
   and the second is `test_tag_changes_when_only_the_key_changes`, with a pointer to
-  `test_tag_binds_the_key_directly` for the mechanism commitment rests on.
+  `test_tag_binds_the_key_directly` for the mechanism commitment rests on. (That last
+  test was later replaced by `test_tag_binds_both_derived_keys` in the v0.3 two-level
+  tag change, above.)
 - **`kat_regression_lock` is described as a lock, not a witness.** It is a second copy
   from the same generator: it catches an expectation edited in-crate, and its
   independence ends there; the independent witness is the differential fixture against
@@ -1822,13 +1888,14 @@ code supports:
 
 ### Release policy
 
-- **The byte format is frozen at construction revision `v0.2`.** It will not change
+- **The byte format is frozen at construction revision `v0.3`.** It will not change
   without a revision bump, a `CHANGELOG` entry and the known-answer vectors updated in
   the same commit; `kat_regression_lock` re-asserts the published bytes from a fixture
   no in-crate change can edit, so the promise is mechanical rather than stated. (Two
   version numbers are in play and are kept apart: the **construction revision**
-  `v0.2` is the bytes, and the **crate version** `0.1.0` is the Rust API. The
-  construction has changed once, v0.1 -> v0.2.)
+  `v0.3` is the bytes, and the **crate version** `0.1.0` is the Rust API. The
+  construction has changed twice: v0.1 -> v0.2, then v0.2 -> v0.3 with the two-level
+  tag.)
 - **The crate is `0.x` until a deliberate 1.0**, because the Rust API is not frozen:
   consumers should pin an exact version rather than a range, and treat the API (not
   the bytes) as the unstable part. It is not interoperable with any standard and no

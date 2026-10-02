@@ -42,10 +42,15 @@
 //!   hash's key and a 32-byte substring of its input are two correlated functions of
 //!   one secret, a key-dependent-input step that no reduction from "keyed BLAKE3 is
 //!   a PRF" covers (`SECURITY-ANALYSIS.md` §2.1, node L3.6).  Two levels remove the
-//!   correlation: every message hashed here is public, and the equal-material route
-//!   stays closed because the attacker must now collide *three* derived values
-//!   (`k_in`, `k_out`, `enc_seed`) at once, a 768-bit birthday rather than a
-//!   512-bit one.
+//!   correlation: every message hashed here is public.  It does **not**, however,
+//!   widen the equal-material route: all three derived values are functions of the
+//!   single 256-bit `subkey = HChaCha20(K, N₁)`, so two keys agreeing on the triple
+//!   need a `subkey` collision — a `2^128` birthday, the same order as the tag's own
+//!   collision bound, not a 768-bit one.  (In revision `v0.2` the `K`-in-input step
+//!   neutralised that route; the two-level tag does not, so a subkey collision now
+//!   yields one ciphertext that opens under both keys.  That is the *attacker-chosen*
+//!   commitment game, which `SECURITY-ANALYSIS.md` does not price; the *target* bound
+//!   — a given ciphertext, `2^-520` per candidate key — is unchanged.)
 //! * **Both lengths are encoded and every field is fixed width.**  BLAKE3 is not
 //!   vulnerable to length extension (its finalisation is flagged, unlike
 //!   Merkle–Damgård constructions), but `A || M` alone would be ambiguous:
@@ -1833,12 +1838,32 @@ fn zeroize_array<T>(value: &mut T) {
 /// keystream blocks under `SUBKEY_DOMAIN || nonce[16..24]` — counter 0 yields the
 /// two tag keys (inner and outer), counter 1 the encryption seed.
 ///
-/// Three independent 256-bit values rather than one 64-byte block: the route that
-/// would let one ciphertext open under two keys is a collision in the *whole*
-/// triple, a 768-bit birthday (2^384) rather than the 512-bit one (2^256, the
-/// key-search level) a single block allows.  That is what keeps the scheme
-/// committing without feeding the master key into the tag's input.
-fn derive_material(key: &[u8; 32], nonce: &[u8; NONCE_LEN]) -> ([u8; 32], [u8; 32], [u8; 32]) {
+/// Three 256-bit values rather than one 64-byte block.  This does **not** widen the
+/// equal-material route, and an earlier revision of this comment claimed it did: all
+/// three are deterministic functions of the single 256-bit `subkey`, so two keys that
+/// agree on the whole triple need a collision in `subkey` — a `2^128` birthday, the
+/// same order as the tag's own collision bound, **not** a 768-bit one.  What the
+/// three values buy is that no master key need enter any hash message (Thm 2's
+/// cascade carries no key-dependent input); what they do not buy is commitment
+/// against an adversary who chooses keys, which is a route in the *attacker-chosen*
+/// game this crate does not price (see `SECURITY-ANALYSIS.md` §4.5).
+/// # Why this writes through the caller's slices
+///
+/// It used to return `([u8; 32], [u8; 32], [u8; 32])`. A 96-byte aggregate return makes the
+/// compiler materialise an unnamed temporary for the return value — a copy no `zeroize_array`
+/// call can name, and therefore none can wipe — exactly the shape `derive_enc` was changed
+/// away from after a stack scan found the tail of its 44-byte return surviving a round trip.
+/// Writing into the caller's buffers leaves the caller's own named locals as the only copies,
+/// and the caller already wipes them. (Not *provable* — a compiler may still spill — which is
+/// why `derive_enc`'s doc keeps the regression test as the check rather than an argument; this
+/// function follows the same shape for the same reason.)
+fn derive_material(
+    key: &[u8; 32],
+    nonce: &[u8; NONCE_LEN],
+    k_in: &mut [u8; 32],
+    k_out: &mut [u8; 32],
+    enc_seed: &mut [u8; 32],
+) {
     let mut subkey = hchacha20(key, &nonce[0..16].try_into().unwrap());
     let mut subkey_nonce = [0u8; 12];
     subkey_nonce[0..4].copy_from_slice(&SUBKEY_DOMAIN);
@@ -1849,18 +1874,14 @@ fn derive_material(key: &[u8; 32], nonce: &[u8; NONCE_LEN]) -> ([u8; 32], [u8; 3
     let mut block1 = [0u8; 64];
     chacha20_keystream_raw(&subkey, 1, &subkey_nonce, &mut block1);
 
-    let mut k_in = [0u8; 32];
     k_in.copy_from_slice(&block0[0..32]);
-    let mut k_out = [0u8; 32];
     k_out.copy_from_slice(&block0[32..64]);
-    let mut enc_seed = [0u8; 32];
     enc_seed.copy_from_slice(&block1[0..32]);
 
     zeroize_array(&mut subkey);
     zeroize_array(&mut subkey_nonce);
     zeroize_array(&mut block0);
     zeroize_array(&mut block1);
-    (k_in, k_out, enc_seed)
 }
 
 /// `out.len()` bytes of `BLAKE3_keyed(key, parts[0] || parts[1] || ...)`, in
@@ -1942,10 +1963,15 @@ const TAG_CONCAT_MIN: usize = 2_048;
 ///   correlated functions of one secret, a key-dependent-input step that no
 ///   black-box reduction from "keyed BLAKE3 is a PRF" reaches
 ///   (`SECURITY-ANALYSIS.md` §2.1, node L3.6, with a separation showing the gap is
-///   real).  Two levels remove the correlation outright, and the equal-material route
-///   the single level's `K` was there to close stays closed for a structural reason:
-///   the attacker must collide `k_in` **and** `k_out` **and** `enc_seed` together, a
-///   768-bit birthday (`2^384`), against a `2^256` key space.
+///   real).  Two levels remove the correlation outright.  They do **not**, however,
+///   restore the equal-material closure the single level's `K` provided: all three
+///   derived values are functions of the single 256-bit `subkey`, so giving two keys
+///   the same triple costs a `subkey` collision — a `2^128` birthday, not the
+///   768-bit one an earlier revision of this comment claimed.  In `v0.2` the
+///   `K`-in-input step made a subkey collision harmless (the tags still differed);
+///   here it is not harmless.  That is a route in the *attacker-chosen* commitment
+///   game, which `SECURITY-ANALYSIS.md` §4.5 does not price; the *target* bound this
+///   crate does claim — a given ciphertext, `2^-520` per candidate key — is untouched.
 /// * **Lengths are encoded and every field is fixed width.** BLAKE3 is not
 ///   vulnerable to length extension (its finalisation is flagged, unlike
 ///   Merkle–Damgård constructions), but `A || M` alone would be ambiguous:
@@ -1955,7 +1981,6 @@ const TAG_CONCAT_MIN: usize = 2_048;
 /// The hasher is fed incrementally rather than through one concatenated buffer,
 /// so nothing secret lands in a growable heap allocation. (Nothing in the inner
 /// hash's *input* is secret either — the key is used as a key, not as data.)
-#[allow(unused_variables)]
 fn derive_tag(
     k_in: &[u8; 32],
     k_out: &[u8; 32],
@@ -2053,7 +2078,7 @@ fn derive_tag(
 /// It used to return `([u8; 32], [u8; 12])`. Returning a 44-byte aggregate makes
 /// the compiler materialise an unnamed temporary for the return value — a copy
 /// no `zeroize_array` call in this function can name, and therefore none can
-/// wipe. A stack scan (`tests/stack_residue.rs`'s method, run as a unit test)
+/// wipe. A stack scan (`tools/stack_residue.sh`'s method, run as a unit test)
 /// found exactly that: the tail of this value, `material[16..44]` — the second
 /// half of `enc_key` together with the whole `enc_nonce` — survived in the frame
 /// after a full round trip, in all three build configurations. Writing into the
@@ -2145,7 +2170,10 @@ pub fn encrypt(
     // `ultra` stack scrub would have had to cover as well.)
     let mut ciphertext = alloc_zeroed(plaintext.len())?;
 
-    let (mut k_in, mut k_out, mut enc_seed) = derive_material(key, nonce);
+    let mut k_in = [0u8; 32];
+    let mut k_out = [0u8; 32];
+    let mut enc_seed = [0u8; 32];
+    derive_material(key, nonce, &mut k_in, &mut k_out, &mut enc_seed);
     let tag = derive_tag(&k_in, &k_out, nonce, aad, plaintext);
     // `ultra`: the independent implementation must produce the same tag. A mismatch is a
     // rejection here rather than a ciphertext the peer will refuse -- and it is the only way
@@ -2160,7 +2188,11 @@ pub fn encrypt(
     // decision is the same one reviewed in `accept_or_reject` and nothing else is suppressed.
     #[cfg(feature = "ultra")]
     {
-        let agree: subtle::Choice = witness::encrypt_tag(key, nonce, aad, plaintext).ct_eq(&tag);
+        // The witness tag is a secret-derived MAC, so it is named and wiped like every other
+        // MAC copy in this file rather than left to `scrub_stack` alone.
+        let mut witness_tag = witness::encrypt_tag(key, nonce, aad, plaintext);
+        let agree: subtle::Choice = witness_tag.ct_eq(&tag);
+        zeroize_array(&mut witness_tag);
         // Two rejections written before the call and checked in series, the same fail-closed
         // shape as both decrypt entry points: a fault that skips the call, or corrupts one
         // outcome, leaves a rejection standing.
@@ -2225,7 +2257,10 @@ pub fn encrypt_in_place_detached(
 ) -> Result<[u8; TAG_LEN], Error> {
     check_lengths(buffer.len(), aad.len())?;
 
-    let (mut k_in, mut k_out, mut enc_seed) = derive_material(key, nonce);
+    let mut k_in = [0u8; 32];
+    let mut k_out = [0u8; 32];
+    let mut enc_seed = [0u8; 32];
+    derive_material(key, nonce, &mut k_in, &mut k_out, &mut enc_seed);
     let tag = derive_tag(&k_in, &k_out, nonce, aad, buffer);
     let mut enc_key = [0u8; 32];
     let mut enc_nonce = [0u8; 12];
@@ -2448,7 +2483,10 @@ pub fn decrypt(
     #[cfg(feature = "ultra")]
     let mut witness_plaintext = alloc_zeroed(ciphertext.len())?;
 
-    let (mut k_in, mut k_out, mut enc_seed) = derive_material(key, nonce);
+    let mut k_in = [0u8; 32];
+    let mut k_out = [0u8; 32];
+    let mut enc_seed = [0u8; 32];
+    derive_material(key, nonce, &mut k_in, &mut k_out, &mut enc_seed);
     let mut enc_key = [0u8; 32];
     let mut enc_nonce = [0u8; 12];
     derive_enc(&enc_seed, tag, &mut enc_key, &mut enc_nonce);
@@ -2476,10 +2514,13 @@ pub fn decrypt(
     // when these were two arms).
     #[cfg(feature = "ultra")]
     let witness_ok: subtle::Choice = {
-        let witness_tag =
+        let mut witness_tag =
             witness::decrypt(key, nonce, aad, ciphertext, tag, &mut witness_plaintext);
         let agree = witness_tag.ct_eq(&computed_tag)
             & witness_plaintext.as_slice().ct_eq(plaintext.as_slice());
+        // Both are secret-derived: the witness tag is a MAC, the plaintext is the recovered
+        // message. Wiped like the rest of the copies in this function.
+        zeroize_array(&mut witness_tag);
         zeroize_slice(&mut witness_plaintext);
         agree
     };
@@ -2666,7 +2707,10 @@ pub fn decrypt_in_place_detached(
     #[cfg(feature = "ultra")]
     let mut witness_plaintext = alloc_zeroed(buffer.len())?;
 
-    let (mut k_in, mut k_out, mut enc_seed) = derive_material(key, nonce);
+    let mut k_in = [0u8; 32];
+    let mut k_out = [0u8; 32];
+    let mut enc_seed = [0u8; 32];
+    derive_material(key, nonce, &mut k_in, &mut k_out, &mut enc_seed);
     let mut enc_key = [0u8; 32];
     let mut enc_nonce = [0u8; 12];
     derive_enc(&enc_seed, tag, &mut enc_key, &mut enc_nonce);
@@ -2686,7 +2730,7 @@ pub fn decrypt_in_place_detached(
     // fail-closed, and keeps it audited.
     #[cfg(feature = "ultra")]
     let witness_ok: subtle::Choice = {
-        let witness_tag = witness::decrypt(
+        let mut witness_tag = witness::decrypt(
             key,
             nonce,
             aad,
@@ -2695,6 +2739,9 @@ pub fn decrypt_in_place_detached(
             &mut witness_plaintext,
         );
         let agree = witness_tag.ct_eq(&computed_tag) & witness_plaintext.ct_eq(buffer);
+        // All three are secret-derived (a MAC, the recovered plaintext, and the recovered
+        // ciphertext buffer); wiped like the rest of the copies in this function.
+        zeroize_array(&mut witness_tag);
         zeroize_slice(&mut witness_plaintext);
         zeroize_slice(&mut witness_ciphertext);
         agree
@@ -4909,7 +4956,7 @@ mod tests {
         assert_ne!(tag1, tag2, "the master key must reach the tag");
     }
 
-    /// The `K || N || len(A) || len(M) || A || M` encoding must be unambiguous.
+    /// The `N || len(A) || len(M) || A || M` encoding must be unambiguous.
     ///
     /// BLAKE3 is not vulnerable to length extension, but `A || M` on its own is
     /// ambiguous: `("ab", "c")` and `("a", "bc")` concatenate identically. The
@@ -5044,7 +5091,10 @@ mod tests {
         let key = [0x11u8; 32];
         let nonce = [0x22u8; NONCE_LEN];
 
-        let (k_in, k_out, enc_seed) = derive_material(&key, &nonce);
+        let mut k_in = [0u8; 32];
+        let mut k_out = [0u8; 32];
+        let mut enc_seed = [0u8; 32];
+        derive_material(&key, &nonce, &mut k_in, &mut k_out, &mut enc_seed);
         let subkey = hchacha20(&key, &nonce[0..16].try_into().unwrap());
 
         // The layout the code uses: domain in the nonce, counters 0 and 1.
@@ -5250,7 +5300,10 @@ mod tests {
             );
 
             // The main path's own tag, for the same input, must equal the witness's.
-            let (k_in, k_out, _) = derive_material(&key, &nonce);
+            let mut k_in = [0u8; 32];
+            let mut k_out = [0u8; 32];
+            let mut _enc_seed = [0u8; 32];
+            derive_material(&key, &nonce, &mut k_in, &mut k_out, &mut _enc_seed);
             assert_eq!(
                 derive_tag(&k_in, &k_out, &nonce, &aad, &pt),
                 w_tag,
@@ -5501,9 +5554,12 @@ mod tests {
             let msg = [0x44u8; 9];
 
             // The 64-byte block `derive_material` burns under (subkey, subkey_nonce, 0)
-            // *is* the pair of tag keys it returns -- that is how the block is split;
+            // *is* the pair of tag keys it writes -- that is how the block is split;
             // the encryption seed comes from counter 1.
-            let (k_in, k_out, enc_seed) = derive_material(&key, &nonce);
+            let mut k_in = [0u8; 32];
+            let mut k_out = [0u8; 32];
+            let mut enc_seed = [0u8; 32];
+            derive_material(&key, &nonce, &mut k_in, &mut k_out, &mut enc_seed);
             let mut kdf_block = [0u8; 64];
             kdf_block[..32].copy_from_slice(&k_in);
             kdf_block[32..].copy_from_slice(&k_out);
@@ -5690,7 +5746,10 @@ mod tests {
             // the inner and outer tag keys (the encryption seed comes from counter 1),
             // with nothing shared between the uses beyond being two halves of one
             // pseudorandom block (Theorem 1 in SECURITY-ANALYSIS.md).
-            let (k_in, k_out, _enc_seed) = derive_material(&key, &nonce);
+            let mut k_in = [0u8; 32];
+            let mut k_out = [0u8; 32];
+            let mut _enc_seed = [0u8; 32];
+            derive_material(&key, &nonce, &mut k_in, &mut k_out, &mut _enc_seed);
             let mut rebuilt = [0u8; 64];
             rebuilt[..32].copy_from_slice(&k_in);
             rebuilt[32..].copy_from_slice(&k_out);

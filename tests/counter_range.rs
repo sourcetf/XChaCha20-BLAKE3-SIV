@@ -79,21 +79,50 @@ fn the_counter_is_the_second_parameter() {
 /// multi-part or streaming API would have to start somewhere else — or *compute* a
 /// counter rather than forwarding one — and this fails then, deliberately.
 ///
-/// One exception, and it is scoped rather than a general loosening: `derive_material`
+/// One exception, and it is scoped by **position** rather than by name: `derive_material`
 /// takes one block at counter 0 (the two tag keys) and one at counter 1 (the encryption
 /// seed), both single blocks under the *derivation* key. That range is `{0, 1}`, it is
 /// fixed, and it shares no key with any message keystream (Theorem 3), so it cannot
-/// repeat a counter inside a message. The literal-1 allowance is therefore granted to
-/// `chacha20_keystream_raw` only — the derivation primitive — and never to a call that
-/// produces message keystream, where starting at 1 would push the last block to counter
-/// `2^32` and wrap.
+/// repeat a counter inside a message. A literal `1` is accepted only for a
+/// `chacha20_keystream_raw` call that lies **inside `derive_material`'s body**, and there
+/// must be exactly one — so a new helper cannot inherit the allowance by being named like
+/// the derivation primitive, and a message-keystream call (where starting at 1 would push
+/// the last block to counter `2^32` and wrap) is still rejected.
 #[test]
 fn every_keystream_call_site_starts_the_counter_at_zero() {
     let src = include_str!("../src/lib.rs");
     let cut = src.find("mod tests {").expect("the test module must exist");
     let body = &src[..cut];
 
+    // The line range of `derive_material`'s body, so the one literal-1 allowance can be
+    // scoped to it. Brace-matched; a missing function is itself a failure, because the
+    // allowance would then have nothing to scope to.
+    let derive_lines = {
+        let at = body
+            .find("fn derive_material(")
+            .expect("derive_material is gone: the literal-1 allowance has nothing to scope to");
+        let open = at + body[at..].find('{').expect("derive_material has no body");
+        let start_line = body[..at].matches('\n').count();
+        let mut depth = 0usize;
+        let mut end_line = None;
+        for (i, c) in body[open..].char_indices() {
+            match c {
+                '{' => depth += 1,
+                '}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        end_line = Some(body[..open + i].matches('\n').count());
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        start_line..=end_line.expect("derive_material's body is unterminated")
+    };
+
     let mut calls = 0;
+    let mut literal_one = 0;
     for (n, line) in body.lines().enumerate() {
         let code = line.split("//").next().unwrap_or("");
         // The definitions themselves contain the names being searched for.
@@ -103,7 +132,7 @@ fn every_keystream_call_site_starts_the_counter_at_zero() {
         // Every keystream entry point, including the raw (no-XOR) one the derivation
         // path uses and the SIMD kernels. The list used to be the first two, so a call
         // routed through `chacha20_keystream_raw` or `x86_simd::blocks8` would have been
-        // invisible here while the `calls >= 4` guard still passed.
+        // invisible here while a lower floor still passed.
         for f in [
             "chacha20_keystream(",
             "chacha20_apply(",
@@ -115,14 +144,18 @@ fn every_keystream_call_site_starts_the_counter_at_zero() {
             let Some(i) = code.find(f) else { continue };
             calls += 1;
             // `chacha20_keystream(&key, 0, &nonce, ...)`: after the first comma the
-            // argument must be a literal zero.  `chacha20_keystream_raw` may also take 1,
-            // for the derivation's second block (see the doc comment).
+            // argument must be a literal zero.  The one literal 1 is the derivation's
+            // second block, and only inside `derive_material`.
             let after_key = code[i + f.len()..].split_once(',').map_or("", |(_, a)| a);
             let arg = after_key.trim_start();
+            let is_literal_one = arg.starts_with("1,");
+            if is_literal_one {
+                literal_one += 1;
+            }
             let allowed = arg.starts_with("0,")
                 || arg.starts_with("counter,")
                 || arg.starts_with("ctr,")
-                || (f == "chacha20_keystream_raw(" && arg.starts_with("1,"));
+                || (is_literal_one && f == "chacha20_keystream_raw(" && derive_lines.contains(&n));
             assert!(
                 allowed,
                 "src/lib.rs:{} calls `{f}` with a counter that is neither zero nor the \
@@ -145,9 +178,15 @@ fn every_keystream_call_site_starts_the_counter_at_zero() {
             );
         }
     }
+    assert_eq!(
+        literal_one, 1,
+        "expected exactly one literal-1 keystream call (the derivation's counter-1 block), \
+         found {literal_one}: a second one is either a new derivation block or a message \
+         keystream starting at 1, and the latter wraps the counter"
+    );
     assert!(
-        calls >= 6,
-        "expected the four call sites (two encrypt paths, two decrypt paths) in the \
-         non-test source, found {calls}: this check is vacuous if the calls moved"
+        calls >= 11,
+        "expected at least eleven keystream call sites in the non-test source, found \
+         {calls}: this check is vacuous if the calls moved or were renamed out of the list"
     );
 }

@@ -818,9 +818,10 @@ jobs:
           are not a gate for this release.
 
           > **Wire format.** This construction is bespoke and not byte-compatible
-          > with anything else: a keyed-BLAKE3 65-byte tag over the XChaCha20
-          > nonce extension. It has already changed once (v0.1 used Poly1305 with
-          > a 32-byte tag), so treat the format as unstable until 1.0. See
+          > with anything else: a two-level keyed-BLAKE3 65-byte tag over the
+          > XChaCha20 nonce extension. It has already changed twice (v0.1 used
+          > Poly1305 with a 32-byte tag; v0.3 made the tag two-level), so treat the
+          > format as unstable until 1.0. See
           > README.md for the construction and its security level.
           EOF
 

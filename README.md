@@ -85,9 +85,16 @@ Three details are load-bearing rather than incidental:
    correlated functions of one secret — a key-dependent-input step that no
    reduction from "keyed BLAKE3 is a PRF" reaches (`SECURITY-ANALYSIS.md` §2.1,
    node L3.6, with a separation showing the gap is real). Two levels remove the
-   correlation outright, and commitment survives because the attacker must now
-   collide `k_in` **and** `k_out` **and** `enc_seed` together — a 768-bit birthday,
-   not one 512-bit block (`test_tag_binds_both_derived_keys`).
+   correlation outright. They do **not** widen the equal-material route, though an
+   earlier revision of this file said they did: all three derived values are
+   functions of the single 256-bit `subkey`, so two keys agreeing on the triple need
+   a `subkey` collision — a `2^128` birthday, the same order as the tag's own
+   collision bound, not a 768-bit one. In `v0.2` the `K`-in-input step made such a
+   collision harmless; here it is not, so a subkey collision yields one ciphertext
+   that opens under both keys. That is the *attacker-chosen* commitment game
+   (`SECURITY-ANALYSIS.md` §4.5, not priced); the *target* bound — a given
+   ciphertext, `2^-520` per candidate key — is unchanged
+   (`test_tag_binds_both_derived_keys`).
 
 3. **Both lengths are encoded, and every field is fixed width.** BLAKE3 is not
    vulnerable to length extension (its finalisation is flagged, unlike
@@ -248,8 +255,8 @@ not cryptographic hardness.
 **The reduction, written out.** [SECURITY-ANALYSIS.md](SECURITY-ANALYSIS.md) is the
 mathematical treatment: the construction as a tuple of functions, each assumption as an
 explicit game, the SIV/DAE theorem with its five-hop reduction and concrete bound
-(`q²/2^257 + q·2^-520` plus the PRF advantages, one of which is `L3.6` and not the
-ordinary keyed-hash one), every pair of uses of one
+(`q²/2^257 + q·2^-520` plus the PRF advantages — `2·Adv^{A3}` for the two-level tag and the
+key derivation, with **no** `L3.6` term since `v0.3` removed it), every pair of uses of one
 primitive enumerated with what separates it, and a falsification table — what would refute
 each claim, which refutations have been attempted, and which are out of reach of any test.
 Two properties it needs are pinned by tests added with it:

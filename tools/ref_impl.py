@@ -174,10 +174,13 @@ def derive_material(key32, nonce24):
     under SUBKEY_DOMAIN || nonce[16..24], at counters 0 and 1.
 
     Counter 0 yields the two tag keys (`k_in` for the inner hash, `k_out` for
-    the outer); counter 1 yields the encryption seed.  Three independent 256-bit
-    values: the route that would let one ciphertext open under two keys is a
-    collision in the *whole triple*, a 768-bit birthday, not the 512-bit one a
-    single 64-byte block allows."""
+    the outer); counter 1 yields the encryption seed.  The three are jointly
+    pseudorandom for a fixed key, but they are *not* 768 bits of entropy: all of
+    them are deterministic functions of the single 256-bit `subkey`, so two keys
+    that agree on the whole triple need a `subkey` collision -- a 2^128 birthday,
+    the same order as the tag's own collision bound, not a 768-bit one.  This is a
+    route in the attacker-chosen commitment game, which the crate's target-only
+    commitment claim does not cover."""
     subkey = hchacha20(key32, nonce24[0:16])
     sub_nonce = SUBKEY_DOMAIN + nonce24[16:24]
     block0 = chacha20_block(subkey, 0, sub_nonce)
@@ -344,12 +347,12 @@ def main():
     print(f"ct   differ: {ct_a != ct_b}")
     print()
 
-    # The tag must depend on the key -- through the whole derived material, not
-    # merely one 256-bit value.  Two keys that collide on all three derived
-    # values (k_in, k_out, enc_seed) give equal tags AND equal keystreams, i.e.
-    # one ciphertext opening under both, but that is a 768-bit birthday
-    # (2^384), unreachable over a 2^256 key space -- which is why the master key
-    # need not be (and is not) fed into the tag's input.
+    # The tag must depend on the key.  Two keys that collide on all three derived
+    # values (k_in, k_out, enc_seed) give equal tags AND equal keystreams, i.e. one
+    # ciphertext opening under both -- but that costs a 2^128 *subkey* collision
+    # (all three derive from the 256-bit subkey), and it is a route in the
+    # attacker-chosen commitment game, not the target one the crate claims.  The
+    # check here is only that the key reaches the tag at all.
     k1 = bytes(32)
     k2 = bytes([1] + [0] * 31)
     n = bytes(24)

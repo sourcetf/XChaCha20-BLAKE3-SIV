@@ -2,10 +2,10 @@
 //!
 //! `SECURITY-ANALYSIS.md` §4.10 answers "does combining ChaCha20, HChaCha20 and BLAKE3 in
 //! *this* way introduce a problem none of them has alone?" with a case analysis over the
-//! six uses of the primitives and the values that flow between them. The part of that
-//! argument which rots silently is its *completeness*: a seventh use (a new hash, a second
+//! seven uses of the primitives and the values that flow between them. The part of that
+//! argument which rots silently is its *completeness*: an eighth use (a new hash, a second
 //! keystream, a re-derivation somewhere) would need the whole case analysis redone, and
-//! nothing else in the suite would notice — a sixth use of a correct primitive still passes
+//! nothing else in the suite would notice — an eighth use of a correct primitive still passes
 //! every behavioural test.
 //!
 //! The inventory therefore also counts the one cryptographic call that is *not* part of that
@@ -24,7 +24,7 @@ use xchacha20_blake3_siv::{DOM_ENC, DOM_PRE, DOM_TAG, SUBKEY_DOMAIN};
 
 /// The cryptographic calls in the non-test source, with how many call sites each has.
 ///
-/// These are the six uses of §4.10, plus the one call outside the construction:
+/// These are the seven uses of §4.10, plus the one call outside the construction:
 ///
 /// * `hchacha20` — U1, the subkey;
 /// * `chacha20_keystream_raw` — U2, the two key-material blocks (counters 0 and 1): the
@@ -122,6 +122,33 @@ fn the_three_blake3_input_spaces_are_disjoint() {
          would reintroduce exactly the ambiguity the length fields in `derive_tag` exist to \
          prevent)"
     );
+
+    // Distinct constants are not enough: each must be written at the *right* place, or the
+    // "disjoint input spaces" lemma says nothing about the bytes actually hashed. (A swap of
+    // the two tag-hash prefixes is also caught by `test_tag_matches_blake3_over_the_documented_input`,
+    // but pinning it here keeps this lemma self-contained rather than resting on another test.)
+    let src = include_str!("../src/lib.rs");
+    let cut = src.find("mod tests {").expect("the test module must exist");
+    let body = &src[..cut];
+    for (site, what) in [
+        (
+            "head[0..8].copy_from_slice(&DOM_PRE);",
+            "the inner tag hash",
+        ),
+        (
+            "outer[0..8].copy_from_slice(&DOM_TAG);",
+            "the outer tag hash",
+        ),
+        (
+            "input[0..8].copy_from_slice(&DOM_ENC);",
+            "the key derivation",
+        ),
+    ] {
+        assert!(
+            body.contains(site),
+            "the domain prefix is not written where S1 needs it ({what}): {site}"
+        );
+    }
 }
 
 /// **Lemma S2**, the part that is visible from outside the crate: the label sits exactly where

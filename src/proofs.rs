@@ -332,7 +332,7 @@ fn hchacha20_matches_draft_vector() {
 //   `test_detached_rejects_tampering_and_wipes`, the `test_avalanche_*`
 //   diffusion checks, and the construction pins
 //   (`test_blake3_keyed_matches_official_vectors`,
-//   `test_tag_binds_the_key_directly`, `test_aad_message_split_is_unambiguous`,
+//   `test_tag_binds_both_derived_keys`, `test_aad_message_split_is_unambiguous`,
 //   `test_every_tag_byte_reaches_the_ciphertext`).
 //
 // The one AEAD-level property that *is* cheap and decidable — the length-limit
@@ -440,8 +440,9 @@ fn max_msg_size_boundary_matches_counter_capacity() {
 // What is *provable* here is the **shape** of the construction, which is
 // exactly what a regression would break:
 //
-//   * every input field reaches the inner hash (N, both lengths, A, M), so nothing
-//     can be dropped from the commitment;
+//   * both lengths reach the inner hash and equal the actual AAD/message lengths,
+//     and the head is exactly `HEAD_LEN` bytes, so nothing can be dropped from the
+//     commitment;
 //   * the outer hash's input is exactly the 32-byte digest, nothing truncated;
 //   * all `TAG_LEN` output bytes are returned, none truncated;
 //   * `derive_enc` consumes **every** tag byte, which is what makes the
@@ -449,6 +450,13 @@ fn max_msg_size_boundary_matches_counter_capacity() {
 //   * a change to any AAD or message byte changes the hash input;
 //   * no master key is in any hash message (the inner head is `DOM_PRE`, not the
 //     old `DOM_TAG || K || …`).
+//
+// One field is *not* covered by this shard, stated so the bullet above is not read
+// as more than it is: the nonce `N` occupies `head[8..32]` and no harness varies or
+// inspects it (the stub checks the domain prefix, the head length and the two length
+// fields).  A regression that dropped `N` from the head would pass every harness
+// here; that property is pinned by `test_tag_matches_blake3_over_the_documented_input`
+// and the differential fixture instead.
 //
 // What is *not* provable — and must not be claimed — is BLAKE3's collision
 // resistance or PRF security. "Distinct inputs give distinct tags" is a
@@ -541,10 +549,11 @@ fn model_blake3_keyed_multi(key: &[u8; 32], parts: &[&[u8]], out: &mut [u8]) {
     // *symbolic* accumulator index -- measured as a factor of 30 in memory.  See
     // `tag_is_keyed_hash_of_the_whole_context` for the numbers.
     //
-    // Arity is itself an assertion: one part comes from `derive_enc` (through
-    // `blake3_keyed_xof`) or from `derive_tag`'s contiguous path, three from
-    // `derive_tag`'s three-update path. Nothing else exists, so a future call
-    // site cannot quietly slip past every branch below by using a fourth shape.
+    // Arity is itself an assertion: there are three one-part call sites -- `derive_enc`
+    // (through `blake3_keyed_xof`, prefix `DOM_ENC`), the inner hash's contiguous path
+    // (prefix `DOM_PRE`) and the outer tag hash (prefix `DOM_TAG`) -- and one three-part
+    // call site, the inner hash's incremental path. Nothing else exists, so a future
+    // call site cannot quietly slip past every branch below by using a fifth shape.
     assert!(parts.len() == 1 || parts.len() == 3);
 
     if parts.len() == 3 {
@@ -560,7 +569,11 @@ fn model_blake3_keyed_multi(key: &[u8; 32], parts: &[&[u8]], out: &mut [u8]) {
         assert!(aad_len == parts[1].len() as u64);
         assert!(msg_len == parts[2].len() as u64);
     } else {
-        // One part: three call sites, told apart by the 8-byte domain word.
+        // One part: three call sites, told apart by the 8-byte domain word.  The
+        // `DOM_PRE` (contiguous-inner) branch is reachable only for totals in
+        // `TAG_CONCAT_MIN..=TAG_CONCAT_LIMIT`, which no harness here reaches, so its
+        // assertions are structural documentation rather than Kani coverage -- the
+        // two shapes' equivalence is pinned by `test_both_tag_call_shapes_hash_the_same_bytes`.
         assert!(parts[0].len() >= 8);
         if parts[0][0..8] == DOM_ENC[..] {
             // `derive_enc`: the domain word and the whole tag, nothing else, so

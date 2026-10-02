@@ -44,8 +44,13 @@
 //!   in one of those helpers (say the rotate amount in `qr`) cannot affect both sides.
 //!
 //! The one thing that *must* be shared is the specification: flags, constants, domain
-//! strings. Those are duplicated as literals here on purpose, so a typo in one copy shows up
-//! as a disagreement in the first test rather than as a silent mismatch of behaviour.
+//! strings. The ChaCha20 constant, the BLAKE3 IV/flags/permutation are duplicated as literals
+//! here on purpose, so a typo in one copy shows up as a disagreement in the first test rather
+//! than as a silent mismatch of behaviour. The domain *strings* and the field widths
+//! (`DOM_PRE`, `DOM_TAG`, `DOM_ENC`, `SUBKEY_DOMAIN`, `NONCE_LEN`, `TAG_LEN`) are **imported**
+//! from the crate instead — that is what `tests/ultra.rs` requires — so a wrong domain is
+//! wrong on both sides and cannot show up here as a disagreement; the external anchor for the
+//! wire format is the differential fixture against `tools/ref_impl.py`, not this cross-check.
 
 use alloc::vec::Vec;
 
@@ -53,12 +58,18 @@ use crate::{DOM_ENC, DOM_PRE, DOM_TAG, NONCE_LEN, SUBKEY_DOMAIN, TAG_LEN};
 
 /// Volatile-zero a slice.
 ///
-/// The witness keeps key-derived state in every buffer it touches, and `ultra` does not count
-/// cost, so every one of them is wiped. This is also what keeps `tools/ctgrind.sh` quiet: the
-/// first version of this module left its BLAKE3 chaining values in a `Vec<[u32; 8]>`, and
-/// memcheck reported a conditional jump in glibc's `free` — the freed chunk's payload held
-/// poisoned data, and the allocator reads part of it. Wiping before the buffer is released is
-/// both correct hygiene and what removes the report.
+/// The witness wipes every key-derived *buffer* it allocates or is handed, and `ultra` does not
+/// count cost, so this is applied liberally. Stated precisely, because an earlier version of
+/// this comment claimed more than the code does: the **construction** buffers (`material`'s
+/// blocks, `inner`, `outer`, `enc_material`'s output) are wiped, but the primitive-internal
+/// scalar state (`block`'s `s`/`v`, `hchacha20`'s `s`/`v`, `compress`'s `state`/`m`) is not —
+/// the crate's own `chacha20_block`/`hchacha20` do wipe theirs, so this is a gap rather than a
+/// policy. It is partly covered by the `scrub_stack()` the entry points run after the witness
+/// call, and closing it fully is a pending tidy-up. This is also what keeps `tools/ctgrind.sh`
+/// quiet: the first version of this module left its BLAKE3 chaining values in a
+/// `Vec<[u32; 8]>`, and memcheck reported a conditional jump in glibc's `free` — the freed
+/// chunk's payload held poisoned data, and the allocator reads part of it. Wiping before the
+/// buffer is released is both correct hygiene and what removes the report.
 #[inline(never)]
 fn wipe<T>(value: &mut T) {
     let bytes = core::mem::size_of::<T>();
@@ -555,8 +566,10 @@ fn material(key: &[u8; 32], nonce: &[u8; NONCE_LEN]) -> ([u8; 32], [u8; 32], [u8
     let mut enc_seed = [0u8; 32];
     enc_seed.copy_from_slice(&block1[0..32]);
 
-    // Every one of these is key material: the subkey, the domain nonce (it carries key-derived
-    // bytes on input), and the two 64-byte blocks they produced.
+    // `subkey` and the two blocks are key-derived and are wiped. `sub_nonce` and `hch_nonce`
+    // are public (the domain label and the caller's nonce) — they are wiped too, but for
+    // uniformity, not because they are secret; an earlier version of this comment called them
+    // "key material", which was wrong.
     wipe(&mut subkey);
     wipe(&mut sub_nonce);
     wipe(&mut hch_nonce);

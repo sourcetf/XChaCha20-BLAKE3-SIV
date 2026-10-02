@@ -189,7 +189,7 @@ L1  proven composition theorems (no assumption at this level)
      |         * one-time-pad with pseudorandom keys
      |
 L2  lemmas proved in §3 from L3 (this document's own contribution)
-     |-- Thm 1  the 512-bit key-material block is a PRF of the nonce
+     |-- Thm 1  the key material (k_in, k_out, enc_seed) is a PRF of the nonce
      |-- Thm 2  the tag is a PRF of (N,A,M), hence collision-resistant and key-committing
      |-- Thm 3  distinct tags => independent (enc_key, enc_nonce)
      |-- A4      the encoding is injective                        (proved by inspection, §4.4)
@@ -427,12 +427,19 @@ independent uniform 512-bit blocks, from which `(k_in, k_out, enc_seed)` are thr
 256-bit ranges.
 ∎
 
-Consequences used below: (a) the values are jointly pseudorandom, so nothing is lost by
-splitting the counter-0 block into `k_in` and `k_out` instead of deriving them separately, nor
-by taking `enc_seed` from the counter-1 block — the three keys are as good as independent;
-(b) *distinct nonces never share key material*, even if the caller repeats a message or an AAD;
-(c) because the three are jointly pseudorandom, two keys that agree on all of them is a 768-bit
-collision (`2^384`), which is the structural fact Thm 2's commitment bullet rests on.
+Consequences used below: (a) the values are jointly pseudorandom for a *fixed* key, so nothing is
+lost by splitting the counter-0 block into `k_in` and `k_out` instead of deriving them
+separately, nor by taking `enc_seed` from the counter-1 block — for an adversary who does not
+know the subkey, the three keys are as good as independent; (b) *distinct nonces never share key
+material*, even if the caller repeats a message or an AAD; (c) **768 bits of output is not 768
+bits of entropy, and the distinction matters here**: the triple is a deterministic function of
+the single 256-bit `subkey`, so an adversary who searches *keys* finds two that agree on the
+whole triple at a `2^128` subkey birthday over a `2^256` key space — the same order as the tag's
+own `2^128` collision bound, **not** a `2^384` event. (An earlier revision of this document
+claimed `2^384`; the triple has no more entropy than the subkey, and the codomain width is
+irrelevant when the domain is 256 bits.) This is the route into the *attacker-chosen* commitment
+game discussed in §4.5, and it is the reason the two-level tag is not, by itself, a
+commitment improvement over `v0.2` — see Thm 2's commitment bullet.
 
 ### Theorem 2 (the tag is a PRF over `(N, A, M)`, and a commitment)
 
@@ -478,14 +485,22 @@ they are stated separately:
   *attacker-chosen*: there the adversary outputs the whole tuple, so there is no fixed tag to hit,
   `2^520` does not describe that game, and **its bound is not derived here** — §4.5, "The two
   commitment games", keeps the two apart and names the gap. What keeps a *chosen*-key search from
-  being cheaper is structural, and it is the one thing the two-level tag must still do: the route
-  is a search over keys the adversary chooses for two that agree on the **whole** derived material
-  (`k_in`, `k_out`, `enc_seed`), which would give equal tags and equal keystreams at key-search
-  cost. Through `v0.2` the single-level tag closed that route by binding `K` into the hash input,
-  at the price of L3.6. `v0.3` closes it instead by deriving **three** independent 256-bit values
-  (counters 0 and 1 of the same ChaCha20 block), so agreeing on all of them is a 768-bit birthday
-  (`2^384`) rather than a 512-bit one (`2^256`, the key-search level) — see §4.10. The route is
-  closed by a wider collision target, not by a correlated hash input.
+  being cheaper **is not** the width of the derived material, and an earlier revision of this
+  document said it was. The route is a search over keys the adversary chooses for two that agree
+  on the **whole** derived material (`k_in`, `k_out`, `enc_seed`), which gives equal tags and equal
+  keystreams — one ciphertext opening under both. Through `v0.2` the single-level tag defeated that
+  route by binding `K` into the hash input: two keys with equal derived material still produced
+  *different tags*, at the price of L3.6. The two-level tag does not bind `K`, and deriving three
+  values instead of one does **not** compensate, because all three are functions of the single
+  256-bit `subkey` (Thm 1, consequence (c)): the route is a `subkey` collision at a `2^128`
+  birthday, the same order as the tag's own collision bound — **not** the `2^384` an earlier
+  revision claimed. So the honest statement is that `v0.3` **reopens** a complete salamander at
+  `2^128` in the attacker-chosen game that `v0.2`'s `K`-in-input had closed. It is `2^128`
+  (infeasible today) and it is a game this document does not price, so the *target* commitment —
+  the property this crate actually claims, `2^-520` per candidate key — is untouched; but the
+  trade for removing L3.6 is real and is recorded here rather than described as a free structural
+  win. A revision that wanted both would have to break the 256-bit `subkey` bottleneck, e.g. by
+  deriving the tag keys from `K` directly rather than through `HChaCha20(K, N₁)`.
 * **Commitment to the nonce and the lengths.** Same argument, byte for byte, since both
   are inputs to the same hash: a tag cannot be moved to another nonce or reinterpreted
   under a different length split (that is the same statement as §4.4).
@@ -967,7 +982,8 @@ that is exactly how such things get lost.
 
 No step above needed an assumption beyond A1–A3 plus the injectivity of the encoding. (Through
 `v0.2` there was one exception, L3.6 in §2.1 — a property of the tag layout rather than a step of
-the composition; `v0.3`'s two-level tag removed it, so the list is now exactly A1–A3.) In
+the composition; `v0.3`'s two-level tag removed it, so the list is now exactly A1–A4 — A4 being
+the injectivity of the encoding, discharged in §4.4.) In
 particular, none of the following is assumed: that `k_in` and `k_out` are *separately*
 derived (splitting one PRF block is fine, Thm 1); that a nonce is used once (that is the
 misuse case, §3 Corollary); that the encryption is randomized (it is deterministic by
@@ -984,7 +1000,7 @@ between uses, and show that each crossing is either a composition the L1 theorem
 a *structural* disjointness, or a bounded-probability event. The enumeration has to be complete,
 so the completeness argument is stated last and it is the part that is mechanised (a test).
 
-**The six uses.** Every cryptographic call **in the construction** is one of these, and the
+**The seven uses.** Every cryptographic call **in the construction** is one of these, and the
 inventory test (`tests/construction_inventory.rs`) fails if the set changes. There is one further
 cryptographic call in the non-test source that is *not* part of the construction — the unkeyed
 BLAKE3 hash behind `locked`'s key-integrity tag — and it is inventoried by the same test and
@@ -1077,11 +1093,14 @@ primitive (no ChaCha20 object and no BLAKE3 object were related by it), which is
 above read "no assumption that relates the two primitives" rather than "no assumption at all".
 Revision `v0.3` removes the conjunct: the two-level tag puts no `K` in any hash message, so there
 is no longer an encoding-introduced assumption, and the sentence above is now the stronger "no
-assumption of its own" in the plain sense. The route the old layout closed — the `2^256`-birthday
-route through the key derivation to a non-committing ciphertext (Thm 2) — is closed instead by
-deriving three independent values (U2, U2′), so the search is over a 768-bit target (`2^384`)
-rather than a 512-bit one and the derivation stays a standard cascade rather than a
-key-dependent-input step.
+assumption of its own" in the plain sense. That removal is **not free**, and an earlier revision
+of this paragraph described it as one. The route the old layout closed — a chosen-key search for
+two keys with equal derived material, which gives one ciphertext opening under both — is closed by
+`v0.2`'s `K`-in-input step and is *not* closed by the two-level tag: all three derived values are
+functions of the single 256-bit `subkey`, so the route costs a `2^128` subkey birthday, not the
+`2^384` an earlier revision claimed (Thm 1 consequence (c), Thm 2's commitment bullet). The
+derivation does stay a standard cascade rather than a key-dependent-input step, which is the
+L3.6 removal; the commitment trade is the price, recorded rather than glossed.
 
 **What this does *not* prove, stated plainly.** It does not prove that ChaCha20 and BLAKE3 are
 secure, and it cannot rule out a future cryptanalytic relation between them: if someone found a
@@ -1116,13 +1135,17 @@ refutation, and the status of the attempt.
 | 12 | An adversary cannot get unverified plaintext | A decryption failure that returns bytes, or that returns them for a moment the caller can observe | `tests/security.rs`, the wipe contracts, and `tools/fi_check.sh`'s `wipe-skipped` row |
 | 15 | **L3.6** [REMOVED in `v0.3`]: the tag was a PRF in the master key even though the master key was also in the tag's input (§2.1) | Through `v0.2`: a distinguisher for `K ↦ B3(D(K), … ‖ K ‖ …)` that is not a distinguisher for `x ↦ B3(k, x)` at a fixed input | **No longer a claim.** The two-level tag has no hash message containing `K`, so there is nothing to refute; the row records the removal rather than an attempt. (The `v0.2` evidence was: not attemptable by test — a statement about a primitive's internal structure — supported by BLAKE3's design, a separation showing the black-box reduction cannot exist, and the fact that every `H(k ‖ m)`-shaped MAC rests on the same assumption. `v0.3` removed the assumption instead of arguing it.) |
 | 16 | The tag-collision birthday is `2^128`, not `2^260` (§4.5) | An argument that some state other than the 256-bit chain value binds the tag; or a collision search cheaper than `2^128` | **Derived here, not tested**: it is a bound on computation. What the harnesses do pin is the premise — that the tag is exactly the root XOF of the encoded input — through the published keyed-BLAKE3 KATs, the differential reference implementation, and `src/witness.rs` under `ultra` |
-| 17 | **Commitment in the attacker-chosen games (CMT-1/CMT-3)** — the adversary outputs both keys, both messages and `(C,T)` and wins if one `(C,T)` opens under both (§4.5) | A worked-out attack in that game, or a completed derivation of its probability | **Not derived here, and this is the honest gap**: the target bound `2^520` does not describe this game (there is no fixed tag to hit), the one step this document can price is the colliding-tag search at `q²/2^257` (`2^128` birthday), and the completion is a fixed point of the tag/keystream coupling that is not analysed. A proof (or a break) would settle it; until then the construction's commitment in that game is argued from the three independent derived values being bound into a two-level tag, not quantified |
+| 17 | **Commitment in the attacker-chosen games (CMT-1/CMT-3)** — the adversary outputs both keys, both messages and `(C,T)` and wins if one `(C,T)` opens under both (§4.5) | A worked-out attack in that game, or a completed derivation of its probability | **Not derived here, and this is the honest gap**: the target bound `2^520` does not describe this game (there is no fixed tag to hit), the one step this document can price is the colliding-tag search at `q²/2^257` (`2^128` birthday), and the completion is a fixed point of the tag/keystream coupling that is not analysed. A proof (or a break) would settle it; and there **is** now a concrete route — a `subkey` collision at `2^128` gives two keys with identical derived material, hence identical tags and keystreams, so the completion is immediate (Thm 2's commitment bullet). That route was closed in `v0.2` by the `K`-in-input step and is *not* closed by the two-level tag, so this row is a known regression rather than only an unquantified gap — `2^128` is infeasible, and the *target* game is untouched, but the honest record is the regression |
 
-Rows 1, 15, 16 and 17 are the honest boundary: **no test in this repository, and none that could be
-written, falsifies or establishes them.** Rows 1 and 15 are the standing bet that every
-symmetric scheme makes (plus the one the layout adds); row 16 is a bound derived by hand, and the
+Rows 1, 16 and 17 are the honest boundary: **no test in this repository, and none that could be
+written, falsifies or establishes them.** Row 1 is the standing bet that every
+symmetric scheme makes; row 16 is a bound derived by hand, and the
 tests around it check the premises of the derivation rather than the number; row 17 is not a bound
-at all — it is the place this document *declines* to put a number, and says so.
+at all — it is the place this document *declines* to put a number, and says so. (Row 15, the
+`v0.2` `K`-in-input assumption L3.6, is marked removed above: `v0.3`'s two-level tag no longer
+takes that step, so it is no longer part of the boundary. Row 17's collision step is now
+`2^128` with a complete completion — a `subkey` collision — rather than an unanalysed fixed
+point; that is recorded there and in §4.5.)
 
 ### 5.1 The falsification procedures: what an attacker runs, and what it costs
 
@@ -1137,7 +1160,7 @@ the tag), and the numbers are work, not wall-clock.
 | **Forgery** | submit `(N, A, C, T)` guesses to the decryption oracle, or search the key space and then forge *legitimately* | 1 verify (oracle) or ≈ 4 calls (key search) | `2^-520` acceptance per fresh tag (the tag is a PRF of `(N,A,M)`, Thm 2), or `2^256` key search — the *minimum* is the key search, which is what "forgery is bounded by the key" means. Note the offline variant needs the key: without it an attacker cannot even test a guess without the oracle |
 | **Key commitment** (a second key that opens a *given* ciphertext) | for each candidate `K′`: derive `(enc_key, enc_nonce)` from the *given* `T`, decrypt `C`, recompute the tag over the recovered `M′`, compare with `T` | ≈ 4 calls | the chance that any one candidate works is `2^-520`, so enumerating the whole `2^256` key space succeeds with probability `≈ 2^-264`: no second key is in reach. **With a 32-byte tag the same procedure expects `≈ 1` success** — this row is what the 65-byte width buys (§4.5) |
 | **Tag collision** (the two-time-pad event of §3's Corollary) | *with the key*: fix `N`, `A`, the lengths and the final block; vary the prefix; hash until two prefixes collide in the 256-bit chaining value. *Without the key*: wait for the birthday event in the traffic | 1 hash per candidate (with the key); zero (without) | `2^128` by birthday. The keyless variant is the one to fear, because at the moment it happens the two-time pad costs the observer *nothing* |
-| **The derivation route to a non-committing ciphertext** (the one the layout closes) | choose `K₁ ≠ K₂` and search for two keys with equal 512-bit key-material blocks | 1 HC + 1 CC per candidate key | `≈ 2^256` candidates produce a collision by birthday — **and the attack still fails**, because `K` is 32 bytes of the tag input, so the two tags differ in their head. Falsifying the falsifier: the cheapest route we know is closed by 32 bytes of input, not by a wider tag (Thm 2, §4.10) |
+| **The derivation route to a non-committing ciphertext** (attacker-chosen game) | choose `K₁ ≠ K₂` and search for two keys whose derived material agrees — `(k_in, k_out, enc_seed)`, all functions of the 256-bit `subkey = HC(K, N₁)` | 1 HC + 2 CC per candidate key | the triple is a function of the 256-bit `subkey`, so two agreeing keys are a `subkey` **collision at a `2^128` birthday**, and it gives equal tags *and* equal keystreams — one ciphertext opening under both. Through `v0.2` this route was **closed by `K` in the tag input** (equal material still gave different tags); `v0.3`'s two-level tag does **not** close it (Thm 2's commitment bullet, §4.10). It is `2^128` — infeasible — and it is the *attacker-chosen* game, so the *target* commitment (`2^-520` per candidate key) is unaffected |
 | **Encoding and parsing** (length ambiguity, `A`/`M` re-split, trailing zeros, a tag byte that does not reach the ciphertext) | the differential suite's byte-position scans, the KATs, the Kani layout harnesses | — | §4.4 proves injectivity; §7 names the harnesses; §4.7 records the one member of this class that *was* real (a 28-byte tag truncation) |
 | **The implementation** (a divergence from the specification, a secret-dependent branch, a skipped wipe) | `tools/ref_impl.py` differential, `src/witness.rs` under `ultra`, ctgrind, the fault campaign, Kani | — | §7 and `tests/README.md` |
 
