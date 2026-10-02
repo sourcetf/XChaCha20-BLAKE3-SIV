@@ -2,8 +2,8 @@
 //!
 //! `SECURITY-ANALYSIS.md` §4.10 answers "does combining ChaCha20, HChaCha20 and BLAKE3 in
 //! *this* way introduce a problem none of them has alone?" with a case analysis over the
-//! five uses of the primitives and the six values that flow between them. The part of that
-//! argument which rots silently is its *completeness*: a sixth use (a new hash, a second
+//! six uses of the primitives and the values that flow between them. The part of that
+//! argument which rots silently is its *completeness*: a seventh use (a new hash, a second
 //! keystream, a re-derivation somewhere) would need the whole case analysis redone, and
 //! nothing else in the suite would notice — a sixth use of a correct primitive still passes
 //! every behavioural test.
@@ -20,16 +20,18 @@
 //! lives in the crate's unit tests (`mod tests`), because only those can reach the internal
 //! derivation.
 
-use xchacha20_blake3_siv::{DOM_ENC, DOM_TAG, SUBKEY_DOMAIN};
+use xchacha20_blake3_siv::{DOM_ENC, DOM_PRE, DOM_TAG, SUBKEY_DOMAIN};
 
 /// The cryptographic calls in the non-test source, with how many call sites each has.
 ///
-/// These are the five uses of §4.10, plus the one call outside the construction:
+/// These are the six uses of §4.10, plus the one call outside the construction:
 ///
 /// * `hchacha20` — U1, the subkey;
-/// * `chacha20_keystream_raw` — U2, the 64-byte key-material block (counter 0);
-/// * `blake3_keyed_xof` — U4, the per-message key; U3 (the tag) goes through
-///   `blake3_keyed_multi` from `derive_tag`, which also has the two concatenation shapes;
+/// * `chacha20_keystream_raw` — U2, the two key-material blocks (counters 0 and 1): the
+///   tag keys and the encryption seed;
+/// * `blake3_keyed_multi` — U3a (the inner tag hash), U3b (the outer tag hash) and U4
+///   (the per-message key, through `blake3_keyed_xof`); the tag has the two concatenation
+///   shapes for the inner hash, hence the extra call site;
 /// * `chacha20_keystream` and `chacha20_apply` — U5, the data keystream, in the allocating
 ///   and in-place entry points;
 /// * `blake3::Hasher::new` (unkeyed) — *not* a construction use: the hash behind `locked`'s
@@ -43,9 +45,9 @@ use xchacha20_blake3_siv::{DOM_ENC, DOM_TAG, SUBKEY_DOMAIN};
 /// use — which is what the failure message asks for.
 const PRIMITIVE_CALLS: &[(&str, usize)] = &[
     ("hchacha20(", 1),
-    ("chacha20_keystream_raw(", 1),
+    ("chacha20_keystream_raw(", 2),
     ("blake3_keyed_xof(", 1),
-    ("blake3_keyed_multi(", 3),
+    ("blake3_keyed_multi(", 4),
     ("chacha20_keystream(", 2),
     ("chacha20_apply(", 4),
     ("blake3::Hasher::new(", 1),
@@ -91,35 +93,34 @@ fn the_primitive_uses_are_the_ones_the_analysis_covers() {
     // describing work the loop above does. What this line actually guards is the table.
     let total: usize = PRIMITIVE_CALLS.iter().map(|(_, n)| n).sum();
     assert!(
-        total >= 13,
+        total >= 15,
         "the inventory table shrank below the recorded total: {total}"
     );
 }
 
-/// **Lemma S1**: the two keyed-BLAKE3 families have disjoint input spaces.
+/// **Lemma S1**: the three keyed-BLAKE3 families have disjoint input spaces.
 ///
-/// The tag is computed over `DOM_TAG ‖ …` and the per-message key over `DOM_ENC ‖ T`. For one
-/// byte string to be an input to both, it would have to start with two different 8-byte
-/// prefixes. That is what separates the two uses *structurally* — i.e. even in the impossible
-/// case `mac_key = enc_seed`, where a merely key-based separation would collapse.
+/// The inner tag hash is computed over `DOM_PRE ‖ …`, the outer over `DOM_TAG ‖ X`, and the
+/// per-message key over `DOM_ENC ‖ T`. For one byte string to be an input to two of them, it
+/// would have to start with two different 8-byte prefixes. That is what separates the uses
+/// *structurally* — i.e. even in the impossible case two of the keys coincide, where a merely
+/// key-based separation would collapse.
 #[test]
-fn the_two_blake3_input_spaces_are_disjoint() {
-    assert_ne!(
-        DOM_TAG, DOM_ENC,
-        "the tag domain and the key-derivation domain are the same string, so those two uses \
-         of keyed BLAKE3 are separated by nothing but their keys"
-    );
+fn the_three_blake3_input_spaces_are_disjoint() {
+    for (a, b) in [(DOM_PRE, DOM_TAG), (DOM_PRE, DOM_ENC), (DOM_TAG, DOM_ENC)] {
+        assert_ne!(
+            a, b,
+            "two of the three BLAKE3 domains are the same string, so those two uses are \
+             separated by nothing but their keys"
+        );
+    }
     assert_eq!(
-        DOM_TAG.len(),
-        DOM_ENC.len(),
+        (DOM_PRE.len(), DOM_TAG.len(), DOM_ENC.len()),
+        (8, 8, 8),
         "the prefixes must be the same width: the separation is then a byte comparison at a \
-         fixed offset, which is what a reader can check by hand"
-    );
-    assert_eq!(
-        DOM_TAG.len(),
-        8,
-        "a variable-length domain would reintroduce exactly the ambiguity the length fields in \
-         `derive_tag` exist to prevent"
+         fixed offset, which is what a reader can check by hand (a variable-length domain \
+         would reintroduce exactly the ambiguity the length fields in `derive_tag` exist to \
+         prevent)"
     );
 }
 
@@ -163,7 +164,11 @@ fn the_derivation_nonce_does_not_use_xchacha20s_nul_padding() {
         "the label is no longer written into the nonce's first four bytes"
     );
     assert!(
-        body.contains("chacha20_keystream_raw(&subkey, 0, &subkey_nonce, &mut material);"),
-        "the key-material block no longer uses counter 0 with that nonce"
+        body.contains("chacha20_keystream_raw(&subkey, 0, &subkey_nonce, &mut block0);"),
+        "the tag-key block no longer uses counter 0 with that nonce"
+    );
+    assert!(
+        body.contains("chacha20_keystream_raw(&subkey, 1, &subkey_nonce, &mut block1);"),
+        "the encryption-seed block no longer uses counter 1 with that nonce"
     );
 }

@@ -431,20 +431,24 @@ fn max_msg_size_boundary_matches_counter_capacity() {
 
 // ── The MAC and the tag (the new construction) ─────────────────────────
 //
-// The MAC is now a single keyed BLAKE3 invocation, and the whole tag is its
-// XOF output:
+// The MAC is two keyed BLAKE3 invocations (the NMAC shape), and the whole tag
+// is the outer one's XOF output:
 //
-//     tag = BLAKE3_keyed(mac_key, DOM_TAG || K || N || le64(|A|) || le64(|M|) || A || M)
+//     X   = BLAKE3_keyed(k_in,  DOM_PRE || N || le64(|A|) || le64(|M|) || A || M)
+//     tag = BLAKE3_keyed(k_out, DOM_TAG || X)
 //
 // What is *provable* here is the **shape** of the construction, which is
 // exactly what a regression would break:
 //
-//   * every input field reaches the hash (K, N, both lengths, A, M), so nothing
+//   * every input field reaches the inner hash (N, both lengths, A, M), so nothing
 //     can be dropped from the commitment;
+//   * the outer hash's input is exactly the 32-byte digest, nothing truncated;
 //   * all `TAG_LEN` output bytes are returned, none truncated;
 //   * `derive_enc` consumes **every** tag byte, which is what makes the
 //     ciphertext commit to all 520 bits;
-//   * a change to any AAD or message byte changes the hash input.
+//   * a change to any AAD or message byte changes the hash input;
+//   * no master key is in any hash message (the inner head is `DOM_PRE`, not the
+//     old `DOM_TAG || K || …`).
 //
 // What is *not* provable — and must not be claimed — is BLAKE3's collision
 // resistance or PRF security. "Distinct inputs give distinct tags" is a
@@ -466,18 +470,22 @@ fn max_msg_size_boundary_matches_counter_capacity() {
 //     secret fed into the key parameter — is caught only because the model now
 //     folds `key` into its output; before that fix it was invisible.
 
-/// Fixed width of the tag input's head: domain word, key, nonce, and the two
+/// Fixed width of the inner hash's head: domain word, nonce, and the two
 /// little-endian lengths.  Must match `derive_tag`.
-const HEAD_LEN: usize = 8 + 32 + NONCE_LEN + 16;
+const HEAD_LEN: usize = 8 + NONCE_LEN + 16;
+
+/// Width of the outer hash's input: `DOM_TAG || X`, the 32-byte inner digest.
+/// Must match `derive_tag`.
+const OUTER_LEN: usize = 8 + 32;
 
 /// The two length fields at their fixed offsets in that head.
 ///
 /// Only call after establishing `head.len() >= HEAD_LEN`.
 fn head_lengths(head: &[u8]) -> (u64, u64) {
     let mut aad_len = [0u8; 8];
-    aad_len.copy_from_slice(&head[40 + NONCE_LEN..48 + NONCE_LEN]);
+    aad_len.copy_from_slice(&head[8 + NONCE_LEN..16 + NONCE_LEN]);
     let mut msg_len = [0u8; 8];
-    msg_len.copy_from_slice(&head[48 + NONCE_LEN..56 + NONCE_LEN]);
+    msg_len.copy_from_slice(&head[16 + NONCE_LEN..24 + NONCE_LEN]);
     (u64::from_le_bytes(aad_len), u64::from_le_bytes(msg_len))
 }
 
@@ -496,7 +504,7 @@ fn head_lengths(head: &[u8]) -> (u64, u64) {
 ///   * **The key is bound.**  Its bytes are folded into the output, so a call
 ///     site passing the wrong key changes the result.  This is load-bearing: an
 ///     earlier version of this function accepted `key` and never read it, so
-///     `derive_enc` passing `mac_key` where `enc_seed` belongs would have passed
+///     `derive_enc` passing `k_in` where `enc_seed` belongs would have passed
 ///     every harness in this shard.  The parameter is now used, and the doc
 ///     bullets that claimed key binding when there was none are gone.
 ///   * **Any single-byte edit to the input is visible.**  Each input byte is
@@ -540,9 +548,11 @@ fn model_blake3_keyed_multi(key: &[u8; 32], parts: &[&[u8]], out: &mut [u8]) {
     assert!(parts.len() == 1 || parts.len() == 3);
 
     if parts.len() == 3 {
-        // The fixed-width head, then AAD, then the message.
+        // The inner hash's three-update shape: the fixed-width head, then AAD,
+        // then the message.  The head starts with DOM_PRE -- the master key is
+        // *not* in it (that is the point of the two-level shape).
         assert!(parts[0].len() == HEAD_LEN);
-        assert!(parts[0][0..8] == DOM_TAG[..]);
+        assert!(parts[0][0..8] == DOM_PRE[..]);
 
         // Both lengths are encoded, and they are the *actual* lengths -- this is
         // what makes `A || M` unambiguous.
@@ -550,24 +560,27 @@ fn model_blake3_keyed_multi(key: &[u8; 32], parts: &[&[u8]], out: &mut [u8]) {
         assert!(aad_len == parts[1].len() as u64);
         assert!(msg_len == parts[2].len() as u64);
     } else {
-        // One part.  Both one-part call sites start with an 8-byte domain word,
-        // so that is what tells them apart.
+        // One part: three call sites, told apart by the 8-byte domain word.
         assert!(parts[0].len() >= 8);
         if parts[0][0..8] == DOM_ENC[..] {
             // `derive_enc`: the domain word and the whole tag, nothing else, so
             // a truncated tag cannot reach the encryption key derivation.
             assert!(parts[0].len() == 8 + TAG_LEN);
+        } else if parts[0][0..8] == DOM_TAG[..] {
+            // The outer tag hash: `DOM_TAG || X`, exactly the 32-byte inner
+            // digest and nothing else, so a truncated digest cannot reach the tag.
+            assert!(parts[0].len() == OUTER_LEN);
         } else {
-            // `derive_tag`'s contiguous path: byte-for-byte the same input as the
-            // three-part shape above, so the head's own length fields must account
-            // for the remaining bytes exactly -- no more, no less.  (Which of the
-            // two shapes a given message takes is a performance decision, never a
-            // semantic one: the differential vectors hash the concatenated input
-            // on both sides of the threshold, and
+            // `derive_tag`'s inner contiguous path: byte-for-byte the same input
+            // as the three-part shape above, so the head's own length fields must
+            // account for the remaining bytes exactly -- no more, no less.  (Which
+            // of the two shapes a given message takes is a performance decision,
+            // never a semantic one: the differential vectors hash the concatenated
+            // input on both sides of the threshold, and
             // `test_both_tag_call_shapes_hash_the_same_bytes` compares the two
             // shapes at the four totals where the choice flips.)
+            assert!(parts[0][0..8] == DOM_PRE[..]);
             assert!(parts[0].len() >= HEAD_LEN);
-            assert!(parts[0][0..8] == DOM_TAG[..]);
             let (aad_len, msg_len) = head_lengths(parts[0]);
             let total = (HEAD_LEN as u64)
                 .wrapping_add(aad_len)
@@ -606,14 +619,21 @@ fn model_blake3_keyed_multi(key: &[u8; 32], parts: &[&[u8]], out: &mut [u8]) {
     }
 }
 
-/// The tag must be the model evaluated on the **exact** concatenation
-/// `DOM_TAG || K || N || le64(|A|) || le64(|M|) || A || M`, over all `TAG_LEN`
-/// bytes.
+/// The tag must be the model evaluated on the **exact** two-level construction,
+/// over all `TAG_LEN` bytes:
 ///
-/// `mac_key`, `key` and `nonce` are symbolic, so this holds for every possible
+/// ```text
+/// X   = BLAKE3_keyed(k_in,  DOM_PRE || N || le64(|A|) || le64(|M|) || A || M)
+/// tag = BLAKE3_keyed(k_out, DOM_TAG || X)
+/// ```
+///
+/// `k_in`, `k_out` and `nonce` are symbolic, so this holds for every possible
 /// secret material.  Because the model is injective in each input byte, a field
-/// dropped from the hasher — the key, either length, the domain separator —
-/// changes the result and fails the assertion.
+/// dropped from either hash — either length, the domain separator, the digest —
+/// changes the result and fails the assertion.  The stub also asserts that the
+/// inner head starts with `DOM_PRE` and the outer input with `DOM_TAG`, and that
+/// the outer input is exactly the 32-byte digest: that is what pins the removal
+/// of the master key from the hash input and the two-level shape.
 ///
 /// Four shapes of input: all-zero lengths, both non-empty (where the two encoded
 /// lengths differ, 4 vs 8, so a mix-up between the length fields cannot hide),
@@ -626,9 +646,8 @@ fn model_blake3_keyed_multi(key: &[u8; 32], parts: &[&[u8]], out: &mut [u8]) {
 /// to this harness's unwind bound instead: 130 iterations writing through a
 /// *symbolic* index into the 65-byte accumulator, which measured >30 GB of CBMC
 /// formula — more than any hosted runner has, and the reason the tag shard never
-/// completed in CI.  Split, each call site's parts are constants, the fold
-/// unwinds to its real length (81), and all four shapes verify in 2:08 with a
-/// 2.1 GB peak.
+/// completed in CI.  Split, each call site's parts are constants and the fold
+/// unwinds to its real length, so all four shapes verify with a small peak.
 ///
 /// `assert!` carries no format arguments: a `"...{}"` message pulls `core::fmt`
 /// into the verification scope, which dominates the run time.  The comparison is
@@ -637,13 +656,14 @@ fn model_blake3_keyed_multi(key: &[u8; 32], parts: &[&[u8]], out: &mut [u8]) {
 #[kani::proof]
 #[kani::stub(blake3_keyed_multi, model_blake3_keyed_multi)]
 #[kani::stub(zeroize_array, noop_zeroize_array)]
-// The longest loop to unwind is the stub's fold over the 80-byte head (81
-// iterations), then the tag-byte smoke check (65).  The unwinding assertions
-// fire if a bound is ever too low, so the headroom here is safe.
+// The longest loop to unwind is the stub's fold over the inner call's key and
+// parts (under 100 iterations), then the tag-byte smoke check (65).  The
+// unwinding assertions fire if a bound is ever too low, so the headroom here is
+// safe.
 #[kani::unwind(130)]
 fn tag_is_keyed_hash_of_the_whole_context() {
-    let mac_key: [u8; 32] = kani::any();
-    let key: [u8; 32] = kani::any();
+    let k_in: [u8; 32] = kani::any();
+    let k_out: [u8; 32] = kani::any();
     let nonce: [u8; NONCE_LEN] = kani::any();
 
     let empty: &[u8] = b"";
@@ -660,7 +680,7 @@ fn tag_is_keyed_hash_of_the_whole_context() {
     // symbolic parameters, which is the same merge by another route.
     macro_rules! shape {
         ($a:expr, $m:expr) => {{
-            let tag = derive_tag(&mac_key, &key, &nonce, $a, $m);
+            let tag = derive_tag(&k_in, &k_out, &nonce, $a, $m);
             let mut nz = 0u8;
             for b in tag.iter() {
                 nz |= *b;
@@ -679,7 +699,7 @@ fn tag_is_keyed_hash_of_the_whole_context() {
     shape!(empty, msg);
 }
 
-/// A change to the key must change the tag.
+/// A change to either derived key must change the tag.
 ///
 /// **What this does not establish**, despite what an earlier version of this doc
 /// claimed: it flips one key byte and asserts only that *some* tag byte moved, so
@@ -694,24 +714,31 @@ fn tag_is_keyed_hash_of_the_whole_context() {
 #[kani::stub(blake3_keyed_multi, model_blake3_keyed_multi)]
 #[kani::stub(zeroize_array, noop_zeroize_array)]
 fn tag_changes_when_the_key_changes() {
-    let mac_key: [u8; 32] = kani::any();
-    let key: [u8; 32] = kani::any();
+    let k_in: [u8; 32] = kani::any();
+    let k_out: [u8; 32] = kani::any();
     let nonce: [u8; NONCE_LEN] = kani::any();
 
-    let tag = derive_tag(&mac_key, &key, &nonce, b"aad", b"msg");
+    let tag = derive_tag(&k_in, &k_out, &nonce, b"aad", b"msg");
 
-    // Flip one key byte.  The assertion is deliberately one-sided ("some tag
-    // byte moved", not "all did") -- see the doc comment for why, and for where
-    // the full-width property is actually established.
-    let mut key2 = key;
-    key2[0] ^= 0xff;
-    let tag2 = derive_tag(&mac_key, &key2, &nonce, b"aad", b"msg");
+    // Flip one byte of each derived key, one at a time.  The assertion is
+    // deliberately one-sided ("some tag byte moved", not "all did") -- see the
+    // doc comment for why, and for where the full-width property is established.
+    let mut k_in2 = k_in;
+    k_in2[0] ^= 0xff;
+    let tag_in = derive_tag(&k_in2, &k_out, &nonce, b"aad", b"msg");
 
-    let mut moved = 0u32;
+    let mut k_out2 = k_out;
+    k_out2[0] ^= 0xff;
+    let tag_out = derive_tag(&k_in, &k_out2, &nonce, b"aad", b"msg");
+
+    let mut moved_in = 0u32;
+    let mut moved_out = 0u32;
     for i in 0..TAG_LEN {
-        moved |= (tag[i] ^ tag2[i]) as u32;
+        moved_in |= (tag[i] ^ tag_in[i]) as u32;
+        moved_out |= (tag[i] ^ tag_out[i]) as u32;
     }
-    assert!(moved != 0);
+    assert!(moved_in != 0);
+    assert!(moved_out != 0);
 }
 
 /// `derive_enc` must consume **every** byte of the tag.
@@ -772,8 +799,8 @@ fn derive_enc_reads_every_tag_byte() {
 #[kani::stub(blake3_keyed_multi, model_blake3_keyed_multi)]
 #[kani::stub(zeroize_array, noop_zeroize_array)]
 fn every_aad_and_message_byte_reaches_the_tag() {
-    let mac_key: [u8; 32] = kani::any();
-    let key: [u8; 32] = kani::any();
+    let k_in: [u8; 32] = kani::any();
+    let k_out: [u8; 32] = kani::any();
     let nonce: [u8; NONCE_LEN] = kani::any();
 
     let aad: [u8; 4] = kani::any();
@@ -783,15 +810,15 @@ fn every_aad_and_message_byte_reaches_the_tag() {
     let delta: u8 = kani::any();
     kani::assume(delta != 0);
 
-    let tag = derive_tag(&mac_key, &key, &nonce, &aad, &msg);
+    let tag = derive_tag(&k_in, &k_out, &nonce, &aad, &msg);
 
     let mut aad2 = aad;
     aad2[pos] ^= delta;
-    let tag_aad = derive_tag(&mac_key, &key, &nonce, &aad2, &msg);
+    let tag_aad = derive_tag(&k_in, &k_out, &nonce, &aad2, &msg);
 
     let mut msg2 = msg;
     msg2[pos] ^= delta;
-    let tag_msg = derive_tag(&mac_key, &key, &nonce, &aad, &msg2);
+    let tag_msg = derive_tag(&k_in, &k_out, &nonce, &aad, &msg2);
 
     let mut d1 = 0u8;
     let mut d2 = 0u8;

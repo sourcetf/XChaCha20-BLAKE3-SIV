@@ -49,7 +49,7 @@
 
 use alloc::vec::Vec;
 
-use crate::{DOM_ENC, DOM_TAG, NONCE_LEN, SUBKEY_DOMAIN, TAG_LEN};
+use crate::{DOM_ENC, DOM_PRE, DOM_TAG, NONCE_LEN, SUBKEY_DOMAIN, TAG_LEN};
 
 /// Volatile-zero a slice.
 ///
@@ -531,8 +531,10 @@ fn keyed_xof(key: &[u8; 32], parts: &[&[u8]], out: &mut [u8]) {
 
 // ── The construction, independently ───────────────────────────────────
 
-/// `(mac_key, enc_seed)`, recomputed the way the crate specifies it.
-fn material(key: &[u8; 32], nonce: &[u8; NONCE_LEN]) -> ([u8; 32], [u8; 32]) {
+/// `(k_in, k_out, enc_seed)`, recomputed the way the crate specifies it: two
+/// ChaCha20 blocks under the subkey nonce, counters 0 (the two tag keys) and 1
+/// (the encryption seed).
+fn material(key: &[u8; 32], nonce: &[u8; NONCE_LEN]) -> ([u8; 32], [u8; 32], [u8; 32]) {
     let mut hch_nonce = [0u8; 16];
     hch_nonce.copy_from_slice(&nonce[0..16]);
     let mut subkey = hchacha20(key, &hch_nonce);
@@ -541,42 +543,58 @@ fn material(key: &[u8; 32], nonce: &[u8; NONCE_LEN]) -> ([u8; 32], [u8; 32]) {
     sub_nonce[0..4].copy_from_slice(&SUBKEY_DOMAIN);
     sub_nonce[4..12].copy_from_slice(&nonce[16..24]);
 
-    let mut material = [0u8; 64];
-    keystream_xor(&subkey, 0, &sub_nonce, &[0u8; 64], &mut material);
+    let mut block0 = [0u8; 64];
+    keystream_xor(&subkey, 0, &sub_nonce, &[0u8; 64], &mut block0);
+    let mut block1 = [0u8; 64];
+    keystream_xor(&subkey, 1, &sub_nonce, &[0u8; 64], &mut block1);
 
-    let mut mac_key = [0u8; 32];
-    mac_key.copy_from_slice(&material[0..32]);
+    let mut k_in = [0u8; 32];
+    k_in.copy_from_slice(&block0[0..32]);
+    let mut k_out = [0u8; 32];
+    k_out.copy_from_slice(&block0[32..64]);
     let mut enc_seed = [0u8; 32];
-    enc_seed.copy_from_slice(&material[32..64]);
+    enc_seed.copy_from_slice(&block1[0..32]);
 
     // Every one of these is key material: the subkey, the domain nonce (it carries key-derived
-    // bytes on input), and the 64-byte block they produced.
+    // bytes on input), and the two 64-byte blocks they produced.
     wipe(&mut subkey);
     wipe(&mut sub_nonce);
     wipe(&mut hch_nonce);
-    wipe(&mut material);
-    (mac_key, enc_seed)
+    wipe(&mut block0);
+    wipe(&mut block1);
+    (k_in, k_out, enc_seed)
 }
 
-/// The 65-byte tag, recomputed: fixed-width head, then AAD and message.
+/// The 65-byte tag, recomputed in two levels: an inner keyed hash of the public
+/// context under `k_in`, then an outer keyed hash of that digest under `k_out`.
 pub fn tag(
-    mac_key: &[u8; 32],
-    key: &[u8; 32],
+    k_in: &[u8; 32],
+    k_out: &[u8; 32],
     nonce: &[u8; NONCE_LEN],
     aad: &[u8],
     msg: &[u8],
 ) -> [u8; TAG_LEN] {
-    let mut head = [0u8; 8 + 32 + NONCE_LEN + 16];
-    head[0..8].copy_from_slice(&DOM_TAG);
-    head[8..40].copy_from_slice(key);
-    head[40..40 + NONCE_LEN].copy_from_slice(nonce);
-    head[40 + NONCE_LEN..48 + NONCE_LEN].copy_from_slice(&(aad.len() as u64).to_le_bytes());
-    head[48 + NONCE_LEN..56 + NONCE_LEN].copy_from_slice(&(msg.len() as u64).to_le_bytes());
+    // Inner: DOM_PRE || N || le64(|A|) || le64(|M|) || A || M, under k_in.
+    let mut head = [0u8; 8 + NONCE_LEN + 16];
+    head[0..8].copy_from_slice(&DOM_PRE);
+    head[8..8 + NONCE_LEN].copy_from_slice(nonce);
+    head[8 + NONCE_LEN..16 + NONCE_LEN].copy_from_slice(&(aad.len() as u64).to_le_bytes());
+    head[16 + NONCE_LEN..24 + NONCE_LEN].copy_from_slice(&(msg.len() as u64).to_le_bytes());
+
+    let mut inner = [0u8; 32];
+    keyed_xof(k_in, &[&head, aad, msg], &mut inner);
+
+    // Outer: DOM_TAG || X, under k_out.
+    let mut outer = [0u8; 8 + 32];
+    outer[0..8].copy_from_slice(&DOM_TAG);
+    outer[8..].copy_from_slice(&inner);
 
     let mut out = [0u8; TAG_LEN];
-    keyed_xof(mac_key, &[&head, aad, msg], &mut out);
-    // `head` holds the master key at `head[8..40]`.
-    wipe(&mut head);
+    keyed_xof(k_out, &[&outer], &mut out);
+
+    // `inner` and `outer` are key-derived (a PRF output under `k_in`); `head` is public.
+    wipe(&mut inner);
+    wipe(&mut outer);
     out
 }
 
@@ -623,15 +641,16 @@ pub fn decrypt(
         ciphertext.len(),
         "witness: the output buffer must be the length of the ciphertext"
     );
-    let (mut mac_key, mut enc_seed) = material(key, nonce);
+    let (mut k_in, mut k_out, mut enc_seed) = material(key, nonce);
     let (mut enc_key, mut enc_nonce) = enc_material(&enc_seed, received_tag);
 
     keystream_xor(&enc_key, 0, &enc_nonce, ciphertext, plaintext);
 
-    let recomputed = tag(&mac_key, key, nonce, aad, plaintext);
+    let recomputed = tag(&k_in, &k_out, nonce, aad, plaintext);
     // The derived keys are wiped here; the plaintext slice is the caller's to wipe (it is
     // written through its buffer, and under `ultra` the caller wipes it after comparing).
-    wipe(&mut mac_key);
+    wipe(&mut k_in);
+    wipe(&mut k_out);
     wipe(&mut enc_seed);
     wipe(&mut enc_key);
     wipe(&mut enc_nonce);
@@ -645,9 +664,10 @@ pub fn encrypt_tag(
     aad: &[u8],
     plaintext: &[u8],
 ) -> [u8; TAG_LEN] {
-    let (mut mac_key, mut enc_seed) = material(key, nonce);
-    let t = tag(&mac_key, key, nonce, aad, plaintext);
-    wipe(&mut mac_key);
+    let (mut k_in, mut k_out, mut enc_seed) = material(key, nonce);
+    let t = tag(&k_in, &k_out, nonce, aad, plaintext);
+    wipe(&mut k_in);
+    wipe(&mut k_out);
     wipe(&mut enc_seed);
     t
 }

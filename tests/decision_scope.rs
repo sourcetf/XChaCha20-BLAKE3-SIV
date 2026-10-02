@@ -430,10 +430,10 @@ fn the_decision_outcome_is_fail_closed() {
     // paths. It is a different set of locals (the buffer is not written yet on that path),
     // so it is asserted separately rather than folded into the count above.
     assert_eq!(
-        LIB.matches("if decision0.is_err() {\n            zeroize_array(&mut mac_key);")
+        LIB.matches("if decision0.is_err() {\n            zeroize_array(&mut k_in);")
             .count()
             + LIB
-                .matches("if decision1.is_err() {\n            zeroize_array(&mut mac_key);")
+                .matches("if decision1.is_err() {\n            zeroize_array(&mut k_in);")
                 .count(),
         2,
         "`encrypt`'s two reject checks must wipe the derived key material"

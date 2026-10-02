@@ -9,12 +9,13 @@
 //! ```text
 //! K (256-bit)   N (192-bit)   A (associated data)   M (message)
 //!
-//! 1. subkey   = HChaCha20(K, N[0..16])
-//!    material = ChaCha20_keystream(subkey, 0, "XSIV" || N[16..24])    64 B
-//!    mac_key  = material[0..32]      enc_seed = material[32..64]
+//! 1. subkey = HChaCha20(K, N[0..16])
+//!    b0     = ChaCha20_keystream(subkey, 0, "XSIV" || N[16..24])      64 B
+//!    b1     = ChaCha20_keystream(subkey, 1, "XSIV" || N[16..24])      64 B
+//!    k_in   = b0[0..32]   k_out = b0[32..64]   enc_seed = b1[0..32]
 //!
-//! 2. tag = BLAKE3_keyed(mac_key,
-//!             "XSIV-TAG" || K || N || le64(|A|) || le64(|M|) || A || M)  65 B
+//! 2. X   = BLAKE3_keyed(k_in,  "XSIV-PRE" || N || le64(|A|) || le64(|M|) || A || M)  32 B
+//!    tag = BLAKE3_keyed(k_out, "XSIV-TAG" || X)                                      65 B
 //!
 //! 3. km      = BLAKE3_keyed(enc_seed, "XSIV-ENC" || tag)               44 B
 //!    enc_key = km[0..32]             enc_nonce = km[32..44]
@@ -33,10 +34,18 @@
 //!   where XChaCha20-Poly1305 leaves NUL padding.  Without it the same
 //!   `(key, nonce)` would derive identical material in both schemes, so a
 //!   protocol mixing them would be reusing keys across schemes.
-//! * **The key enters the tag input directly**, not only through the derived
-//!   `mac_key`.  Binding it only via `mac_key` would let an adversary search for
-//!   two keys colliding on that 256-bit value — a 2^128 effort — and bypass the
-//!   520-bit tag entirely.
+//! * **The tag is computed in two levels, and no hash message contains the master
+//!   key.**  The inner hash absorbs the public context (nonce, lengths, AAD,
+//!   message) under `k_in`; the outer turns that 32-byte digest into the tag under
+//!   the independent key `k_out`.  This is the NMAC shape.  A *single* level keyed
+//!   by `mac_key` would need `K` in its input to stay committing — but then the
+//!   hash's key and a 32-byte substring of its input are two correlated functions of
+//!   one secret, a key-dependent-input step that no reduction from "keyed BLAKE3 is
+//!   a PRF" covers (`SECURITY-ANALYSIS.md` §2.1, node L3.6).  Two levels remove the
+//!   correlation: every message hashed here is public, and the equal-material route
+//!   stays closed because the attacker must now collide *three* derived values
+//!   (`k_in`, `k_out`, `enc_seed`) at once, a 768-bit birthday rather than a
+//!   512-bit one.
 //! * **Both lengths are encoded and every field is fixed width.**  BLAKE3 is not
 //!   vulnerable to length extension (its finalisation is flagged, unlike
 //!   Merkle–Damgård constructions), but `A || M` alone would be ambiguous:
@@ -108,7 +117,7 @@
 //! key-committing.  What the width does *not* buy is collision resistance (`2^128`, the
 //! birthday of the chaining value the tag is a function of) or forgery resistance
 //! (`2^256`, bounded by the key).  [`TAG_LEN`]'s own docs carry both arguments, and
-//! `SECURITY-ANALYSIS.md` §4.5 the derivation; the format is frozen at revision `v0.2`,
+//! `SECURITY-ANALYSIS.md` §4.5 the derivation; the format is frozen at revision `v0.3`,
 //! which is now a second reason the width cannot move, not the only one.
 //!
 //! These rest on BLAKE3 being a secure PRF and collision-resistant and on
@@ -357,19 +366,33 @@ pub const NONCE_LEN: usize = 24;
 /// The value is ASCII "XSIV", chosen to be self-describing.
 pub const SUBKEY_DOMAIN: [u8; 4] = *b"XSIV";
 
-/// Domain separator for the **tag** computation.
+/// Domain separator for the **inner** keyed hash of the two-level tag.
 ///
 /// Part of the wire format: changing it changes every tag ever produced.
 ///
-/// Both domains are fixed width and mutually distinct.  A variable-length
+/// The inner hash is `BLAKE3_keyed(k_in, DOM_PRE || N || le64(|A|) || le64(|M|)
+/// || A || M)`; its 32-byte digest is the message of the outer hash.  It is the
+/// one place the message and both lengths are absorbed, and — because `K` is not
+/// in its input — the place that would carry the key-dependent-input correlation
+/// if the tag were a single level.
+pub const DOM_PRE: [u8; 8] = *b"XSIV-PRE";
+
+/// Domain separator for the **outer** keyed hash, which produces the tag.
+///
+/// Part of the wire format: changing it changes every tag ever produced.
+///
+/// The outer hash is `BLAKE3_keyed(k_out, DOM_TAG || X)`, where `X` is the inner
+/// digest.
+///
+/// All three domains are fixed width and mutually distinct.  A variable-length
 /// domain would reintroduce exactly the ambiguity the `u64` length fields in
 /// `derive_tag` exist to prevent.
 pub const DOM_TAG: [u8; 8] = *b"XSIV-TAG";
 
 /// Domain separator for deriving the per-message encryption key and nonce.
 ///
-/// Part of the wire format.  Distinct from [`DOM_TAG`] so the two BLAKE3
-/// invocations cannot be confused for one another.
+/// Part of the wire format.  Distinct from [`DOM_PRE`] and [`DOM_TAG`] so the
+/// three BLAKE3 invocations cannot be confused for one another.
 pub const DOM_ENC: [u8; 8] = *b"XSIV-ENC";
 
 /// Extra stack, in bytes, that one call into this crate may touch below its entry point.
@@ -1804,29 +1827,40 @@ fn zeroize_array<T>(value: &mut T) {
 
 // ── Public API ───────────────────────────────────────────────────────
 
-/// Derive `(mac_key, enc_seed)` from a key and nonce.
+/// Derive `(k_in, k_out, enc_seed)` from a key and nonce.
 ///
-/// XChaCha20-style: `subkey = HChaCha20(key, nonce[0..16])`, then one ChaCha20
-/// keystream block under `SUBKEY_DOMAIN || nonce[16..24]` yields 64 bytes,
-/// split into the BLAKE3 MAC key and the encryption seed.
-fn derive_material(key: &[u8; 32], nonce: &[u8; NONCE_LEN]) -> ([u8; 32], [u8; 32]) {
+/// XChaCha20-style: `subkey = HChaCha20(key, nonce[0..16])`, then two ChaCha20
+/// keystream blocks under `SUBKEY_DOMAIN || nonce[16..24]` — counter 0 yields the
+/// two tag keys (inner and outer), counter 1 the encryption seed.
+///
+/// Three independent 256-bit values rather than one 64-byte block: the route that
+/// would let one ciphertext open under two keys is a collision in the *whole*
+/// triple, a 768-bit birthday (2^384) rather than the 512-bit one (2^256, the
+/// key-search level) a single block allows.  That is what keeps the scheme
+/// committing without feeding the master key into the tag's input.
+fn derive_material(key: &[u8; 32], nonce: &[u8; NONCE_LEN]) -> ([u8; 32], [u8; 32], [u8; 32]) {
     let mut subkey = hchacha20(key, &nonce[0..16].try_into().unwrap());
     let mut subkey_nonce = [0u8; 12];
     subkey_nonce[0..4].copy_from_slice(&SUBKEY_DOMAIN);
     subkey_nonce[4..12].copy_from_slice(&nonce[16..24]);
 
-    let mut material = [0u8; 64];
-    chacha20_keystream_raw(&subkey, 0, &subkey_nonce, &mut material);
+    let mut block0 = [0u8; 64];
+    chacha20_keystream_raw(&subkey, 0, &subkey_nonce, &mut block0);
+    let mut block1 = [0u8; 64];
+    chacha20_keystream_raw(&subkey, 1, &subkey_nonce, &mut block1);
 
-    let mut mac_key = [0u8; 32];
-    mac_key.copy_from_slice(&material[0..32]);
+    let mut k_in = [0u8; 32];
+    k_in.copy_from_slice(&block0[0..32]);
+    let mut k_out = [0u8; 32];
+    k_out.copy_from_slice(&block0[32..64]);
     let mut enc_seed = [0u8; 32];
-    enc_seed.copy_from_slice(&material[32..64]);
+    enc_seed.copy_from_slice(&block1[0..32]);
 
     zeroize_array(&mut subkey);
     zeroize_array(&mut subkey_nonce);
-    zeroize_array(&mut material);
-    (mac_key, enc_seed)
+    zeroize_array(&mut block0);
+    zeroize_array(&mut block1);
+    (k_in, k_out, enc_seed)
 }
 
 /// `out.len()` bytes of `BLAKE3_keyed(key, parts[0] || parts[1] || ...)`, in
@@ -1886,33 +1920,32 @@ const TAG_CONCAT_LIMIT: usize = 65_536;
 /// BLAKE3 gains nothing from a single call.
 const TAG_CONCAT_MIN: usize = 2_048;
 
-/// The 520-bit tag: one keyed BLAKE3 over the entire context.
+/// The 520-bit tag, computed in **two levels**.
 ///
-/// `BLAKE3_keyed(mac_key, DOM_TAG || K || N || le64(|A|) || le64(|M|) || A || M)`
+/// ```text
+/// X   = BLAKE3_keyed(k_in,  DOM_PRE || N || le64(|A|) || le64(|M|) || A || M)   32 B
+/// tag = BLAKE3_keyed(k_out, DOM_TAG || X)                                       65 B
+/// ```
 ///
 /// Two properties are load-bearing and easy to lose in a refactor:
 ///
-/// * **The key is an input, not just the MAC key.** Without `K` in the head, an adversary
-///   who controls two keys could look for a collision in the *derivation* — the 512-bit
-///   `mat` block is `CC(HC(K, N₁), …)`, so two keys with equal `mat` give equal `mac_key`
-///   *and* equal `enc_seed`, hence identical tags for equal messages *and* identical
-///   keystreams: one ciphertext opening under both keys, for a `2^256` birthday search,
-///   which is the key-search level and therefore not committing at all. With `K` in the
-///   head that route is closed — the two tags now have different inputs — and the shortest
-///   route is the `2^520` target of `TAG_LEN`'s docs. So the binding raises the *route* the
-///   attacker must take, at the price of the correlation noted below.
+/// * **No hash message contains the master key.**  The inner hash absorbs the
+///   public context under `k_in`; the outer turns that 32-byte digest into the tag
+///   under the independent key `k_out`.  This is the NMAC shape, and it is what
+///   makes the tag's PRF claim rest on "keyed BLAKE3 is a PRF" alone: in both calls
+///   the message is a value the reduction can construct, so the standard
+///   PRF/cascade reductions apply.
 ///
-///   One honest caveat belongs here, because it is the one step in the security argument
-///   that no black-box reduction covers (`SECURITY-ANALYSIS.md` §2.1, node L3.6): the hash's
-///   *key* and a 32-byte *substring of its input* are two correlated functions of one
-///   secret, where the PRF game assumes a key drawn independently of the input. With the
-///   derivation idealized the reduction is immediate — a random function does not care what
-///   its input means — but a hash that could *notice* the relation would not be a PRF under
-///   this composition, and §2.1's separation shows the gap is real rather than a missing
-///   paragraph. What supports the step is that neither primitive is known to have that
-///   structure, and that no experiment here separates the composition from ideal. A format
-///   revision could remove the correlation entirely by dropping `K` from the head — at the
-///   cost of re-opening the derivation route above, which is the trade rather than a free win.
+///   The alternative — a *single* keyed BLAKE3 with the master key `K` also in the
+///   input — is what this revision replaces.  It is committing too, but it puts the
+///   hash's key and a 32-byte substring of its message in the same call as two
+///   correlated functions of one secret, a key-dependent-input step that no
+///   black-box reduction from "keyed BLAKE3 is a PRF" reaches
+///   (`SECURITY-ANALYSIS.md` §2.1, node L3.6, with a separation showing the gap is
+///   real).  Two levels remove the correlation outright, and the equal-material route
+///   the single level's `K` was there to close stays closed for a structural reason:
+///   the attacker must collide `k_in` **and** `k_out` **and** `enc_seed` together, a
+///   768-bit birthday (`2^384`), against a `2^256` key space.
 /// * **Lengths are encoded and every field is fixed width.** BLAKE3 is not
 ///   vulnerable to length extension (its finalisation is flagged, unlike
 ///   Merkle–Damgård constructions), but `A || M` alone would be ambiguous:
@@ -1920,11 +1953,12 @@ const TAG_CONCAT_MIN: usize = 2_048;
 ///   length fields remove that.
 ///
 /// The hasher is fed incrementally rather than through one concatenated buffer,
-/// so the key never lands in a growable heap allocation.
+/// so nothing secret lands in a growable heap allocation. (Nothing in the inner
+/// hash's *input* is secret either — the key is used as a key, not as data.)
 #[allow(unused_variables)]
 fn derive_tag(
-    mac_key: &[u8; 32],
-    key: &[u8; 32],
+    k_in: &[u8; 32],
+    k_out: &[u8; 32],
     nonce: &[u8; NONCE_LEN],
     aad: &[u8],
     msg: &[u8],
@@ -1932,23 +1966,23 @@ fn derive_tag(
     #[cfg(test)]
     test_counters::DERIVE_TAG_CALLS.with(|c| c.set(c.get() + 1));
 
-    // Fixed-width head: domain, key, nonce, and the two lengths.  Assembled on
-    // the stack so the key never enters a heap buffer, and so the whole thing is
-    // one slice the seam can absorb.
-    let mut head = [0u8; 8 + 32 + NONCE_LEN + 16];
-    head[0..8].copy_from_slice(&DOM_TAG);
-    head[8..40].copy_from_slice(key);
-    head[40..40 + NONCE_LEN].copy_from_slice(nonce);
-    head[40 + NONCE_LEN..48 + NONCE_LEN].copy_from_slice(&(aad.len() as u64).to_le_bytes());
-    head[48 + NONCE_LEN..56 + NONCE_LEN].copy_from_slice(&(msg.len() as u64).to_le_bytes());
+    // Inner hash: fixed-width head (domain, nonce, two lengths), then AAD and M.
+    // The head is public — it holds no key material — so unlike the single-level
+    // revision it needs no wipe.  The digest it produces is key-derived and is
+    // wiped below.
+    let mut head = [0u8; 8 + NONCE_LEN + 16];
+    head[0..8].copy_from_slice(&DOM_PRE);
+    head[8..8 + NONCE_LEN].copy_from_slice(nonce);
+    head[8 + NONCE_LEN..16 + NONCE_LEN].copy_from_slice(&(aad.len() as u64).to_le_bytes());
+    head[16 + NONCE_LEN..24 + NONCE_LEN].copy_from_slice(&(msg.len() as u64).to_le_bytes());
 
-    let mut tag = [0u8; TAG_LEN];
+    let mut inner = [0u8; 32];
     // How the bytes are *fed* does not change the hash -- only their order does --
     // so this is free to pick whichever call shape is faster:
     //
     // BLAKE3's incremental API only takes its batched SIMD path (`hash_many`)
     // when a call starts on a chunk boundary. Feeding it `head`, then `aad`, then
-    // `msg` starts the big call 83 bytes into a chunk, which drops the whole
+    // `msg` starts the big call part-way into a chunk, which drops the whole
     // message onto the one-block-at-a-time path. Measured on x86_64, per message:
     //
     //     size     three updates   one contiguous   ratio
@@ -1960,11 +1994,10 @@ fn derive_tag(
     //
     // A contiguous buffer costs a copy (about 0.07 ns/byte), so the win is
     // size-bounded: below one chunk there is nothing to batch, and above
-    // ~64 KiB the copy costs more than the batching saves.
+    // ~64 KiB the copy costs more than the batching saves.  (The table was
+    // measured before the two-level change, when the head was 80 bytes; it is now
+    // 48, which shifts the totals but not the shape of the trade.)
     //
-    // `head` holds the master key, so the buffer is built once with an exact
-    // capacity (no reallocation can strand a copy) and wiped before it is
-    // dropped, which is what keeps this consistent with the rest of the crate.
     // `checked_add`, not `+`: on a 32-bit target this sum can overflow, because
     // `check_lengths` cannot fire there (`MAX_MSG_SIZE` = 2^38 > `u32::MAX`, as
     // `test_length_guard_cannot_fire_on_32_bit` records), so `aad.len() + msg.len()` is
@@ -1988,18 +2021,24 @@ fn derive_tag(
             cat.extend_from_slice(&head);
             cat.extend_from_slice(aad);
             cat.extend_from_slice(msg);
-            blake3_keyed_multi(mac_key, &[&cat], &mut tag);
+            blake3_keyed_multi(k_in, &[&cat], &mut inner);
             zeroize_slice(&mut cat);
         }
-        None => blake3_keyed_multi(mac_key, &[&head, aad, msg], &mut tag),
+        None => blake3_keyed_multi(k_in, &[&head, aad, msg], &mut inner),
     }
 
-    // `head` holds the master key at `head[8..40]`, so it is secret and must be
-    // wiped like every other key-bearing local in this module.  A `[u8; 80]`
-    // on the stack is not cleared by dropping it, and leaving the key there
-    // would break the invariant the rest of this file maintains (the same
-    // failure mode as the two previously fixed instances of unwiped copies).
-    zeroize_array(&mut head);
+    // Outer hash: `DOM_TAG || X`, one short call under the independent key.
+    let mut outer = [0u8; 8 + 32];
+    outer[0..8].copy_from_slice(&DOM_TAG);
+    outer[8..].copy_from_slice(&inner);
+
+    let mut tag = [0u8; TAG_LEN];
+    blake3_keyed_multi(k_out, &[&outer], &mut tag);
+
+    // Both buffers are key-derived (the digest is a PRF output under `k_in`), so
+    // they are wiped like every other key-bearing local in this module.
+    zeroize_array(&mut inner);
+    zeroize_array(&mut outer);
     tag
 }
 
@@ -2100,13 +2139,14 @@ pub fn encrypt(
     // The buffer is allocated *first*, before any key material exists: this length is the
     // caller's, so the allocation is the one step that can fail, and taking it here means
     // the `?` cannot return through live secrets. (It did: with the derivation first, an
-    // `AllocationFailed` left `mac_key`, `enc_seed`, `enc_key` and `enc_nonce` in the frame
+    // `AllocationFailed` left `k_in`, `k_out`, `enc_seed`, `enc_key` and `enc_nonce` in the
+    // frame
     // -- on a path the error type explicitly invites the caller to retry, and which the
     // `ultra` stack scrub would have had to cover as well.)
     let mut ciphertext = alloc_zeroed(plaintext.len())?;
 
-    let (mut mac_key, mut enc_seed) = derive_material(key, nonce);
-    let tag = derive_tag(&mac_key, key, nonce, aad, plaintext);
+    let (mut k_in, mut k_out, mut enc_seed) = derive_material(key, nonce);
+    let tag = derive_tag(&k_in, &k_out, nonce, aad, plaintext);
     // `ultra`: the independent implementation must produce the same tag. A mismatch is a
     // rejection here rather than a ciphertext the peer will refuse -- and it is the only way
     // to notice a fault in the tag computation on the *sending* side at all.
@@ -2128,7 +2168,8 @@ pub fn encrypt(
         let mut decision1: Result<(), Error> = Err(Error::AuthenticationFailed);
         accept_or_reject(agree, agree, &mut decision0, &mut decision1);
         if decision0.is_err() {
-            zeroize_array(&mut mac_key);
+            zeroize_array(&mut k_in);
+            zeroize_array(&mut k_out);
             zeroize_array(&mut enc_seed);
             // The buffer has not been written yet (the keystream runs below), but it is
             // zeroized on this path anyway rather than left to `Drop`, so the two rejection
@@ -2144,7 +2185,8 @@ pub fn encrypt(
             return Err(Error::AuthenticationFailed);
         }
         if decision1.is_err() {
-            zeroize_array(&mut mac_key);
+            zeroize_array(&mut k_in);
+            zeroize_array(&mut k_out);
             zeroize_array(&mut enc_seed);
             zeroize_slice(&mut ciphertext);
             #[cfg(feature = "dual-mac")]
@@ -2158,7 +2200,8 @@ pub fn encrypt(
 
     chacha20_keystream(&enc_key, 0, &enc_nonce, plaintext, &mut ciphertext);
 
-    zeroize_array(&mut mac_key);
+    zeroize_array(&mut k_in);
+    zeroize_array(&mut k_out);
     zeroize_array(&mut enc_seed);
     zeroize_array(&mut enc_key);
     // The per-message ChaCha20 nonce is secret-derived too (it comes out of
@@ -2182,15 +2225,16 @@ pub fn encrypt_in_place_detached(
 ) -> Result<[u8; TAG_LEN], Error> {
     check_lengths(buffer.len(), aad.len())?;
 
-    let (mut mac_key, mut enc_seed) = derive_material(key, nonce);
-    let tag = derive_tag(&mac_key, key, nonce, aad, buffer);
+    let (mut k_in, mut k_out, mut enc_seed) = derive_material(key, nonce);
+    let tag = derive_tag(&k_in, &k_out, nonce, aad, buffer);
     let mut enc_key = [0u8; 32];
     let mut enc_nonce = [0u8; 12];
     derive_enc(&enc_seed, &tag, &mut enc_key, &mut enc_nonce);
 
     chacha20_apply(&enc_key, 0, &enc_nonce, &Input::InPlace, buffer);
 
-    zeroize_array(&mut mac_key);
+    zeroize_array(&mut k_in);
+    zeroize_array(&mut k_out);
     zeroize_array(&mut enc_seed);
     zeroize_array(&mut enc_key);
     // The per-message ChaCha20 nonce is secret-derived too (it comes out of
@@ -2404,14 +2448,14 @@ pub fn decrypt(
     #[cfg(feature = "ultra")]
     let mut witness_plaintext = alloc_zeroed(ciphertext.len())?;
 
-    let (mut mac_key, mut enc_seed) = derive_material(key, nonce);
+    let (mut k_in, mut k_out, mut enc_seed) = derive_material(key, nonce);
     let mut enc_key = [0u8; 32];
     let mut enc_nonce = [0u8; 12];
     derive_enc(&enc_seed, tag, &mut enc_key, &mut enc_nonce);
 
     chacha20_keystream(&enc_key, 0, &enc_nonce, ciphertext, &mut plaintext);
 
-    let mut computed_tag = derive_tag(&mac_key, key, nonce, aad, &plaintext);
+    let mut computed_tag = derive_tag(&k_in, &k_out, nonce, aad, &plaintext);
     // `ultra`: recompute the *entire* decryption with the independent implementation in
     // `witness` and require bit-for-bit agreement — plaintext and tag both. Every other
     // defence compares values produced by one implementation, so a fault that makes that
@@ -2451,7 +2495,7 @@ pub fn decrypt(
     // the received one satisfies both at once; this is the only software measure that
     // disagrees with such a fault. Measured cost: +21..40% on decryption.
     #[cfg(feature = "dual-mac")]
-    let mut recomputed_tag = derive_tag(&mac_key, key, nonce, aad, &plaintext);
+    let mut recomputed_tag = derive_tag(&k_in, &k_out, nonce, aad, &plaintext);
     #[cfg(feature = "hardened")]
     let gates = {
         // Two *recomputations*, not one result read twice.  The two gate
@@ -2506,7 +2550,8 @@ pub fn decrypt(
     #[cfg(not(feature = "hardened"))]
     let auth_ok = computed_tag.ct_eq(tag);
 
-    zeroize_array(&mut mac_key);
+    zeroize_array(&mut k_in);
+    zeroize_array(&mut k_out);
     zeroize_array(&mut enc_seed);
     zeroize_array(&mut enc_key);
     // The per-message ChaCha20 nonce is secret-derived too (it comes out of
@@ -2621,7 +2666,7 @@ pub fn decrypt_in_place_detached(
     #[cfg(feature = "ultra")]
     let mut witness_plaintext = alloc_zeroed(buffer.len())?;
 
-    let (mut mac_key, mut enc_seed) = derive_material(key, nonce);
+    let (mut k_in, mut k_out, mut enc_seed) = derive_material(key, nonce);
     let mut enc_key = [0u8; 32];
     let mut enc_nonce = [0u8; 12];
     derive_enc(&enc_seed, tag, &mut enc_key, &mut enc_nonce);
@@ -2631,7 +2676,7 @@ pub fn decrypt_in_place_detached(
 
     chacha20_apply(&enc_key, 0, &enc_nonce, &Input::InPlace, buffer);
 
-    let mut computed_tag = derive_tag(&mac_key, key, nonce, aad, buffer);
+    let mut computed_tag = derive_tag(&k_in, &k_out, nonce, aad, buffer);
     // `ultra`: the independent implementation recomputes the whole decryption from the
     // ciphertext the caller still holds, and its agreement rides the existing gate rather than
     // becoming a branch of its own -- a branch on a secret-derived comparison outside
@@ -2661,7 +2706,7 @@ pub fn decrypt_in_place_detached(
     // `ultra`/`dual-mac`, as in `decrypt`: an independent recomputation that must agree
     // with both the stored value and the received tag.
     #[cfg(feature = "dual-mac")]
-    let mut recomputed_tag = derive_tag(&mac_key, key, nonce, aad, buffer);
+    let mut recomputed_tag = derive_tag(&k_in, &k_out, nonce, aad, buffer);
     #[cfg(feature = "hardened")]
     let gates = {
         // See the matching block in `decrypt`: identical reasoning, and the same
@@ -2706,7 +2751,8 @@ pub fn decrypt_in_place_detached(
     #[cfg(not(feature = "hardened"))]
     let auth_ok = computed_tag.ct_eq(tag);
 
-    zeroize_array(&mut mac_key);
+    zeroize_array(&mut k_in);
+    zeroize_array(&mut k_out);
     zeroize_array(&mut enc_seed);
     zeroize_array(&mut enc_key);
     // The per-message ChaCha20 nonce is secret-derived too (it comes out of
@@ -3618,15 +3664,17 @@ mod tests {
     // ── XChaCha20-BLAKE3-SIV KAT (24-byte nonce public API) ──
     //
     // These lock the whole construction: XChaCha20-style subkey derivation
-    // (HChaCha20 + SUBKEY_DOMAIN || nonce[16..24]) producing `mac_key` and
-    // `enc_seed`, the keyed-BLAKE3 tag over `DOM_TAG || K || N || |A| || |M| ||
-    // A || M`, and the encryption key/nonce derived from that tag.  There is no
-    // CTX term and no Poly1305: both were part of v0.1 and are gone.
+    // (HChaCha20 + SUBKEY_DOMAIN || nonce[16..24]) producing `k_in`, `k_out` and
+    // `enc_seed`, the **two-level** keyed-BLAKE3 tag (`DOM_PRE || N || |A| ||
+    // |M| || A || M` under `k_in`, then `DOM_TAG || X` under `k_out`), and the
+    // encryption key/nonce derived from that tag.  No hash message contains the
+    // master key.  There is no CTX term and no Poly1305: both were part of v0.1
+    // and are gone.
     //
     // The vectors were regenerated with the independent reference implementation
     // in `tools/ref_impl.py`, written from the RFC 8439 /
     // draft-irtf-cfrg-xchacha-03 pseudocode and the BLAKE3 specification, after
-    // the tag change.  That reference is checked
+    // the two-level tag change.  That reference is checked
     // against the published RFC 8439 §2.3.2, the HChaCha20 draft (§2.2.1, §A.2.1,
     // §A.3.1) and BLAKE3's official keyed vectors before it emits anything, so it
     // is not merely a restatement of
@@ -3645,10 +3693,10 @@ mod tests {
             "4c616469657320616e642047656e746c656d656e206f662074686520636c617373206f66202739393a204966204920636f756c64206f6666657220796f75206f6e6c79206f6e652074697020666f7220746865206675747572652c2073756e73637265656e20776f756c642062652069742e",
         );
         let expected_ct = hex(
-            "39d8c2bc507e147e719d79975b5cf999f0313790d98f7b523f3f4d738116822b3b582ecf7b448d43b3074761cf5c6c2af92faabaf04c779c5f5fe8aa3d3b2a6588137488b453d3728452341483725c9ba1b5ee36d2cf9c743da4df8c4f6023852db6a85e82fcf58636d38768d88c881d56e5",
+            "ce8797ab2f9545a09a64c160940cdf2d96fdb7093232db8701d252ac7d897c5c4da16707fb7859c5dcd7c0f6f3f03475ef304270c9eb38b355f08856b293bebb0b0a67c771acb395f6408bec5f27706ca4a251756586f85c925f65ed6d2be08bb759e59368f2125c40babb535377b778b898",
         );
         let expected_tag = hex(
-            "6f463e1fb35a5c7727a73bc194a826a4607a7a885b6bdc4622a8a118e673f786800e0fbff12d3d6db861042eb88bda44ca69a9f222417ecea36525ebb9390bb2b6",
+            "252fcc32463a1d94bcd0e058d5338d1ca87a026e7974acdf1803d27b7cf68466a4c6180a866b2f4f8712f4a8f0e4bfbad7eabe689a276c86e70c03c68f7dc22f29",
         );
 
         let (ct, tag) = encrypt(&key, &nonce, &aad, &pt).unwrap();
@@ -3673,10 +3721,10 @@ mod tests {
             "4c616469657320616e642047656e746c656d656e206f662074686520636c617373206f66202739393a204966204920636f756c64206f6666657220796f75206f6e6c79206f6e652074697020666f7220746865206675747572652c2073756e73637265656e20776f756c642062652069742e",
         );
         let expected_ct = hex(
-            "cadc4425420cd2885a524aef50b5079dba67d38c37ca8aff461817e4de4470f1f228627f5e88733843d2658049ffb8b91b656cd7950ace606515e41fc60d7a943940d4798f053f97744d0146129e51a128e2f1fec012104f6ffb6dabcacb646f63d0c644a736a0984f991ad5ac3dae002288",
+            "3f1245b4c0a792664d07ea5c68dae2f66984a7a1f76ea2f3d001adeb4d57fea66980cd8b7e884fb389b0906aeddaf3578dcda17ed36faf4ff8d7381c9706230617afdc4af67e24fd919b54e63c79831b49b41de1d46adec7c5c5cf8bcc7db4d42fd7895881f61ff3c2095408a4bbc2e6d1eb",
         );
         let expected_tag = hex(
-            "19a364fdd465b99a1d30ff89bd55099e2c8fb25b4e8dbdae87347e72ffc86eb3a28eb065c6ff101bc4218cd141a931ebceec3807b271e4466bc85ed5b35d1eec4a",
+            "fb6d487598563d254b2103ac557e20c9932d0a9c9f00ee4d1305b28a86b594a91bc6a2bbeaba04bdfed72cc7d6dc1e9c50331f02c51510b63afd273c9d946f62b0",
         );
 
         let (ct, tag) = encrypt(&key, &nonce, &[], &pt).unwrap();
@@ -3697,7 +3745,7 @@ mod tests {
             .try_into()
             .unwrap();
         let expected_tag = hex(
-            "1db104f0e59673b1426fc2febf34b719273295bc5d04f7accd04a1181aa5495af53f3924cc55cbf08d17d640ad8af582b49fa64eafb82856f927b3ff173f75996e",
+            "b2834c5164b63c132bbffb4940fb36ead01cf0d90f6352f002775e7e26baa1a0a58e5243f05d27f87a50d45c40e01362b9260bd2d7e04378d7162f671045b785ce",
         );
 
         let (ct, tag) = encrypt(&key, &nonce, &[], &[]).unwrap();
@@ -3970,7 +4018,7 @@ mod tests {
         assert_eq!(cases, 120);
         assert_eq!(total, 123_256);
         assert_eq!(
-            digest, 0x430e_de7e_c152_53fe,
+            digest, 0x1837_384f_9dc3_c962,
             "the accelerated paths disagree with the scalar reference \
              (digest {digest:#018x} over {cases} cases, {total} bytes)"
         );
@@ -4139,10 +4187,9 @@ mod tests {
     /// Key commitment itself is a security argument about collision bounds (2^128 for the
     /// context case, at most 2^256 for the key case — see `TAG_LEN` and the README's
     /// "Security level") and cannot be established by sampling; what is testable is that
-    /// the tag is not indifferent to the key, and the mechanism it rests on -- the
-    /// key reaching the tag *directly*, not only through `mac_key` -- is what
-    /// `test_tag_binds_the_key_directly` checks. The old name claimed the property
-    /// rather than the sampling.
+    /// the tag is not indifferent to the key, and the mechanism it rests on -- the key
+    /// reaching the tag through *both* derived tag keys, with no hash message containing
+    /// it -- is what `test_tag_binds_both_derived_keys` checks.
     #[test]
     fn test_tag_changes_when_only_the_key_changes() {
         let key1 = [0u8; 32];
@@ -4813,37 +4860,53 @@ mod tests {
     // These replace the deleted Poly1305/CTX tests. Each pins a property the
     // new construction depends on and that a refactor could silently break.
 
-    /// The key must reach the tag **directly**, not only through the derived
-    /// `mac_key`.
+    /// The tag must depend on both derived tag keys, and the master key through
+    /// the derivation.
     ///
-    /// If the tag were `BLAKE3_keyed(mac_key, ...)`, an adversary could look for
-    /// two keys colliding on that 256-bit value — a 2^128 search — and thereby
-    /// bypass the whole point of a 520-bit tag. Feeding `K` into the hash input
-    /// instead binds the tag to the key itself.
-    ///
-    /// A test cannot distinguish the two designs by output equality, so this
-    /// checks the *construction*: `derive_tag` must change when the key does,
-    /// for a fixed `mac_key`. (The complementary property — that the real
-    /// encryption path changes — is covered by every KAT.)
+    /// The tag is `B3(k_out, DOM_TAG || B3(k_in, DOM_PRE || N || …))`. A design
+    /// that dropped `k_in` from the inner hash, or `k_out` from the outer, would
+    /// still produce tag-shaped output, so this pins that each is load-bearing.
+    /// The master key reaches the tag only through the derivation — it is *not*
+    /// in any hash message, which is the point of the two-level shape (§2.1,
+    /// L3.6) — so its binding is checked through the real entry point.
     #[test]
-    fn test_tag_binds_the_key_directly() {
-        let mac_key = [0x5Au8; 32];
+    fn test_tag_binds_both_derived_keys() {
         let nonce = [0x33u8; NONCE_LEN];
         let aad = b"aad";
         let msg = b"msg";
 
-        let k1 = [0x00u8; 32];
-        let mut k2 = [0x00u8; 32];
-        k2[0] = 1;
+        let k_in = [0x5Au8; 32];
+        let k_out = [0x6Bu8; 32];
+        let t = derive_tag(&k_in, &k_out, &nonce, aad, msg);
 
-        let t1 = derive_tag(&mac_key, &k1, &nonce, aad, msg);
-        let t2 = derive_tag(&mac_key, &k2, &nonce, aad, msg);
-        assert_ne!(t1, t2, "tag must depend on the key, not just the mac_key");
+        let mut k_in2 = k_in;
+        k_in2[0] ^= 1;
+        assert_ne!(
+            t,
+            derive_tag(&k_in2, &k_out, &nonce, aad, msg),
+            "the inner key must reach the tag"
+        );
+
+        let mut k_out2 = k_out;
+        k_out2[0] ^= 1;
+        assert_ne!(
+            t,
+            derive_tag(&k_in, &k_out2, &nonce, aad, msg),
+            "the outer key must reach the tag"
+        );
 
         // And the nonce must reach it too.
         let mut n2 = nonce;
         n2[23] ^= 1;
-        assert_ne!(t1, derive_tag(&mac_key, &k1, &n2, aad, msg));
+        assert_ne!(t, derive_tag(&k_in, &k_out, &n2, aad, msg));
+
+        // The master key reaches the tag through the derivation.
+        let key = [0x11u8; 32];
+        let mut key2 = key;
+        key2[0] ^= 1;
+        let (_, tag1) = encrypt(&key, &nonce, aad, msg).unwrap();
+        let (_, tag2) = encrypt(&key2, &nonce, aad, msg).unwrap();
+        assert_ne!(tag1, tag2, "the master key must reach the tag");
     }
 
     /// The `K || N || len(A) || len(M) || A || M` encoding must be unambiguous.
@@ -4960,10 +5023,14 @@ mod tests {
     /// fixed width, and distinct from each other.
     #[test]
     fn test_domain_separators_are_pinned() {
+        assert_eq!(DOM_PRE, *b"XSIV-PRE");
         assert_eq!(DOM_TAG, *b"XSIV-TAG");
         assert_eq!(DOM_ENC, *b"XSIV-ENC");
+        assert_eq!(DOM_PRE.len(), 8);
         assert_eq!(DOM_TAG.len(), 8);
         assert_eq!(DOM_ENC.len(), 8);
+        assert_ne!(DOM_PRE, DOM_TAG);
+        assert_ne!(DOM_PRE, DOM_ENC);
         assert_ne!(DOM_TAG, DOM_ENC);
     }
 
@@ -4977,23 +5044,27 @@ mod tests {
         let key = [0x11u8; 32];
         let nonce = [0x22u8; NONCE_LEN];
 
-        let (mac_key, _) = derive_material(&key, &nonce);
+        let (k_in, k_out, enc_seed) = derive_material(&key, &nonce);
         let subkey = hchacha20(&key, &nonce[0..16].try_into().unwrap());
 
-        // The layout the code uses: domain in the nonce, counter 0.
+        // The layout the code uses: domain in the nonce, counters 0 and 1.
         let mut n = [0u8; 12];
         n[0..4].copy_from_slice(&SUBKEY_DOMAIN);
         n[4..12].copy_from_slice(&nonce[16..24]);
         let mut buf = [0u8; 64];
         chacha20_keystream_raw(&subkey, 0, &n, &mut buf);
-        assert_eq!(mac_key.as_slice(), &buf[0..32]);
+        assert_eq!(k_in.as_slice(), &buf[0..32]);
+        assert_eq!(k_out.as_slice(), &buf[32..64]);
+        let mut buf1 = [0u8; 64];
+        chacha20_keystream_raw(&subkey, 1, &n, &mut buf1);
+        assert_eq!(enc_seed.as_slice(), &buf1[0..32]);
 
         // The documented-but-wrong reading (domain in the counter) must differ.
         let mut n2 = [0u8; 12];
         n2[4..12].copy_from_slice(&nonce[16..24]);
         let mut buf2 = [0u8; 64];
         chacha20_keystream_raw(&subkey, u32::from_le_bytes(SUBKEY_DOMAIN), &n2, &mut buf2);
-        assert_ne!(mac_key.as_slice(), &buf2[0..32]);
+        assert_ne!(k_in.as_slice(), &buf2[0..32]);
     }
 
     /// The MAC must cover the **whole** AAD and the **whole** message: flipping
@@ -5021,15 +5092,17 @@ mod tests {
         }
     }
 
-    /// The tag must equal a keyed BLAKE3 over **exactly** the documented byte
-    /// string, all 65 bytes.
+    /// The tag must equal the two-level documented construction over **exactly**
+    /// the documented byte strings, all 65 bytes.
     ///
-    /// The input is rebuilt here from the specification in the module docs
-    /// (`DOM_TAG || K || N || le64(|A|) || le64(|M|) || A || M`), independently of
-    /// how `derive_tag` assembles it, and compared byte for byte. This makes the
-    /// full width deterministic: an implementation that filled a prefix and
-    /// zeroed the rest, or that dropped or reordered a field, fails here and
-    /// cannot pass by luck.
+    /// Both levels are rebuilt here from the specification in the module docs —
+    /// `X = B3(k_in, DOM_PRE || N || le64(|A|) || le64(|M|) || A || M)` and
+    /// `tag = B3(k_out, DOM_TAG || X)` — independently of how `derive_tag`
+    /// assembles them, and compared byte for byte. This makes the full width
+    /// deterministic: an implementation that filled a prefix and zeroed the rest,
+    /// or that dropped or reordered a field, fails here and cannot pass by luck.
+    /// It also pins that *no master key is in either message*: a revision that
+    /// put `K` back into the inner input would change `X` and fail here.
     ///
     /// An earlier version of this test flipped one input byte and required all
     /// 65 tag bytes to move. That is *probabilistic* — a single fixed byte
@@ -5039,8 +5112,8 @@ mod tests {
     /// because exact equality is both stronger and deterministic.
     #[test]
     fn test_tag_matches_blake3_over_the_documented_input() {
-        let mac_key = [0x5Au8; 32];
-        let key = [0x11u8; 32];
+        let k_in = [0x5Au8; 32];
+        let k_out = [0x6Bu8; 32];
         let nonce = [0x22u8; NONCE_LEN];
 
         for (aad, msg) in [
@@ -5049,33 +5122,40 @@ mod tests {
             (b"x".as_slice(), b"".as_slice()),
             (b"".as_slice(), b"y".as_slice()),
         ] {
+            // The inner hash: DOM_PRE || N || le64(|A|) || le64(|M|) || A || M,
+            // under k_in.  No master key appears anywhere in it.
+            let mut inner = [0u8; 32];
+            let mut h_in = blake3::Hasher::new_keyed(&k_in);
+            h_in.update(&DOM_PRE);
+            h_in.update(&nonce);
+            h_in.update(&(aad.len() as u64).to_le_bytes());
+            h_in.update(&(msg.len() as u64).to_le_bytes());
+            h_in.update(aad);
+            h_in.update(msg);
+            h_in.finalize_xof().fill(&mut inner);
+
+            // The outer: DOM_TAG || X, under k_out.
             let mut want = [0u8; TAG_LEN];
+            let mut h_out = blake3::Hasher::new_keyed(&k_out);
+            h_out.update(&DOM_TAG);
+            h_out.update(&inner);
+            h_out.finalize_xof().fill(&mut want);
 
-            let mut hasher = blake3::Hasher::new_keyed(&mac_key);
-            hasher.update(&DOM_TAG);
-            hasher.update(&key);
-            hasher.update(&nonce);
-            hasher.update(&(aad.len() as u64).to_le_bytes());
-            hasher.update(&(msg.len() as u64).to_le_bytes());
-            hasher.update(aad);
-            hasher.update(msg);
-            hasher.finalize_xof().fill(&mut want);
-
-            let got = derive_tag(&mac_key, &key, &nonce, aad, msg);
+            let got = derive_tag(&k_in, &k_out, &nonce, aad, msg);
             assert_eq!(
                 got,
                 want,
-                "tag diverges from keyed BLAKE3 over the documented input \
+                "tag diverges from the two-level documented input \
                  (aad_len={}, msg_len={})",
                 aad.len(),
                 msg.len()
             );
         }
 
-        // The nonce and the key must each be in the hashed input, and the two
-        // length fields must swap when the roles are swapped.
-        let t1 = derive_tag(&mac_key, &key, &nonce, b"ab", b"cde");
-        let t2 = derive_tag(&mac_key, &key, &nonce, b"abc", b"de");
+        // The nonce must be in the inner input, and the two length fields must
+        // swap when the roles are swapped.
+        let t1 = derive_tag(&k_in, &k_out, &nonce, b"ab", b"cde");
+        let t2 = derive_tag(&k_in, &k_out, &nonce, b"abc", b"de");
         assert_ne!(t1, t2, "A||M must not be ambiguous");
     }
 
@@ -5170,9 +5250,9 @@ mod tests {
             );
 
             // The main path's own tag, for the same input, must equal the witness's.
-            let (mac_key, _) = derive_material(&key, &nonce);
+            let (k_in, k_out, _) = derive_material(&key, &nonce);
             assert_eq!(
-                derive_tag(&mac_key, &key, &nonce, &aad, &pt),
+                derive_tag(&k_in, &k_out, &nonce, &aad, &pt),
                 w_tag,
                 "the crate's tag and the witness tag disagree at length {len}"
             );
@@ -5309,10 +5389,10 @@ mod tests {
     /// itself, with the update-per-field shape.
     #[test]
     fn test_both_tag_call_shapes_hash_the_same_bytes() {
-        let mac_key = [0x5Au8; 32];
-        let key = [0x11u8; 32];
+        let k_in = [0x5Au8; 32];
+        let k_out = [0x6Bu8; 32];
         let nonce = [0x22u8; NONCE_LEN];
-        let head_len = 8 + 32 + NONCE_LEN + 16;
+        let head_len = 8 + NONCE_LEN + 16;
         let msg = [0xA5u8];
 
         for total in [
@@ -5326,18 +5406,23 @@ mod tests {
 
             // The expected tag always comes from the three-update shape, so this
             // compares the two shapes rather than one with itself.
-            let mut want = [0u8; TAG_LEN];
-            let mut hasher = blake3::Hasher::new_keyed(&mac_key);
-            hasher.update(&DOM_TAG);
-            hasher.update(&key);
-            hasher.update(&nonce);
-            hasher.update(&(aad.len() as u64).to_le_bytes());
-            hasher.update(&(msg.len() as u64).to_le_bytes());
-            hasher.update(&aad);
-            hasher.update(&msg);
-            hasher.finalize_xof().fill(&mut want);
+            let mut inner = [0u8; 32];
+            let mut h_in = blake3::Hasher::new_keyed(&k_in);
+            h_in.update(&DOM_PRE);
+            h_in.update(&nonce);
+            h_in.update(&(aad.len() as u64).to_le_bytes());
+            h_in.update(&(msg.len() as u64).to_le_bytes());
+            h_in.update(&aad);
+            h_in.update(&msg);
+            h_in.finalize_xof().fill(&mut inner);
 
-            let got = derive_tag(&mac_key, &key, &nonce, &aad, &msg);
+            let mut want = [0u8; TAG_LEN];
+            let mut h_out = blake3::Hasher::new_keyed(&k_out);
+            h_out.update(&DOM_TAG);
+            h_out.update(&inner);
+            h_out.finalize_xof().fill(&mut want);
+
+            let got = derive_tag(&k_in, &k_out, &nonce, &aad, &msg);
             assert_eq!(
                 got, want,
                 "the tag depends on which hash call shape was chosen (total={total})"
@@ -5416,14 +5501,15 @@ mod tests {
             let msg = [0x44u8; 9];
 
             // The 64-byte block `derive_material` burns under (subkey, subkey_nonce, 0)
-            // *is* the pair it returns -- that is how the block is split.
-            let (mac_key, enc_seed) = derive_material(&key, &nonce);
+            // *is* the pair of tag keys it returns -- that is how the block is split;
+            // the encryption seed comes from counter 1.
+            let (k_in, k_out, enc_seed) = derive_material(&key, &nonce);
             let mut kdf_block = [0u8; 64];
-            kdf_block[..32].copy_from_slice(&mac_key);
-            kdf_block[32..].copy_from_slice(&enc_seed);
+            kdf_block[..32].copy_from_slice(&k_in);
+            kdf_block[32..].copy_from_slice(&k_out);
 
             // The message keystream, derived the way `encrypt` derives it.
-            let tag = derive_tag(&mac_key, &key, &nonce, &aad, &msg);
+            let tag = derive_tag(&k_in, &k_out, &nonce, &aad, &msg);
             let mut enc_key = [0u8; 32];
             let mut enc_nonce = [0u8; 12];
             derive_enc(&enc_seed, &tag, &mut enc_key, &mut enc_nonce);
@@ -5600,14 +5686,14 @@ mod tests {
                  nonce — which is a collision in a permutation"
             );
 
-            // And the split of the block is what the derivation uses: the first half is the
-            // tag key, the second is the encryption seed, with nothing shared between the two
-            // uses beyond being two halves of one pseudorandom block (Theorem 1 in
-            // SECURITY-ANALYSIS.md).
-            let (mac_key, enc_seed) = derive_material(&key, &nonce);
+            // And the split of the block is what the derivation uses: the two halves are
+            // the inner and outer tag keys (the encryption seed comes from counter 1),
+            // with nothing shared between the uses beyond being two halves of one
+            // pseudorandom block (Theorem 1 in SECURITY-ANALYSIS.md).
+            let (k_in, k_out, _enc_seed) = derive_material(&key, &nonce);
             let mut rebuilt = [0u8; 64];
-            rebuilt[..32].copy_from_slice(&mac_key);
-            rebuilt[32..].copy_from_slice(&enc_seed);
+            rebuilt[..32].copy_from_slice(&k_in);
+            rebuilt[32..].copy_from_slice(&k_out);
             assert_eq!(
                 rebuilt, xsi_block,
                 "the material block is not what it is split from"

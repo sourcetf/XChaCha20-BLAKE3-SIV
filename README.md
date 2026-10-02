@@ -52,14 +52,15 @@ The construction in full:
 ```
 K (256-bit)   N (192-bit)   A (associated data)   M (message)
 
-1. subkey   = HChaCha20(K, N[0..16])
-   material = ChaCha20_keystream(subkey, counter 0, "XSIV" || N[16..24])   64 B
-   mac_key  = material[0..32]      enc_seed = material[32..64]
+1. subkey = HChaCha20(K, N[0..16])
+   b0     = ChaCha20_keystream(subkey, counter 0, "XSIV" || N[16..24])   64 B
+   b1     = ChaCha20_keystream(subkey, counter 1, "XSIV" || N[16..24])   64 B
+   k_in   = b0[0..32]   k_out = b0[32..64]   enc_seed = b1[0..32]
 
-2. tag = BLAKE3_keyed(mac_key,
-            "XSIV-TAG" || K || N || le64(|A|) || le64(|M|) || A || M)     65 B
+2. X   = BLAKE3_keyed(k_in,  "XSIV-PRE" || N || le64(|A|) || le64(|M|) || A || M)  32 B
+   tag = BLAKE3_keyed(k_out, "XSIV-TAG" || X)                                     65 B
 
-3. km      = BLAKE3_keyed(enc_seed, "XSIV-ENC" || tag)                    44 B
+3. km      = BLAKE3_keyed(enc_seed, "XSIV-ENC" || tag)                   44 B
    enc_key = km[0..32]             enc_nonce = km[32..44]
 
 4. C = ChaCha20(enc_key, counter 0, enc_nonce, M)
@@ -75,10 +76,18 @@ Three details are load-bearing rather than incidental:
    same `(key, nonce)` derives different material in the two schemes and a
    protocol that mixed them would not be reusing keys across schemes.
 
-2. **The key goes into the tag input directly**, not only through the derived
-   `mac_key`. Binding it only via `mac_key` would let an adversary search for
-   two keys colliding on that 256-bit value — a 2^128 effort — and bypass the
-   520-bit tag entirely (`test_tag_binds_the_key_directly`).
+2. **The tag is two keyed BLAKE3 calls, and no hash message contains the key.**
+   The inner hash absorbs the public context (nonce, lengths, AAD, message) under
+   `k_in`; the outer turns that 32-byte digest into the tag under the independent
+   key `k_out`. This is the NMAC shape. A *single* level keyed by the derived
+   `mac_key` would need `K` in its input to stay committing, but that puts the
+   hash's key and a 32-byte substring of its message in the same call as two
+   correlated functions of one secret — a key-dependent-input step that no
+   reduction from "keyed BLAKE3 is a PRF" reaches (`SECURITY-ANALYSIS.md` §2.1,
+   node L3.6, with a separation showing the gap is real). Two levels remove the
+   correlation outright, and commitment survives because the attacker must now
+   collide `k_in` **and** `k_out` **and** `enc_seed` together — a 768-bit birthday,
+   not one 512-bit block (`test_tag_binds_both_derived_keys`).
 
 3. **Both lengths are encoded, and every field is fixed width.** BLAKE3 is not
    vulnerable to length extension (its finalisation is flagged, unlike
@@ -95,12 +104,12 @@ anything.
 Two version numbers, deliberately kept apart (see `CHANGELOG.md`, which is written
 in the same terms):
 
-* **construction revision** — `v0.2` today. The bytes: domain strings, key
+* **construction revision** — `v0.3` today. The bytes: domain strings, key
   derivation, tag size. This is what a consumer has to match.
 * **crate version** — `0.1.0` in `Cargo.toml`. The Rust API: names, signatures,
   features.
 
-**The byte format is frozen at revision v0.2.** It will not change without a
+**The byte format is frozen at revision v0.3.** It will not change without a
 revision bump, a `CHANGELOG` entry and the known-answer vectors updated in the same
 commit — and that is mechanical rather than a promise: `kat_regression_lock`
 re-asserts the published bytes from a fixture no in-crate change can edit, and both
@@ -155,7 +164,7 @@ before 1.0 would be a revision bump, not a silent one.
 | Confidentiality (plaintext recovery) | 256-bit | the ChaCha20 key |
 | Forgery resistance | **256-bit** | BLAKE3 keyed mode as a PRF over a 256-bit key; a *target* problem, so no birthday search applies |
 | Context commitment **against a given ciphertext** (the target game) | `2^520` per attempt | a target hit in the 520-bit output: the width is what sets it. The literature's CMT-3 is *attacker-chosen*, not this — see below |
-| Key commitment **against a given ciphertext** (the target game) | `2^520` per attempt | the same, plus the key being bound into the tag's *input* as well as its derivation |
+| Key commitment **against a given ciphertext** (the target game) | `2^520` per attempt | the same, plus the derived key material bound into the tag's derivation across three independent values (`k_in`, `k_out`, `enc_seed`) |
 | Commitment in the **attacker-chosen** games (invisible salamanders, CMT-1/CMT-3) | **not derived here** | the adversary outputs both keys, both messages and `(C,T)`, so `2^520` does not describe it; the colliding-tag step is `2^128` and the completion is unanalysed. `SECURITY-ANALYSIS.md` §4.5 |
 | Tag collision resistance (the DAE bound's collision term) | **2^128** | the *chaining value*, not the tag: keyed BLAKE3's output is a function of its 256-bit state, so a state collision gives byte-identical tags of any length |
 
@@ -204,9 +213,9 @@ literature's names next to the number and let the reader assume it covered them:
   the colliding-tag search, `q²/2^257` with birthday point `2^128` (the state collision above);
   the completion — making one `C` consistent with two keys, which needs `M₂ = M₁ ⊕ KS₁ ⊕ KS₂` while
   `KS₂` is derived from the very tag being fixed — is circular and is not worked out. So the
-  construction's commitment in those games rests on the design argument (the key bound into the tag
-  input, §4.10 and Thm 2) rather than on a computed probability, and `SECURITY-ANALYSIS.md` records
-  it as an open obligation rather than a bound.
+  construction's commitment in those games rests on the design argument (three independent derived
+  values bound into a two-level tag, §4.10 and Thm 2) rather than on a computed probability, and
+  `SECURITY-ANALYSIS.md` records it as an open obligation rather than a bound.
 
 **`2^128` bounds *collisions*, not *targets*.** The state shortcut above helps only when
 both sides of the collision are the adversary's to search. A tag that has to be hit as
@@ -222,14 +231,15 @@ the attack.
 being a secure PRF and collision-resistant, and on ChaCha20 being a secure
 stream cipher. Those are standard, heavily analysed assumptions — but they are
 assumptions, not theorems, and this particular *composition* has no public
-specification and has not been independently analysed. One of them is this crate's
-own to declare rather than inherit: binding the key into the tag's *input* as well
-as into its key derivation puts a derived key and the value it is derived from in
-one hash call, which the black-box PRF assumption does not cover. It is stated as
-`L3.6` in [SECURITY-ANALYSIS.md](SECURITY-ANALYSIS.md) §2.1, with the separation
-showing no reduction reaches it and the reason it is still believed; §2.2 there is a
-ledger mapping an auditor's own lettered list of assumptions onto the document, so
-"which of these do you actually assume, and which are proved or falsified?" has a
+specification and has not been independently analysed. The one assumption an
+earlier revision of this crate added on top of those — binding the key into the
+tag's *input* as well as into its key derivation, which put a derived key and the
+value it is derived from in one hash call — is **gone** as of revision `v0.3`: the
+tag is now two levels and no hash message contains the master key, so the assumption
+list is the primitives' own. `SECURITY-ANALYSIS.md` §2.1 keeps the node `L3.6` and
+its separation as the record of *why* the single-level form was replaced; §2.2 there
+is a ledger mapping an auditor's own lettered list of assumptions onto the document,
+so "which of these do you actually assume, and which are proved or falsified?" has a
 one-table answer. The formal
 harnesses in `src/proofs.rs` prove properties of the implementation (that the fields
 reach the hash, that every output byte is used, that the tag reaches the ciphertext),
@@ -621,14 +631,16 @@ deployment.
   would wrap to 0 and reuse keystream *inside one message*. A `const` assertion binds
   the constant to the counter arithmetic, so raising it is a **build** failure rather
   than a silent wrap, and `tests/counter_range.rs` checks the arithmetic at run time
-  and that every call site either starts at zero or forwards its own counter.
+  and that every *message*-keystream call site either starts at zero or forwards its
+  own counter (the derivation's two single-block calls at counters 0 and 1 are the one
+  scoped exception, and they share no key with the message keystream).
 - **The wire format is frozen, and it is not a standard** ("Wire format: frozen by
   revision, and the crate is 0.x" above): the bytes will not move without a revision
   bump, while the *crate* is `0.x`, so the Rust API is the unstable part — and none of
   it is interoperable with any standard, so a consumer on the other end must be this
   crate, or a reimplementation of the same three domain strings and the same tag
   construction.  (This bullet said "not frozen"; that was true before the format was
-  frozen at revision `v0.2`, and the sentence was left behind when the section above was
+  frozen, and the sentence was left behind when the section above was
   rewritten.)
 
 ## Nonces, and where randomness comes from

@@ -40,6 +40,19 @@ the second shares LLC and DRAM with whatever else is on the host). **Differences
 that are the same number**, which is why most of the `hardened`-vs-`opt-out` column pairs below
 read as ties and why this section does not quote a figure to three digits.
 
+**Revision `v0.3` note: the tables below are `v0.2` figures and have not been re-measured under
+the three-pass protocol.** `v0.3`'s two-level tag is one extra keyed-BLAKE3 call and one extra
+ChaCha20 derivation block per message, a **fixed** cost that does not scale with the message.
+Measured directly (single pass, 2026-10-02, this host): the added primitives cost **+101 ns**
+(one keyed-BLAKE3 XOF call, 40 B in / 65 B out) and **+72 ns** (one ChaCha20 block), less about
+40 ns saved by the shorter inner-hash input — call it **≈ +130 ns per message** — and criterion's
+comparison against the stored `v0.2` baseline shows **+15% on 64-byte encryption**, falling to
+within the noise floor (≤2%) by 4 KiB (16 KiB measured at 7.80 µs against the `v0.2` median of
+7.42 µs, a 5% move inside the 5.9% floor). So the 64–256 B rows below read optimistically by
+roughly that fixed term, while the per-byte throughput and the ≥16 KiB rows are unchanged within
+noise. A full three-pass re-measurement of every cell is outstanding; `CHANGELOG.md` records the
+change and `benches/compare.rs` reproduces it.
+
 `opt-out` is `--no-default-features` (one comparison), `hardened` is the default (two gates,
 independent recomputation, fail-closed, and both constant-time comparison *shapes*), `ultra` adds
 the witness cross-check and the `locked`/`rng`/`dual-mac` layers. All three produce **identical

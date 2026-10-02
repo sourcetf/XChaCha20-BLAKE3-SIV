@@ -176,7 +176,7 @@ patch_recomputed_tag_ignored() {
   python3 - "$1/src/lib.rs" <<'PY'
 import sys
 p = sys.argv[1]; s = open(p).read()
-old = "    let mut computed_tag = derive_tag(&mac_key, key, nonce, aad, &plaintext);"
+old = "    let mut computed_tag = derive_tag(&k_in, &k_out, nonce, aad, &plaintext);"
 assert s.count(old) == 1, f"computed_tag sites: {s.count(old)}"
 open(p, "w").write(s.replace(old, "    let mut computed_tag = *tag;", 1))
 PY
@@ -204,7 +204,7 @@ patch_tag_replaced() {  # the tag computation is faulted away entirely
   python3 - "$1/src/lib.rs" <<'PY'
 import sys
 p = sys.argv[1]; s = open(p).read()
-old = "    let mut computed_tag = derive_tag(&mac_key, key, nonce, aad, &plaintext);"
+old = "    let mut computed_tag = derive_tag(&k_in, &k_out, nonce, aad, &plaintext);"
 assert s.count(old) == 1, f"computed_tag: {s.count(old)}"
 open(p, "w").write(s.replace(old, "    let mut computed_tag = *tag;", 1))
 PY

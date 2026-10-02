@@ -3,8 +3,9 @@
 
 Written from the RFC 8439 / draft-irtf-cfrg-xchacha-03 pseudocode plus the
 BLAKE3 specification: XChaCha20 nonce extension (HChaCha20) for subkey
-derivation, and a **keyed BLAKE3** MAC as the tag, whose output also derives the
-per-message encryption key and nonce.
+derivation, and a **two-level keyed BLAKE3** MAC as the tag, whose output also
+derives the per-message encryption key and nonce.  The tag is computed in two
+levels (NMAC-shaped) so that no hash message contains the master key.
 
 This is deliberately NOT derived from the Rust code under test.  It exists so
 the known-answer vectors can be regenerated after any change to the
@@ -122,6 +123,10 @@ def hchacha20(key, nonce16):
 TAG_LEN = 65
 
 #: Fixed-width domain separators.  Must match src/lib.rs.
+#:
+#: `DOM_PRE` keys the inner (message-absorbing) hash, `DOM_TAG` the outer one
+#: that produces the tag, `DOM_ENC` the per-message key/nonce derivation.
+DOM_PRE = b"XSIV-PRE"
 DOM_TAG = b"XSIV-TAG"
 DOM_ENC = b"XSIV-ENC"
 
@@ -136,41 +141,48 @@ def blake3_keyed_xof(key32, data, n):
     return blake3.blake3(data, key=key32).digest(length=n)
 
 
-def compute_tag(mac_key32, key32, nonce24, aad, msg):
-    """The 520-bit tag: one keyed BLAKE3 over the entire context.
+def compute_tag(k_in32, k_out32, nonce24, aad, msg):
+    """The 520-bit tag, computed in two levels:
 
-    `BLAKE3_keyed(mac_key, DOM_TAG || K || N || le64(|A|) || le64(|M|) || A || M)`
+        X = BLAKE3_keyed(k_in,  DOM_PRE || N || le64(|A|) || le64(|M|) || A || M)   32 B
+        T = BLAKE3_keyed(k_out, DOM_TAG || X)                                       65 B
 
-    The key `K` is fed in directly, not merely through the derived `mac_key`.
-    Binding it only via `mac_key` would let a collision in that 256-bit value
-    (a 2^128 search) bypass the 520-bit tag entirely.
+    Neither hash message contains the master key.  The inner hash absorbs the
+    public context (nonce, lengths, AAD, message) under `k_in`; the outer turns
+    that 32-byte digest into the tag under the independent key `k_out`.  That is
+    the NMAC shape, and it is what keeps the tag's PRF claim free of the
+    key-dependent-input correlation a single level with `K` in the input carries.
 
     The two length fields are what make the encoding unambiguous: without them
     `("ab", "c")` and `("a", "bc")` would hash identically.  BLAKE3 is not
     itself vulnerable to length extension -- its finalisation is flagged, unlike
     Merkle-Damgard constructions -- so this is about ambiguity, not extension.
     """
-    data = (
-        DOM_TAG
-        + key32
-        + nonce24
-        + struct.pack("<QQ", len(aad), len(msg))
-        + aad
-        + msg
+    inner = blake3_keyed_xof(
+        k_in32,
+        DOM_PRE + nonce24 + struct.pack("<QQ", len(aad), len(msg)) + aad + msg,
+        32,
     )
-    return blake3_keyed_xof(mac_key32, data, TAG_LEN)
+    return blake3_keyed_xof(k_out32, DOM_TAG + inner, TAG_LEN)
 
 
 # ── The scheme ──────────────────────────────────────────────────────────
 
 
 def derive_material(key32, nonce24):
-    """XChaCha20-style: HChaCha20(key, nonce[0..16]) then one ChaCha20 block
-    under SUBKEY_DOMAIN || nonce[16..24], at counter 0.  Splits into the BLAKE3
-    MAC key and the encryption seed."""
+    """XChaCha20-style: HChaCha20(key, nonce[0..16]) then two ChaCha20 blocks
+    under SUBKEY_DOMAIN || nonce[16..24], at counters 0 and 1.
+
+    Counter 0 yields the two tag keys (`k_in` for the inner hash, `k_out` for
+    the outer); counter 1 yields the encryption seed.  Three independent 256-bit
+    values: the route that would let one ciphertext open under two keys is a
+    collision in the *whole triple*, a 768-bit birthday, not the 512-bit one a
+    single 64-byte block allows."""
     subkey = hchacha20(key32, nonce24[0:16])
-    buf = chacha20_block(subkey, 0, SUBKEY_DOMAIN + nonce24[16:24])
-    return buf[0:32], buf[32:64]
+    sub_nonce = SUBKEY_DOMAIN + nonce24[16:24]
+    block0 = chacha20_block(subkey, 0, sub_nonce)
+    block1 = chacha20_block(subkey, 1, sub_nonce)
+    return block0[0:32], block0[32:64], block1[0:32]
 
 
 def derive_enc(enc_seed32, tag):
@@ -180,18 +192,18 @@ def derive_enc(enc_seed32, tag):
 
 
 def encrypt_x(key, nonce24, aad, pt):
-    mac_key, enc_seed = derive_material(key, nonce24)
-    tag = compute_tag(mac_key, key, nonce24, aad, pt)
+    k_in, k_out, enc_seed = derive_material(key, nonce24)
+    tag = compute_tag(k_in, k_out, nonce24, aad, pt)
     enc_key, enc_nonce = derive_enc(enc_seed, tag)
     ct = chacha20_xor(enc_key, 0, enc_nonce, pt)
     return ct, tag
 
 
 def decrypt_x(key, nonce24, aad, ct, tag):
-    mac_key, enc_seed = derive_material(key, nonce24)
+    k_in, k_out, enc_seed = derive_material(key, nonce24)
     enc_key, enc_nonce = derive_enc(enc_seed, tag)
     pt = chacha20_xor(enc_key, 0, enc_nonce, ct)
-    if compute_tag(mac_key, key, nonce24, aad, pt) != tag:
+    if compute_tag(k_in, k_out, nonce24, aad, pt) != tag:
         return None
     return pt
 
@@ -332,9 +344,12 @@ def main():
     print(f"ct   differ: {ct_a != ct_b}")
     print()
 
-    # The key must reach the tag directly, not merely through the derived
-    # mac_key. Without this, an adversary could search for two keys that collide
-    # on the 256-bit mac_key (a 2^128 effort) and bypass the 520-bit tag.
+    # The tag must depend on the key -- through the whole derived material, not
+    # merely one 256-bit value.  Two keys that collide on all three derived
+    # values (k_in, k_out, enc_seed) give equal tags AND equal keystreams, i.e.
+    # one ciphertext opening under both, but that is a 768-bit birthday
+    # (2^384), unreachable over a 2^256 key space -- which is why the master key
+    # need not be (and is not) fed into the tag's input.
     k1 = bytes(32)
     k2 = bytes([1] + [0] * 31)
     n = bytes(24)

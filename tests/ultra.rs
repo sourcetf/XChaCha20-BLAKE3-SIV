@@ -417,7 +417,7 @@ fn the_witness_shares_only_the_specification_with_the_crate() {
         .join("\n");
 
     // The one permitted import: the specification's constants.
-    let allowed = "use crate::{DOM_ENC, DOM_TAG, NONCE_LEN, SUBKEY_DOMAIN, TAG_LEN};";
+    let allowed = "use crate::{DOM_ENC, DOM_PRE, DOM_TAG, NONCE_LEN, SUBKEY_DOMAIN, TAG_LEN};";
     assert!(
         code.contains(allowed),
         "the witness must import the specification's constants explicitly, and nothing \

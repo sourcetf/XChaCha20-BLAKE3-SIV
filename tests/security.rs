@@ -452,12 +452,12 @@ fn kat_regression_lock() {
          637265656e20776f756c642062652069742e",
     );
     let want_ct = hx(
-        "39d8c2bc507e147e719d79975b5cf999f0313790d98f7b523f3f4d738116822b\
-        3b582ecf7b448d43b3074761cf5c6c2af92faabaf04c779c5f5fe8aa3d3b2a65\
-        88137488b453d3728452341483725c9ba1b5ee36d2cf9c743da4df8c4f602385\
-        2db6a85e82fcf58636d38768d88c881d56e5",
+        "ce8797ab2f9545a09a64c160940cdf2d96fdb7093232db8701d252ac7d897c5c\
+        4da16707fb7859c5dcd7c0f6f3f03475ef304270c9eb38b355f08856b293bebb\
+        0b0a67c771acb395f6408bec5f27706ca4a251756586f85c925f65ed6d2be08b\
+        b759e59368f2125c40babb535377b778b898",
     );
-    let want_tag = hx("6f463e1fb35a5c7727a73bc194a826a4607a7a885b6bdc4622a8a118e673f786800e0fbff12d3d6db861042eb88bda44ca69a9f222417ecea36525ebb9390bb2b6");
+    let want_tag = hx("252fcc32463a1d94bcd0e058d5338d1ca87a026e7974acdf1803d27b7cf68466a4c6180a866b2f4f8712f4a8f0e4bfbad7eabe689a276c86e70c03c68f7dc22f29");
 
     let (ct, tag) = encrypt(&key, &nonce, &aad, &pt).unwrap();
     assert_eq!(
@@ -475,7 +475,7 @@ fn kat_regression_lock() {
     assert!(ct2.is_empty());
     assert_eq!(
         tag2.as_slice(),
-        hx("1db104f0e59673b1426fc2febf34b719273295bc5d04f7accd04a1181aa5495af53f3924cc55cbf08d17d640ad8af582b49fa64eafb82856f927b3ff173f75996e").as_slice()
+        hx("b2834c5164b63c132bbffb4940fb36ead01cf0d90f6352f002775e7e26baa1a0a58e5243f05d27f87a50d45c40e01362b9260bd2d7e04378d7162f671045b785ce").as_slice()
     );
 }
 
@@ -569,7 +569,7 @@ fn decrypt_bounded_enforces_the_callers_limit() {
 /// `?` that carries it out of the function also skips every `zeroize_array` below —
 /// so an allocation taken *after* a derivation returns through live key material.
 /// That was a real defect (`encrypt` derived first, and an `AllocationFailed` left
-/// `mac_key`, `enc_seed`, `enc_key` and `enc_nonce` in the frame), and it came back
+/// `k_in`, `k_out`, `enc_seed`, `enc_key` and `enc_nonce` in the frame), and it came back
 /// when `ultra`'s witness buffers were added to `decrypt_in_place_detached` where
 /// they are used rather than at the top.
 ///

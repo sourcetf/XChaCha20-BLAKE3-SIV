@@ -100,7 +100,7 @@ fn main() {
     let nonce: [u8; 24] = hx("404142434445464748494a4b4c4d4e4f5051525354555657")
         .try_into().unwrap();
 
-    // The caller knows these two; the derived values (mac_key, enc_seed, enc_key,
+    // The caller knows these two; the derived values (k_in, k_out, enc_seed, enc_key,
     // enc_nonce) are not reachable from the public API, which is why the in-tree
     // version of this measurement needed crate internals.
     let known: [(&str, Vec<u8>); 2] = [

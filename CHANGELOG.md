@@ -7,14 +7,79 @@ tags have been cut yet.
 
 ## Unreleased
 
-### Wire format
+### Wire format: revision `v0.3` — the tag becomes two-level, and the key-dependent-input assumption (L3.6) is removed
 
-**Unchanged.** Every ciphertext and tag this revision produces is byte-identical to
-the previous one; the KATs, the differential fixture against `tools/ref_impl.py` and
-the accelerated-path corpus all still pin the same bytes. Nothing below touches the
-construction — it is hardening, correctness in `ultra`, evidence quality, and
-corrections to the *documented* security numbers, one of which (the `locked` layer
-never issuing `MADV_DODUMP`) was a real bug in a defence rather than prose.
+**The wire format changes: every tag, and therefore every ciphertext, differs from the previous
+revision.** This is a construction change rather than a hardening one, and it is the first
+wire-format change since `v0.2`. It is recorded first because a consumer's first question is
+always "did the bytes move?" — and here the answer is yes.
+
+**What changed.** The tag was one keyed BLAKE3 in which the master key `K` both keyed the hash
+(through `mac_key`) and appeared in its input:
+
+```text
+tag = BLAKE3_keyed(mac_key, DOM_TAG || K || N || |A| || |M| || A || M)
+```
+
+It is now two keyed BLAKE3 calls (the NMAC shape), and **no hash message contains `K`**:
+
+```text
+X   = BLAKE3_keyed(k_in,  DOM_PRE || N || |A| || |M| || A || M)   32 B
+tag = BLAKE3_keyed(k_out, DOM_TAG || X)                           65 B
+```
+
+The derivation produces three keys instead of two, from two ChaCha20 blocks (counters 0 and 1
+under the same subkey nonce): `k_in` and `k_out` from block 0, `enc_seed` from block 1.
+
+**Why.** The single-level form was committing — `K` in the input is what closed the
+equal-material route — but it put the hash's *key* and a 32-byte substring of its *message* in the
+same call as two correlated functions of one secret. That is a key-dependent-input step (the
+document's node **L3.6**): strictly stronger than "keyed BLAKE3 is a PRF", with a separation in
+`SECURITY-ANALYSIS.md` §2.1 showing no black-box reduction from it exists, and — unlike HMAC's
+two-level structure — with no published theorem in that shape. The two-level form removes the
+correlation outright: in both calls the message is a value the reduction can construct, so the
+standard PRF and cascade reductions apply and **L3.6 is gone from the assumption list.**
+
+**Commitment survives, for a structural reason rather than a probabilistic one.** The
+equal-material route required two keys with equal derived material; with three independent values
+the attacker must now collide `k_in` **and** `k_out` **and** `enc_seed` together — a 768-bit
+birthday (`2^384`), unreachable over a `2^256` key space, versus the 512-bit (`2^256`, the
+key-search level) one a single 64-byte block allowed. The `2^520` *target* bound is unchanged, and
+so is the `2^128` collision bound.
+
+**What else moved with it.**
+
+- `DOM_PRE` is a new domain constant (`XSIV-PRE`); `DOM_TAG` now keys the **outer** hash.
+- `derive_material` returns `(k_in, k_out, enc_seed)` and burns counters 0 and 1 of the derivation
+  block, not only counter 0. `tests/counter_range.rs`'s "counter starts at zero" rule now names
+  that one scoped exception rather than being loosened.
+- Cost: **one extra ChaCha20 block and one extra BLAKE3 call per message** — measured +18% at
+  64 B and under 2% from 4 KiB up (see `performance.md`); the message-length-dependent work is
+  unchanged.
+- `tools/ref_impl.py` (the independent reference, anchored to the published RFC 8439,
+  HChaCha20-draft and official-BLAKE3 vectors) was updated first; the KATs, the differential
+  fixture and the in-crate corpus digest were regenerated from it. The duplicated KAT in
+  `tests/security.rs` was regenerated too, from the same reference.
+- `tests/construction_inventory.rs`'s primitive-call count moved from 13 to 15: two ChaCha20
+  derivation blocks (was one) and three BLAKE3 tag calls (was two).
+
+**The security argument's shape changed more than the bytes did.** `SECURITY-ANALYSIS.md` §2, §2.1,
+§2.2, §2.3, §4.10 and §6 are updated: the assumption tree now has five primitive conjectures
+(L3.1–L3.5) rather than six, A5 no longer declares a correlation, the "one layout choice that adds
+an assumption" row is gone, and §6's residual-risk entry for L3.6 is removed. The test that pinned
+the old design (`test_tag_binds_the_key_directly`) is replaced by
+`test_tag_binds_both_derived_keys`, which pins that both derived keys reach the tag — the master
+key now reaches it only through the derivation.
+
+### Wire format (the entries below this heading)
+
+**Unchanged.** The entries below — the pre-review sweep and everything after it — do not move the
+bytes; the two-level tag above is the only wire-format change in this section. Within those
+entries every ciphertext and tag is byte-identical, and the KATs, the differential fixture against
+`tools/ref_impl.py` and the accelerated-path corpus all pin the same bytes. They are hardening,
+correctness in `ultra`, evidence quality, and corrections to the *documented* security numbers, one
+of which (the `locked` layer never issuing `MADV_DODUMP`) was a real bug in a defence rather than
+prose.
 
 ### Final pre-review sweep: two wipes that a path could skip, two guards satisfied by prose, and six CI/tool defects
 

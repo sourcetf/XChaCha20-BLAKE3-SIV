@@ -78,6 +78,15 @@ fn the_counter_is_the_second_parameter() {
 /// `0 ..= blocks - 1`, which with the length bound above is `0 ..= u32::MAX`. A future
 /// multi-part or streaming API would have to start somewhere else — or *compute* a
 /// counter rather than forwarding one — and this fails then, deliberately.
+///
+/// One exception, and it is scoped rather than a general loosening: `derive_material`
+/// takes one block at counter 0 (the two tag keys) and one at counter 1 (the encryption
+/// seed), both single blocks under the *derivation* key. That range is `{0, 1}`, it is
+/// fixed, and it shares no key with any message keystream (Theorem 3), so it cannot
+/// repeat a counter inside a message. The literal-1 allowance is therefore granted to
+/// `chacha20_keystream_raw` only — the derivation primitive — and never to a call that
+/// produces message keystream, where starting at 1 would push the last block to counter
+/// `2^32` and wrap.
 #[test]
 fn every_keystream_call_site_starts_the_counter_at_zero() {
     let src = include_str!("../src/lib.rs");
@@ -106,11 +115,16 @@ fn every_keystream_call_site_starts_the_counter_at_zero() {
             let Some(i) = code.find(f) else { continue };
             calls += 1;
             // `chacha20_keystream(&key, 0, &nonce, ...)`: after the first comma the
-            // argument must be a literal zero.
+            // argument must be a literal zero.  `chacha20_keystream_raw` may also take 1,
+            // for the derivation's second block (see the doc comment).
             let after_key = code[i + f.len()..].split_once(',').map_or("", |(_, a)| a);
             let arg = after_key.trim_start();
+            let allowed = arg.starts_with("0,")
+                || arg.starts_with("counter,")
+                || arg.starts_with("ctr,")
+                || (f == "chacha20_keystream_raw(" && arg.starts_with("1,"));
             assert!(
-                arg.starts_with("0,") || arg.starts_with("counter,") || arg.starts_with("ctr,"),
+                allowed,
                 "src/lib.rs:{} calls `{f}` with a counter that is neither zero nor the \
                  caller's own (so it could be anywhere in the range): {}",
                 n + 1,

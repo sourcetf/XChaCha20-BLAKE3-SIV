@@ -69,12 +69,15 @@ defended against" in `README.md`:
 
 ## Versions
 
-The byte format is **frozen at construction revision `v0.2`** — it will not change
+The byte format is **frozen at construction revision `v0.3`** — it will not change
 without a revision bump, a `CHANGELOG` entry and the known-answer vectors updated in
 the same commit (see README, "Wire format: frozen by revision, and the crate is
 0.x"). What is *not* frozen is the Rust API: the crate is `0.x` until a deliberate
 1.0, so pin an exact version rather than a range. (An earlier version of this file
 pointed at a README section called "Wire format is not frozen", which no longer
-exists and whose claim is no longer true.) There are no maintained release branches:
+exists and whose claim is no longer true. Revision `v0.3` moved the format once — the
+tag became two-level and the key-dependent-input assumption L3.6 was removed — which
+is exactly the bump-plus-CHANGELOG-plus-vectors procedure this paragraph describes.)
+There are no maintained release branches:
 security fixes land on `main`, and the version currently in `Cargo.toml` is the only
 supported one.
