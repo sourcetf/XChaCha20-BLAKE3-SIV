@@ -723,7 +723,7 @@ jobs:
           compiled library, a runnable binary and that configuration's known-answer output, whose
           digest is the same in all three. What changes is
           the fault model and the cost; per-configuration performance against RustCrypto's
-          \`chacha20poly1305\` is in \`README.md\`, "The three configurations, measured".
+          \`chacha20poly1305\` is in \`performance.md\`.
           EOF
           cat target/CONFIGURATIONS.md
 

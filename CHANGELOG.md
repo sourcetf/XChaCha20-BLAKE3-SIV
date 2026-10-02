@@ -16,6 +16,50 @@ construction — it is hardening, correctness in `ultra`, evidence quality, and
 corrections to the *documented* security numbers, one of which (the `locked` layer
 never issuing `MADV_DODUMP`) was a real bug in a defence rather than prose.
 
+### Commitment: `2^520` is a *target* bound, and the literature's games are not that game
+
+An auditor's finding, and a correct one. This repository quoted `2^520` next to the commitment
+games the AEAD literature names — **CMT-1/CMT-3**, invisible salamanders — as if the number
+belonged to those games. It does not, and the two are not interchangeable:
+
+- **What `2^520` is.** A *target* bound. The adversary is *given* a ciphertext/tag (a published
+  one, say) and must find a second key under which that same `(C,T)` validates. It has to hit the
+  tag it was given, so it is a target: `2^-520` per candidate key, `≈2^-264` over the whole key
+  space. This is correct in its own semantics, and it is what the 65-byte width buys.
+- **What CMT-1/CMT-3 are.** *Attacker-chosen* games: the adversary **outputs the whole tuple** —
+  two keys/contexts, two messages, and the `(C,T)` — and wins if the one `(C,T)` validates under
+  both. There is no fixed value to hit, so a target bound does not describe them.
+- **Why they cannot be swapped.** In the attacker-chosen game the adversary may collect tags for
+  `q` self-chosen inputs and search for a **collision**, which is `q²/2^257` with birthday point
+  **`2^128`** (the chaining-value birthday: keyed BLAKE3's output is a function of its 256-bit
+  state, so a state collision gives byte-identical tags). The collision route the target bound
+  does not price is exactly what that game offers.
+- **What is *not* derived, and is now said to be not derived.** A colliding pair of tags is only
+  the *first* step; the completion must also make one `C` consistent with both keys, and that step
+  is circular — an adversary who knows both keys can set `M₂ = M₁ ⊕ KS₁ ⊕ KS₂`, but `KS₂` is
+  derived from the very tag `T₂ = T₁` it is trying to fix, so the message it must exhibit is the
+  message it was choosing. The completion is a fixed point of the tag/keystream coupling, and its
+  cost is **not analysed here**. Earlier prose named the literature's games next to `2^520`, which
+  implied otherwise.
+
+What changed: `SECURITY-ANALYSIS.md` §4.5 gains a section, *"The two commitment games, kept
+apart"*, with a row in its bounds table and a named open obligation in §5.1 (row 17: "not derived
+here"); Thm 2's commitment bullet, the §8.2 attack-class row, the multi-key note, and the §5.1
+falsification row are all scoped to the target game and point at the attacker-chosen gap; and the
+README's security table now has a separate row for the attacker-chosen games that reads **"not
+derived here"** rather than a number. No bound was weakened — `2^520` was always a target — but the
+document no longer lends it to a game it does not answer. (The `K`-in-the-input binding and the
+closed derivation route are unchanged and still argued in §4.10.)
+
+### The performance results move to `performance.md`
+
+The README's `## Performance` section — the three-configuration tables, the measured noise floor,
+the per-layer cost tables and the "where the headroom is" notes — is now
+[`performance.md`](performance.md). The README keeps a short `## Performance` section that states
+the two headline results (more per message, less per byte) and the two structural latency
+properties, and links out. Cross-references in the README's layer table, `SECURITY-ANALYSIS.md`,
+and the release manifest were updated to point at the new file. No number changed.
+
 ### `ultra`: the `locked` layer never worked, and now does
 
 Three defects in the same ten lines, none of which any test could see because the one

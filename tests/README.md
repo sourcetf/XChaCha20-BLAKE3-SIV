@@ -68,7 +68,7 @@ surprise:
   format change cannot pass unnoticed. The *sampling* evidence is elsewhere -- the
   scheduled 4000-random-vector differential (`tools/broad_differential.py`) and the
   fuzzing, neither of which is committed as a fixture because neither is stable.
-- **There is no performance gate.** The numbers in `README.md` are measured on a named
+- **There is no performance gate.** The numbers in `performance.md` are measured on a named
   host, with the method stated; a threshold that runs on a shared runner would gate
   CPU noise, and the same measurement that rules out a timing gate (t ≈ 11 with no
   possible cause) rules out this one. What *is* enforced is the correctness side: the
