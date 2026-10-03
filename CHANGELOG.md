@@ -47,8 +47,11 @@ hygiene defect. **No wire-format change.**
 - **Gate defects fixed**: `verify.sh`'s mutation-evidence gate now *fails* on stale evidence
   instead of printing a note; `cache_profile.sh` and `ctgrind.sh` honour `CARGO_TARGET_DIR`
   instead of profiling a stale `./target` binary; `deep.yml`'s address-trace step is no longer
-  `continue-on-error`; `fi_check.sh`'s rows are wrapped in `timeout` so a cut-off is a failure;
-  and `deny.toml`'s bans/sources lints are `deny`, not `warn`.
+  `continue-on-error` — and, since a host whose valgrind cannot start `lackey` genuinely cannot
+  run it, `cache_profile.sh`'s self-test now propagates exit 3 ("could not run") rather than 1,
+  so that host *skips* the trace checks instead of failing them; `fi_check.sh`'s rows are wrapped
+  in `timeout` so a cut-off is a failure; and `deny.toml`'s bans/sources lints are `deny`, not
+  `warn`.
 - **`ultra` needs an OS entropy source** (`rng` → `getrandom`) and does not build on bare-metal
   `no_std`; documented, with the `hardened,dual-mac,locked` alternative.
 

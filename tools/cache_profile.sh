@@ -207,9 +207,14 @@ PY
     inner=$?
   fi
   if [ "$inner" = 3 ]; then
-    echo "FAIL: $mode_name could not run here, so the self-test cannot conclude anything" >&2
-    echo "      about it. Exit 3 is 'could not run', not 'detected'." >&2
-    exit 1
+    # The inner run could not run (e.g. valgrind here cannot start `lackey`). That is the
+    # repository's "could not run" answer -- exit 3 -- not a detection and not a failure of
+    # the detector, so propagate 3 and let the caller map it to a skipped stage, exactly as
+    # it does for the differential run itself. Exit 1 stays reserved for a self-test that
+    # *ran* and left the planted leak undetected (the branch above), which is a real defect.
+    echo "SKIPPED: $mode_name could not run here, so the self-test cannot conclude anything" >&2
+    echo "         about it. Exit 3 is 'could not run', not 'detected'." >&2
+    exit 3
   fi
   echo "OK: the planted leak is detected by $mode_name"
   grep -E "^(FAIL|[-+](D1mr|DLmr|L|S|I) )" "$work/selftest.log" | head -4
