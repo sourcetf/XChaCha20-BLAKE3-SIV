@@ -9,7 +9,7 @@ tags have been cut yet.
 
 ### Second audit round: two vacuous proofs, a stack-residue regression, and a set of claims the tools did not support
 
-An adversarial re-audit (fourteen independent passes over the construction, the tests, the
+An adversarial re-audit (a dozen independent passes over the construction, the tests, the
 gates and the docs) found no defect in the *construction* — it is byte-for-byte what
 `SECURITY-ANALYSIS.md` §1 specifies, reproduced a fourth time here with an OpenSSL-backed
 ChaCha20 — but it found real problems in the verification story and one reintroduced
