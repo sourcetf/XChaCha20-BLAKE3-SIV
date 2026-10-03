@@ -1,0 +1,21 @@
+--- src/lib.rs
++++ replace & with ^ in decrypt_in_place_detached
+@@ -2754,17 +2754,17 @@
+         let mut witness_tag = witness::decrypt(
+             key,
+             nonce,
+             aad,
+             &witness_ciphertext,
+             tag,
+             &mut witness_plaintext,
+         );
+-        let agree = witness_tag.ct_eq(&computed_tag) & witness_plaintext.ct_eq(buffer);
++        let agree = witness_tag.ct_eq(&computed_tag) ^ /* ~ changed by cargo-mutants ~ */ witness_plaintext.ct_eq(buffer);
+         // All three are secret-derived (a MAC, the recovered plaintext, and the recovered
+         // ciphertext buffer); wiped like the rest of the copies in this function.
+         zeroize_array(&mut witness_tag);
+         zeroize_slice(&mut witness_plaintext);
+         zeroize_slice(&mut witness_ciphertext);
+         agree
+     };
+     // Constant `true` when `ultra` is off, so the gate below stays one expression; see the

@@ -101,10 +101,12 @@ subtle = { version = "2.6.1", default-features = false }
 # `default-features = false` (or `--no-default-features`).
 #
 # Measured cost of the default configuration against `--no-default-features`,
-# in-place round trip, AMD Ryzen 9 7945HX: +10.8% at 64 bytes, +8.9% at 256, +3.6%
-# at 1 KiB, +4.1% at 4 KiB, +2.5% at 16 KiB, +1.0% at 64 KiB, +0.4% at 1 MiB (the
-# added work is four 65-byte constant-time comparisons, so it does not scale with
-# the message).
+# AMD Ryzen 9 7945HX, re-measured for `v0.3`. The added work is four 65-byte
+# constant-time comparisons on **decrypt**, so it is a fixed per-message cost:
+# +25% at 64 B, +24% at 256 B, +23% at 1 KiB, +11% at 4 KiB, and within the noise
+# floor from 16 KiB up. Encryption pays nothing for it, so a round-trip figure
+# shows a smaller, noisier fraction of the same cost. `performance.md` is the
+# source.
 #
 # This is not a claim of fault-injection resistance. It defends against a single
 # fault on the decision only; two faults, a targeted fault in the tag computation

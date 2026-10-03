@@ -36,3 +36,8 @@ fuzz/fuzz-*.log
 # run -- stale by construction, ~1 MB of diffs against line numbers from an older
 # revision, and never the thing being claimed.
 /mutants.out.old/
+
+# Raw `cargo bench` output from `tools/bench_3pass.sh`. Run artefacts: the *tables* it
+# feeds go into `performance.md`, and the per-pass files are reproducible from the
+# script, so they are not committed.
+/bench-out/

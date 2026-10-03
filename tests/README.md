@@ -71,7 +71,10 @@ surprise:
 - **There is no performance gate.** The numbers in `performance.md` are measured on a named
   host, with the method stated; a threshold that runs on a shared runner would gate
   CPU noise, and the same measurement that rules out a timing gate (t ≈ 11 with no
-  possible cause) rules out this one. What *is* enforced is the correctness side: the
+  possible cause) rules out this one. The method is scripted rather than prose —
+  `tools/bench_3pass.sh` runs the three configurations × three passes with the rotated
+  order, and `tools/bench_summarise.py` prints the tables — so a refresh is a command,
+  not a retyping exercise. What *is* enforced is the correctness side: the
   accelerated paths are held byte-identical to the scalar one, so a "faster" change
   that alters output fails the KATs, the differential fixtures and
   `test_all_accelerated_paths_agree_on_a_boundary_corpus`.

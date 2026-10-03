@@ -7,6 +7,33 @@ tags have been cut yet.
 
 ## Unreleased
 
+### Both outstanding items done: `performance.md` re-measured for `v0.3`, and `mutants.out/` refreshed
+
+- **Every performance table in `performance.md` is now a `v0.3` three-pass measurement**, made
+  with the documented protocol (three configurations × three passes, rotated order, one pinned
+  core, criterion `--warm-up-time 2 --measurement-time 4`). The protocol is now a script rather
+  than a paragraph: `tools/bench_3pass.sh` produces the raw output per configuration per pass and
+  `tools/bench_summarise.py` turns it into the tables, so the numbers can be reproduced instead of
+  taken on trust. `README.md`'s performance summary, its witness fault-table row and its
+  "cannot fix for you" note are updated to match.
+  - The `v0.3` change (one extra keyed-BLAKE3 call, one extra ChaCha20 derivation block, both
+    **fixed** per message) moved the small sizes, as predicted: 64 B encryption is now ~1.25x the
+    reference against 1.57x before, decryption 64 B is inside the noise floor, and everything from
+    16 KiB up is unchanged (1.35x encryption, 1.30x decryption at 1 MiB). `ultra`'s witness is
+    ~2.5x at 64 B and ~10.1x at 1 MiB on decryption (was 2.8x/11.3x).
+  - The noise floor is re-derived the same way as before (the reference implementation's own
+    pass-to-pass spread): median **6.8%**, p90 **10%**, worst **15%** across 63 cells — the same
+    shape as the 5.9%/11%/15% this file previously reported.
+  - The 12-byte-vs-24-byte Poly1305 comparison is re-derived too: median cell 1.6% (was 1.4%),
+    worst 6.1% at 1 KiB decryption (was 8.4%).
+- **`mutants.out/` now describes the current source.** The committed evidence predated `v0.3`
+  (its diffs still contained `mac_key` and the pre-change `decrypt` body). Re-ran the campaign
+  (`cargo mutants --features ultra -f src/lib.rs -F 'decrypt|accept_or_reject' -E 'replace & with
+  |' -- --test decision --test security`): **17 mutants, 15 caught, 2 unviable**, the same
+  outcome vector as before, so the change did not alter the mutation result — but the recorded
+  diffs now carry the current function bodies and line numbers, and
+  `tools/mutation_evidence.py` reports the committed directory describes the fresh run.
+
 ### Production-readiness pass: every gate in the repository passes, and two documentation defects fixed
 
 Ran the repository's own verification, end to end, on this tree. **All of it passes**, and no

@@ -8,7 +8,7 @@
       "phase_results": [
         {
           "phase": "Build",
-          "duration": 7.568547362,
+          "duration": 8.623641442,
           "process_status": "Success",
           "argv": [
             "/home/dev123/.rustup/toolchains/stable-x86_64-unknown-linux-gnu/bin/cargo",
@@ -21,7 +21,7 @@
         },
         {
           "phase": "Test",
-          "duration": 5.060921762,
+          "duration": 6.164725612,
           "process_status": "Success",
           "argv": [
             "/home/dev123/.rustup/toolchains/stable-x86_64-unknown-linux-gnu/bin/cargo",
@@ -40,7 +40,7 @@
     {
       "scenario": {
         "Mutant": {
-          "name": "src/lib.rs:1879:5: replace accept_or_reject with ()",
+          "name": "src/lib.rs:2442:5: replace accept_or_reject with ()",
           "package": "xchacha20-blake3-siv",
           "file": "src/lib.rs",
           "function": {
@@ -48,22 +48,22 @@
             "return_type": "",
             "span": {
               "start": {
-                "line": 1864,
+                "line": 2427,
                 "column": 1
               },
               "end": {
-                "line": 1911,
+                "line": 2474,
                 "column": 2
               }
             }
           },
           "span": {
             "start": {
-              "line": 1879,
+              "line": 2442,
               "column": 5
             },
             "end": {
-              "line": 1910,
+              "line": 2473,
               "column": 6
             }
           },
@@ -72,12 +72,12 @@
         }
       },
       "summary": "CaughtMutant",
-      "log_path": "log/src__lib.rs_line_1879_col_5.log",
-      "diff_path": "diff/src__lib.rs_line_1879_col_5.diff",
+      "log_path": "log/src__lib.rs_line_2442_col_5.log",
+      "diff_path": "diff/src__lib.rs_line_2442_col_5.diff",
       "phase_results": [
         {
           "phase": "Build",
-          "duration": 0.602027006,
+          "duration": 0.752577882,
           "process_status": "Success",
           "argv": [
             "/home/dev123/.rustup/toolchains/stable-x86_64-unknown-linux-gnu/bin/cargo",
@@ -90,7 +90,7 @@
         },
         {
           "phase": "Test",
-          "duration": 0.101290815,
+          "duration": 0.1013922,
           "process_status": {
             "Failure": 101
           },
@@ -111,7 +111,7 @@
     {
       "scenario": {
         "Mutant": {
-          "name": "src/lib.rs:1933:5: replace decrypt -> Result<Plaintext, Error> with Ok(Default::default())",
+          "name": "src/lib.rs:2496:5: replace decrypt -> Result<Plaintext, Error> with Ok(Default::default())",
           "package": "xchacha20-blake3-siv",
           "file": "src/lib.rs",
           "function": {
@@ -119,22 +119,22 @@
             "return_type": "-> Result<Plaintext, Error>",
             "span": {
               "start": {
-                "line": 1913,
+                "line": 2476,
                 "column": 1
               },
               "end": {
-                "line": 2087,
+                "line": 2657,
                 "column": 2
               }
             }
           },
           "span": {
             "start": {
-              "line": 1933,
+              "line": 2496,
               "column": 5
             },
             "end": {
-              "line": 2086,
+              "line": 2656,
               "column": 29
             }
           },
@@ -143,12 +143,12 @@
         }
       },
       "summary": "Unviable",
-      "log_path": "log/src__lib.rs_line_1933_col_5.log",
-      "diff_path": "diff/src__lib.rs_line_1933_col_5.diff",
+      "log_path": "log/src__lib.rs_line_2496_col_5.log",
+      "diff_path": "diff/src__lib.rs_line_2496_col_5.diff",
       "phase_results": [
         {
           "phase": "Build",
-          "duration": 0.301597432,
+          "duration": 0.352112989,
           "process_status": {
             "Failure": 101
           },
@@ -166,7 +166,7 @@
     {
       "scenario": {
         "Mutant": {
-          "name": "src/lib.rs:1975:13: replace & with ^ in decrypt",
+          "name": "src/lib.rs:2541:13: replace & with ^ in decrypt",
           "package": "xchacha20-blake3-siv",
           "file": "src/lib.rs",
           "function": {
@@ -174,22 +174,22 @@
             "return_type": "-> Result<Plaintext, Error>",
             "span": {
               "start": {
-                "line": 1913,
+                "line": 2476,
                 "column": 1
               },
               "end": {
-                "line": 2087,
+                "line": 2657,
                 "column": 2
               }
             }
           },
           "span": {
             "start": {
-              "line": 1975,
+              "line": 2541,
               "column": 13
             },
             "end": {
-              "line": 1975,
+              "line": 2541,
               "column": 14
             }
           },
@@ -198,12 +198,12 @@
         }
       },
       "summary": "CaughtMutant",
-      "log_path": "log/src__lib.rs_line_1975_col_13.log",
-      "diff_path": "diff/src__lib.rs_line_1975_col_13.diff",
+      "log_path": "log/src__lib.rs_line_2541_col_13.log",
+      "diff_path": "diff/src__lib.rs_line_2541_col_13.diff",
       "phase_results": [
         {
           "phase": "Build",
-          "duration": 0.602106249,
+          "duration": 0.702298945,
           "process_status": "Success",
           "argv": [
             "/home/dev123/.rustup/toolchains/stable-x86_64-unknown-linux-gnu/bin/cargo",
@@ -216,7 +216,7 @@
         },
         {
           "phase": "Test",
-          "duration": 0.101445743,
+          "duration": 0.101152558,
           "process_status": {
             "Failure": 101
           },
@@ -237,7 +237,7 @@
     {
       "scenario": {
         "Mutant": {
-          "name": "src/lib.rs:2007:45: replace & with ^ in decrypt",
+          "name": "src/lib.rs:2576:45: replace & with ^ in decrypt",
           "package": "xchacha20-blake3-siv",
           "file": "src/lib.rs",
           "function": {
@@ -245,22 +245,22 @@
             "return_type": "-> Result<Plaintext, Error>",
             "span": {
               "start": {
-                "line": 1913,
+                "line": 2476,
                 "column": 1
               },
               "end": {
-                "line": 2087,
+                "line": 2657,
                 "column": 2
               }
             }
           },
           "span": {
             "start": {
-              "line": 2007,
+              "line": 2576,
               "column": 45
             },
             "end": {
-              "line": 2007,
+              "line": 2576,
               "column": 46
             }
           },
@@ -269,12 +269,12 @@
         }
       },
       "summary": "CaughtMutant",
-      "log_path": "log/src__lib.rs_line_2007_col_45.log",
-      "diff_path": "diff/src__lib.rs_line_2007_col_45.diff",
+      "log_path": "log/src__lib.rs_line_2576_col_45.log",
+      "diff_path": "diff/src__lib.rs_line_2576_col_45.diff",
       "phase_results": [
         {
           "phase": "Build",
-          "duration": 0.552101276,
+          "duration": 0.602526076,
           "process_status": "Success",
           "argv": [
             "/home/dev123/.rustup/toolchains/stable-x86_64-unknown-linux-gnu/bin/cargo",
@@ -287,7 +287,7 @@
         },
         {
           "phase": "Test",
-          "duration": 0.101237755,
+          "duration": 0.101217236,
           "process_status": {
             "Failure": 101
           },
@@ -308,7 +308,7 @@
     {
       "scenario": {
         "Mutant": {
-          "name": "src/lib.rs:2029:79: replace & with ^ in decrypt",
+          "name": "src/lib.rs:2598:79: replace & with ^ in decrypt",
           "package": "xchacha20-blake3-siv",
           "file": "src/lib.rs",
           "function": {
@@ -316,22 +316,22 @@
             "return_type": "-> Result<Plaintext, Error>",
             "span": {
               "start": {
-                "line": 1913,
+                "line": 2476,
                 "column": 1
               },
               "end": {
-                "line": 2087,
+                "line": 2657,
                 "column": 2
               }
             }
           },
           "span": {
             "start": {
-              "line": 2029,
+              "line": 2598,
               "column": 79
             },
             "end": {
-              "line": 2029,
+              "line": 2598,
               "column": 80
             }
           },
@@ -340,12 +340,12 @@
         }
       },
       "summary": "CaughtMutant",
-      "log_path": "log/src__lib.rs_line_2029_col_79.log",
-      "diff_path": "diff/src__lib.rs_line_2029_col_79.diff",
+      "log_path": "log/src__lib.rs_line_2598_col_79.log",
+      "diff_path": "diff/src__lib.rs_line_2598_col_79.diff",
       "phase_results": [
         {
           "phase": "Build",
-          "duration": 0.552042187,
+          "duration": 0.552223251,
           "process_status": "Success",
           "argv": [
             "/home/dev123/.rustup/toolchains/stable-x86_64-unknown-linux-gnu/bin/cargo",
@@ -358,7 +358,7 @@
         },
         {
           "phase": "Test",
-          "duration": 0.101763308,
+          "duration": 0.101440298,
           "process_status": {
             "Failure": 101
           },
@@ -379,7 +379,7 @@
     {
       "scenario": {
         "Mutant": {
-          "name": "src/lib.rs:2031:70: replace & with ^ in decrypt",
+          "name": "src/lib.rs:2600:70: replace & with ^ in decrypt",
           "package": "xchacha20-blake3-siv",
           "file": "src/lib.rs",
           "function": {
@@ -387,22 +387,22 @@
             "return_type": "-> Result<Plaintext, Error>",
             "span": {
               "start": {
-                "line": 1913,
+                "line": 2476,
                 "column": 1
               },
               "end": {
-                "line": 2087,
+                "line": 2657,
                 "column": 2
               }
             }
           },
           "span": {
             "start": {
-              "line": 2031,
+              "line": 2600,
               "column": 70
             },
             "end": {
-              "line": 2031,
+              "line": 2600,
               "column": 71
             }
           },
@@ -411,12 +411,12 @@
         }
       },
       "summary": "CaughtMutant",
-      "log_path": "log/src__lib.rs_line_2031_col_70.log",
-      "diff_path": "diff/src__lib.rs_line_2031_col_70.diff",
+      "log_path": "log/src__lib.rs_line_2600_col_70.log",
+      "diff_path": "diff/src__lib.rs_line_2600_col_70.diff",
       "phase_results": [
         {
           "phase": "Build",
-          "duration": 0.552710753,
+          "duration": 0.552814957,
           "process_status": "Success",
           "argv": [
             "/home/dev123/.rustup/toolchains/stable-x86_64-unknown-linux-gnu/bin/cargo",
@@ -429,7 +429,7 @@
         },
         {
           "phase": "Test",
-          "duration": 0.101519436,
+          "duration": 0.101534699,
           "process_status": {
             "Failure": 101
           },
@@ -450,7 +450,7 @@
     {
       "scenario": {
         "Mutant": {
-          "name": "src/lib.rs:2031:32: replace & with ^ in decrypt",
+          "name": "src/lib.rs:2600:32: replace & with ^ in decrypt",
           "package": "xchacha20-blake3-siv",
           "file": "src/lib.rs",
           "function": {
@@ -458,22 +458,22 @@
             "return_type": "-> Result<Plaintext, Error>",
             "span": {
               "start": {
-                "line": 1913,
+                "line": 2476,
                 "column": 1
               },
               "end": {
-                "line": 2087,
+                "line": 2657,
                 "column": 2
               }
             }
           },
           "span": {
             "start": {
-              "line": 2031,
+              "line": 2600,
               "column": 32
             },
             "end": {
-              "line": 2031,
+              "line": 2600,
               "column": 33
             }
           },
@@ -482,12 +482,12 @@
         }
       },
       "summary": "CaughtMutant",
-      "log_path": "log/src__lib.rs_line_2031_col_32.log",
-      "diff_path": "diff/src__lib.rs_line_2031_col_32.diff",
+      "log_path": "log/src__lib.rs_line_2600_col_32.log",
+      "diff_path": "diff/src__lib.rs_line_2600_col_32.diff",
       "phase_results": [
         {
           "phase": "Build",
-          "duration": 0.552318837,
+          "duration": 0.602682318,
           "process_status": "Success",
           "argv": [
             "/home/dev123/.rustup/toolchains/stable-x86_64-unknown-linux-gnu/bin/cargo",
@@ -500,7 +500,7 @@
         },
         {
           "phase": "Test",
-          "duration": 0.101424605,
+          "duration": 0.101341987,
           "process_status": {
             "Failure": 101
           },
@@ -521,7 +521,7 @@
     {
       "scenario": {
         "Mutant": {
-          "name": "src/lib.rs:2128:5: replace decrypt_bounded -> Result<Plaintext, Error> with Ok(Default::default())",
+          "name": "src/lib.rs:2698:5: replace decrypt_bounded -> Result<Plaintext, Error> with Ok(Default::default())",
           "package": "xchacha20-blake3-siv",
           "file": "src/lib.rs",
           "function": {
@@ -529,22 +529,22 @@
             "return_type": "-> Result<Plaintext, Error>",
             "span": {
               "start": {
-                "line": 2089,
+                "line": 2659,
                 "column": 1
               },
               "end": {
-                "line": 2132,
+                "line": 2702,
                 "column": 2
               }
             }
           },
           "span": {
             "start": {
-              "line": 2128,
+              "line": 2698,
               "column": 5
             },
             "end": {
-              "line": 2131,
+              "line": 2701,
               "column": 46
             }
           },
@@ -553,12 +553,12 @@
         }
       },
       "summary": "Unviable",
-      "log_path": "log/src__lib.rs_line_2128_col_5.log",
-      "diff_path": "diff/src__lib.rs_line_2128_col_5.diff",
+      "log_path": "log/src__lib.rs_line_2698_col_5.log",
+      "diff_path": "diff/src__lib.rs_line_2698_col_5.diff",
       "phase_results": [
         {
           "phase": "Build",
-          "duration": 0.301515164,
+          "duration": 0.351862161,
           "process_status": {
             "Failure": 101
           },
@@ -576,7 +576,7 @@
     {
       "scenario": {
         "Mutant": {
-          "name": "src/lib.rs:2128:25: replace > with == in decrypt_bounded",
+          "name": "src/lib.rs:2698:25: replace > with == in decrypt_bounded",
           "package": "xchacha20-blake3-siv",
           "file": "src/lib.rs",
           "function": {
@@ -584,22 +584,22 @@
             "return_type": "-> Result<Plaintext, Error>",
             "span": {
               "start": {
-                "line": 2089,
+                "line": 2659,
                 "column": 1
               },
               "end": {
-                "line": 2132,
+                "line": 2702,
                 "column": 2
               }
             }
           },
           "span": {
             "start": {
-              "line": 2128,
+              "line": 2698,
               "column": 25
             },
             "end": {
-              "line": 2128,
+              "line": 2698,
               "column": 26
             }
           },
@@ -608,12 +608,12 @@
         }
       },
       "summary": "CaughtMutant",
-      "log_path": "log/src__lib.rs_line_2128_col_25.log",
-      "diff_path": "diff/src__lib.rs_line_2128_col_25.diff",
+      "log_path": "log/src__lib.rs_line_2698_col_25.log",
+      "diff_path": "diff/src__lib.rs_line_2698_col_25.diff",
       "phase_results": [
         {
           "phase": "Build",
-          "duration": 0.501923553,
+          "duration": 0.60255902,
           "process_status": "Success",
           "argv": [
             "/home/dev123/.rustup/toolchains/stable-x86_64-unknown-linux-gnu/bin/cargo",
@@ -626,7 +626,7 @@
         },
         {
           "phase": "Test",
-          "duration": 5.261454921,
+          "duration": 6.465323191,
           "process_status": {
             "Failure": 101
           },
@@ -647,7 +647,7 @@
     {
       "scenario": {
         "Mutant": {
-          "name": "src/lib.rs:2128:25: replace > with < in decrypt_bounded",
+          "name": "src/lib.rs:2698:25: replace > with < in decrypt_bounded",
           "package": "xchacha20-blake3-siv",
           "file": "src/lib.rs",
           "function": {
@@ -655,22 +655,22 @@
             "return_type": "-> Result<Plaintext, Error>",
             "span": {
               "start": {
-                "line": 2089,
+                "line": 2659,
                 "column": 1
               },
               "end": {
-                "line": 2132,
+                "line": 2702,
                 "column": 2
               }
             }
           },
           "span": {
             "start": {
-              "line": 2128,
+              "line": 2698,
               "column": 25
             },
             "end": {
-              "line": 2128,
+              "line": 2698,
               "column": 26
             }
           },
@@ -679,12 +679,12 @@
         }
       },
       "summary": "CaughtMutant",
-      "log_path": "log/src__lib.rs_line_2128_col_25_001.log",
-      "diff_path": "diff/src__lib.rs_line_2128_col_25_001.diff",
+      "log_path": "log/src__lib.rs_line_2698_col_25_001.log",
+      "diff_path": "diff/src__lib.rs_line_2698_col_25_001.diff",
       "phase_results": [
         {
           "phase": "Build",
-          "duration": 0.552177729,
+          "duration": 0.602822426,
           "process_status": "Success",
           "argv": [
             "/home/dev123/.rustup/toolchains/stable-x86_64-unknown-linux-gnu/bin/cargo",
@@ -697,7 +697,7 @@
         },
         {
           "phase": "Test",
-          "duration": 5.461416102,
+          "duration": 5.813686397,
           "process_status": {
             "Failure": 101
           },
@@ -718,7 +718,7 @@
     {
       "scenario": {
         "Mutant": {
-          "name": "src/lib.rs:2128:25: replace > with >= in decrypt_bounded",
+          "name": "src/lib.rs:2698:25: replace > with >= in decrypt_bounded",
           "package": "xchacha20-blake3-siv",
           "file": "src/lib.rs",
           "function": {
@@ -726,22 +726,22 @@
             "return_type": "-> Result<Plaintext, Error>",
             "span": {
               "start": {
-                "line": 2089,
+                "line": 2659,
                 "column": 1
               },
               "end": {
-                "line": 2132,
+                "line": 2702,
                 "column": 2
               }
             }
           },
           "span": {
             "start": {
-              "line": 2128,
+              "line": 2698,
               "column": 25
             },
             "end": {
-              "line": 2128,
+              "line": 2698,
               "column": 26
             }
           },
@@ -750,12 +750,12 @@
         }
       },
       "summary": "CaughtMutant",
-      "log_path": "log/src__lib.rs_line_2128_col_25_002.log",
-      "diff_path": "diff/src__lib.rs_line_2128_col_25_002.diff",
+      "log_path": "log/src__lib.rs_line_2698_col_25_002.log",
+      "diff_path": "diff/src__lib.rs_line_2698_col_25_002.diff",
       "phase_results": [
         {
           "phase": "Build",
-          "duration": 0.552160579,
+          "duration": 0.652911037,
           "process_status": "Success",
           "argv": [
             "/home/dev123/.rustup/toolchains/stable-x86_64-unknown-linux-gnu/bin/cargo",
@@ -768,7 +768,7 @@
         },
         {
           "phase": "Test",
-          "duration": 5.211345906,
+          "duration": 6.264365157,
           "process_status": {
             "Failure": 101
           },
@@ -789,7 +789,7 @@
     {
       "scenario": {
         "Mutant": {
-          "name": "src/lib.rs:2145:5: replace decrypt_in_place_detached -> Result<(), Error> with Ok(())",
+          "name": "src/lib.rs:2715:5: replace decrypt_in_place_detached -> Result<(), Error> with Ok(())",
           "package": "xchacha20-blake3-siv",
           "file": "src/lib.rs",
           "function": {
@@ -797,22 +797,22 @@
             "return_type": "-> Result<(), Error>",
             "span": {
               "start": {
-                "line": 2134,
+                "line": 2704,
                 "column": 1
               },
               "end": {
-                "line": 2280,
+                "line": 2857,
                 "column": 2
               }
             }
           },
           "span": {
             "start": {
-              "line": 2145,
+              "line": 2715,
               "column": 5
             },
             "end": {
-              "line": 2279,
+              "line": 2856,
               "column": 11
             }
           },
@@ -821,12 +821,12 @@
         }
       },
       "summary": "CaughtMutant",
-      "log_path": "log/src__lib.rs_line_2145_col_5.log",
-      "diff_path": "diff/src__lib.rs_line_2145_col_5.diff",
+      "log_path": "log/src__lib.rs_line_2715_col_5.log",
+      "diff_path": "diff/src__lib.rs_line_2715_col_5.diff",
       "phase_results": [
         {
           "phase": "Build",
-          "duration": 0.602422517,
+          "duration": 0.702500272,
           "process_status": "Success",
           "argv": [
             "/home/dev123/.rustup/toolchains/stable-x86_64-unknown-linux-gnu/bin/cargo",
@@ -839,7 +839,7 @@
         },
         {
           "phase": "Test",
-          "duration": 0.101386743,
+          "duration": 0.101149527,
           "process_status": {
             "Failure": 101
           },
@@ -860,7 +860,7 @@
     {
       "scenario": {
         "Mutant": {
-          "name": "src/lib.rs:2189:54: replace & with ^ in decrypt_in_place_detached",
+          "name": "src/lib.rs:2762:54: replace & with ^ in decrypt_in_place_detached",
           "package": "xchacha20-blake3-siv",
           "file": "src/lib.rs",
           "function": {
@@ -868,22 +868,22 @@
             "return_type": "-> Result<(), Error>",
             "span": {
               "start": {
-                "line": 2134,
+                "line": 2704,
                 "column": 1
               },
               "end": {
-                "line": 2280,
+                "line": 2857,
                 "column": 2
               }
             }
           },
           "span": {
             "start": {
-              "line": 2189,
+              "line": 2762,
               "column": 54
             },
             "end": {
-              "line": 2189,
+              "line": 2762,
               "column": 55
             }
           },
@@ -892,12 +892,12 @@
         }
       },
       "summary": "CaughtMutant",
-      "log_path": "log/src__lib.rs_line_2189_col_54.log",
-      "diff_path": "diff/src__lib.rs_line_2189_col_54.diff",
+      "log_path": "log/src__lib.rs_line_2762_col_54.log",
+      "diff_path": "diff/src__lib.rs_line_2762_col_54.diff",
       "phase_results": [
         {
           "phase": "Build",
-          "duration": 0.702590741,
+          "duration": 0.70271483,
           "process_status": "Success",
           "argv": [
             "/home/dev123/.rustup/toolchains/stable-x86_64-unknown-linux-gnu/bin/cargo",
@@ -910,7 +910,7 @@
         },
         {
           "phase": "Test",
-          "duration": 0.101543874,
+          "duration": 0.101140332,
           "process_status": {
             "Failure": 101
           },
@@ -931,7 +931,7 @@
     {
       "scenario": {
         "Mutant": {
-          "name": "src/lib.rs:2207:45: replace & with ^ in decrypt_in_place_detached",
+          "name": "src/lib.rs:2783:45: replace & with ^ in decrypt_in_place_detached",
           "package": "xchacha20-blake3-siv",
           "file": "src/lib.rs",
           "function": {
@@ -939,22 +939,22 @@
             "return_type": "-> Result<(), Error>",
             "span": {
               "start": {
-                "line": 2134,
+                "line": 2704,
                 "column": 1
               },
               "end": {
-                "line": 2280,
+                "line": 2857,
                 "column": 2
               }
             }
           },
           "span": {
             "start": {
-              "line": 2207,
+              "line": 2783,
               "column": 45
             },
             "end": {
-              "line": 2207,
+              "line": 2783,
               "column": 46
             }
           },
@@ -963,12 +963,12 @@
         }
       },
       "summary": "CaughtMutant",
-      "log_path": "log/src__lib.rs_line_2207_col_45.log",
-      "diff_path": "diff/src__lib.rs_line_2207_col_45.diff",
+      "log_path": "log/src__lib.rs_line_2783_col_45.log",
+      "diff_path": "diff/src__lib.rs_line_2783_col_45.diff",
       "phase_results": [
         {
           "phase": "Build",
-          "duration": 0.552072983,
+          "duration": 0.552123826,
           "process_status": "Success",
           "argv": [
             "/home/dev123/.rustup/toolchains/stable-x86_64-unknown-linux-gnu/bin/cargo",
@@ -981,7 +981,7 @@
         },
         {
           "phase": "Test",
-          "duration": 0.10156548,
+          "duration": 0.101370244,
           "process_status": {
             "Failure": 101
           },
@@ -1002,7 +1002,7 @@
     {
       "scenario": {
         "Mutant": {
-          "name": "src/lib.rs:2229:79: replace & with ^ in decrypt_in_place_detached",
+          "name": "src/lib.rs:2805:79: replace & with ^ in decrypt_in_place_detached",
           "package": "xchacha20-blake3-siv",
           "file": "src/lib.rs",
           "function": {
@@ -1010,22 +1010,22 @@
             "return_type": "-> Result<(), Error>",
             "span": {
               "start": {
-                "line": 2134,
+                "line": 2704,
                 "column": 1
               },
               "end": {
-                "line": 2280,
+                "line": 2857,
                 "column": 2
               }
             }
           },
           "span": {
             "start": {
-              "line": 2229,
+              "line": 2805,
               "column": 79
             },
             "end": {
-              "line": 2229,
+              "line": 2805,
               "column": 80
             }
           },
@@ -1034,12 +1034,12 @@
         }
       },
       "summary": "CaughtMutant",
-      "log_path": "log/src__lib.rs_line_2229_col_79.log",
-      "diff_path": "diff/src__lib.rs_line_2229_col_79.diff",
+      "log_path": "log/src__lib.rs_line_2805_col_79.log",
+      "diff_path": "diff/src__lib.rs_line_2805_col_79.diff",
       "phase_results": [
         {
           "phase": "Build",
-          "duration": 0.551954674,
+          "duration": 0.602517667,
           "process_status": "Success",
           "argv": [
             "/home/dev123/.rustup/toolchains/stable-x86_64-unknown-linux-gnu/bin/cargo",
@@ -1052,7 +1052,7 @@
         },
         {
           "phase": "Test",
-          "duration": 0.101285477,
+          "duration": 0.101690979,
           "process_status": {
             "Failure": 101
           },
@@ -1073,7 +1073,7 @@
     {
       "scenario": {
         "Mutant": {
-          "name": "src/lib.rs:2231:70: replace & with ^ in decrypt_in_place_detached",
+          "name": "src/lib.rs:2807:70: replace & with ^ in decrypt_in_place_detached",
           "package": "xchacha20-blake3-siv",
           "file": "src/lib.rs",
           "function": {
@@ -1081,22 +1081,22 @@
             "return_type": "-> Result<(), Error>",
             "span": {
               "start": {
-                "line": 2134,
+                "line": 2704,
                 "column": 1
               },
               "end": {
-                "line": 2280,
+                "line": 2857,
                 "column": 2
               }
             }
           },
           "span": {
             "start": {
-              "line": 2231,
+              "line": 2807,
               "column": 70
             },
             "end": {
-              "line": 2231,
+              "line": 2807,
               "column": 71
             }
           },
@@ -1105,12 +1105,12 @@
         }
       },
       "summary": "CaughtMutant",
-      "log_path": "log/src__lib.rs_line_2231_col_70.log",
-      "diff_path": "diff/src__lib.rs_line_2231_col_70.diff",
+      "log_path": "log/src__lib.rs_line_2807_col_70.log",
+      "diff_path": "diff/src__lib.rs_line_2807_col_70.diff",
       "phase_results": [
         {
           "phase": "Build",
-          "duration": 0.552398739,
+          "duration": 0.552524827,
           "process_status": "Success",
           "argv": [
             "/home/dev123/.rustup/toolchains/stable-x86_64-unknown-linux-gnu/bin/cargo",
@@ -1123,7 +1123,7 @@
         },
         {
           "phase": "Test",
-          "duration": 0.101426739,
+          "duration": 0.101271227,
           "process_status": {
             "Failure": 101
           },
@@ -1144,7 +1144,7 @@
     {
       "scenario": {
         "Mutant": {
-          "name": "src/lib.rs:2231:32: replace & with ^ in decrypt_in_place_detached",
+          "name": "src/lib.rs:2807:32: replace & with ^ in decrypt_in_place_detached",
           "package": "xchacha20-blake3-siv",
           "file": "src/lib.rs",
           "function": {
@@ -1152,22 +1152,22 @@
             "return_type": "-> Result<(), Error>",
             "span": {
               "start": {
-                "line": 2134,
+                "line": 2704,
                 "column": 1
               },
               "end": {
-                "line": 2280,
+                "line": 2857,
                 "column": 2
               }
             }
           },
           "span": {
             "start": {
-              "line": 2231,
+              "line": 2807,
               "column": 32
             },
             "end": {
-              "line": 2231,
+              "line": 2807,
               "column": 33
             }
           },
@@ -1176,12 +1176,12 @@
         }
       },
       "summary": "CaughtMutant",
-      "log_path": "log/src__lib.rs_line_2231_col_32.log",
-      "diff_path": "diff/src__lib.rs_line_2231_col_32.diff",
+      "log_path": "log/src__lib.rs_line_2807_col_32.log",
+      "diff_path": "diff/src__lib.rs_line_2807_col_32.diff",
       "phase_results": [
         {
           "phase": "Build",
-          "duration": 0.552057803,
+          "duration": 0.602141377,
           "process_status": "Success",
           "argv": [
             "/home/dev123/.rustup/toolchains/stable-x86_64-unknown-linux-gnu/bin/cargo",
@@ -1194,7 +1194,7 @@
         },
         {
           "phase": "Test",
-          "duration": 0.101356734,
+          "duration": 0.101617309,
           "process_status": {
             "Failure": 101
           },
@@ -1219,7 +1219,7 @@
   "timeout": 0,
   "unviable": 2,
   "success": 0,
-  "start_time": "2026-09-30T17:37:07.557092739Z",
-  "end_time": "2026-09-30T17:37:47.018671161Z",
+  "start_time": "2026-10-02T20:24:56.32106058Z",
+  "end_time": "2026-10-02T20:25:41.395790693Z",
   "cargo_mutants_version": "27.1.0"
 }

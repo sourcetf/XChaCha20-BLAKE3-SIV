@@ -395,8 +395,13 @@ and the allocating one rests on reading the code (the first version of that row
 mutated the unobservable one and the campaign reported "expected fail, got pass",
 which is what a mutation nothing can catch looks like).
 
-Measured cost, in-place round trip on the host `performance.md` describes: **+10.8% at 64 bytes, +8.9% at 256, +3.6% at 1 KiB, +4.1% at 4 KiB, +2.5% at 16 KiB, +1.0% at 64 KiB, +0.4% at 1 MiB** — the added work
-is four 65-byte constant-time comparisons, so it does not scale with the message. That is the cost of the *default* build over `--no-default-features`; the default build is byte-for-byte identical on the wire (the KATs and
+Measured cost, on the host `performance.md` describes and re-measured for `v0.3`: the added
+work is four 65-byte constant-time comparisons on **decrypt**, so it is a fixed per-message
+cost that does not scale — **+25% at 64 B, +24% at 256 B, +23% at 1 KiB, +11% at 4 KiB, and
+within the noise floor from 16 KiB up** (default over `--no-default-features`; `performance.md`'s
+latency and ratio tables are the source). Encryption pays nothing for it (flat to the noise
+floor at every size), so the in-place *round trip* shows a smaller, noisier fraction of the same
+cost. The default build is byte-for-byte identical on the wire (the KATs and
 both differential fixtures replay unchanged), which is what keeps every other piece
 of evidence in this file valid for it.
 
@@ -421,7 +426,7 @@ xchacha20-blake3-siv = { version = "0.1", features = ["ultra"] }
 | `hardened` (moved here from `dual-mac`) | a fault inside the shared constant-time comparison (a shortened loop, a corrupted bound): the second gate `AND`s a differently *written* comparison (an 8-byte fold into a `u64`, rather than `subtle`'s per-byte loop), so one fault reaches only one of the two shapes and a forgery needs two faults | **+1.4 ns** per decryption, measured (0.1% at 64 B). It was `dual-mac`-only until the two numbers were put side by side: this cost against a hand-modelled change from "forgery accepted after 2,573 attempts" to "no forgery in 2,000,000" |
 | `dual-mac` | the tag being pinned to a constant or to the received tag — the one model the two gates fail *together* on | +30% at 64 B, +40% at 1 KiB, +24% at 1 MiB on decryption (a +21–40% range); +6–25% on a round trip (the two ranges `Cargo.toml` and the changelog state) |
 | `dual-mac` | the `blake3` dependency's XOF output surviving in its own stack frames: `scrub_stack()` overwrites the 16 KiB below the entry point after the last derivation | ~16 KiB of volatile stores, ~0.5–1 µs per operation, **and ~16 KiB of stack per call**. Measured on a thread with a 32 KiB stack: the default build still runs after 16 KiB of the stack is already consumed, this one does not survive 8 KiB. A caller that spawns threads with small stacks must size them for it — the scrub is a 16 KiB frame, so it can fault the thread it is protecting. The number is public as `stack_requirement_bytes()` (zero outside `dual-mac`), and `the_reported_stack_requirement_is_sufficient` measures that a thread given that budget survives a round trip |
-| `witness` (in `ultra` only) | a fault aimed at the **derivation arithmetic both tag computations share** — `derive_tag`, the keyed BLAKE3 under it, and the SIMD kernels: the one model `dual-mac` alone cannot close, and where every accepting fault the sweep finds in the `hardened` build sits | decryption costs **2.8x at 64 B, 4.1x at 1 KiB, 9.7x at 64 KiB, 11.3x at 1 MiB** against the default configuration, and the round trip 2.3x/2.8x/5.5x/5.7x in place or 2.6x/3.1x/6.4x/7.1x allocating (measured; the four tables are in [`performance.md`](performance.md), and that file's "what the `ultra` layer costs" table is the one to read for this row). It is a *scalar* implementation, so its cost is per byte, and on the encrypt side it is present **only on the allocating `encrypt`** — see "What the witness is" for why the in-place path does not carry it. It does not make the *totals* in the fault table zero — it removes accepting faults from the decision and from the shared derivation, and the `ultra` build has a handful elsewhere (§§) |
+| `witness` (in `ultra` only) | a fault aimed at the **derivation arithmetic both tag computations share** — `derive_tag`, the keyed BLAKE3 under it, and the SIMD kernels: the one model `dual-mac` alone cannot close, and where every accepting fault the sweep finds in the `hardened` build sits | decryption costs **2.5x at 64 B, 3.6x at 1 KiB, 10.0x at 64 KiB, 10.1x at 1 MiB** against the default configuration, and the round trip 2.1x/2.6x/5.8x/5.8x in place or 2.3x/3.0x/6.5x/6.9x allocating (measured; the four tables are in [`performance.md`](performance.md), and that file's "what the `ultra` layer costs" table is the one to read for this row). It is a *scalar* implementation, so its cost is per byte, and on the encrypt side it is present **only on the allocating `encrypt`** — see "What the witness is" for why the in-place path does not carry it. It does not make the *totals* in the fault table zero — it removes accepting faults from the decision and from the shared derivation, and the `ultra` build has a handful elsewhere (§§) |
 | `locked` | key pages readable out of **swap** or a **core dump** | ~7 µs once per key (`mlock`+`munlock`), not per message. The key is heap-allocated so its address is stable: `mlock` is address-based, and a key returned by value moves after being locked, which left this layer protecting a dead stack slot |
 | `locked` | a **hardware fault or bit flip in the key page** turning into a silent wrong key | `+42 ns` per use, measured: an 8-byte BLAKE3 tag of the key is stored beside it and checked (constant time) on every `as_bytes()`, so a corrupted page panics at the first use instead of decrypting with a key that is not the caller's. It does not detect a fault that rewrites the tag too, nor one outside the key-and-tag region (the rest of the page is never read) |
 | `locked` | a **debugger** attaching to the process, or another process reading its memory | one `prctl` call, opt-in: `locked::deny_debugging()` makes the process non-dumpable, after which the kernel refuses `PTRACE_MODE_ATTACH` (and `/proc/<pid>/mem`) even to the same user without `CAP_SYS_PTRACE`. Not automatic, not even under `ultra`, because it is *process* policy — it also disables core dumps and breaks crash reporters, which is the application's call rather than a library's |
@@ -467,14 +472,14 @@ agreement in rejects. It is not two physically independent machines: same CPU, s
 compiler, same source file tree, so a *systematic* fault (a compiler bug, a wrong constant
 in both implementations, a fault that hits both code paths in one glitch) is still outside
 what this can see. What it does not share, and what makes it worth its price on a large
-message — 6x at 64 KiB and 9x at 1 MiB on decryption, measured against `ultra` minus the
+message — 10x at 64 KiB and 10.1x at 1 MiB on decryption, measured against `ultra` minus the
 witness above — is the *machine code that computes the tag*.
 
 **`encrypt_in_place_detached` has no encrypt-side cross-check, and that asymmetry is now stated
 rather than implied.** The earlier revision of this paragraph said "on every encrypt", which was
 false for the in-place path — found by *measuring*, when the three-configuration benchmark showed
 `ultra`'s in-place encryption costing the same as the default at 1 MiB while its decryption cost
-11.3x. Two reasons not to close the gap in code: what an encrypt-side witness can see is a fault
+10.1x. Two reasons not to close the gap in code: what an encrypt-side witness can see is a fault
 that produces a ciphertext the *peer* will reject, which is availability rather than authenticity
 (the tag is over the plaintext the caller supplied, and the peer recomputes it over what it
 decrypts), and the check is a full re-hash with the scalar witness — per byte, measured at about
@@ -857,13 +862,14 @@ Benchmarks — throughput and latency against RustCrypto's `chacha20poly1305` fo
 configurations, the measured noise floor, and the cost of each defence — are in
 [`performance.md`](performance.md), split out so this file stays about the construction and
 the security argument. The short version, so a reader need not open it: this crate pays
-**more per message** (two key derivations, a 65-byte tag, and wiping all of it) and **less
+**more per message** (three derived keys, a 65-byte tag, and wiping all of it) and **less
 per byte** (BLAKE3 beats Poly1305 once there is data to batch), so in the default
-configuration it is ahead of `XChaCha20Poly1305` on encryption at every size measured — level
-at 1–4 KiB, where the noise floor is a tie — and ahead on decryption from 16 KiB up, the small
-sizes being a tie and 1–4 KiB behind. The two costs it prices are a fixed per-message cost on
+configuration it is ahead of `XChaCha20Poly1305` on encryption from 256 B up (level at
+1–4 KiB, where the noise floor is a tie) and ahead on decryption from 16 KiB up, the small
+sizes within the noise floor and 1 KiB behind (the fixed per-message cost dominates there).
+The two costs it prices are a fixed per-message cost on
 `hardened` decryption (two 65-byte constant-time comparisons; gone by 1 MiB) and a per-byte
-cost on `ultra` decryption, whose scalar witness is **2.8x at 64 B and 11.3x at 1 MiB**.
+cost on `ultra` decryption, whose scalar witness is **2.5x at 64 B and 10.1x at 1 MiB**.
 
 Two structural properties constrain a caller, and both follow from the construction rather
 than from this implementation:

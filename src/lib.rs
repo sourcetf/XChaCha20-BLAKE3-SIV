@@ -1541,7 +1541,7 @@ pub mod locked {
         ///
         /// Cost, measured on this host: one BLAKE3 hash of a 32-byte input, **42 ns**, paid per
         /// `as_bytes()` call — so once per encryption and once per decryption, since both go
-        /// through it. That is ~5% of a 64-byte encrypt (0.82 us) and ~0.01% of a 1 MiB one,
+        /// through it. That is ~4% of a 64-byte encrypt (0.94 us, `v0.3`) and ~0.01% of a 1 MiB one,
         /// and it is confined to `locked`: callers that pass a `&[u8; 32]` directly pay nothing.
         pub fn as_bytes(&self) -> &[u8; crate::KEY_LEN] {
             // SAFETY: `new` wrote `KEY_LEN` initialised bytes at the start of the page; the
@@ -2322,7 +2322,7 @@ pub fn encrypt_in_place_detached(
 /// default) and everything above it — not only `dual-mac`.** It used to be
 /// gated on `dual-mac` — so the *default* build had one comparison shape and one shortened-loop
 /// fault was enough — until the costs were put side by side: this is one extra 65-byte fold,
-/// **measured at 1.4 ns** (0.1% of a 64-byte decryption, 1.05 us) against a measured change from
+/// **measured at 1.4 ns** (0.1% of a 64-byte decryption, 1.32 us) against a measured change from
 /// "forgery after 2,573 attempts" to "none in 2,000,000". A defence with that ratio belongs in
 /// the default. (The `--no-default-features` build is deliberately the single-gate, single-shape
 /// baseline — it compiles neither this function nor `ct_eq_independent` — which is why the

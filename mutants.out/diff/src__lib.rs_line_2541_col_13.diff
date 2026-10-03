@@ -1,0 +1,21 @@
+--- src/lib.rs
++++ replace & with ^ in decrypt
+@@ -2533,17 +2533,17 @@
+     // `cargo mutants` does not evaluate `cfg`, so a copy that is compiled out in a given run
+     // reads there as an uncaught mutant (measured: six `&` -> `^` mutants came back MISSED
+     // when these were two arms).
+     #[cfg(feature = "ultra")]
+     let witness_ok: subtle::Choice = {
+         let mut witness_tag =
+             witness::decrypt(key, nonce, aad, ciphertext, tag, &mut witness_plaintext);
+         let agree = witness_tag.ct_eq(&computed_tag)
+-            & witness_plaintext.as_slice().ct_eq(plaintext.as_slice());
++            ^ /* ~ changed by cargo-mutants ~ */ witness_plaintext.as_slice().ct_eq(plaintext.as_slice());
+         // Both are secret-derived: the witness tag is a MAC, the plaintext is the recovered
+         // message. Wiped like the rest of the copies in this function.
+         zeroize_array(&mut witness_tag);
+         zeroize_slice(&mut witness_plaintext);
+         agree
+     };
+     // The gate's extra operand when `ultra` is off: `Choice::from(1)` is "true", so the
+     // `&` it feeds is a no-op the optimizer folds away. Gated on `hardened` as well,
