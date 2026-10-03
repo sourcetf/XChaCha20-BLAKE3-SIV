@@ -191,11 +191,13 @@ if [ "$RUN_CROSS_EXEC" -eq 1 ]; then
   #     there, so `check_lengths`, the length fields fed to the tag and every
   #     loop bound take a different route through the same source.
   #   * powerpc64 -- the only way any of this runs on a **big-endian** machine,
-  #     where the 35 `from_le_bytes`/`to_le_bytes` call sites in lib.rs have to do
+  #     where the 32 `from_le_bytes`/`to_le_bytes` call sites in lib.rs have to do
   #     real work instead of being identity functions, and where a four-byte load
-  #     is not the `u32` the code assumes.  Miri's s390x cross-interpretation
-  #     covers the same question by interpretation; this executes compiled
-  #     big-endian machine code.
+  #     is not the `u32` the code assumes.
+  #
+  # The Miri stage also cross-interprets s390x (64-bit big-endian) and so covers the
+  # same byte-order question by *interpretation*, without an emulator; this executes
+  # compiled big-endian machine code. Both are run, so neither claim rests on prose.
   #
   # qemu-user closes both gaps for everything except throughput.
   # `--aarch64-exec` is accepted as an alias of `--cross-exec`.
@@ -348,6 +350,19 @@ if [ "$RUN_MIRI" -eq 1 ]; then
         test_aarch64_neon_kernel_matches_scalar \
         test_simd_xor_matches_scalar_and_raw \
         test_zeroize_covers_unaligned_prefix
+
+    # Big-endian, by interpretation: no emulator and no cross toolchain needed. This is
+    # the run the README and tests/README describe; it used to be claimed but never
+    # executed by any committed entry point, which is why it is here now. The boundary
+    # corpus is the byte-order-sensitive one: it folds every ciphertext and tag byte of
+    # a corpus crossing every internal boundary into a pinned digest, so a big-endian
+    # bug in the lengths, the wire format or the SIMD byte order changes it.
+    echo
+    echo "--- Miri, big-endian (s390x, cross-interpreted) ---"
+    cargo +nightly miri setup --target s390x-unknown-linux-gnu >/dev/null
+    MIRIFLAGS="-Zmiri-disable-isolation -Zmiri-strict-provenance" \
+      cargo +nightly miri test --release --features pure --target s390x-unknown-linux-gnu --lib -- \
+        test_all_accelerated_paths_agree_on_a_boundary_corpus
   else
     skip "Miri" "the miri component is not installed (rustup +nightly component add miri)"
     echo "         (rustup component add miri --toolchain nightly)"

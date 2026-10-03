@@ -67,6 +67,17 @@ hygiene defect. **No wire-format change.**
   Two broken intra-doc links are fixed as well (`[LockedKey]` in `unlock_range`'s new text, and a
   pre-existing `[random::generate_key]` that only resolved under `rng`), so `cargo doc` is clean
   with default features and with `--all-features`.
+- **Portability claims aligned with what actually runs.** A dedicated cross-target pass found no
+  functional defect — ppc64 big-endian, i686 in release *and* debug (overflow-checked), Miri's
+  s390x (64-bit big-endian) and ppc32, aarch64/qemu and a 300-vector native↔ppc64 random
+  differential were all byte-identical, and the SIMD-vs-scalar suite already sweeps every length
+  0–600 plus the block/SIMD boundaries and counter-carry values — but several claims were not
+  backed by any committed entry point: `verify.sh --miri` now really does cross-interpret **s390x**
+  and run the boundary corpus there (README, `tests/README` and `src/lib.rs` described that run
+  while nothing executed it); `verify.sh`'s "35 `from_le_bytes`/`to_le_bytes` call sites" is 32;
+  `tests/README`'s claim that only four named binaries execute on the big-endian target was wrong
+  (every built binary runs; `timing-*` and `ctgrind-*` are the only exclusions); and the NEON
+  transpose comment no longer justifies itself with "no qemu", which is false here.
 
 ### The commitment bound reads "`2^-520` per candidate key", not "`2^520` per attempt"; a flaky test assertion removed
 

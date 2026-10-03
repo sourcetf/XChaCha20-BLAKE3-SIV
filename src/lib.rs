@@ -3411,12 +3411,13 @@ mod aarch64_simd {
 
         // Final addition, then transpose lanes -> per-block byte layout.
         //
-        // NOTE: unlike the x86 kernels, this keeps the scalar transpose.  The
-        // NEON shuffle sequence that would replace it cannot be *executed* in
-        // the development environment (no aarch64 hardware and no qemu), and a
-        // wrong transpose silently corrupts the keystream, so an unverifiable
-        // speedup is not worth taking here.  The x86 equivalents are covered by
-        // `test_simd_matches_scalar_all_lengths`, which runs on every host.
+        // NOTE: unlike the x86 kernels, this keeps the scalar transpose.  A NEON
+        // shuffle sequence would have to be *executed* before it could be trusted,
+        // and a wrong transpose silently corrupts the keystream; `qemu-aarch64` is
+        // available here (verify.sh and CI run the NEON kernel through it), so this
+        // is a choice about the cost of a scalar transpose on a path `ultra` does
+        // not use, not a statement that NEON cannot be tested.  The x86 equivalents
+        // are covered by `test_simd_matches_scalar_all_lengths`, on every host.
         let mut w = [[0u32; 4]; 16];
         for i in 0..16 {
             let v = vaddq_u32(x[i], orig[i]);
@@ -4028,7 +4029,9 @@ mod tests {
     /// * x86_64 with AVX2 disabled under `qemu-x86_64 -cpu Nehalem` (SSE2 only),
     /// * aarch64 under `qemu-aarch64` (NEON),
     /// * i686 under `qemu-i386` (no SIMD backend at all, pure scalar),
-    /// * s390x, big-endian, interpreted by Miri.
+    /// * s390x, big-endian, interpreted by Miri (`verify.sh --miri` runs this test
+    ///   under that target; it is the run that makes the big-endian claim backed
+    ///   by a committed entry point rather than by prose).
     ///
     /// CI runs this test under qemu on aarch64 and i686, so a change that makes
     /// one backend disagree with the others fails there rather than on a user's
