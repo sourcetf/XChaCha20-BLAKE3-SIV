@@ -48,9 +48,12 @@
 //!   need a `subkey` collision — a `2^128` birthday, the same order as the tag's own
 //!   collision bound, not a 768-bit one.  (In revision `v0.2` the `K`-in-input step
 //!   neutralised that route; the two-level tag does not, so a subkey collision now
-//!   yields one ciphertext that opens under both keys.  That is the *attacker-chosen*
-//!   commitment game, which `SECURITY-ANALYSIS.md` does not price; the *target* bound
-//!   — a given ciphertext, `2^-520` per candidate key — is unchanged.)
+//!   yields one ciphertext that opens under both keys — to the *same* plaintext,
+//!   because identical material means identical keystreams.  That is the
+//!   **key-commitment** half of the *attacker-chosen* game; the different-message
+//!   (salamander) half needs `KS₁ ≠ KS₂` and so is the fixed point
+//!   `SECURITY-ANALYSIS.md` §4.5 records as unanalysed.  The *target* bound — a given
+//!   ciphertext, `2^-520` per candidate key — is unchanged either way.)
 //! * **Both lengths are encoded and every field is fixed width.**  BLAKE3 is not
 //!   vulnerable to length extension (its finalisation is flagged, unlike
 //!   Merkle–Damgård constructions), but `A || M` alone would be ambiguous:
@@ -1881,8 +1884,10 @@ fn zeroize_array<T>(value: &mut T) {
 /// same order as the tag's own collision bound, **not** a 768-bit one.  What the
 /// three values buy is that no master key need enter any hash message (Thm 2's
 /// cascade carries no key-dependent input); what they do not buy is commitment
-/// against an adversary who chooses keys, which is a route in the *attacker-chosen*
-/// game this crate does not price (see `SECURITY-ANALYSIS.md` §4.5).
+/// against an adversary who chooses keys — a route in the *attacker-chosen* game
+/// this crate prices only in part: the key-commitment half falls at `2^128`, with
+/// both keys decrypting to the same plaintext, while the two-different-messages
+/// half is unanalysed (see `SECURITY-ANALYSIS.md` §4.5).
 /// # Why this writes through the caller's slices
 ///
 /// It used to return `([u8; 32], [u8; 32], [u8; 32])`. A 96-byte aggregate return makes the

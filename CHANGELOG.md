@@ -7,6 +7,36 @@ tags have been cut yet.
 
 ## Unreleased
 
+### The `2^128` route is a key-commitment break, not a salamander
+
+A reader's independent analysis — matching what §4.5 of `SECURITY-ANALYSIS.md` already said about
+the completion being circular — showed that Thm 2's commitment bullet overstated the `v0.3`
+regression: it called the `subkey`-collision route "a complete salamander at `2^128`". An
+experiment against `tools/ref_impl.py` confirms what the route actually gives:
+
+- **Assuming the collision** (two distinct keys whose HChaCha20 output agrees), both keys open the
+  same `(C, T)` — but the two decryptions are **byte-identical**, because identical derived
+  material means identical keystreams. That is a **key-commitment** break: one ciphertext, two
+  keys, complete and immediate.
+- A **_salamander_** needs the two openings to be *different* messages, which needs
+  `KS₁(T) ≠ KS₂(T)` and therefore *different* derived material — exactly what this route rules
+  out, since it forces `KS₁ = KS₂` and hence `M₁ = M₂`.
+- Without a collision the finish condition is precisely the fixed point
+  `T = tag(K₂, N, A, C ⊕ KS₂(T))` — the completion §4.5 already recorded as circular — and the
+  cheapest route to it we can see is the `2^520` search over the tag space (about one fixed point
+  per key pair, if the map behaves as a random function). That is not a proof that no cheaper
+  route exists, and the document says so rather than claiming one.
+
+So the accurate statement is: **`v0.3` reopens a key-commitment break at `2^128`, at the cost of
+the same plaintext; the salamander half was never at `2^128` and is not analysed.** Corrected in
+Thm 2's commitment bullet, §5 row 17 and its closing paragraph, and §8.1 — which now carries a
+*key-commitment* row and a *salamander* row rather than one row answering `2^128` to both — plus
+README's security table and its "two games" section. The error's direction was conservative (it
+credited the route with more than it has), but the whole point of this document is which game has
+which bound.
+
+**No code or wire-format change.**
+
 ### Second audit round: two vacuous proofs, a stack-residue regression, and a set of claims the tools did not support
 
 An adversarial re-audit (a dozen independent passes over the construction, the tests, the

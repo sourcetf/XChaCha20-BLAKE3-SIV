@@ -172,7 +172,7 @@ before 1.0 would be a revision bump, not a silent one.
 | Forgery resistance | **256-bit** | BLAKE3 keyed mode as a PRF over a 256-bit key; a *target* problem, so no birthday search applies |
 | Context commitment **against a given ciphertext** (the target game) | `2^-520` per candidate key (other than the real one) | a target hit in the 520-bit output: the width is what sets it. The literature's CMT-3 is *attacker-chosen*, not this — see below |
 | Key commitment **against a given ciphertext** (the target game) | `2^-520` per candidate key (other than the real one) | the same; the key material is bound into the tag's derivation across three separate values (`k_in`, `k_out`, `enc_seed`) |
-| Commitment in the **attacker-chosen** games (invisible salamanders, CMT-1/CMT-3) | **not derived here** | the adversary outputs both keys, both messages and `(C,T)`, so `2^520` does not describe it; the colliding-tag step is `2^128` and the completion is unanalysed. `SECURITY-ANALYSIS.md` §4.5 |
+| Commitment in the **attacker-chosen** games (invisible salamanders, CMT-1/CMT-3) | **key-commitment half: `2^128`, with identical plaintexts; salamander half: not derived here** | the adversary outputs both keys, both messages and `(C,T)`, so `2^520` does not describe it. A `subkey` collision at `2^128` gives two keys whose derived material, tag and keystream all coincide — one `(C,T)` valid under both, decrypting to the **same** plaintext. Two *different* messages instead need `KS₁ ≠ KS₂`, hence different material, so that half is the fixed point `T = tag(K₂, N, A, C ⊕ KS₂(T))` and is not analysed. `SECURITY-ANALYSIS.md` §4.5, Thm 2 and §8.1 |
 | Tag collision resistance (the DAE bound's collision term) | **2^128** | the *chaining value*, not the tag: keyed BLAKE3's output is a function of its 256-bit state, so a state collision gives byte-identical tags of any length |
 
 **On forgery: 256 bits is the ceiling, not a choice.** Forgery resistance is
@@ -216,13 +216,19 @@ literature's names next to the number and let the reader assume it covered them:
   `CMT-1`/`CMT-3` (and the "invisible salamanders" attack): the adversary *outputs the entire
   tuple* — two keys (or two contexts), two messages, and the `(C, T)` — and wins if one `(C, T)`
   validates under both. There is no fixed value to hit, so a target bound is the wrong shape for
-  it, and **this file does not have the number that fits it.** The one step that can be priced is
-  the colliding-tag search, `q²/2^257` with birthday point `2^128` (the state collision above);
-  the completion — making one `C` consistent with two keys, which needs `M₂ = M₁ ⊕ KS₁ ⊕ KS₂` while
-  `KS₂` is derived from the very tag being fixed — is circular and is not worked out. So the
-  construction's commitment in those games rests on the design argument (three separate derived
-  values bound into a two-level tag, §4.10 and Thm 2) rather than on a computed probability, and
-  `SECURITY-ANALYSIS.md` records it as an open obligation rather than a bound.
+  it, and **this file does not have the number that fits the whole of it.** One half is priced: a
+  `subkey` collision at `2^128` gives two keys whose derived material, tag and keystream all
+  coincide, so one `(C, T)` validates under both — **key commitment, broken at `2^128`**, and the
+  two keys decrypt it to the *same* plaintext. The other half is not: the *salamander* needs the
+  two openings to be two *different* messages, which requires `KS₁ ≠ KS₂` and therefore different
+  derived material — so the `2^128` route cannot supply it, and the object to find becomes the
+  fixed point `T = tag(K₂, N, A, C ⊕ KS₂(T))` over the 520-bit tag space (`≈ 2^520` on the obvious
+  route; `SECURITY-ANALYSIS.md` §4.5 does not claim that is optimal). On top of that, the
+  colliding-*tag* search is `q²/2^257` with birthday point `2^128` (the state collision above).
+  So the construction's commitment in those games rests partly on a computed route and partly on
+  the design argument (three separate derived values bound into a two-level tag, §4.10 and
+  Thm 2), and `SECURITY-ANALYSIS.md` records the unanalysed half as an open obligation rather
+  than a bound.
 
 **`2^128` bounds *collisions*, not *targets*.** The state shortcut above helps only when
 both sides of the collision are the adversary's to search. A tag that has to be hit as

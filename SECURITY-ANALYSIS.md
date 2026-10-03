@@ -563,19 +563,34 @@ they are stated separately:
   being cheaper **is not** the width of the derived material, and an earlier revision of this
   document said it was. The route is a search over keys the adversary chooses for two that agree
   on the **whole** derived material (`k_in`, `k_out`, `enc_seed`), which gives equal tags and equal
-  keystreams — one ciphertext opening under both. Through `v0.2` the single-level tag defeated that
+  keystreams — one ciphertext opening under both, to the *same* plaintext (the bullet below is
+  about exactly that qualification). Through `v0.2` the single-level tag defeated that
   route by binding `K` into the hash input: two keys with equal derived material still produced
   *different tags*, at the price of L3.6. The two-level tag does not bind `K`, and deriving three
   values instead of one does **not** compensate, because all three are functions of the single
   256-bit `subkey` (Thm 1, consequence (c)): the route is a `subkey` collision at a `2^128`
   birthday, the same order as the tag's own collision bound — **not** the `2^384` an earlier
-  revision claimed. So the honest statement is that `v0.3` **reopens** a complete salamander at
-  `2^128` in the attacker-chosen game that `v0.2`'s `K`-in-input had closed. It is `2^128`
-  (infeasible today) and it is a game this document does not price, so the *target* commitment —
-  the property this crate actually claims, `2^-520` per candidate key — is untouched; but the
-  trade for removing L3.6 is real and is recorded here rather than described as a free structural
-  win. A revision that wanted both would have to break the 256-bit `subkey` bottleneck, e.g. by
-  deriving the tag keys from `K` directly rather than through `HChaCha20(K, N₁)`.
+  revision claimed.
+* **What that route does and does not give, stated precisely**, because an earlier revision of
+  this bullet called it "a complete salamander at `2^128`" and that overstates it. Equal derived
+  material means equal keystreams, so the two keys decrypt the one ciphertext to the *same*
+  plaintext. What falls at `2^128` is therefore **key commitment** — one `(C, T)` valid under two
+  distinct keys, complete and immediate — and it is **not** a *salamander* in the literature's
+  sense, which requires the two openings to be *different* messages `M₁ ≠ M₂`. That form needs
+  `KS₁(T) ≠ KS₂(T)`, hence *different* derived material, which is exactly what this route rules
+  out: it forces `KS₁ = KS₂` and therefore `M₁ = M₂`. The different-message form is the completion
+  §4.5 already records as circular — `T = tag(K₂, N, A, C ⊕ KS₂(T))` — and the cheapest route to
+  it we can see is the fixed-point search over the 520-bit tag space, `≈ 2^520`, not `2^128`.
+  (That is where the search lands if the map behaves as a random function on 520 bits: about one
+  fixed point per `(K₁, K₂)`, found in `2^520` evaluations. It is not a proof that no cheaper
+  route exists, and this document does not claim one.) So `v0.2`'s `K`-in-input had closed the
+  key-commitment break, `v0.3` reopens it at `2^128`, and the salamander half is not reached at
+  `2^128` at all. `2^128` is infeasible today, and the attacker-chosen games are ones this document
+  does not price, so the *target* commitment — the property this crate actually claims, `2^-520`
+  per candidate key — is untouched; but the trade for removing L3.6 is real and is recorded here
+  rather than described as a free structural win. A revision that wanted both would have to break
+  the 256-bit `subkey` bottleneck, e.g. by deriving the tag keys from `K` directly rather than
+  through `HChaCha20(K, N₁)`.
 * **Commitment to the nonce and the lengths.** Same argument, byte for byte, since both
   are inputs to the same hash: a tag cannot be moved to another nonce or reinterpreted
   under a different length split (that is the same statement as §4.4).
@@ -1211,7 +1226,7 @@ refutation, and the status of the attempt.
 | 12 | An adversary cannot get unverified plaintext | A decryption failure that returns bytes, or that returns them for a moment the caller can observe | `tests/security.rs`, the wipe contracts, and `tools/fi_check.sh`'s `wipe-skipped` row |
 | 15 | **L3.6** [REMOVED in `v0.3`]: the tag was a PRF in the master key even though the master key was also in the tag's input (§2.1) | Through `v0.2`: a distinguisher for `K ↦ B3(D(K), … ‖ K ‖ …)` that is not a distinguisher for `x ↦ B3(k, x)` at a fixed input | **No longer a claim.** The two-level tag has no hash message containing `K`, so there is nothing to refute; the row records the removal rather than an attempt. (The `v0.2` evidence was: not attemptable by test — a statement about a primitive's internal structure — supported by BLAKE3's design, a separation showing the black-box reduction cannot exist, and the fact that every `H(k ‖ m)`-shaped MAC rests on the same assumption. `v0.3` removed the assumption instead of arguing it.) |
 | 16 | The tag-collision birthday is `2^128`, not `2^260` (§4.5) | An argument that some state other than the 256-bit chain value binds the tag; or a collision search cheaper than `2^128` | **Derived here, not tested**: it is a bound on computation. What the harnesses do pin is the premise — that the tag is exactly the root XOF of the encoded input — through the published keyed-BLAKE3 KATs, the differential reference implementation, and `src/witness.rs` under `ultra` |
-| 17 | **Commitment in the attacker-chosen games (CMT-1/CMT-3)** — the adversary outputs both keys, both messages and `(C,T)` and wins if one `(C,T)` opens under both (§4.5) | A worked-out attack in that game, or a completed derivation of its probability | **Not derived here, and this is the honest gap**: the target bound `2^520` does not describe this game (there is no fixed tag to hit), the one step this document can price is the colliding-tag search at `q²/2^257` (`2^128` birthday), and the completion is a fixed point of the tag/keystream coupling that is not analysed. A proof (or a break) would settle it; and there **is** now a concrete route — a `subkey` collision at `2^128` gives two keys with identical derived material, hence identical tags and keystreams, so the completion is immediate (Thm 2's commitment bullet). That route was closed in `v0.2` by the `K`-in-input step and is *not* closed by the two-level tag, so this row is a known regression rather than only an unquantified gap — `2^128` is infeasible, and the *target* game is untouched, but the honest record is the regression |
+| 17 | **Commitment in the attacker-chosen games (CMT-1/CMT-3)** — the adversary outputs both keys, both messages and `(C,T)` and wins if one `(C,T)` opens under both (§4.5) | A worked-out attack in that game, or a completed derivation of its probability | **Not derived here, and this is the honest gap**: the target bound `2^520` does not describe this game (there is no fixed tag to hit), the one step this document can price is the colliding-tag search at `q²/2^257` (`2^128` birthday), and the completion is a fixed point of the tag/keystream coupling that is not analysed. A proof (or a break) would settle it; and there **is** now a concrete route to *half* of the game — a `subkey` collision at `2^128` gives two keys with identical derived material, hence identical tags *and keystreams*, so the two decryptions are byte-identical and the key-commitment half completes immediately (Thm 2's commitment bullet). It does **not** give a salamander: two *different* messages require `KS₁ ≠ KS₂`, which identical material rules out, so that half is the fixed point and this document's cheapest route to it is `≈ 2^520`. The key-commitment route was closed in `v0.2` by the `K`-in-input step and is *not* closed by the two-level tag, so this row is a known regression rather than only an unquantified gap — `2^128` is infeasible, the salamander half is unchanged, and the *target* game is untouched, but the honest record is the regression |
 
 Rows 1, 16 and 17 are the honest boundary: **no test in this repository, and none that could be
 written, falsifies or establishes them.** Row 1 is the standing bet that every
@@ -1219,9 +1234,11 @@ symmetric scheme makes; row 16 is a bound derived by hand, and the
 tests around it check the premises of the derivation rather than the number; row 17 is not a bound
 at all — it is the place this document *declines* to put a number, and says so. (Row 15, the
 `v0.2` `K`-in-input assumption L3.6, is marked removed above: `v0.3`'s two-level tag no longer
-takes that step, so it is no longer part of the boundary. Row 17's collision step is now
-`2^128` with a complete completion — a `subkey` collision — rather than an unanalysed fixed
-point; that is recorded there and in §4.5.)
+takes that step, so it is no longer part of the boundary. Row 17 now has both a priced half and an
+unpriced one: a `subkey` collision at `2^128` breaks the *key-commitment* half completely, with
+both keys decrypting to the same plaintext, while the *salamander* half (two different messages)
+is still the unanalysed fixed point — that distinction is recorded there and in §4.5, and an
+earlier revision of this sentence called the whole row "a complete completion", which it is not.)
 
 ### 5.1 The falsification procedures: what an attacker runs, and what it costs
 
@@ -1410,7 +1427,8 @@ target bounds are §4.5's, and each harness named in the last column is describe
 | Length extension | Merkle–Damgård padding | **not applicable**: BLAKE3 finalises with a flag, and the encoding carries explicit `|A|`/`|M|` (§4.4). Its real descendants — re-splitting `A ‖ M`, trailing zeros — are defeated by A4 and pinned by `test_aad_message_split_is_unambiguous` |
 | Collision (incl. Joux multicollisions, herding) | the tag | `2^128` by birthday over the 256-bit chain value, via the fixed-tail procedure of §4.5; no tag width raises it |
 | Commitment **against a given ciphertext** (the target game — what the `2^520` belongs to) | a ciphertext that opens under two keys or contexts, with the ciphertext *given* | **`2^-520` per candidate key (other than the real one)** — a target, not a birthday; enumerating the whole key space yields `2^256 · 2^-520 ≈ 2^-264` second keys. (The `2^-256` a *uniformly random* key "succeeds" with is that it is almost surely the real key, i.e. key recovery, not a second key.) The wide tag is what sets this (Thm 2) |
-| Commitment in the **attacker-chosen** games (invisible salamanders, CMT-1/CMT-3) | a ciphertext the *adversary* chooses, opening under two keys or contexts it also chooses | **`2^128`** — a `subkey` collision (all three derived values are functions of the 256-bit `subkey`) gives two keys with identical tags *and* keystreams, so the completion is immediate. This was closed in `v0.2` by `K`-in-input and is **not** closed by the two-level tag: the honest record of that trade. §4.5, "The two commitment games", and §5 row 17 |
+| Commitment in the **attacker-chosen** games — the **key-commitment** half (one `(C,T)` valid under two keys) | a ciphertext the *adversary* chooses, opening under two keys it also chooses | **`2^128`** — a `subkey` collision (all three derived values are functions of the 256-bit `subkey`) gives two keys with identical material, tags *and* keystreams, so both keys decrypt to the **same plaintext** and the completion is immediate. This was closed in `v0.2` by `K`-in-input and is **not** closed by the two-level tag: the honest record of that trade. §4.5, "The two commitment games", and §5 row 17 |
+| Commitment in the **attacker-chosen** games — the **salamander** half (one `(C,T)` opening to two *different* messages) | the same, but the two openings must differ: `M₁ ≠ M₂` | **not derived here, and not reached by the `2^128` route**: identical derived material forces `KS₁ = KS₂` and hence `M₁ = M₂`, so two messages need the fixed point `T = tag(K₂, N, A, C ⊕ KS₂(T))`, whose cheapest known route is the `2^520` search over the tag space. §4.5, Thm 2's commitment bullet |
 | Forgery (tag guess, second preimage) | the tag | `min(2^256 key search, 2^520 tag guess)` = the key search; the fault-assisted variants are §8.2's subject |
 | Two-time pad | a tag collision between two messages | the same `2^128` event; when it happens the observer pays nothing (§3's Corollary) |
 | Nonce misuse (related nonce, IV reuse) | SIV's misuse model | **by design**: reuse degrades to equality plus the collision term above; a keystream derived from `(K, N)` alone would leak `M₁ ⊕ M₂` always (`nonce_reuse_does_not_reuse_the_keystream`) |
