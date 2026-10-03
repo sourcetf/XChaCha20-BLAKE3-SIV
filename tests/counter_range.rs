@@ -140,6 +140,11 @@ fn every_keystream_call_site_starts_the_counter_at_zero() {
             "x86_simd::blocks4(",
             "x86_simd::blocks8(",
             "aarch64_simd::blocks4(",
+            // The scalar block primitive the kernels' tails fall through to. It was absent
+            // from this list, so a call routed through it was invisible: an audit added
+            // `chacha20_block(key, 7, nonce)` and this test stayed green. Both real call
+            // sites advance a `ctr` the caller owns, so it belongs here.
+            "chacha20_block(",
         ] {
             let Some(i) = code.find(f) else { continue };
             calls += 1;

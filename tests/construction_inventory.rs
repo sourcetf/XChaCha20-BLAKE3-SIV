@@ -51,6 +51,12 @@ const PRIMITIVE_CALLS: &[(&str, usize)] = &[
     ("chacha20_keystream(", 2),
     ("chacha20_apply(", 4),
     ("blake3::Hasher::new(", 1),
+    // The single keyed-BLAKE3 seam. Counted separately because it is the *only* place that
+    // may construct a keyed hasher: an audit added a second direct `new_keyed` use in the
+    // non-test source and this inventory never noticed, because the name was not on the
+    // list. (It does not collide with `blake3::Hasher::new(` above: after `new` comes `_`,
+    // not `(`.)
+    ("blake3::Hasher::new_keyed(", 1),
 ];
 
 #[test]

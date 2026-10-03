@@ -79,6 +79,14 @@ hygiene defect. **No wire-format change.**
   `tests/README`'s claim that only four named binaries execute on the big-endian target was wrong
   (every built binary runs; `timing-*` and `ctgrind-*` are the only exclusions); and the NEON
   transpose comment no longer justifies itself with "no qemu", which is false here.
+- **Two source-scan tests no longer miss the evasions an audit demonstrated.**
+  `tests/counter_range.rs` now scans `chacha20_block(` — the scalar primitive the kernels'
+  tails fall through to — so `chacha20_block(key, 7, nonce)` fails it (reproduced on a scratch
+  copy); it used to be invisible because the name was not on the list.
+  `tests/construction_inventory.rs` now counts `blake3::Hasher::new_keyed(`, the single keyed
+  seam, so a second direct keyed-hasher construction is a count change rather than a silent
+  eighth use (also reproduced). Both remain name lists — a different spelling could still
+  evade them — which `tests/README.md` now says instead of implying the coverage is complete.
 
 ### The commitment bound reads "`2^-520` per candidate key", not "`2^520` per attempt"; a flaky test assertion removed
 
