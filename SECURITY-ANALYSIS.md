@@ -1305,6 +1305,18 @@ missing later (L3.6, §2.1).
 * **Determinism and length** (§3 Corollary): equal `(K,N,A,M)` ⇒ equal ciphertext forever,
   and the ciphertext length equals the message length. Both are properties of the mode, not
   defects, and both are documented in `README.md`.
+* **Stack residue, and the limit of what `scrub_stack` proves.** The crate wipes every
+  key-bearing local it can *name*, but three things it cannot are measured to survive in the
+  call-chain stack: the `blake3` dependency's XOF output buffer (a frame this crate does not
+  own), `k_out` under the `pure` Rust-backend build, and the *return temporaries* of functions
+  that return an aggregate by value (which is why `derive_material`/`derive_enc` write through
+  caller slices). Under `ultra`, `dual-mac`'s `scrub_stack` overwrites the derivation region
+  afterwards, which is why the `ultra` stack scan reports clean — but that is a **frame-layout
+  heuristic, not a proof**: it is best-effort, compiler-dependent, and covers the region the
+  scrubber's own 16 KiB frame happens to reach, not the caller's frames above it. `README.md`
+  ("What this crate cannot fix for you") carries the measurements and `tools/stack_residue.sh`
+  re-runs them. This is in the residual list because it is the one hygiene claim that rests on
+  something other than a wipe the code names.
 * **Beyond the model.** Side channels, fault injection, a debugger, cold boot, a hostile
   hypervisor: out of scope here and covered where they belong.
 * **What "no unknown problem" can and cannot mean.** A break of this construction must be a
