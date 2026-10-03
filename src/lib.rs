@@ -668,7 +668,7 @@ impl core::fmt::Debug for Plaintext {
 
 /// A 256-bit key that zeroizes on drop.
 ///
-/// [`random::generate_key`] returns this rather than a bare `[u8; KEY_LEN]`, so a
+/// `random::generate_key` returns this rather than a bare `[u8; KEY_LEN]`, so a
 /// key this crate generated is wiped when it goes out of scope instead of being
 /// left in freed stack or heap memory for the next allocation to read.  Every API
 /// here takes `&[u8; KEY_LEN]` and this derefs to it, so call sites are unchanged:
@@ -1125,7 +1125,7 @@ pub mod locked {
         /// `MADV_DODUMP` clears `VM_DONTDUMP` for the whole page-aligned range whatever set
         /// it, and this call does not record whether *it* was the one that set it. So if the
         /// caller (or another library) excluded these pages from core dumps independently,
-        /// `unlock_range` silently removes that exclusion. The crate's own [`LockedKey`] is
+        /// `unlock_range` silently removes that exclusion. The crate's own `LockedKey` is
         /// unaffected — its page is freshly and exclusively owned, and `lock_range` is the
         /// only thing that ever advised it — but a caller pairing `lock_range`/`unlock_range`
         /// on memory it does not own outright should treat this as "the range is now

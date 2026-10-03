@@ -64,6 +64,9 @@ hygiene defect. **No wire-format change.**
   catches divergence, not a shared misreading); the fuzz target also feeds `decrypt` tags and
   ciphertexts taken straight from the fuzzer and requires them to re-encrypt to themselves if
   they authenticate; and `unlock_range` documents that it clears a `VM_DONTDUMP` it did not set.
+  Two broken intra-doc links are fixed as well (`[LockedKey]` in `unlock_range`'s new text, and a
+  pre-existing `[random::generate_key]` that only resolved under `rng`), so `cargo doc` is clean
+  with default features and with `--all-features`.
 
 ### The commitment bound reads "`2^-520` per candidate key", not "`2^520` per attempt"; a flaky test assertion removed
 
