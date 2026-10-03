@@ -7,6 +7,37 @@ tags have been cut yet.
 
 ## Unreleased
 
+### L3.4 and L3.5 reduced to L3.3, so the assumption list is three primitive conjectures
+
+`SECURITY-ANALYSIS.md` §2.1 previously listed L3.4 ("the BLAKE3 tree preserves PRF-ness") and
+L3.5 ("the XOF keeps it past the first output block") as primitive-level conjectures alongside
+L3.1–L3.3, with L3.4 described as "an argument, not a proof" and "the one place in this tree where
+'it is standard practice' is doing more work than a citation". The argument is now written out as
+a reduction:
+
+- **Lemma T (node-input injectivity):** in one keyed BLAKE3 tree every compression call is at a
+  distinct point of the compression function's domain, unless two chaining values collide —
+  proved by cases, the same kind of inspection-level statement as A4.
+- **L3.4 = L3.3 + Lemma T**, by a bottom-up hybrid, loss `depth · Adv^{L3.3} + q²/2^257`
+  (`depth ≤ 28` for `MAX_MSG_SIZE`).
+- **L3.5 = L3.3**, since successive XOF output blocks are the root compression at distinct
+  counters.
+
+So the irreducible primitive conjectures are **L3.1, L3.2 and L3.3** — one per primitive, with
+L3.4/L3.5 reduced and A4 proved. The document states two caveats rather than presenting this as a
+theorem: the reduction is *this document's own* proof sketch (BCK covers sequential iteration and
+says nothing about a tree), and its weight rests on Lemma T, so the nodes stay on the conjecture
+list until an independent party checks the sketch. §2.1, §2.2, §2.3, §3 and §6 are updated so
+"which assumptions are irreducible" has one answer.
+
+The same section now also answers "BLAKE3 uses fewer rounds than BLAKE2s — should the rounds be
+raised?": **no**, because the bounds here are set by key size (`2^256` forgery) and chaining-value
+size (`2^128` collision), not by rounds, and because "BLAKE3 with more rounds" would be an
+unanalyzed bespoke variant — trading the one body of evidence that supports L3.3 for a
+construction with none.
+
+**No code or wire-format change:** this is the security argument, not the construction.
+
 ### Both outstanding items done: `performance.md` re-measured for `v0.3`, and `mutants.out/` refreshed
 
 - **Every performance table in `performance.md` is now a `v0.3` three-pass measurement**, made
@@ -213,7 +244,8 @@ would have to break the `subkey` bottleneck (e.g. derive the tag keys from `K` d
 
 **The security argument's shape changed more than the bytes did.** `SECURITY-ANALYSIS.md` §2, §2.1,
 §2.2, §2.3, §4.10 and §6 are updated: the assumption tree now has five primitive conjectures
-(L3.1–L3.5) rather than six, A5 no longer declares a correlation, the "one layout choice that adds
+(L3.1–L3.5) rather than six — *and a later entry, above, reduces L3.4/L3.5 to L3.3, leaving three* —
+A5 no longer declares a correlation, the "one layout choice that adds
 an assumption" row is gone, and §6's residual-risk entry for L3.6 is removed. The test that pinned
 the old design (`test_tag_binds_the_key_directly`) is replaced by
 `test_tag_binds_both_derived_keys`, which pins that both derived keys reach the tag — the master

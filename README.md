@@ -243,7 +243,10 @@ earlier revision of this crate added on top of those — binding the key into th
 tag's *input* as well as into its key derivation, which put a derived key and the
 value it is derived from in one hash call — is **gone** as of revision `v0.3`: the
 tag is now two levels and no hash message contains the master key, so the assumption
-list is the primitives' own. `SECURITY-ANALYSIS.md` §2.1 keeps the node `L3.6` and
+list is the primitives' own: three irreducible conjectures — ChaCha20, HChaCha20 and keyed
+BLAKE3 are PRFs — with the two BLAKE3 *mode* statements (the tree preserves PRF-ness, the XOF
+keeps it past the first block) reduced to the keyed-BLAKE3 conjecture in §2.1 rather than counted
+as assumptions of their own. `SECURITY-ANALYSIS.md` §2.1 keeps the node `L3.6` and
 its separation as the record of *why* the single-level form was replaced; §2.2 there
 is a ledger mapping an auditor's own lettered list of assumptions onto the document,
 so "which of these do you actually assume, and which are proved or falsified?" has a

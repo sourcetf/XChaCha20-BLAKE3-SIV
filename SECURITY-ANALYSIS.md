@@ -116,7 +116,8 @@ assumption, it is a hope.
 > which removes the correlation and with it L3.6. The node is kept in §2.1 and §2.2 below, marked
 > as removed, because its separation is the record of *why* the change was made and because §2.3's
 > non-redundancy argument was written against the six-conjecture set. The construction now rests
-> on A1–A4 and L3.1–L3.5 alone — five primitive conjectures, which is exactly what the primitives'
+> on A1–A4 and L3.1–L3.5 alone — of which L3.1–L3.3 are irreducible primitive conjectures and
+> L3.4/L3.5 reduce to L3.3 (§2.1) — which is exactly what the primitives'
 > own assumptions provide, with nothing added by the encoding.
 
 **A1 (ChaCha20 is a PRF / secure stream cipher).** For a uniformly random key `k`, the
@@ -206,7 +207,9 @@ L3  primitive-level conjectures -- each one a statement about an object, not a m
      |-- L3.3  the BLAKE3 compression function, keyed through its key words with the
      |         KEYED_HASH flag, is a PRF in the message block
      |-- L3.4  the BLAKE3 tree preserves PRF-ness: the root node's output is a PRF
+     |         [reduced to L3.3 + Lemma T in §2.1; a proof sketch, this document's own]
      |-- L3.5  the BLAKE3 XOF keeps that property past the first output block
+     |         [reduced to L3.3 in §2.1: successive output blocks are distinct points]
      |-- L3.6  [REMOVED in revision v0.3] for a uniform `K`, the map
      |         `(N, A, M) ↦ B3(D(K, N), P ‖ K ‖ S)` was a PRF, where `D(K, N)` was the
      |         derived hash key (`mac_key`) and the *scheme* inserted the secret `K` between
@@ -238,8 +241,71 @@ covered. What supports L3.4 here is structural: every node of a BLAKE3 tree is a
 compression with a distinct, injectively-encoded input (chunk counter, block index, length,
 and the CHUNK_START/CHUNK_END/PARENT/ROOT flags), so two distinct messages cannot produce the
 same node input except by colliding inside the compression function itself. That is an
-argument, not a proof, and it is the one place in this tree where "it is standard practice"
-is doing more work than a citation.
+argument rather than a citation, and BCK cannot be pointed at it; so, because it is the one
+place in this tree where the document leans on a structural fact rather than a theorem, the
+argument is written out as an actual reduction below.
+
+**The reduction: L3.4 follows from L3.3 plus the tree's injectivity.** Two ingredients, one
+structural and one primitive-level.
+
+* **Lemma T (node-input injectivity).** In one keyed BLAKE3 tree over an input `M`, every
+  compression call sits at a *distinct point* of the compression function's domain — a distinct
+  `(block, counter, block_len, flags)` — unless two chaining values in that tree collide.
+  *Proof, by cases; inspection-level, the same kind of statement as A4.* (i) Within a chunk the
+  blocks chain sequentially, and only the first and last carry CHUNK_START/CHUNK_END, so two
+  blocks of one chunk share a compression input only if a chaining value repeated — a CV
+  collision. (ii) Different chunks carry a different `counter`. (iii) A parent carries `PARENT`,
+  which no chunk block has, and `ROOT` marks the root, so parent and chunk calls never coincide.
+  (iv) Two parents share an input only if their `(left_cv, right_cv)` pairs are equal — again a
+  CV collision. ∎
+
+* **Theorem (L3.4, from L3.3 + Lemma T).** For a uniformly random key `k`, `M ↦ root_output(k, M)`
+  is a PRF, with loss `depth · Adv^{L3.3} + q²/2^257`, where `depth` is the tree height (≤ 28 for
+  `MAX_MSG_SIZE`, since 2^38 bytes is 2^28 chunks).
+  *Proof sketch (hybrid, bottom-up).* (1) By Lemma T the chunk-level compression calls are at
+  pairwise distinct points, so — L3.3 being a **multi-query** PRF, held for each flag setting, and
+  the flags are public domain separation so that is the natural reading — replace every completed
+  chunk's chaining value with an independent uniform string, at one multi-query advantage. (2)
+  Suppose every node at level `j` now outputs an independent uniform CV. A level-`j+1` parent's
+  input `left_cv ‖ right_cv` is then a fresh uniform point, *unless* two parents share one, which
+  Lemma T reduces to a CV collision — charged at `q²/2^257` (256-bit CVs). Replace each parent's
+  output by uniform: one more L3.3 advantage per level. (3) After the root the output is uniform,
+  so the real and ideal trees are indistinguishable up to the accumulated terms. ∎
+
+So L3.4 is **not a separate primitive conjecture**: it is L3.3 applied to a tree, with Lemma T as
+the only construction-specific input. The non-redundancy table in §2.3 is consistent with this and
+not contradicted by it — it shows L3.3 *alone* does not imply L3.4, because a *different* root
+assembly (one that ignores half a child) still satisfies L3.3 while defeating injectivity; Lemma T
+is exactly the hypothesis BLAKE3's own assembly supplies. **L3.5 reduces the same way**: the
+successive XOF output blocks are the root compression at `counter = 0, 1, 2, …`, distinct points
+by construction, so the whole multi-block stream is one multi-query L3.3 application.
+
+**Two honest caveats, so the reduction is not read as more than it is.** First, this is *this
+document's* argument, not a cited or peer-reviewed theorem — BCK covers sequential iteration and
+says nothing about a tree, so what is offered is a proof sketch with its kernel named (Lemma T);
+the nodes stay on the conjecture list until an independent party checks the sketch. Second, the
+loss is `depth · Adv^{L3.3}` rather than a single advantage, because the hybrid runs level by
+level; at `depth ≤ 28` that is at most a factor of 28 on an already-negligible term. The
+irreducible primitive conjectures are therefore **L3.1, L3.2 and L3.3**; L3.4 and L3.5 are
+reductions, and A4 is proved outright.
+
+**Would more rounds help? No, for two independent reasons.** An auditor's natural reading of
+A3 ("BLAKE3 uses 7 rounds where BLAKE2s uses 10") is that the primitive is under-margined and one
+could simply add rounds. It does not work here. (i) **The bounds this construction is limited by
+are not the round count.** Forgery is `2^256` because the key is 256 bits, and collisions are
+`2^128` because the output is a function of a 256-bit chaining value (§4.5); neither number moves
+when the compression function gets slower or longer-round, because neither is set by the rounds.
+More rounds cannot, e.g., turn a 128-bit collision bound into a 160-bit one — the CV is still 32
+bytes. (ii) **There is no such primitive to switch to.** "BLAKE3 with more rounds" is not BLAKE3;
+it is an unanalyzed bespoke variant, and A3 is defensible *precisely because* it is a standard
+primitive that outside cryptanalysts have attacked. A 10-round re-parameterisation would trade the
+one body of evidence that supports L3.3 for a construction with none, which is a strict loss of
+assurance. What *would* matter is a full-round distinguisher for BLAKE3 as specified — that is the
+stated falsifier of L3.1–L3.3 (§5.2, item 1), and it is a break of the primitive, not something a
+caller can pre-empt by adding rounds. A deployment that genuinely wants a different margin wants a
+*different, independently analyzed* primitive (SHA-3/KMAC, or SHA-512), not a tweaked BLAKE3 — and
+that is a wire-format change with its own performance and analysis story, which is a revision
+decision rather than a hardening one.
 
 **Why L3.6 was an assumption of its own, and what removed it.** This subsection is kept because
 it is the record of a design change: revision `v0.3` replaced the single-level tag with a
@@ -303,7 +369,7 @@ message; L3.4 covers the inner one).
 | `subkey = HC(K, N₁)` | L3.2 | truncated permutation output, keyed by `K` |
 | `(k_in, k_out) = CC(subkey, sn, 0)[0..64]` | L3.1 | feed-forward block function, counter 0 |
 | `enc_seed = CC(subkey, sn, 1)[0..32]` | L3.1 | the same block function at counter 1 (a distinct point) |
-| `X = B3(k_in, DOM_PRE ‖ …)` | L3.3, L3.4 | keyed compression and tree over the public context |
+| `X = B3(k_in, DOM_PRE ‖ …)` | L3.3 (and L3.4, = L3.3 + Lemma T) | keyed compression and tree over the public context |
 | `T = B3(k_out, DOM_TAG ‖ X)` | L3.3, L3.5 | keyed compression, single short message, 65-byte XOF output |
 | `(enc_key, enc_nonce) = B3(enc_seed, …)` | L3.3, L3.5 | keyed compression, 44-byte XOF output |
 | `C = M xor KS(enc_key, enc_nonce)` | L3.1 (via L1.3's counter-mode reduction) | distinct counters per block, §4.6 |
@@ -326,15 +392,17 @@ the key), which is why the node was a real assumption and why `v0.3` removed it 
 keeping it; no such structure is known in BLAKE3. A4 (the encoding) is not a conjecture: it is
 proven in §4.4.
 
-**The honest bottom line.** Every claim in this document rests on L3.1–L3.5 and nothing else.
-There is no proof of any of the five, and no test in this repository — or any other — can
-establish them, because they are statements about the infeasibility of computation. What the
-remainder of the document does is make sure that *nothing else* is assumed. Five is exactly what
-the primitives' own assumptions provide, and — unlike revision `v0.2`, which added a sixth
-(`L3.6`) from a choice of encoding — revision `v0.3` adds none: the two-level tag's only
-requirement beyond L3.3 and L3.4 is that the inner digest be a PRF output, which is L3.3 itself.
-The distinction that §4.10 draws (no *joint* assumption between ChaCha20 and BLAKE3) still holds,
-and there is now no encoding-introduced assumption on top of it either.
+**The honest bottom line.** Every claim in this document rests on **L3.1, L3.2 and L3.3** and
+nothing else. There is no proof of any of the three, and no test in this repository — or any
+other — can establish them, because they are statements about the infeasibility of computation.
+What the remainder of the document does is make sure that *nothing else* is assumed. Three
+irreducible primitive conjectures is exactly what the primitives' own assumptions provide — one
+per primitive — and, unlike revision `v0.2` which added a sixth (`L3.6`) from a choice of
+encoding, revision `v0.3` adds none: L3.4 and L3.5 are reduced to L3.3 in §2.1 above (with the
+tree's encoding injectivity, Lemma T, as the only construction-specific input), A4 is proved by
+inspection, and the two-level tag's only further requirement is that the inner digest be a PRF
+output, which is L3.3 itself. The distinction §4.10 draws (no *joint* assumption between ChaCha20
+and BLAKE3) still holds, and there is now no encoding-introduced assumption on top of it either.
 
 ### 2.2 An auditor's lettered list, mapped onto this document
 
@@ -349,7 +417,7 @@ worth having in one place:
 | Auditor's item | Where it lives here | Status |
 | --- | --- | --- |
 | ChaCha20 is a secure PRF | L3.1 | assumed (L3.1's standing paragraph; no full-round attack, huge deployment) |
-| Keyed BLAKE3 is a secure PRF | L3.3, L3.4, L3.5 | assumed (design argument, not a theorem; the most exposed of the three) |
+| Keyed BLAKE3 is a secure PRF | L3.3 (with L3.4/L3.5 reduced to it in §2.1) | assumed (design argument, not a theorem; the most exposed of the three) |
 | HChaCha20 is a secure PRF | L3.2 | assumed, and a *separate* conjecture from L3.1 though it is the same permutation |
 | The two-level derivation cascade is a PRF | **Thm 1** | **proved** here from L3.1 + L3.2, not assumed — the same construction XChaCha20 rests on, but with the argument written out |
 | "The 520-bit XOF output gives more than `2^256` collision resistance" | §4.5 | **falsified**: the whole output is a function of a 256-bit chain value, so collisions are `2^128`-class and the width cannot raise them. (The claim was never needed for commitment — that is a *target*, §3 Thm 2 — which is why falsifying it does not weaken the scheme's commitment) |
@@ -368,14 +436,15 @@ satisfiable* (no contradiction hides in the set) and *non-redundant* (none is a 
 another, or it is doing no work and should be deleted). Both are discharged here, which is the
 part of an assumption audit that usually goes missing.
 
-**Consistency: the five hold together, in one model.** Take `CC` and `HC` to be independent random
-functions of their inputs (each is then a PRF, so L3.1 and L3.2 hold), and take keyed BLAKE3 to
-be a random oracle `R(k, x)` whose output stream is uniform and independent for every distinct
-`(k, x)`. Then:
+**Consistency: the conjectures hold together, in one model.** Take `CC` and `HC` to be independent
+random functions of their inputs (each is then a PRF, so L3.1 and L3.2 hold), and take keyed
+BLAKE3 to be a random oracle `R(k, x)` whose output stream is uniform and independent for every
+distinct `(k, x)`. Then:
 
 * L3.3 holds: at a fixed `x`, `k ↦ R(k, x)` is a random function;
 * L3.4 holds: whatever the tree does with chaining values, the root's output is a fresh uniform
-  string per distinct root input — there is no structure left to exploit;
+  string per distinct root input — there is no structure left to exploit (and §2.1 reduces it to
+  L3.3 + Lemma T, so a model of L3.3 that also satisfies Lemma T models it);
 * L3.5 holds: later output blocks are part of the same uniform stream.
 
 So no two assumptions contradict each other, and the idealised world the reductions compare
@@ -393,8 +462,8 @@ separation needs to be when the two statements are about different objects:
 | --- | --- | --- |
 | L3.1 (CC is a PRF) | L3.2 (HC is a PRF) | the object is the *same* permutation `P`; `P(x)+x` is a PRF up to the birthday bound and false beyond it, while `trunc(P(y))` is not a PRF at all (a truncated permutation is distinguished by collision counting). §2.1's "why L3.1 and L3.2 are two conjectures" |
 | L3.2 | L3.1 | the same pair, read the other way: dropping the feed-forward is not a strengthening |
-| L3.3 (keyed compression is a PRF) | L3.4 (the tree preserves it) | keep BLAKE3's compression, change only the *root's input assembly* so that half of the left chaining value is ignored: the compression is still a PRF, but two messages differing in the ignored half have identical roots *deterministically*, and no PRF does that |
-| L3.3 or L3.4 | L3.5 (the XOF keeps it past block 1) | keep the compression and the tree, define output block `i ≥ 1` as a constant: the first block is still a PRF and the tree is untouched, while the multi-block output carries no input-dependence at all |
+| L3.3 (keyed compression is a PRF) | L3.4 (the tree preserves it) | keep BLAKE3's compression, change only the *root's input assembly* so that half of the left chaining value is ignored: the compression is still a PRF, but two messages differing in the ignored half have identical roots *deterministically*, and no PRF does that. So L3.3 **alone** does not give L3.4 — but L3.3 + Lemma T does (§2.1): the separated object is precisely one where Lemma T fails, and BLAKE3's own assembly is one where it holds |
+| L3.3 | L3.5 (the XOF keeps it past block 1) | keep the compression and the tree, define output block `i ≥ 1` as a constant: the first block is still a PRF and the tree is untouched, while the multi-block output carries no input-dependence at all. Again L3.3 alone does not give it, but with the output counter in the compression input (BLAKE3's own assembly) the blocks are distinct points and §2.1 reduces it |
 | L3.3 | L3.6 (the composed tag map is a PRF) — **the row that motivated `v0.3`** | the grep-the-key hash of §2.1: `B3'(k, x) = 0` if `k` occurs in `x`, else `B3(k, x)`. L3.3 holds up to `q·2^-256`; the composed map of the *single-level* tag is the constant zero function. This separation is why the two-level tag exists: it removes the composed map rather than assuming it is a PRF |
 | any of L3.1–L3.3 | any other | different objects: they are statements about three different primitives, so nothing follows in either direction, and the document cites each only for the layer that uses it |
 
@@ -1232,7 +1301,7 @@ missing later (L3.6, §2.1).
 * **Beyond the model.** Side channels, fault injection, a debugger, cold boot, a hostile
   hypervisor: out of scope here and covered where they belong.
 * **What "no unknown problem" can and cannot mean.** A break of this construction must be a
-  break of L3.1–L3.5 or of an L1 composition theorem; §4.10 proves that the *combination* adds
+  break of L3.1–L3.5 (irreducibly L3.1–L3.3, §2.1) or of an L1 composition theorem; §4.10 proves that the *combination* adds
   no conjunct of its own. Through `v0.2` the encoding added one further conjunct (L3.6, the
   `K`-in-input step); `v0.3`'s two-level tag removed it, so the sentence is now stronger. But a
   proof that no unknown cryptanalytic relation exists between ChaCha20 and BLAKE3 is not something
@@ -1254,20 +1323,21 @@ missing later (L3.6, §2.1).
 **The strongest true sentence about this construction.** It is worth writing the whole audit's
 conclusion as one paragraph, because it is easy to read the rest as more than it is:
 
-> Given the five conjectures of §2.1 — L3.1–L3.5, which is exactly what the primitives' own
-> assumptions provide, with nothing added by this construction's encoding — the scheme is a secure
+> Given the three irreducible primitive conjectures of §2.1 — L3.1, L3.2 and L3.3, with L3.4/L3.5
+> reduced to L3.3 there and A4 proved by inspection, being exactly what the primitives' own
+> assumptions provide and nothing added by this construction's encoding — the scheme is a secure
 > MRAE/DAE authenticated encryption: its confidentiality, authenticity, and both commitment
 > properties follow from those conjectures by the reductions in §3, its collision-limited
 > properties sit at `2^128` and its target-limited ones at `2^520` or the key's own `2^256`, the
 > composition adds no assumption of its own (§2.3, §4.10), and the reduction's hybrid chain is
 > valid under nonce repetition as well as under nonce uniqueness (§3's lemma).
 
-There is *no* proof of security in the standard model, and there cannot be one: the five
-conjectures are statements about the infeasibility of computation on primitives nobody has
-proven anything about, and a document that claimed otherwise would be wrong for a reason no
+There is *no* proof of security in the standard model, and there cannot be one: the three
+irreducible conjectures are statements about the infeasibility of computation on primitives nobody
+has proven anything about, and a document that claimed otherwise would be wrong for a reason no
 amount of internal consistency can repair. What the document establishes is the other half — that
-the *construction* is not where the risk is: every risk is one of five named conjectures, each with
-a falsifier, and all five are about single primitives rather than about this scheme.
+the *construction* is not where the risk is: every risk is one of three named conjectures, each with
+a falsifier, and all three are about single primitives rather than about this scheme.
 
 ---
 
