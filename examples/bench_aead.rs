@@ -25,7 +25,7 @@ fn main() {
     let aad = b"associated data";
 
     println!("=== XChaCha20-BLAKE3-SIV 性能基准 ===\n");
-    println!("消息大小\t\t加密 (MB/s)\t解密 (MB/s)");
+    println!("消息大小\t\t加密 (MiB/s)\t解密 (MiB/s)");
     println!("=============================================");
 
     for &size in &[64usize, 256, 1024, 4096, 16384, 65536, 1048576] {

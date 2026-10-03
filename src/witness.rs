@@ -545,7 +545,20 @@ fn keyed_xof(key: &[u8; 32], parts: &[&[u8]], out: &mut [u8]) {
 /// `(k_in, k_out, enc_seed)`, recomputed the way the crate specifies it: two
 /// ChaCha20 blocks under the subkey nonce, counters 0 (the two tag keys) and 1
 /// (the encryption seed).
-fn material(key: &[u8; 32], nonce: &[u8; NONCE_LEN]) -> ([u8; 32], [u8; 32], [u8; 32]) {
+///
+/// Writes through the caller's slices rather than returning a `([u8; 32], [u8; 32],
+/// [u8; 32])` tuple: an aggregate return materialises an unnamed temporary holding
+/// all three keys, which no `wipe` in this function can name. That is the same
+/// defect `src/lib.rs::derive_material`/`derive_enc` were rewritten away from (see
+/// `derive_enc`'s doc), and a stack scan found the witness reintroducing it —
+/// `k_out` survived as a full 32-byte run after `witness::decrypt`.
+fn material(
+    key: &[u8; 32],
+    nonce: &[u8; NONCE_LEN],
+    k_in: &mut [u8; 32],
+    k_out: &mut [u8; 32],
+    enc_seed: &mut [u8; 32],
+) {
     let mut hch_nonce = [0u8; 16];
     hch_nonce.copy_from_slice(&nonce[0..16]);
     let mut subkey = hchacha20(key, &hch_nonce);
@@ -559,11 +572,8 @@ fn material(key: &[u8; 32], nonce: &[u8; NONCE_LEN]) -> ([u8; 32], [u8; 32], [u8
     let mut block1 = [0u8; 64];
     keystream_xor(&subkey, 1, &sub_nonce, &[0u8; 64], &mut block1);
 
-    let mut k_in = [0u8; 32];
     k_in.copy_from_slice(&block0[0..32]);
-    let mut k_out = [0u8; 32];
     k_out.copy_from_slice(&block0[32..64]);
-    let mut enc_seed = [0u8; 32];
     enc_seed.copy_from_slice(&block1[0..32]);
 
     // `subkey` and the two blocks are key-derived and are wiped. `sub_nonce` and `hch_nonce`
@@ -575,7 +585,6 @@ fn material(key: &[u8; 32], nonce: &[u8; NONCE_LEN]) -> ([u8; 32], [u8; 32], [u8
     wipe(&mut hch_nonce);
     wipe(&mut block0);
     wipe(&mut block1);
-    (k_in, k_out, enc_seed)
 }
 
 /// The 65-byte tag, recomputed in two levels: an inner keyed hash of the public
@@ -612,7 +621,17 @@ pub fn tag(
 }
 
 /// `(enc_key, enc_nonce)` from the seed and the whole tag.
-fn enc_material(enc_seed: &[u8; 32], tag: &[u8; TAG_LEN]) -> ([u8; 32], [u8; 12]) {
+///
+/// Writes through the caller's slices for the same reason [`material`] does: the
+/// 44-byte `(enc_key, enc_nonce)` tuple this used to return left an unnamed return
+/// temporary, and `src/lib.rs::derive_enc`'s doc records a stack scan finding exactly
+/// that tail surviving a round trip.
+fn enc_material(
+    enc_seed: &[u8; 32],
+    tag: &[u8; TAG_LEN],
+    enc_key: &mut [u8; 32],
+    enc_nonce: &mut [u8; 12],
+) {
     let mut input = [0u8; 8 + TAG_LEN];
     input[0..8].copy_from_slice(&DOM_ENC);
     input[8..].copy_from_slice(tag);
@@ -620,15 +639,12 @@ fn enc_material(enc_seed: &[u8; 32], tag: &[u8; TAG_LEN]) -> ([u8; 32], [u8; 12]
     let mut material = [0u8; 44];
     keyed_xof(enc_seed, &[&input], &mut material);
 
-    let mut enc_key = [0u8; 32];
     enc_key.copy_from_slice(&material[0..32]);
-    let mut enc_nonce = [0u8; 12];
     enc_nonce.copy_from_slice(&material[32..44]);
 
     // The tag is a hash of key material and the 44 bytes are the per-message key and nonce.
     wipe(&mut input);
     wipe(&mut material);
-    (enc_key, enc_nonce)
 }
 
 /// The whole decryption, independently: writes the plaintext into `plaintext` and returns
@@ -654,8 +670,13 @@ pub fn decrypt(
         ciphertext.len(),
         "witness: the output buffer must be the length of the ciphertext"
     );
-    let (mut k_in, mut k_out, mut enc_seed) = material(key, nonce);
-    let (mut enc_key, mut enc_nonce) = enc_material(&enc_seed, received_tag);
+    let mut k_in = [0u8; 32];
+    let mut k_out = [0u8; 32];
+    let mut enc_seed = [0u8; 32];
+    material(key, nonce, &mut k_in, &mut k_out, &mut enc_seed);
+    let mut enc_key = [0u8; 32];
+    let mut enc_nonce = [0u8; 12];
+    enc_material(&enc_seed, received_tag, &mut enc_key, &mut enc_nonce);
 
     keystream_xor(&enc_key, 0, &enc_nonce, ciphertext, plaintext);
 
@@ -677,7 +698,10 @@ pub fn encrypt_tag(
     aad: &[u8],
     plaintext: &[u8],
 ) -> [u8; TAG_LEN] {
-    let (mut k_in, mut k_out, mut enc_seed) = material(key, nonce);
+    let mut k_in = [0u8; 32];
+    let mut k_out = [0u8; 32];
+    let mut enc_seed = [0u8; 32];
+    material(key, nonce, &mut k_in, &mut k_out, &mut enc_seed);
     let t = tag(&k_in, &k_out, nonce, aad, plaintext);
     wipe(&mut k_in);
     wipe(&mut k_out);

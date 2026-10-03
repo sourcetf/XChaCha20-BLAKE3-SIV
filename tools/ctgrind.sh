@@ -99,6 +99,21 @@ TARGET=x86_64-unknown-linux-gnu
 SUPP="$(pwd)/tests/ctgrind.supp"
 [ -f "$SUPP" ] || { echo "missing tests/ctgrind.supp" >&2; exit 1; }
 
+# `cargo test --no-run` honours CARGO_TARGET_DIR; find the binary where it actually
+# wrote. Hard-coding `target/...` found a stale `ctgrind-*` (or none, and aborted exit 1,
+# which verify.sh reads as a hard failure rather than the exit-3 "could not run").
+# Resolved to an absolute path so it names the same directory inside the self-test copy,
+# the way `tools/fi_instruction.sh` does it.
+if [ -n "${CARGO_TARGET_DIR:-}" ]; then
+  case "$CARGO_TARGET_DIR" in
+    /*) TARGET_DIR="$CARGO_TARGET_DIR" ;;
+    *)  TARGET_DIR="$(pwd)/$CARGO_TARGET_DIR" ;;
+  esac
+else
+  TARGET_DIR="$(pwd)/target"
+fi
+DEPS_DIR="$TARGET_DIR/$TARGET/release/deps"
+
 # ── The suppression file may only name the decision ────────────────────
 # An entry permits every conditional jump in the function it names, so an entry
 # naming an entry point reads as "the decision is permitted" while permitting any
@@ -131,9 +146,9 @@ RUSTFLAGS="-C target-feature=+crt-static -C strip=none" \
 # `set -e`, and `grep -v` exits 1 when nothing is left, which killed the whole
 # script at this line -- silently, because the `[ -n "$BIN" ]` that reports it
 # never ran. A failure here has to arrive with a reason.
-BIN=$(ls -t "target/$TARGET/release/deps/"ctgrind-* 2>/dev/null \
+BIN=$(ls -t "$DEPS_DIR/"ctgrind-* 2>/dev/null \
       | grep -vE '\.(d|o)$' | head -1 || true)
-[ -n "$BIN" ] || { echo "could not find the ctgrind test binary under target/$TARGET/release/deps/" >&2; exit 1; }
+[ -n "$BIN" ] || { echo "could not find the ctgrind test binary under $DEPS_DIR/" >&2; exit 1; }
 echo "binary: $BIN"
 
 # ── 1. The negative control must be detected ───────────────────────────
@@ -292,10 +307,13 @@ PLANT
   fi
 
   ( cd "$WORK/tree"
+    # Same directory the main build used, so the planted binary is found where this
+    # script looks for it (`$DEPS_DIR`) even when CARGO_TARGET_DIR is set.
+    export CARGO_TARGET_DIR="$TARGET_DIR"
     RUSTFLAGS="-C target-feature=+crt-static -C strip=none" \
       cargo test --release --target "$TARGET" --test ctgrind --no-run \
       "${CARGO_ARGS[@]+"${CARGO_ARGS[@]}"}" >/dev/null )
-  planted_bin="$(ls -t "$WORK/tree/target/$TARGET/release/deps/"ctgrind-* 2>/dev/null \
+  planted_bin="$(ls -t "$DEPS_DIR/"ctgrind-* 2>/dev/null \
                  | grep -vE '\.(d|o)$' | head -1 || true)"
   [ -n "$planted_bin" ] || { echo "FAIL: no planted test binary" >&2; exit 1; }
 

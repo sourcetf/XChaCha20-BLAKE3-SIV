@@ -205,11 +205,18 @@ fn differential_detached_matches_reference() {
 #[test]
 fn differential_every_position_is_authenticated() {
     let f = parse_fixture();
+    // Count what was actually swept. The row filter below is a size cap, and a
+    // regenerated fixture whose sizes all exceeded it would make this test scan
+    // zero positions and pass vacuously; the floor at the end forbids that.
+    let mut swept_rows = 0usize;
+    let mut swept_positions = 0usize;
     for (msg_len, aad_len, ct, tag) in &f.rows {
         // Sweep a subset of rows: all of them would be O(total bytes).
         if *msg_len > 300 {
             continue;
         }
+        swept_rows += 1;
+        swept_positions += ct.len() + TAG_LEN;
         let aad = aad_for(*aad_len);
 
         for pos in 0..ct.len() {
@@ -229,6 +236,11 @@ fn differential_every_position_is_authenticated() {
             );
         }
     }
+    assert!(
+        swept_rows >= 10 && swept_positions > 0,
+        "the sweep skipped everything ({swept_rows} rows, {swept_positions} positions): the \
+         fixture no longer has rows under the size cap"
+    );
 }
 
 /// The AAD must be authenticated in full: flipping any AAD bit must be
@@ -237,9 +249,14 @@ fn differential_every_position_is_authenticated() {
 #[test]
 fn differential_every_aad_bit_is_authenticated() {
     let f = parse_fixture();
+    // As above: a floor, so a fixture with no small-AAD rows cannot make this vacuous.
+    let mut swept_rows = 0usize;
     for (msg_len, aad_len, ct, tag) in &f.rows {
         if *aad_len > 130 {
             continue;
+        }
+        if *aad_len > 0 {
+            swept_rows += 1;
         }
         let aad = aad_for(*aad_len);
         for pos in 0..aad.len() {
@@ -251,6 +268,11 @@ fn differential_every_aad_bit_is_authenticated() {
             );
         }
     }
+    assert!(
+        swept_rows >= 5,
+        "the AAD sweep covered only {swept_rows} non-empty rows: the fixture no longer has \
+         rows under the size cap"
+    );
 }
 
 /// The large-size fixture, whose expected output is a digest rather than bytes.

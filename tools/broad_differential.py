@@ -20,8 +20,10 @@ kernels (the default) and with `--features pure`.
 
 Requires the `blake3` module (pip install blake3).  Exit codes, matching the
 repository's convention: **0** all vectors match, **1** a mismatch (printing the
-vector that produced it), **3** could-not-run (the `blake3` module is absent, or
-cargo could not build the example).  The 3 matters: `verify.sh` maps it to a
+vector that produced it) — including the example exiting non-zero, since a panic
+on some input is a defect in the crate, not a harness that failed to run — and
+**3** could-not-run (the `blake3` module is absent, or cargo could not *build* the
+example).  The 3 matters: `verify.sh` maps it to a
 *skipped* stage, so a host that simply cannot run this must not report a failure —
 before this code existed, a missing `blake3` raised out of `main` and exited 1,
 which reads as a mismatch.
@@ -84,27 +86,50 @@ def vectors(count, seed):
         yield key, nonce, aad, msg
 
 
+def example_binary():
+    """Path `cargo build` writes the example to, honouring CARGO_TARGET_DIR."""
+    target = os.environ.get("CARGO_TARGET_DIR") or os.path.join(ROOT, "target")
+    if not os.path.isabs(target):
+        target = os.path.join(ROOT, target)
+    return os.path.join(target, "release", "examples", "xsiv_stdin")
+
+
+def build_example(features):
+    """Build the example separately, so a build failure is exit 3 and only a run failure is 1."""
+    cmd = ["cargo", "build", "--release", "--quiet", "--example", "xsiv_stdin"]
+    if features:
+        cmd += ["--features", features]
+    proc = subprocess.run(cmd, cwd=ROOT, capture_output=True, text=True)
+    if proc.returncode != 0:
+        print(f"could not run: could not build the crate's example:\n{proc.stderr}", file=sys.stderr)
+        sys.exit(3)
+    return example_binary()
+
+
 def run_crate(pairs, features):
     """Feed the vectors to the crate, return its outputs."""
+    binary = build_example(features)
     lines = [
         "{} {} {} {}".format(
             key.hex(), nonce.hex(), aad.hex() or "-", msg.hex() or "-"
         )
         for key, nonce, aad, msg in pairs
     ]
-    cmd = ["cargo", "run", "--release", "--quiet", "--example", "xsiv_stdin"]
-    if features:
-        cmd += ["--features", features]
     proc = subprocess.run(
-        cmd,
+        [binary],
         cwd=ROOT,
         input="\n".join(lines) + "\n",
         capture_output=True,
         text=True,
     )
     if proc.returncode != 0:
-        print(f"could not run: the crate's own tool failed:\n{proc.stderr}", file=sys.stderr)
-        sys.exit(3)
+        # `cargo run` used to collapse this into "could not run" (exit 3), which verify.sh
+        # turns into a skip -- so a panic on some input, a real defect, was reported as a
+        # check that simply did not happen. The example is built by now, so a non-zero exit
+        # is the crate failing on real input: that is the mismatch this tool exists to find.
+        print(f"mismatch: the crate's example exited {proc.returncode}", file=sys.stderr)
+        print(proc.stderr, file=sys.stderr)
+        sys.exit(1)
     out = [line for line in proc.stdout.splitlines() if line.strip()]
     if len(out) != len(lines):
         # The harness itself is broken (the example printed the wrong number of lines), which

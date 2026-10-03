@@ -87,6 +87,10 @@ for i in range(n):
 PY
 }
 
+# `cargo build` honours CARGO_TARGET_DIR, so the runs below must use the same directory.
+# Hard-coding `./target` profiled a stale binary while building into $CARGO_TARGET_DIR,
+# and -- because a stale binary still produces identical counters -- could PASS.
+TARGET_DIR="${CARGO_TARGET_DIR:-target}"
 cargo build --release --quiet --example xsiv_stdin ${FEATURES:+--features "$FEATURES"}
 
 # Which configuration the verdicts below are about. Printed in every mode, so a log that
@@ -110,7 +114,7 @@ if [ "${1:-}" = "--trace" ]; then
       # same addresses in both runs. That requirement is this mode's main caveat -- it
       # needs a controlled layout, which is not a statement about a hostile process.
       setarch --addr-no-randomize "$VALGRIND" --tool=lackey --trace-mem=yes \
-        ./target/release/examples/xsiv_stdin ${extra[@]+"${extra[@]}"} \
+        "$TARGET_DIR/release/examples/xsiv_stdin" ${extra[@]+"${extra[@]}"} \
         < "$work/t-$side.txt" 2>&1 \
         | grep -E "^[ILSM] " > "$work/$phase-$side.trace" || true
     done
@@ -143,7 +147,20 @@ fi
 # require the mode under test to catch it. A self-test that cannot fail proves
 # nothing, so this checks the exit status rather than printing what came out. ──
 if [ "${1:-}" = "--selftest" ]; then
-  mode="${2:-}"; count="${3:-32}"
+  shift
+  # `--selftest [vectors] [--trace]`: loop rather than reading fixed positions, or
+  # `--selftest 4` read the vector count as the mode and `--selftest 12 --trace` read
+  # `--trace` as the count -- the inner run then silently did counts mode, not trace.
+  mode=""; count="32"
+  for arg in "$@"; do
+    case "$arg" in
+      --trace) mode="--trace" ;;
+      ''|*[!0-9]*)
+        echo "usage: tools/cache_profile.sh --selftest [vectors] [--trace]" >&2
+        exit 1 ;;
+      *) count="$arg" ;;
+    esac
+  done
   # `$mode` is the mode flag for the inner run (`--trace` or nothing), which is what the
   # messages below have to name -- an earlier version printed it as if it were a mode
   # name and reported "detected by " with an empty field.
@@ -213,7 +230,7 @@ profile() {  # args..., then in-file and out-file are last two
   local extra=("${@:1:$#-2}")
   local in="${@: -2:1}" out="${@: -1}"
   "$VALGRIND" --tool=cachegrind --cache-sim=yes --branch-sim=yes \
-    --cachegrind-out-file="$out" ./target/release/examples/xsiv_stdin \
+    --cachegrind-out-file="$out" "$TARGET_DIR/release/examples/xsiv_stdin" \
     ${extra[@]+"${extra[@]}"} < "$in" > /dev/null 2>&1
 }
 

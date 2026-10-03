@@ -146,8 +146,8 @@ before 1.0 would be a revision bump, not a silent one.
   plaintext is wiped, never returned.
 - **Zeroization** — intermediate secrets are wiped with volatile stores; the
   returned `Plaintext` wipes itself on drop, and so does the `Key` that
-  `random::generate_key` returns; and BLAKE3's internal state (which holds the MAC
-  key) is explicitly zeroized, since it is unreachable from here and is not cleared
+  `random::generate_key` returns; and BLAKE3's internal state (which holds the
+  keyed-BLAKE3 key material) is explicitly zeroized, since it is unreachable from here and is not cleared
   on drop. It is a *volatile-store* wipe, which is a bound worth stating: it does
   not cover a page that was already swapped out, a core dump, or a cold boot — see
   "What this crate cannot fix for you" below.
@@ -171,7 +171,7 @@ before 1.0 would be a revision bump, not a silent one.
 | Confidentiality (plaintext recovery) | 256-bit | the ChaCha20 key |
 | Forgery resistance | **256-bit** | BLAKE3 keyed mode as a PRF over a 256-bit key; a *target* problem, so no birthday search applies |
 | Context commitment **against a given ciphertext** (the target game) | `2^-520` per candidate key (other than the real one) | a target hit in the 520-bit output: the width is what sets it. The literature's CMT-3 is *attacker-chosen*, not this — see below |
-| Key commitment **against a given ciphertext** (the target game) | `2^-520` per candidate key (other than the real one) | the same; the key material is bound into the tag's derivation across three independent values (`k_in`, `k_out`, `enc_seed`) |
+| Key commitment **against a given ciphertext** (the target game) | `2^-520` per candidate key (other than the real one) | the same; the key material is bound into the tag's derivation across three separate values (`k_in`, `k_out`, `enc_seed`) |
 | Commitment in the **attacker-chosen** games (invisible salamanders, CMT-1/CMT-3) | **not derived here** | the adversary outputs both keys, both messages and `(C,T)`, so `2^520` does not describe it; the colliding-tag step is `2^128` and the completion is unanalysed. `SECURITY-ANALYSIS.md` §4.5 |
 | Tag collision resistance (the DAE bound's collision term) | **2^128** | the *chaining value*, not the tag: keyed BLAKE3's output is a function of its 256-bit state, so a state collision gives byte-identical tags of any length |
 
@@ -220,7 +220,7 @@ literature's names next to the number and let the reader assume it covered them:
   the colliding-tag search, `q²/2^257` with birthday point `2^128` (the state collision above);
   the completion — making one `C` consistent with two keys, which needs `M₂ = M₁ ⊕ KS₁ ⊕ KS₂` while
   `KS₂` is derived from the very tag being fixed — is circular and is not worked out. So the
-  construction's commitment in those games rests on the design argument (three independent derived
+  construction's commitment in those games rests on the design argument (three separate derived
   values bound into a two-level tag, §4.10 and Thm 2) rather than on a computed probability, and
   `SECURITY-ANALYSIS.md` records it as an open obligation rather than a bound.
 
@@ -258,7 +258,7 @@ not cryptographic hardness.
 **The reduction, written out.** [SECURITY-ANALYSIS.md](SECURITY-ANALYSIS.md) is the
 mathematical treatment: the construction as a tuple of functions, each assumption as an
 explicit game, the SIV/DAE theorem with its five-hop reduction and concrete bound
-(`q²/2^257 + q·2^-520` plus the PRF advantages — `2·Adv^{A3}` for the two-level tag and the
+(`q²/2^257 + q·2^-520` plus the PRF advantages — `3·Adv^{A3}` for the two-level tag and the
 key derivation, with **no** `L3.6` term since `v0.3` removed it), every pair of uses of one
 primitive enumerated with what separates it, and a falsification table — what would refute
 each claim, which refutations have been attempted, and which are out of reach of any test.
@@ -268,13 +268,15 @@ which a keystream derived from `(key, nonce)` alone would fail while every other
 the suite still passed) and `the_key_material_block_is_not_the_message_keystream`.
 
 **What no tool here detects: variable-latency operations on secrets.** ctgrind
-reports branches and memory indices that depend on poisoned data; a division, a
-remainder or a float operation has neither, and its latency varies inside the ALU with
+reports branches that depend on poisoned data (memcheck does not report an *address*
+derived from a poisoned byte, see `tests/ctgrind.rs`); a division, a
+remainder or a float operation has neither a branch nor a secret-dependent index, and its latency varies inside the ALU with
 the operand. Measured, not assumed: with a division by a secret-derived byte planted
 inside `decrypt`, ctgrind passes and the release timing screen reports t = 0.22 / 0.48
 — the effect on this CPU is a few cycles against a floor of about seventeen. The
 control is therefore a list rather than a tool: `tests/variable_latency.rs` inventories
-every `/` and `%` in the crate's non-test source and fails if one appears that is not
+every literal `/` and `%` in `src/lib.rs`'s non-test source (not in `src/witness.rs`, and
+only the literal operators, not divisions hidden behind a helper) and fails if one appears that is not
 in the table with a reason. It makes them visible; it cannot tell whether one is safe,
 and the table's one entry today divides by the compile-time alignment of `usize`.
 
@@ -303,8 +305,8 @@ ciphertext, tag and AAD is rejected by the tests, and every fuzz run recorded in
 CI has found no acceptance — but those are *non-physical* analogues: they show the
 acceptance predicate is exact, not that the decision survives a glitch.  (This
 claimed a specific "115 million fuzz executions".  No artefact in the repository
-records that many: the configured budget is 120 s locally and 300 s in CI, at
-roughly 1100 exec/s.  The claim is removed rather than re-derived, because a number
+records that many: the configured budget is 120 s locally and 300 s in CI.  The claim is
+removed rather than re-derived, because a number
 nobody can reproduce is worth less than no number.)
 
 ### The `hardened` decision — on by default
@@ -315,9 +317,10 @@ an opt-in: the property it protects is the one a forgery turns on, it costs noth
 on large messages, and an opt-in that most callers never enable would mean most
 callers are unprotected while this file claims hardening. `default-features = false`
 gives the single-gate build back for a caller who has measured the cost. It makes
-the decision two independently *recomputed* checks, each with its own branch, so
-one skipped instruction reaches the other gate instead of accepting. "Recomputed"
-is load-bearing and is enforced rather than hoped for: the second gate re-reads
+the decision two comparisons over the same values, the second independently *shaped*,
+each with its own branch, so
+one skipped instruction reaches the other gate instead of accepting. The second
+comparison is load-bearing and is enforced rather than hoped for: the second gate re-reads
 both operands with a volatile read, because the two gate expressions are otherwise
 identical and an optimizer is entitled to merge them into one comparison — which
 would leave one fault carrying both gates. Both combinations use `&` and never
@@ -336,7 +339,7 @@ something — it must *fail* when the second gate is replaced by a copy of the f
 | A single corrupted byte or bit **inside the decision function** | **defended, and measured**: `tools/fi_instruction.sh` sweeps every byte of the compiled `accept_or_reject` — both fault models, three configurations — and attributes each accepting fault to the symbol it sits in. Accepting faults inside the decision: **0 in the `hardened` build and 0 in `ultra`, in both models**. The opt-out build has **3** in the bit-flip model, which is the control that the sweep reaches the decision at all: its single `test`/`je` pair is one flipped bit away from falling through into the accept store, and that is precisely the defect the second gate removes |
 | A single corrupted byte or bit **anywhere in the swept code** (the two *decrypt* entry points — `decrypt` and `decrypt_in_place_detached` — and the decision) | **measured, and not zero — the mechanism is not the gate**: last full local sweep, `(total, inside the decision)` — opt-out `2, 0` (nop) and `117, 3` (bits); `hardened` `0, 0` and `1, 0`; `ultra` `0, 0` and `4, 0`. The accepting sites outside the decision are in the shared KDF/MAC/SIMD code, and several are the middle byte of a multi-byte instruction, where corruption desynchronises the decoder and the following bytes execute as different instructions — no source structure prevents that. **The raw totals are not comparable across configurations**, and an earlier revision of this table compared them as if they were: `ultra`'s entry points contain more code than `hardened`'s (the witness call, an extra gate operand, a ciphertext copy), so a longer region naturally collects more accepting bytes even when every one of them is outside the decision. What is comparable is the decision-scoped count, which is why that is what the tool gates on. For scale, the same technique over RustCrypto's `XChaCha20Poly1305` measures 13 of 1081 (nop) and 106 of 8648 (bits) — on a *different region*, its whole tag-verification function rather than a decision helper of 18–25 bytes, so the two are not like-for-like either |
 | A fault inside the constant-time comparison itself (a shortened loop, a corrupted bound) | **closed in every configuration that builds the gates — `hardened` (the default) and above — but not in the opt-out build**: every gate compares the two tags through *two differently written* constant-time comparisons — `subtle`'s per-byte loop and an 8-byte fold into a `u64` — so a fault that shortens one shape leaves the other saying "different", and a forgery needs two faults aimed at two shapes.  The `--no-default-features` build compiles neither the fold nor a second gate, so it keeps its single shape and the accepting sites its own row above reports; that is what "opt-out" means, and the layer table says so.  **Hand-modelled, not by a committed tool**: no script in `tools/` shortens those loops — the campaign's faults are source-level changes of other kinds (`tools/mutation_check.sh` plants a `==` where `ct_eq` was, which is not a shortened loop) and `tools/fi_instruction.sh` sweeps the compiled bytes uniformly rather than aiming at a loop bound — so the counts in this row came from cutting the comparison down by hand in a throwaway copy.  Hand-measured against that fault: an accept after **2,573 attempts** when both comparisons were the same shape (which was the `hardened` build until the fold was made unconditional within the gate-building builds), and **no forgery in 2,000,000 attempts** with both shapes present.  The fold costs **1.4 ns**, measured.  Two faults still defeat both, which is the boundary this row states rather than hides |
-| A fault that replaces the computed tag with a constant, or with the received tag | **not defended by `hardened`, closed by `ultra`/`dual-mac`**: with only `hardened` this is the strongest fault model in the table and it defeats the two gates *together* — either gate is `computed_tag ? tag`, so forcing `computed_tag` to equal `tag` satisfies both at once, and two gates over one value are one gate for this attack, not two witnesses. That half is pinned rather than hidden: `tools/fi_check.sh`'s `computed-tag-replaced` row applies exactly this fault to the hardened build and requires it to be accepted, so a change in either direction is noticed. `dual-mac`, part of `ultra`, closes it by doing the thing an earlier revision of this row said was not done here: computing the tag *twice, independently* — a second MAC pass, and the tag pass is a large part of a short message — and requiring the recomputation to agree with the stored value **and** with the received tag (`recomputed_tag.ct_eq(&computed_tag) & recomputed_tag.ct_eq(tag)`, in both decrypt entry points). A rewritten stored tag then disagrees with the recomputation, and `tools/fi_check.sh`'s `dual-mac-blocks-tag-substitution` row runs that same source fault on the `ultra` build and is rejected there. The residual is the rest of this row's boundary: two faults, one in each derivation, or one aimed at the arithmetic both derivations share (`derive_tag` and the keyed BLAKE3 under it), still defeat it — that is a synchronized two-glitch bench or precision injection, and the answer for a deployment that faces it is a hardware countermeasure — dual-rail logic, an HSM — rather than software |
+| A fault that replaces the computed tag with a constant, or with the received tag | **not defended by `hardened`, closed by `ultra`/`dual-mac`**: with only `hardened` this is the strongest fault model in the table and it defeats the two gates *together* — either gate is `computed_tag ? tag`, so forcing `computed_tag` to equal `tag` satisfies both at once, and two gates over one value are one gate for this attack, not two witnesses. That half is pinned rather than hidden: `tools/fi_check.sh`'s `computed-tag-replaced` row applies exactly this fault to the hardened build and requires it to be accepted, so a change in either direction is noticed. `dual-mac`, part of `ultra`, closes it by doing the thing an earlier revision of this row said was not done here: computing the tag a second time through the shared `derive_tag` path (catching a post-derivation rewrite of the stored value, not a fault inside the derivation) — a second MAC pass, and the tag pass is a large part of a short message — and requiring the recomputation to agree with the stored value **and** with the received tag (`recomputed_tag.ct_eq(&computed_tag) & recomputed_tag.ct_eq(tag)`, in both decrypt entry points). A rewritten stored tag then disagrees with the recomputation, and `tools/fi_check.sh`'s `dual-mac-blocks-tag-substitution` row runs that same source fault on the `ultra` build and is rejected there. The residual is the rest of this row's boundary: two faults, one in each derivation, or one aimed at the arithmetic both derivations share (`derive_tag` and the keyed BLAKE3 under it), still defeat it — that is a synchronized two-glitch bench or precision injection, and the answer for a deployment that faces it is a hardware countermeasure — dual-rail logic, an HSM — rather than software |
 | Two independent faults | not defended — this is where the attacker's cost moves to a synchronized two-glitch bench |
 | A targeted fault inside the tag computation, making it produce the attacker's tag | not defended — precision injection, laboratory grade |
 | Key recovery by differential fault analysis of ChaCha20 | not defended — laboratory grade, and harder against ARX than against AES |
@@ -423,12 +426,18 @@ features" should be one word rather than a checklist someone gets half-right.
 xchacha20-blake3-siv = { version = "0.1", features = ["ultra"] }
 ```
 
+`ultra` includes `rng`, which pulls in `getrandom` and therefore needs an OS entropy
+source. It **does not build on bare-metal `no_std` targets** (e.g. `--features ultra
+--target thumbv7em-none-eabihf` fails with `getrandom`'s "target is not supported");
+a `no_std` caller that wants the same defences without OS randomness should spell them
+out as `features = ["hardened", "dual-mac", "locked"]`.
+
 | Layer | What it defends | Cost (measured, this host) |
 | --- | --- | --- |
-| `hardened` (already default) | a single corrupted decision value or instruction | +10.8% at 64 B, +3.6% at 1 KiB, +0.4% at 1 MiB |
+| `hardened` (already default) | a single corrupted decision value or instruction | +25% at 64 B, +24% at 256 B, +23% at 1 KiB, +11% at 4 KiB, and within the noise floor from 16 KiB up (`performance.md`'s latency and ratio tables are the source) |
 | `hardened` (moved here from `dual-mac`) | a fault inside the shared constant-time comparison (a shortened loop, a corrupted bound): the second gate `AND`s a differently *written* comparison (an 8-byte fold into a `u64`, rather than `subtle`'s per-byte loop), so one fault reaches only one of the two shapes and a forgery needs two faults | **+1.4 ns** per decryption, measured (0.1% at 64 B). It was `dual-mac`-only until the two numbers were put side by side: this cost against a hand-modelled change from "forgery accepted after 2,573 attempts" to "no forgery in 2,000,000" |
 | `dual-mac` | the tag being pinned to a constant or to the received tag — the one model the two gates fail *together* on | +30% at 64 B, +40% at 1 KiB, +24% at 1 MiB on decryption (a +21–40% range); +6–25% on a round trip (the two ranges `Cargo.toml` and the changelog state) |
-| `dual-mac` | the `blake3` dependency's XOF output surviving in its own stack frames: `scrub_stack()` overwrites the 16 KiB below the entry point after the last derivation | ~16 KiB of volatile stores, ~0.5–1 µs per operation, **and ~16 KiB of stack per call**. Measured on a thread with a 32 KiB stack: the default build still runs after 16 KiB of the stack is already consumed, this one does not survive 8 KiB. A caller that spawns threads with small stacks must size them for it — the scrub is a 16 KiB frame, so it can fault the thread it is protecting. The number is public as `stack_requirement_bytes()` (zero outside `dual-mac`), and `the_reported_stack_requirement_is_sufficient` measures that a thread given that budget survives a round trip |
+| `dual-mac` | key residue surviving in stack frames this crate cannot name — the `blake3` dependency's XOF output (`enc_key ‖ enc_nonce`) and, under `pure`, the outer key `k_out`: `scrub_stack()` overwrites the 16 KiB below the entry point after the last derivation | ~16 KiB of volatile stores, ~0.5–1 µs per operation, **and ~16 KiB of stack per call**. Measured on a thread with a 32 KiB stack: the default build still runs after 16 KiB of the stack is already consumed, this one does not survive 8 KiB. A caller that spawns threads with small stacks must size them for it — the scrub is a 16 KiB frame, so it can fault the thread it is protecting. The number is public as `stack_requirement_bytes()` (zero outside `dual-mac`), and `the_reported_stack_requirement_is_sufficient` measures that a thread given that budget survives a round trip |
 | `witness` (in `ultra` only) | a fault aimed at the **derivation arithmetic both tag computations share** — `derive_tag`, the keyed BLAKE3 under it, and the SIMD kernels: the one model `dual-mac` alone cannot close, and where every accepting fault the sweep finds in the `hardened` build sits | decryption costs **2.5x at 64 B, 3.6x at 1 KiB, 10.0x at 64 KiB, 10.1x at 1 MiB** against the default configuration, and the round trip 2.1x/2.6x/5.8x/5.8x in place or 2.3x/3.0x/6.5x/6.9x allocating (measured; the four tables are in [`performance.md`](performance.md), and that file's "what the `ultra` layer costs" table is the one to read for this row). It is a *scalar* implementation, so its cost is per byte, and on the encrypt side it is present **only on the allocating `encrypt`** — see "What the witness is" for why the in-place path does not carry it. It does not make the *totals* in the fault table zero — it removes accepting faults from the decision and from the shared derivation, and the `ultra` build has a handful elsewhere (§§) |
 | `locked` | key pages readable out of **swap** or a **core dump** | ~7 µs once per key (`mlock`+`munlock`), not per message. The key is heap-allocated so its address is stable: `mlock` is address-based, and a key returned by value moves after being locked, which left this layer protecting a dead stack slot |
 | `locked` | a **hardware fault or bit flip in the key page** turning into a silent wrong key | `+42 ns` per use, measured: an 8-byte BLAKE3 tag of the key is stored beside it and checked (constant time) on every `as_bytes()`, so a corrupted page panics at the first use instead of decrypting with a key that is not the caller's. It does not detect a fault that rewrites the tag too, nor one outside the key-and-tag region (the rest of the page is never read) |
@@ -446,7 +455,7 @@ where every accepting fault in the `hardened` build sits.
 
 (§) Measured with `examples/bench_aead.rs`, release, on this host, comparing
 `hardened,dual-mac,locked,rng` — which is `ultra` minus the witness — against `ultra`:
-decryption 30.1 → 20.8 MB/s at 64 B, 259 → 121 at 1 KiB, 1462 → 232 at 64 KiB, 1767 → 192
+decryption 30.1 → 20.8 MiB/s at 64 B, 259 → 121 at 1 KiB, 1462 → 232 at 64 KiB, 1767 → 192
 at 1 MiB, and encryption 46.8 → 32.0, 444 → 247, 2089 → 588, 2406 → 610 on the same
 sizes. The deterministic half of that measurement (cachegrind instruction counts on
 `examples/xsiv_stdin.rs`, per message) agrees: the decrypt path's added work is 17 k
@@ -475,7 +484,7 @@ agreement in rejects. It is not two physically independent machines: same CPU, s
 compiler, same source file tree, so a *systematic* fault (a compiler bug, a wrong constant
 in both implementations, a fault that hits both code paths in one glitch) is still outside
 what this can see. What it does not share, and what makes it worth its price on a large
-message — 10x at 64 KiB and 10.1x at 1 MiB on decryption, measured against `ultra` minus the
+message — 6.3x at 64 KiB and 9.2x at 1 MiB on decryption, measured against `ultra` minus the
 witness above — is the *machine code that computes the tag*.
 
 **`encrypt_in_place_detached` has no encrypt-side cross-check, and that asymmetry is now stated
@@ -593,17 +602,21 @@ deployment.
   cannot reach it.** Measured with `tools/stack_residue.sh`: after a full round trip,
   the master key never appears in the call-chain stack region, but the *XOF output* of
   the keyed hash does — a full 44-byte `enc_key ‖ enc_nonce` — because `blake3` keeps
-  its output block in frames of its own. The key itself is not left (measured: longest
+  its output block in frames of its own. Under the `pure` (Rust-backend) build the
+  outer key `k_out` also survives `derive_tag` as a ~16-byte stack run, so the residue
+  is not only the XOF buffer; `ultra`'s `scrub_stack` is what overwrites the derivation
+  region and clears both, which is why the `ultra` scan reports clean. The key itself
+  is not left (measured: longest
   run 4 bytes); the derived material is. `blake3`'s `zeroize` feature is already on and
   the crate already calls `reader.zeroize(); hasher.zeroize();`, which is the entire
-  reach a caller has. What this means in practice: an attacker who can read this
+  reach a caller has apart from `scrub_stack`. What this means in practice: an attacker who can read this
   process's stack gets per-message encryption keys, not the master key — and such an
   attacker can usually read the caller's own key copy anyway. It is written down here
-  because the crate's own claim ("no copy of the MAC key survives the call") is about
-  the MAC key, and a reader should not extend it to the encryption key. The same scan
+  because the crate's own claim ("no copy of the keyed-BLAKE3 key material survives the call") is about
+  that material, and a reader should not extend it to the encryption key. The same scan
   covers `locked`'s integrity tag — a hash of the master key — and reaches the same
-  conclusion: the crate's own copies are wiped, the residue is the dependency's XOF
-  buffer, and the tool attributes it with a blake3-only control. Three source changes
+  conclusion: the crate's own copies are wiped, the residue is the frames described
+  above (the dependency's XOF buffer, plus `k_out` under `pure`), and the tool attributes it with a blake3-only control. Three source changes
   in this crate reduce the residue that *is* reachable — `derive_enc`, `derive_material`
   and `integrity_tag` all write through caller slices instead of returning an aggregate
   (the last one's return value was a copy of `BLAKE3(key)` in a frame no wipe could
@@ -749,8 +762,10 @@ Two entry points, both runnable from a fresh checkout:
 ./verify.sh --tools         # ...plus the tool-level gates CI runs on every push: the
                             # 13-row fault campaign, both instruction sweeps, the
                             # cache-profile differential and its planted-leak control,
-                            # the planted-bug checks, the Kani cfg check, and the
-                            # 4000-vector differential against the Python reference
+                            # the planted-bug checks, and the Kani cfg check. (The
+                            # 4000-vector differential against the Python reference is
+                            # not an every-push gate: it runs in the scheduled `wide`
+                            # job.)
 ./verify.sh --deep          # every switch above; `--all` is the same set
 ```
 
@@ -813,10 +828,16 @@ works unprivileged, and the emulator is extracted into `~/.local/bin`.
   separate run), the NEON kernel by cross-interpreting the aarch64 target, and
   big-endian execution by cross-interpreting s390x.
 - **Kani** — bounded model checking of the construction shape: that the domain,
-  key, nonce and both lengths reach the hash in the specified layout; that every
-  output byte comes from the hash; that every AAD and message byte reaches the
-  tag; and that `derive_enc` consumes all 65 tag bytes (so the ciphertext
-  commits to all 520 bits). Plus the ChaCha20 counter sequencing, zeroization
+  key and both lengths reach the hash in the layout the spec fixes for the
+  three-part inner shape; that a key change moves *some* output byte (the
+  key-change harness is one-sided, so no harness checks all 65); that every AAD
+  and message byte reaches the tag; and that `derive_enc` consumes all 65 tag
+  bytes (so the ciphertext commits to all 520 bits). Two boundaries: the
+  **nonce** is not varied or read back by any harness, so its binding rests on
+  `test_tag_matches_blake3_over_the_documented_input`, not on Kani; and the
+  contiguous one-part hash shape (2 KiB–64 KiB) is reached by no harness (its
+  stub assertions are documentation, and the shape equivalence is pinned by
+  `test_both_tag_call_shapes_hash_the_same_bytes`). Plus the ChaCha20 counter sequencing, zeroization
   and length-limit harnesses. `-Z stubbing` is required, and the MAC is stubbed
   through a single seam so no call site can escape the model. The suite runs with
   CBMC's extra pointer checks, in parallel shards — those checks were

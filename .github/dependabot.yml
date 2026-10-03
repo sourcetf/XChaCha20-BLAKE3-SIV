@@ -79,3 +79,18 @@ updates:
       # commit where the numbers are re-measured anyway.
       - dependency-name: chacha20poly1305
       - dependency-name: aead
+
+  # `Cargo.toml` excludes `fuzz` from the workspace, so `fuzz/Cargo.toml` (and its own
+  # committed `fuzz/Cargo.lock`) are a second dependency set that the `directory: "/"`
+  # entry above never sees. Without this entry, `libfuzzer-sys` and everything under the
+  # fuzz crate's path dependency would silently never receive a bump.
+  - package-ecosystem: cargo
+    directory: "/fuzz"
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    groups:
+      cargo-minor:
+        patterns: ["*"]
+        update-types: ["minor", "patch"]

@@ -41,7 +41,7 @@ ones the noise floor was computed over.
 
 **Noise floor, measured rather than assumed**: the reference implementation is the *same code*
 in all nine runs (three configurations × three passes), so the spread of its own cells is the
-floor. Across the 189 cell-runs, the median **pass-to-pass** spread is **6.8%**, the 90th
+floor. Across the 63 pass-to-pass cells (189 runs, three passes each), the median spread is **6.8%**, the 90th
 percentile **10%**, the worst cell **15%** (the small sizes and 1 MiB — the first is CPU-boost
 sensitive, the second shares LLC and DRAM with whatever else is on the host). **Differences
 smaller than that are the same number**, which is why most of the `hardened`-vs-`opt-out` column
@@ -193,7 +193,7 @@ has to rediscover it:
   `chacha20_apply` carries these numbers.
 * Wiping BLAKE3's internal state costs 15% of the instructions in a 64-byte round
   trip -- it wipes the whole CV stack, most of which a one-chunk input never
-  touched. It stays: that no copy of the MAC key survives the call is the
+  touched. It stays: that no copy of the keyed-BLAKE3 key material survives the call is the
   guarantee, and only the dependency can say which of its state that covers.
 * Above a few megabytes, intra-message parallelism is real, but it is a policy
   decision rather than an oversight. Hashing 16 MiB with a reused four-thread pool

@@ -299,10 +299,13 @@ fi
 # `--fast` means "no cross-target work", so any cross-execution request has to be
 # dropped before delegating -- and nothing else may be.  `--all` is a single token to
 # `verify.sh` that sets a dozen switches, so under `--fast` it is expanded into the ones
-# that need no cross target (Kani runs natively; so do ctgrind, cargo-deny, fuzzing,
-# TSAN and the tool-level gates) rather than being replaced by `--kani`, which would
-# have silently dropped the rest.  Note the expansion also drops the strict mode that
-# `--all` implies, which is right: a `--fast` run does not claim to be complete.
+# that need no cross target (Kani runs natively; so do miri -- x86_64 and an
+# interpreted aarch64 target, no qemu -- and ctgrind, cargo-deny, fuzzing, TSAN and the
+# tool-level gates) rather than being replaced by `--kani`, which would have silently
+# dropped the rest.  miri used to be omitted here, so `--fast --all` quietly ran a
+# smaller set than `verify.sh --all` minus cross-exec.  Note the expansion also drops
+# the strict mode that `--all` implies, which is right: a `--fast` run does not claim to
+# be complete, so an unavailable miri is a skip rather than a failure.
 if [ "$FAST" -eq 1 ]; then
   FILTERED=()
   saw_all=0
@@ -314,7 +317,7 @@ if [ "$FAST" -eq 1 ]; then
     esac
   done
   if [ "$saw_all" -eq 1 ]; then
-    FILTERED+=(--kani --ctgrind --deny --fuzz --tsan --tools)
+    FILTERED+=(--kani --miri --ctgrind --deny --fuzz --tsan --tools)
   fi
   VERIFY_ARGS=(${FILTERED[@]+"${FILTERED[@]}"})
 fi

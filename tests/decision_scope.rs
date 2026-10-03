@@ -310,6 +310,12 @@ fn the_second_gate_uses_two_comparison_shapes_in_every_configuration() {
          lost this defence before:\n{body}"
     );
     assert!(
+        body.contains("plain & also"),
+        "the independent fold must be ANDed into the returned `Choice`, not merely computed: \
+         keeping the `let also = ...` line but returning `plain` alone passed this test \
+         before:\n{body}"
+    );
+    assert!(
         !body.contains("subtle::Choice::from(1)"),
         "the `dual-mac`-only placeholder (`Choice::from(1)`) must not come back: it is how the \
          default build ended up with a single comparison shape:\n{body}"
@@ -322,6 +328,12 @@ fn the_second_gate_uses_two_comparison_shapes_in_every_configuration() {
     assert!(
         fold[0].contains("u64::from_le_bytes") && fold[0].contains("acc |= x"),
         "the fold must accumulate 8-byte words into one comparison:\n{}",
+        fold[0]
+    );
+    assert!(
+        fold[0].contains("acc.ct_eq(&0u64)"),
+        "the fold must end in a constant-time comparison of the accumulator: a body that kept \
+         the loop but returned `subtle::Choice::from(1)` passed this test before:\n{}",
         fold[0]
     );
 }
@@ -487,6 +499,31 @@ fn the_decision_outcome_is_fail_closed() {
         non_test.matches("& witness_ok").count(),
         2,
         "each entry point must fold that agreement into the gate"
+    );
+    // And the agreement must be built from the witness's own answers, not a placeholder:
+    // requiring only `& witness_ok` let a `Choice::from(1)` replacement pass with the real
+    // comparison deleted. These are the two operands the agreement ANDs together.
+    assert_eq!(
+        non_test.matches("witness_tag.ct_eq(&computed_tag)").count(),
+        2,
+        "each decrypt entry point must compare the witness tag against the computed tag"
+    );
+    // The two decrypt paths compare the witness plaintext against the recovered one in
+    // different shapes: `decrypt` (slices) and `decrypt_in_place_detached` (a slice
+    // against the caller's buffer). One of each, so a `Choice::from(1)` rewrite that
+    // dropped either comparison fails here.
+    assert_eq!(
+        non_test
+            .matches("witness_plaintext.as_slice().ct_eq(plaintext.as_slice())")
+            .count(),
+        1,
+        "`decrypt` must compare the witness plaintext against the recovered plaintext"
+    );
+    assert_eq!(
+        non_test.matches("witness_plaintext.ct_eq(buffer)").count(),
+        1,
+        "`decrypt_in_place_detached` must compare the witness plaintext against the caller's \
+         buffer"
     );
     assert_eq!(
         non_test.matches("witness::decrypt(").count(),

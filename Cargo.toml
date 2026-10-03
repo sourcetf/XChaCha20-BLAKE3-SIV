@@ -24,10 +24,11 @@ getrandom = { version = "0.4", optional = true, default-features = false }
 #
 # **No `pure` here, deliberately: it costs 24-32%.** BLAKE3's `pure` feature
 # selects its Rust-intrinsics backends; without it, BLAKE3 uses its C/assembly
-# SIMD kernels where the target has them. Measured with `benches/bench.rs` on
-# x86_64 (Ryzen 9 7945HX, release+LTO): 966 -> 766 MB/s at 4 KiB, 2540 -> 2053
-# MB/s at 1 MiB, and the whole crate goes from ~30% behind RustCrypto's
-# XChaCha20-Poly1305 at 4-64 KiB to parity or ahead.
+# SIMD kernels where the target has them. Measured on x86_64 (Ryzen 9 7945HX,
+# release+LTO) with `examples/bench_aead.rs`, whose size sweep includes the 1 MiB
+# point: 966 -> 766 MiB/s at 4 KiB, 2540 -> 2053 MiB/s at 1 MiB, and the
+# head-to-head in `benches/compare.rs` puts the whole crate from ~30% behind
+# RustCrypto's XChaCha20-Poly1305 at 4-64 KiB to parity or ahead.
 #
 # Portability is not lost, because BLAKE3's build script *falls back* to the Rust
 # backends when no compiler is available for the target (`support == NoCompiler`).
@@ -90,9 +91,9 @@ subtle = { version = "2.6.1", default-features = false }
 [features]
 # Fault-injection hardening of the accept/reject decision (see the `hardened`
 # section in the crate documentation, and "What is not defended against" in
-# README.md). It makes the decision two independently *recomputed* checks, each with
-# its own branch, so a single skipped instruction reaches the other gate instead of
-# accepting a forgery.
+# README.md). It makes the decision two comparisons over the same values, the second
+# independently *shaped*, each with its own branch, so a single skipped instruction
+# reaches the other gate instead of accepting a forgery.
 #
 # **On by default.** The property it protects is the one a forgery turns on, and it
 # costs nothing on large messages, so an opt-in that most callers never enable would
@@ -119,16 +120,22 @@ hardened = []
 # "ultra" section for what each adds, what it costs (every figure measured), and --
 # importantly -- what still cannot be defended against.
 #
+# `ultra` implies `rng`, so it needs an OS entropy source and does NOT build on
+# bare-metal `no_std` targets (`--features ultra --target thumbv7em-none-eabihf`
+# fails inside `getrandom`); a `no_std` caller should use the equivalent list
+# `--features hardened,dual-mac,locked` instead.
+#
 # `pure` is deliberately *not* here: it forces BLAKE3's portable Rust backends, which
 # costs 24-32% (see the `pure` comment below) and buys no security -- the C/assembly
 # kernels are constant-time by construction and covered by the same differential tests.
 # `ultra` is about defences, not about giving up speed for nothing.
 ultra = ["hardened", "rng", "dual-mac", "locked"]
-# A second, independently recomputed tag on the verify path. Defends against a fault
-# that pins the computed tag to a constant or to the received tag (both gates compare
-# the same two values, so they fail *together* without this). Measured +21..40% on
+# A second derivation through the shared `derive_tag` path on the verify path (it catches
+# a post-derivation rewrite of the stored value, not a fault inside the derivation). Defends
+# against a fault that pins the computed tag to a constant or to the received tag (both gates
+# compare the same two values, so they fail *together* without this). Measured +21..40% on
 # decryption, +6..25% on a round trip.
-# Implies `hardened`: the recomputation only exists to make the *second gate* independent,
+# Implies `hardened`: the second derivation only exists to make the *second gate* differ,
 # so without the gate there is nothing for it to strengthen -- measured with
 # `cargo check --no-default-features --features dual-mac`, which built a second tag
 # derivation, compared it against nothing, and warned that the comparison was dead code.
@@ -140,6 +147,9 @@ locked = []
 
 # Opt-in OS randomness for `generate_key` / `generate_nonce`.  Off by default:
 # `no_std` builds and users who already have an entropy source pay nothing.
+#
+# `getrandom` needs a backend (`std` or an OS RNG), so this feature does not build
+# on bare-metal `no_std` targets -- and `ultra` implies it, see above.
 rng = ["dep:getrandom"]
 
 # Force BLAKE3's portable Rust backends. Off by default: the native ones are

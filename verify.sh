@@ -526,22 +526,28 @@ if [ "$RUN_TOOLS" -eq 1 ]; then
         rm -rf "$work_mut"
         exit "$mut_rc"
       fi
-      # `mutation_evidence.py` exits 3 for "could not compare" (missing or unparseable
-      # directory), which is NOT the same as "the committed evidence is stale". Collapsing
-      # the two made a could-not-run print "commit the fresh run" and silently leave the
-      # committed `mutants.out/` un-restored -- a green stage over a skipped check.
+      # `mutation_evidence.py` distinguishes three outcomes and so must this gate:
+      #   0 = the committed evidence describes this run; restore it over the fresh run.
+      #   3 = "could not compare" (missing or unparseable directory). That is a skipped
+      #       stage, exactly like every other tool's exit 3 -- recorded so `--deep`/`--all`
+      #       refuses to call the run complete rather than printing "all requested checks
+      #       passed" over a check that never happened.
+      #   1 = the committed evidence is stale. That is the finding this gate exists to
+      #       report, so it fails the run; a gate that cannot fail is the bug.
       # `|| ev_rc=$?` rather than a bare call: under `set -e` a non-zero exit (1 *or* 3)
-      # would abort the script here before the branch below could run.
+      # would abort the script here before the branches below could run.
       ev_rc=0
       python3 tools/mutation_evidence.py "$work_mut/committed" mutants.out || ev_rc=$?
       if [ "$ev_rc" -eq 0 ]; then
         rm -rf mutants.out && cp -r "$work_mut/committed" mutants.out
       elif [ "$ev_rc" -eq 3 ]; then
-        echo "      could not compare the committed evidence with this run (exit 3);"
-        echo "      leaving mutants.out/ as the fresh run rather than pretending it matched"
+        skip "mutation evidence" "could not compare the committed evidence with this run (exit 3); mutants.out/ is left as the fresh run rather than pretending it matched"
       else
-        echo "      (mutants.out/ now holds the fresh run: commit it, or throw it away"
-        echo "       with 'git checkout -- mutants.out' if this run was not a source change)"
+        echo "FAILED: the committed mutants.out/ does not describe this source (exit $ev_rc)" >&2
+        echo "        mutants.out/ now holds the fresh run: commit it, or discard it with" >&2
+        echo "        'git checkout -- mutants.out' if this run was not a source change" >&2
+        rm -rf "$work_mut"
+        exit "$ev_rc"
       fi
     else
       skip "mutation evidence" "mutants.out/ is missing"

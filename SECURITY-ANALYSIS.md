@@ -39,7 +39,8 @@ probability statement about secret values, or recorded as a residual with a numb
 ## 1. The construction
 
 Let `{0,1}^*` mean finite byte strings, `‖` concatenation, `⟨n⟩₆₄` the 8-byte little-endian
-encoding of `n`, and `X[a:b]` a byte-range.
+encoding of `n`, and `X[a:b]` a range in the unit the surrounding expression uses — bits in
+this section, bytes in §4.
 
 **Domains.** `SUBKEY_DOMAIN = "XSIV"` (4 bytes), `DOM_PRE = "XSIV-PRE"`, `DOM_TAG = "XSIV-TAG"`,
 `DOM_ENC = "XSIV-ENC"` (8 bytes each). All four are distinct fixed-width byte strings; §4.4 is
@@ -98,9 +99,10 @@ Two structural remarks that the rest of the document depends on:
   tag under `k_out`. SIV does not require this, and it is what makes the tag's PRF claim an
   ordinary keyed-BLAKE3 cascade (§3, Thm 2) rather than a key-dependent-input step. An earlier
   revision (`v0.2`) used a *single* level with `K` in its input, which bound the key more directly
-  but needed an assumption — L3.6 — that no reduction covered; §2.1 records the change. The
-  equal-material route the old layout closed is closed here structurally, by three independent
-  derived values (`k_in`, `k_out`, `enc_seed`) and a 768-bit joint-collision target (§4.10).
+but needed an assumption — L3.6 — that no reduction covered; §2.1 records the change. The
+equal-material route the old layout closed is **not** closed here: all three separate derived
+values (`k_in`, `k_out`, `enc_seed`) are functions of the single 256-bit `subkey`, so it is a
+`2^128` subkey birthday in the attacker-chosen game (§4.5/§4.10), not a structural win.
 
 ---
 
@@ -165,7 +167,8 @@ its separation as the record of *why* that revision was made.
 
 ### 2.1 The assumption tree, layer by layer
 
-Numbering the assumptions A1–A5 is not enough to audit a composition: each of those has to be
+Numbering the assumptions A1–A4 (with A5 a standard-model scope statement rather than a
+conjecture) is not enough to audit a composition: each of those has to be
 pushed down until it rests on something that cannot be pushed further — a theorem with a
 proof and a citation, or a conjecture about a primitive that nobody has proven. This is that
 tree. Every node names its own falsifier, and no node is left as "it's standard".
@@ -351,8 +354,10 @@ and the outer message is the inner digest, which a reduction that has idealised 
 PRF step at a distinct point, not key-dependent) can compute. Neither call has a secret in its
 message, so the key-dependent-input shape is gone, Thm 2's hybrid (i) is the ordinary PRF step,
 and the node is deleted. The price the single level paid for its input-side binding — this
-assumption — is not paid here; the binding that closed the equal-material route is instead
-structural, over three independent derived values (§4.10, and the §2.3 non-redundancy row).
+assumption — is not paid here, but neither is the route that binding closed: the three separate
+derived values are jointly pseudorandom yet all functions of the single 256-bit `subkey`, so the
+equal-material route is a `2^128` subkey birthday rather than a structural separation
+(§4.5/§4.10, and the §2.3 non-redundancy row).
 
 **What supports the replacement is structural, and it is a stronger statement than the design
 argument the single level rested on.** BLAKE3's keyed mode still puts the key words in the initial
@@ -600,20 +605,20 @@ encryption is a uniformly random function of `(N, A, M)` (so repeated queries re
 answer) with the same length profile. Then
 
 ```
-Adv^{priv} ≤ Adv^{A1} + Adv^{A2} + 2·Adv^{A3} + q²/2^257
-Adv^{auth} ≤ Adv^{A1} + Adv^{A2} + 2·Adv^{A3} + q·2^-520 + q²/2^257
+Adv^{priv} ≤ Adv^{A1} + Adv^{A2} + 3·Adv^{A3} + q²/2^257
+Adv^{auth} ≤ Adv^{A1} + Adv^{A2} + 3·Adv^{A3} + q·2^-520 + q²/2^257
 ```
 
 where `q` bounds the adversary's oracle queries and each `Adv` is the *multi-query* PRF
 advantage of the corresponding assumption (each is already defined for a polynomial query
 bound). `Adv^{A1}`/`Adv^{A2}` are the ChaCha20/HChaCha20 terms of the key derivation (Thm 1),
-and the two `Adv^{A3}` terms are the two keyed-BLAKE3 calls the tag is now made of (the inner
-and outer hashes of Thm 2) plus the per-message key derivation — three A3 applications, of
-which the tag's two are counted as `2·Adv^{A3}`. There is no L3.6 term: revision `v0.3`'s
+and the `Adv^{A3}` term is the three A3 applications the scheme makes — the tag's two
+keyed-BLAKE3 calls (the inner and outer hashes of Thm 2) and the per-message key derivation —
+charged as `3·Adv^{A3}`. There is no L3.6 term: revision `v0.3`'s
 two-level tag puts no master key in any hash message, so the tag is an ordinary A3 cascade.
 MRAE security is the pair.
 
-An earlier revision of this document wrote `Adv^{A3} + Adv^{L3.6}` in place of `2·Adv^{A3}` and
+An earlier revision of this document wrote `Adv^{A3} + Adv^{L3.6}` in place of `3·Adv^{A3}` and
 `q²/2^521` in place of `q²/2^257`. The `q²/2^521` treated the 65-byte tag as 65 independent
 random bits, which §4.5 shows it is not; the `Adv^{L3.6}` was the *v0.2* tag's extra assumption,
 now removed rather than priced. Both corrections lower nothing that was not already lower: the
@@ -1192,7 +1197,7 @@ refutation, and the status of the attempt.
 | --- | --- | --- | --- |
 | 1 | A1, A2, A3 (PRF security of the primitives) | A distinguisher for ChaCha20 / HChaCha20 / keyed BLAKE3 | **Not attempted, and not attemptable by test**: these are open problems in cryptanalysis. The evidence is the primitives' standing, their published test vectors (replayed here), and the fact that the construction's use of them is standard |
 | 2 | Tag is a PRF over `(N,A,M)` | Two distinct `(N,A,M)` with equal tags under one key | A *fixed* pair is out of reach (`2^-520`); *searching* for a pair is the chain-value birthday, `q²/2^257` (§4.5), also out of reach. *Structural* variants tested: length ambiguity, A/M swap, trailing zeros, single-byte changes in A and M, key and nonce reaching the tag. Not testable: both numbers are bounds on computation |
-| 3 | Key commitment **against a given ciphertext** (the target game) | A `(C,T)` that opens under two keys | Against a given `(C,T)` this is a target and stays out of reach (`2^-520` per candidate key, a `2^520` search); the *birthday* level for a colliding pair is `2^128` (§4.5), which an invisible-salamander attack against a fixed ciphertext cannot use. *Mechanism* tested: both derived tag keys reach the tag (`test_tag_binds_both_derived_keys`) and Kani proves the inner head and the outer input are what the spec says. **The literature's CMT-1/CMT-3 games are attacker-chosen, not this target; their bound is not derived here** — see the row below and §4.5, "The two commitment games" |
+| 3 | Key commitment **against a given ciphertext** (the target game) | A `(C,T)` that opens under two keys | Against a given `(C,T)` this is a target and stays out of reach (`2^-520` per candidate key, a `2^520` search); the *birthday* level for a colliding pair is `2^128` (§4.5), which an invisible-salamander attack against a fixed ciphertext cannot use. *Mechanism* tested: both derived tag keys reach the tag (`test_tag_binds_both_derived_keys`) and Kani proves the inner head's domain/length fields and the outer input are what the spec says (it does not read the nonce back; that binding is pinned by `test_tag_matches_blake3_over_the_documented_input`). **The literature's CMT-1/CMT-3 games are attacker-chosen, not this target; their bound is not derived here** — see the row below and §4.5, "The two commitment games" |
 | 4 | Keystream is tag-dependent | `ct₁ ⊕ ct₂ = M₁ ⊕ M₂` under one nonce, or `ct` invariant under an AAD change | **Tested**: `nonce_reuse_does_not_reuse_the_keystream` (message change, AAD change, first-block check, attached and in-place paths) |
 | 5 | The two ChaCha20 uses are separate | The key-material block equals the message keystream | **Tested**: `the_key_material_block_is_not_the_message_keystream` (16 trials, key, nonce and keystream compared); the residual is §4.1 |
 | 6 | The KDF consumes the whole tag | A tag byte that does not move the derived key | **Proved + tested**: Kani (all 65 bytes consumed), `test_every_tag_byte_reaches_the_ciphertext` |
@@ -1347,15 +1352,15 @@ a falsifier, and all three are about single primitives rather than about this sc
 
 | Claim | Enforcement |
 | --- | --- |
-| The tag's exact input layout, and that every field reaches the hash | Kani (`tag_is_keyed_hash_of_the_whole_context`, `every_aad_and_message_byte_reaches_the_tag`, `tag_changes_when_the_key_changes`), `test_tag_matches_blake3_over_the_documented_input` |
+| The tag's exact input layout, and that every field reaches the hash | Kani (`tag_is_keyed_hash_of_the_whole_context`, `every_aad_and_message_byte_reaches_the_tag`, `tag_changes_when_the_key_changes`) for the domain, key and both lengths; the **nonce** is not varied or read back by any harness, and the contiguous one-part hash shape (2 KiB–64 KiB) is reached by none, so both rest on `test_tag_matches_blake3_over_the_documented_input` (the shape equivalence is pinned by `test_both_tag_call_shapes_hash_the_same_bytes`) |
 | Every one of the 65 tag bytes is consumed | Kani (`derive_enc_reads_every_tag_byte`), `test_every_tag_byte_reaches_the_ciphertext` |
-| The counter never wraps | `const` assertion, `tests/counter_range.rs`, Kani (`chacha20_counter_sequencing_is_exact`, `max_msg_size_fits_in_the_block_counter`, `max_msg_size_boundary_matches_counter_capacity`) |
+| The counter never wraps | the `const` assertion in `src/lib.rs` and the constant-arithmetic Kani harnesses `max_msg_size_fits_in_the_block_counter` / `max_msg_size_boundary_matches_counter_capacity`, plus the run-time arithmetic in `tests/counter_range.rs`. (`chacha20_counter_sequencing_is_exact` pins per-block *sequencing* at a concrete `start = 7`, not the wrap boundary.) |
 | Domains are distinct, fixed width, and correctly placed | `test_domain_separators_are_pinned`, `test_subkey_domain_occupies_nonce_not_counter` |
 | The AAD and the message are separately bound | `test_aad_message_split_is_unambiguous`, `test_tag_covers_every_aad_and_message_byte` |
 | Nonce reuse cannot reuse a keystream | `nonce_reuse_does_not_reuse_the_keystream` |
 | The two ChaCha20 uses are separate | `the_key_material_block_is_not_the_message_keystream` |
 | The set of primitive uses, and the separations between them | `tests/construction_inventory.rs` |
-| The premise of the §4.5 bound — the tag is exactly the root XOF of the encoded input, with no extra step that could add entropy | `test_tag_matches_blake3_over_the_documented_input`, the published keyed-BLAKE3 KATs, `src/witness.rs` under `ultra`, and the Kani layout harnesses |
+| The premise of the §4.5 bound — the tag is exactly the root XOF of the encoded input, with no extra step that could add entropy | `test_tag_matches_blake3_over_the_documented_input`, the published keyed-BLAKE3 KATs, `src/witness.rs` under `ultra`, and the Kani layout harnesses (the three-part inner shape; the contiguous shape is not reached) |
 | The two-level tag's layout — no hash message contains `K`, and both derived tag keys reach the tag | `derive_tag`'s doc comment in `src/lib.rs`, `test_tag_binds_both_derived_keys`, `test_tag_matches_blake3_over_the_documented_input`, §2.1 (the removal of L3.6), §4.10's closing paragraph |
 | The design on the wire is the design in the paper | The differential fixtures, the published KATs, and `src/witness.rs` under `ultra` |
 | The properties here are not silently weakened by a code change | The source-shape tests in `tests/decision_scope.rs`, `tests/variable_latency.rs`, `tests/counter_range.rs` |
@@ -1405,13 +1410,14 @@ target bounds are §4.5's, and each harness named in the last column is describe
 
 | Class | `opt-out` | `hardened` | `ultra` | Evidence |
 | --- | --- | --- | --- | --- |
-| Timing: branch or index on a secret | defended — constant-time by construction | defended; more constant-time work | defended | ctgrind in three configurations, `tests/variable_latency.rs`, the timing screens (advisory in CI, strict under `verify.sh --deep`) |
-| Cache-timing (Prime+Probe, Flush+Reload, Evict+Time) | defended — no tables, no secret-dependent indices | same | same | `tools/cache_profile.sh` (counts invariant for two keys, both phases) |
-| Microarchitectural / speculative (Spectre family, port contention, execution-unit timing) | not defended | not defended | not defended — **and the crate contributes no gadget** | Two statements, kept apart because they are different claims. (i) *Here*: the constant-time discipline leaves no secret-dependent index or memory access, and the one secret-dependent branch (the decision) has a **public** outcome, so speculating past it reveals what the caller learns anyway — there is no `if (secret_index < len) { table[secret_index] }` shape to build a gadget from (ctgrind, `cache_profile.sh`). Software measures for gadgets — index masking (`array_index_nospec`), `lfence`/`csdb` barriers, LLVM's Speculative Load Hardening — exist and are the right answer *for code that has a gadget*; adding a barrier here would serialize a comparison whose result is already public. (ii) *Elsewhere*: no library can bound the CPU's speculation in other code, nor the non-speculative microarchitectural channels (port contention, and the Hertzbleed-class power/frequency channel that constant-time code does not address at all) |
+| Timing: branch on a secret | defended — constant-time by construction, with no secret-dependent branch apart from the documented decision; ctgrind checks the *branches* | defended; more constant-time work | defended | ctgrind in three configurations, `tests/variable_latency.rs`, the timing screens (advisory in CI, strict under `verify.sh --deep`) |
+| Timing: secret-dependent index or memory access | defended — no tables and no secret-dependent index by construction (ARX, no lookup tables) | same | same | the structural argument (no table in the source) and `tools/cache_profile.sh --trace` (identical address traces for two keys, both phases); memcheck does not report an address derived from a poisoned byte, so this is not ctgrind's evidence |
+| Cache-timing (Prime+Probe, Flush+Reload, Evict+Time) | defended — no tables, no secret-dependent indices | same | same | `tools/cache_profile.sh` (instruction counts invariant for two keys, and identical address traces in `--trace` mode, both phases) |
+| Microarchitectural / speculative (Spectre family, port contention, execution-unit timing) | not defended | not defended | not defended — **and the crate contributes no gadget** | Two statements, kept apart because they are different claims. (i) *Here*: the constant-time discipline leaves no secret-dependent index or memory access, and the one secret-dependent branch (the decision) has a **public** outcome, so speculating past it reveals what the caller learns anyway — there is no `if (secret_index < len) { table[secret_index] }` shape to build a gadget from (the ARX structural argument, and `cache_profile.sh`'s trace mode). Software measures for gadgets — index masking (`array_index_nospec`), `lfence`/`csdb` barriers, LLVM's Speculative Load Hardening — exist and are the right answer *for code that has a gadget*; adding a barrier here would serialize a comparison whose result is already public. (ii) *Elsewhere*: no library can bound the CPU's speculation in other code, nor the non-speculative microarchitectural channels (port contention, and the Hertzbleed-class power/frequency channel that constant-time code does not address at all) |
 | Power / EM (SPA, DPA, CPA, templates) | not defended | not defended | not defended, **but partly by construction — and the exception is narrower than this row first said** | needs proximity and equipment, and software algorithms for it exist — §8.5 names them (masking, hiding, fresh re-keying, leakage-resilient designs) with the model each is proven in. Fresh re-keying (Medwed–Standaert) is *already the shape of this construction* for the **payload cipher**: `enc_key`/`enc_nonce` are derived from the tag, so they are per message, and traces of the XOR pass cannot be averaged across messages (the same nonce *and* message replays one trace; a different message is a different key). **That argument does not extend to the other BLAKE3 uses, and the exception is nonce reuse.** The derived tag keys `k_in`/`k_out` and `enc_seed` are functions of `(K, N)` alone (Thm 1) — they must be, or the tag would not be deterministic in `(K, N, A, M)` — so `q` messages under one nonce hand the attacker `q` traces of **the tag passes and the enc-KDF under fixed keys with varying, attacker-chosen input**: exactly the setup CPA/DPA averages. The surface grows with the number of messages under a reused nonce, and for the tag pass it grows with the *message length*, since the tag hashes the whole message under `k_in`. Under a nonce-respecting deployment every key but the master key is per message, and the residual is the per-nonce derivation (HChaCha20 plus two ChaCha20 blocks, ~2 blocks, under `K`) — which is what this row claimed for *all* cases, and was wrong. Three consequences: for DPA, nonce reuse is worse than the "leak of equality" the misuse story describes; a nonce collision between two messages does the same thing, so the README's low-entropy-nonce warning covers this class too; and the exposure is **inherent to the frozen format** — a revision could re-key the tag's inner key *from the message* (`T = B3(k_out, DOM_TAG ‖ B3(k_in, A ‖ M))` is still deterministic in the quadruple) and remove it, at the price of changing every tag, which is a revision decision rather than a cleanup. No leakage assessment has been run, so this is a structural argument, not a measurement |
 | Single fault, decision *value* | **not defended** — accepting sites exist | defended: two gates, separate branches, fail-closed | defended | README fault table; `tools/fi_check.sh` rows per configuration |
 | Single fault, decision *instruction* (skip or corrupt a byte/bit) | **not defended** (3 accepting in the bit model, inside the decision) | 0 | 0 | `tools/fi_instruction.sh`, both models |
-| Fault that rewrites the stored tag | not defended | not defended | **defended** (`dual-mac`: an independent recomputation compared against both values) | `dual-mac-blocks-tag-substitution` row |
+| Fault that rewrites the stored tag | not defended | not defended | **defended** (`dual-mac`: a second derivation through the shared `derive_tag` path compared against both values) | `dual-mac-blocks-tag-substitution` row |
 | Fault in the *shared derivation* (tag, keyed BLAKE3, SIMD) | not defended | not defended | **detected** by the second implementation — with a stated boundary: both decrypt paths and the allocating `encrypt`; the in-place encrypt carries no cross-check | README "What the witness is"; `tests/ultra.rs`'s source-shape test |
 | Two independent faults, synchronized glitch, laser injection | not defended | not defended | not defended | software redundancy (which `ultra` has twice over — the second gate and the `dual-mac` recomputation — but *diversity* only once, in the witness, since both of those recompute through the same `derive_tag`/BLAKE3/SIMD path) cannot cover a fault that hits both computations or the arithmetic beneath them. Software algorithms in this class do exist — infective computation, randomised scheduling, tamper-resilient encodings, key ratcheting with destructive read-out (§8.5) — and each is proven only in a *model* (bounded faults, unknown location); an attacker with precise, repeated faults defeats any of them, and validation needs a fault bench. Not claimed here |
 | Fault-assisted key recovery (DFA) | not defended | not defended | not defended, **with a reduced payoff by construction** | same software caveats as above, plus a structural fact worth stating: classic DFA recovers *long-lived* round keys, and nothing in this construction is long-lived beyond the master key. Every intermediate an attacker could recover by faulting the payload path — `enc_key`/`enc_nonce` and the tag — is **per message** (Thm 3, which covers what is derived from the tag), so it decrypts exactly that message and nothing else. (`k_in`/`k_out`/`enc_seed` are **not** in that list: they are functions of `(K, N)` alone — Thm 1, per *nonce* — as the power row above says, so under nonce reuse they are shared across the messages of that nonce. They sit on the per-nonce derivation's surface, not the per-message one.) The honest DFA targets are the per-nonce derivation (`HChaCha20(K, N₁)`, two ChaCha20 blocks) and the tag passes, where the master key is in use. Faulting those is faulting `ultra`'s *witness* territory and is §8.2's row above |

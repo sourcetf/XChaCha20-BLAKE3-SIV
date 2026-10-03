@@ -116,8 +116,12 @@ def main():
         f"{fresh_meta.get('cargo_mutants_version', '?')}"
     )
     if fresh_meta.get("missed"):
+        # `outcomes.json` records `missed` as a count, not a list; recover the names from
+        # the per-mutant verdicts we already loaded rather than iterating the integer.
         print(f"this run has {fresh_meta['missed']} missed mutant(s):")
-        print("\n".join(f"  {m}" for m in fresh_meta["missed"]))
+        for key in sorted(fresh, key=describe):
+            if fresh[key] == "MissedMutant":
+                print(f"  {describe(key)}")
 
     if problems:
         print()

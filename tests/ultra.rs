@@ -89,6 +89,16 @@ fn dual_mac_is_wired_into_both_decrypt_paths() {
         2,
         "and against the received tag, which is what catches a rewritten stored value"
     );
+    // The calls must actually reach the gate: keeping the comparisons but writing
+    // `let second = gate_pair;` left this test green before, because it counted the calls
+    // without checking that `second` used them.
+    assert_eq!(
+        body.matches("gate_pair & recomputed_tag.ct_eq(&computed_tag) & recomputed_tag.ct_eq(tag)")
+            .count(),
+        2,
+        "the recomputation must be ANDed into the second gate on both entry points, not merely \
+         computed"
+    );
     // Under `ultra` the independent *implementation* joins the same gate: the stored tag
     // agreeing with the received one is not enough if both came from a rewritten
     // computation, so the witness's own answer is required too. It is folded into
@@ -105,6 +115,25 @@ fn dual_mac_is_wired_into_both_decrypt_paths() {
         body.matches("zeroize_array(&mut recomputed_tag)").count(),
         2,
         "the recomputed tag is secret-derived and must be wiped"
+    );
+}
+
+/// Every `scrub_stack` call site must survive.
+///
+/// `scrub_stack` overwrites the derivation frames that the wipes cannot name. It is
+/// best-effort and has no behavioural signature, so nothing else notices if a call is
+/// dropped — and dropping one leaves key material in the region it exists to clear.
+/// Six sites: the two `ultra` encrypt-side rejection returns, the two success returns
+/// (`encrypt`, `encrypt_in_place_detached`), and the two decrypt entry points.
+#[test]
+fn scrub_stack_is_called_at_every_entry_point() {
+    let src = include_str!("../src/lib.rs");
+    let cut = src.find("mod tests {").expect("test module");
+    let body = &src[..cut];
+    assert_eq!(
+        body.matches("scrub_stack();").count(),
+        6,
+        "all six scrub_stack call sites must remain"
     );
 }
 

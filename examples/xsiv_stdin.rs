@@ -37,6 +37,10 @@ fn from_hex(field: &str) -> Vec<u8> {
         return Vec::new();
     }
     assert!(field.len() % 2 == 0, "odd-length hex field: {field}");
+    assert!(
+        field.bytes().all(|b| b.is_ascii_hexdigit()),
+        "non-hex field: {field}"
+    );
     (0..field.len())
         .step_by(2)
         .map(|i| u8::from_str_radix(&field[i..i + 2], 16).expect("hex field"))

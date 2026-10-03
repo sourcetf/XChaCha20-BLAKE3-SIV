@@ -73,29 +73,32 @@
 //!
 //! Key properties:
 //!
-//! - 520-bit tag (65 bytes), key-committing (CMT-1/CMTk) and context-committing
-//!   (CMT-3): an attacker must hit the tag it published, a *target* at `2^520` per
-//!   attempt, and that is what the width buys.  Read the "Security level" section
+//! - 520-bit tag (65 bytes), committing **against a given ciphertext** (the *target*
+//!   game; the literature's CMT-1/CMT-3 are *attacker-chosen* and are a different game
+//!   this crate does not put a number on): an attacker must hit the tag it published, a
+//!   *target* at `2^-520` per candidate key (`≈ 2^-264` over the whole key space), and
+//!   that is what the width buys.  Read the "Security level" section
 //!   below before relying on a number: this crate advertised `2^260` for these for a
 //!   while, and that was wrong — the tag is a function of a 256-bit chaining value, so
 //!   what it *collides* at is `2^128`, well below the key.
 //! - SIV mode: tag computed before encryption, nonce-misuse resistant
 //! - Fault-injection hardening, **on by default** (the `hardened` feature): the
-//!   accept/reject decision becomes two independently recomputed checks with
-//!   separate branches, so a single skipped instruction cannot accept a forgery —
-//!   and the outcome is fail-closed, so skipping the decision call cannot either.
-//!   It defends the decision and nothing else, it is not validated on a
-//!   fault-injection bench, and it costs ~4-11% below 4 KiB and under 2.5% above
-//!   (measured against `--no-default-features`, which gives the single-gate build
-//!   back). See README.md ("The `hardened` decision — on by default") for the table
-//!   of what it covers and what it does not.
+//!   accept/reject decision becomes a second, independently *shaped* comparison over
+//!   the same two values, with its own branch, so a single skipped instruction cannot
+//!   accept a forgery — and the outcome is fail-closed, so skipping the decision call
+//!   cannot either.  It defends the decision and nothing else, it is not validated on a
+//!   fault-injection bench, and it costs +25% at 64 B, +24% at 256 B, +23% at 1 KiB,
+//!   +11% at 4 KiB, within the noise floor from 16 KiB up (measured against
+//!   `--no-default-features`, which gives the single-gate build back). See README.md
+//!   ("The `hardened` decision — on by default") for the table of what it covers and
+//!   what it does not.
 //! - Constant-time operations: the tag is compared with `subtle::ConstantTimeEq`
 //!   and decryption is decrypt-then-verify (SIV requires the plaintext to
 //!   recompute the tag, so verify-then-decrypt is not possible).  See the
 //!   "Side channels" section below for what has actually been checked.
 //! - Zeroization of sensitive material, including the returned [`Plaintext`],
 //!   which wipes itself on drop, and BLAKE3's internal state, which holds the
-//!   MAC key and is not cleared on drop.
+//!   keyed-BLAKE3 key material (`k_in`/`k_out`/`enc_seed`) and is not cleared on drop.
 //! - Typed errors via [`Error`]; no stringly-typed failures
 //!
 //! # Security level

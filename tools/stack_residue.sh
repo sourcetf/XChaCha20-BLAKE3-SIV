@@ -17,7 +17,7 @@
 #     analyser's own allocations land in the region being searched and overwrite
 #     the evidence, which produces hits that fail to re-verify.
 #
-# Usage:  tools/stack_residue.sh [--pure]
+# Usage:  tools/stack_residue.sh [--pure | --ultra]
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"

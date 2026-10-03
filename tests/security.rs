@@ -120,8 +120,13 @@ proptest! {
         );
     }
 
-    /// Flipping **any** single bit of the tag must be rejected, at every one of
-    /// the 65 byte positions.
+    /// Flipping **any** single bit of the tag must be rejected.
+    ///
+    /// The strategy draws one byte position per case, so this is *sampled*, not a
+    /// sweep over all 65 positions (with the default 256 cases, a run leaves at
+    /// least one tag byte untried about 71% of the time). The exhaustive
+    /// per-position sweeps live in `tests/decision.rs` and
+    /// `tests/differential_reference.rs`.
     #[test]
     fn prop_tag_bit_flip_rejected(
         key in key_strategy(),
@@ -183,8 +188,9 @@ proptest! {
     ///
     ///   * identical `(aad, msg)` gives byte-identical output (the scheme is
     ///     deterministic — that is what makes the KATs meaningful);
-    ///   * different `(aad, msg)` gives a different tag *and* different
-    ///     ciphertext, which is what SIV promises on nonce reuse;
+    ///   * different `(aad, msg)` gives a different tag, which is what SIV
+    ///     promises on nonce reuse (the *ciphertexts* are not promised to differ —
+    ///     see the note in the body);
     ///   * and both still decrypt.
     ///
     /// The second point is the reason this construction is usable with a random

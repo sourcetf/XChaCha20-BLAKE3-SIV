@@ -222,16 +222,27 @@ jobs:
 
       # The address-trace mode is the stronger technique -- it sees which line is
       # touched, not just how many misses there were -- but it needs valgrind's
-      # lackey tool, which the extracted valgrind on the development host cannot
-      # start. Non-blocking, because "could not run" and "found something" must not
-      # be confused: the script reports them as different exit codes, and the
-      # self-test treats "could not run" as its own failure rather than a detection.
+      # lackey tool. `continue-on-error: true` swallowed both "could not run" (exit
+      # 3) and a real leak (exit 1), which made this the one detector in the repo
+      # that could never fail. Instead, map exit 3 to an explicit skip and let any
+      # other non-zero exit fail the job: the script distinguishes the two, so this
+      # step must too. (The `--selftest` run turns its inner "could not run" into
+      # exit 1 by design -- a self-test that cannot conclude is not a pass.)
       - name: address-trace differential (needs lackey)
-        continue-on-error: true
         run: |
-          ./tools/cache_profile.sh --trace 12
-          ./tools/cache_profile.sh --selftest --trace
-          XSIV_FEATURES=ultra ./tools/cache_profile.sh --trace 12
+          set -euo pipefail
+          trace() {
+            local rc=0
+            "$@" || rc=$?
+            case "$rc" in
+              0) : ;;
+              3) echo "SKIPPED: $* could not run (exit 3; needs valgrind's lackey tool)" ;;
+              *) echo "FAILED: $* (exit $rc)" >&2; exit "$rc" ;;
+            esac
+          }
+          trace ./tools/cache_profile.sh --trace 12
+          trace ./tools/cache_profile.sh --selftest --trace
+          trace env XSIV_FEATURES=ultra ./tools/cache_profile.sh --trace 12
 
   audit:
     name: cargo-audit
@@ -326,14 +337,18 @@ jobs:
   mutation:
     name: verify the verifier (mutation check)
     runs-on: ubuntu-latest
-    # 90, not 60: this job carries the fault campaign (thirteen rows, each a build), the
-    # mutation campaign, and the two quick instruction sweeps. The bit-flip sweep is eight
-    # times its `nop` sibling *and* now sweeps three configurations, one of which (`ultra`)
-    # has the largest swept region -- measured at 3m18s on four cores of a fast machine and
-    # considerably longer on a shared runner, which is why the quick stride is 13 and the
-    # budget is 90. 60 was already close before the third configuration was added; a job
-    # that runs past its `timeout-minutes` reads as `cancelled`, not as `failure`.
-    timeout-minutes: 90
+    # This job carries the fault campaign (thirteen rows, each a build), the mutation
+    # campaign, and the two quick instruction sweeps -- the heaviest set in the file.
+    # A job that runs past its `timeout-minutes` reads as `cancelled`, not as `failure`,
+    # so each heavy sweep is wrapped in its own `timeout <secs>`: a hung sweep is then
+    # SIGTERM'd and the step exits 124, a failure. The job budget is deliberately larger
+    # than the sum of those per-step caps (20 + 30 + 15 + 40 min) plus checkout/install,
+    # so the job-level limit is headroom rather than the thing that fires.
+    # The bit-flip sweep is eight times its `nop` sibling *and* sweeps three
+    # configurations, one of which (`ultra`) has the largest swept region -- measured at
+    # 3m18s on four cores of a fast machine and considerably longer on a shared runner,
+    # which is why the quick stride is 13 and its cap is the largest below.
+    timeout-minutes: 150
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
@@ -363,7 +378,9 @@ jobs:
           tool: cargo-mutants
 
       - name: fault-injection campaign
-        run: ./tools/fi_check.sh
+        # `timeout` so an overrun exits 124 (a failure) instead of letting the job hit
+        # its own limit, which GitHub reports as `cancelled`.
+        run: timeout 1200 ./tools/fi_check.sh
 
       # Every mutant of the decision must be caught, by the two suites that witness
       # it: `tests/decision.rs` for the accept/reject outcome and `tests/security.rs`
@@ -407,7 +424,7 @@ jobs:
           # code that no longer existed).
           work="${RUNNER_TEMP:-${TMPDIR:-/tmp}}"
           cp -r mutants.out "$work/mutants.committed"
-          cargo mutants --features ultra -f src/lib.rs \
+          timeout 1800 cargo mutants --features ultra -f src/lib.rs \
             -F 'decrypt|accept_or_reject' -E 'replace & with \|' \
             -- --test decision --test security
 
@@ -438,7 +455,7 @@ jobs:
       # through into the accept store) and the other two must be zero inside the
       # decision, which is what the tool gates on.
       - name: instruction-level faults, quick sweep (neutralised byte)
-        run: ./tools/fi_instruction.sh --quick
+        run: timeout 900 ./tools/fi_instruction.sh --quick
 
       # The symmetric model: one *flipped bit* rather than one neutralised byte. It
       # is the one that finds what no source-level shape can remove (a conditional
@@ -446,7 +463,7 @@ jobs:
       # argued about. Eight times the `nop` sweep, hence `--quick` here and the full
       # run in the scheduled `wide` job.
       - name: instruction-level faults, quick bit-flip sweep
-        run: ./tools/fi_instruction.sh --quick --bits
+        run: timeout 2400 ./tools/fi_instruction.sh --quick --bits
 
   coverage:
     name: coverage and dependency inventory

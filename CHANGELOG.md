@@ -7,6 +7,51 @@ tags have been cut yet.
 
 ## Unreleased
 
+### Second audit round: two vacuous proofs, a stack-residue regression, and a set of claims the tools did not support
+
+An adversarial re-audit (fourteen independent passes over the construction, the tests, the
+gates and the docs) found no defect in the *construction* — it is byte-for-byte what
+`SECURITY-ANALYSIS.md` §1 specifies, reproduced a fourth time here with an OpenSSL-backed
+ChaCha20 — but it found real problems in the verification story and one reintroduced
+hygiene defect. **No wire-format change.**
+
+- **`witness::material`/`enc_material` returned key material by value** — the exact
+  aggregate-return shape `derive_material`/`derive_enc` were rewritten away from, because the
+  return temporary is a copy no `wipe` can name. A stack scan on a scratch copy measured
+  `k_out` surviving as a full 32-byte run (and `enc_seed` 23–31 bytes) after
+  `witness::decrypt`; it was masked in production only by `scrub_stack`. Both now write
+  through caller slices.
+- **The Kani tag harness was vacuous.** `tag_is_keyed_hash_of_the_whole_context` asserted only
+  that the tag was non-zero, and the stub's layout assertions run only if the stub is *called*
+  — so a `derive_tag` that returned a constant without reaching the hash passed (reproduced).
+  The harness now requires the hash to have been reached, through a call counter the stub
+  increments; the mutant now fails and the harness still verifies (284 s).
+- **`dual-mac`'s and `ultra`'s wiring was not behaviourally tested.** `fi_check.sh`'s
+  stored-tag-substitution row runs on `ultra`, where the witness rejects the fault on its own,
+  so a dead `dual-mac` recomputation passed it; and a `Choice::from(1)` rewrite of the witness
+  agreement left `cargo test --features ultra` green (both reproduced). A `dual-mac-isolated`
+  row now runs on `hardened,dual-mac`, and the shape tests require the wiring tokens, not just
+  the calls — each evasion was re-run and now fails.
+- **Claims the tools did not support, corrected**: ctgrind reports secret-dependent
+  *branches*, not memory indices (memcheck does not report an address from a poisoned byte);
+  Kani does not read the nonce back, and reaches neither the contiguous hash shape nor the
+  counter wrap; `variable_latency.rs` inventories literal `/`/`%` in `src/lib.rs` only;
+  the differential position sweeps now floor their row count so a regenerated fixture cannot
+  make them vacuous; and `prop_tag_bit_flip_rejected` samples one position per case rather than
+  sweeping all 65.
+- **Two documentation self-contradictions in `SECURITY-ANALYSIS.md`** that survived the
+  earlier corrections (`§1` still claimed the equal-material route was closed by a "768-bit
+  target"; `src/lib.rs` still quoted "`2^520` per attempt" across a line break, which is how a
+  single-line grep missed it), the Thm 4 bound now charges the three `Adv^{A3}` applications it
+  actually makes, and `§1`'s range notation is defined in one unit.
+- **Gate defects fixed**: `verify.sh`'s mutation-evidence gate now *fails* on stale evidence
+  instead of printing a note; `cache_profile.sh` and `ctgrind.sh` honour `CARGO_TARGET_DIR`
+  instead of profiling a stale `./target` binary; `deep.yml`'s address-trace step is no longer
+  `continue-on-error`; `fi_check.sh`'s rows are wrapped in `timeout` so a cut-off is a failure;
+  and `deny.toml`'s bans/sources lints are `deny`, not `warn`.
+- **`ultra` needs an OS entropy source** (`rng` → `getrandom`) and does not build on bare-metal
+  `no_std`; documented, with the `hardened,dual-mac,locked` alternative.
+
 ### The commitment bound reads "`2^-520` per candidate key", not "`2^520` per attempt"; a flaky test assertion removed
 
 Two findings from an audit pass, one adopted and one corrected — recorded because the first
@@ -602,7 +647,7 @@ witness's path.
 **Cost**: it is a scalar implementation, so the cost is per byte rather than fixed.
 Measured with `examples/bench_aead.rs` (release, this host), `ultra` against
 `hardened,dual-mac,locked,rng` — which is `ultra` without the witness: decryption 30.1 →
-20.8 MB/s at 64 B, 259 → 121 at 1 KiB, 1462 → 232 at 64 KiB, 1767 → 192 at 1 MiB.
+20.8 MiB/s at 64 B, 259 → 121 at 1 KiB, 1462 → 232 at 64 KiB, 1767 → 192 at 1 MiB.
 Cachegrind instruction counts agree in shape: +17 k instructions per 64 B message on the
 decrypt path, +64 M on a 1 MiB one. `ultra` is for callers who have decided that is worth
 it; the four features can also be listed without the witness. **The witness's buffers are

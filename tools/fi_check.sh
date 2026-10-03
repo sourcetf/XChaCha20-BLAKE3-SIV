@@ -281,6 +281,14 @@ run_row both-checks-neutralised "--features hardened" decision fail patch_both_c
 # above shows the opposite: both builds accept it.)
 run_row dual-mac-blocks-tag-substitution "ultra" decision pass patch_recomputed_tag_ignored
 
+# ...and the same fault with the witness *removed*. `ultra` implies `dual-mac`, so the row
+# above passes even if `dual-mac`'s recomputation were dead -- the independent
+# implementation would reject the substitution on its own, and the row would read as
+# evidence for `dual-mac` when it was really evidence for the witness. This row runs on
+# `hardened,dual-mac` (no witness), so only the recomputation can reject it; together the
+# two rows isolate each layer's contribution.
+run_row dual-mac-isolated "--features hardened,dual-mac" decision pass patch_recomputed_tag_ignored
+
 # The pair that shows what a *second implementation* buys, and what it does not: the same
 # message-independent MAC fault, which the gates and `dual-mac` cannot see (they recompute
 # through the broken function), and which `ultra`'s independent implementation catches because

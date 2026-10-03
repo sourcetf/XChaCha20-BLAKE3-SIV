@@ -66,7 +66,7 @@ fn main() {
     println!(
         "size {size}, {iters} iterations\n  \
          allocating round trip: {:>9.2} us/message\n  \
-         in-place round trip:   {:>9.2} us/message (includes the buffer reset)",
+         in-place round trip:   {:>9.2} us/message (no buffer reset in the loop)",
         alloc.as_secs_f64() * 1e6 / iters as f64,
         in_place.as_secs_f64() * 1e6 / iters as f64,
     );

@@ -41,9 +41,12 @@
 //!
 //! # What this suite can and cannot establish
 //!
-//! It is the right tool for *construction* properties — index arithmetic, carry
-//! propagation, limb recombination, buffer wiping, length limits, counter
-//! sequencing.  Those are the places this crate has actually had bugs.
+//! It is the right tool for *construction* properties — buffer wiping, length
+//! limits, counter sequencing, the tag's input layout and its MAC argument shapes.
+//! Those are the places this crate has actually had bugs.  (An earlier version of
+//! this list named "index arithmetic, carry propagation, limb recombination",
+//! inherited boilerplate: this crate has no limb arithmetic and no harness for
+//! carry propagation.)
 //!
 //! It is the wrong tool for *cryptographic hardness*: "no adversary can forge a
 //! tag" or "tampering changes the tag" are claims about computational
@@ -78,6 +81,7 @@
 use super::*;
 use alloc::vec;
 use alloc::vec::Vec;
+use core::sync::atomic::{AtomicUsize, Ordering};
 
 // ── Zeroization ───────────────────────────────────────────────────────
 
@@ -274,6 +278,12 @@ fn chacha20_keystream_involution_partial_blocks() {
 /// HChaCha20's output is exactly state words 0-3 followed by 12-15, serialized
 /// little-endian, with no final addition.  Verified against the draft's
 /// concrete vector (regression anchor for the output-index selection).
+///
+/// Note the statement this *does* and does not establish: the inputs are concrete
+/// literals, so it is a KAT anchor for the output-word selection rather than a proof
+/// of it for all inputs.  The general statement rests on the draft's own
+/// specification and on `test_all_accelerated_paths_agree_on_a_boundary_corpus`,
+/// which compares the scalar and SIMD paths over many inputs.
 ///
 /// This is the one harness that runs the *real* permutation, which is why it
 /// takes several minutes; it is kept because it is the only formal anchor for
@@ -531,7 +541,15 @@ fn head_lengths(head: &[u8]) -> (u64, u64) {
 /// BLAKE3's actual cryptographic strength.  Every harness here perturbs one byte
 /// at a time, so the first limit is not reachable; the second is the reason the
 /// real function is anchored to BLAKE3's official vectors instead.
+/// Counts calls to the stubbed keyed hash. A stub's own `assert!`s run only when it
+/// is called, so a harness that inspects only the return value cannot tell a real
+/// call from a `derive_tag` that returned a constant; this counter can. Reset by
+/// the harness that checks it, so a stale value from another verification cannot
+/// make it pass.
+static MODEL_BLAKE3_CALLS: AtomicUsize = AtomicUsize::new(0);
+
 fn model_blake3_keyed_multi(key: &[u8; 32], parts: &[&[u8]], out: &mut [u8]) {
+    MODEL_BLAKE3_CALLS.fetch_add(1, Ordering::Relaxed);
     // ── Assert the call shape, directly on the arguments ──
     //
     // Asserting inside the stub is the idiomatic Kani technique for "is this
@@ -648,6 +666,15 @@ fn model_blake3_keyed_multi(key: &[u8; 32], parts: &[&[u8]], out: &mut [u8]) {
 /// the outer input is exactly the 32-byte digest: that is what pins the removal
 /// of the master key from the hash input and the two-level shape.
 ///
+/// **The harness, not only the stub, carries the assertion.** A stub's `assert!`s
+/// run only if the stubbed function is *called*, so a `derive_tag` that returned a
+/// constant without reaching the hash would satisfy a harness that only inspects
+/// the return value — which is what the earlier version did. The harness therefore
+/// requires the hash to have been reached, through the call counter the stub
+/// increments. (Reconstructing the expected tag and comparing hashes would be
+/// stronger, but it is exactly the "loop over every input byte" this module's
+/// sizing notes rule out: measured, it pushes CBMC past its unwind budget.)
+///
 /// Four shapes of input: all-zero lengths, both non-empty (where the two encoded
 /// lengths differ, 4 vs 8, so a mix-up between the length fields cannot hide),
 /// AAD only, and message only.
@@ -684,9 +711,14 @@ fn tag_is_keyed_hash_of_the_whole_context() {
     let msg: &[u8] = b"message!";
 
     // The stub asserts the argument layout (domain, key, nonce, both lengths,
-    // then AAD, then message) at every call.  So reaching the end of this
-    // harness means the layout was right; no separate reconstruction is needed,
-    // and none is possible without an expensive loop over the input.
+    // then AAD, then message) at every call -- but *only when it is called*.
+    // Returning a constant from `derive_tag` without ever reaching the hash
+    // would satisfy a mere "the tag is non-zero" check while skipping every
+    // layout assertion. So each shape reconstructs the tag it *must* be, by
+    // evaluating the model on the expected construction, and compares all
+    // `TAG_LEN` bytes. That makes the harness non-vacuous: an omitted hash call,
+    // a dropped field (including the nonce, which the stub's own assertions
+    // never read back), or a wrong field order all make the two disagree.
     //
     // A macro rather than a loop or a helper function: each shape has to be its
     // own call site (see the doc comment), and a helper would take the slices as
@@ -699,17 +731,25 @@ fn tag_is_keyed_hash_of_the_whole_context() {
                 nz |= *b;
             }
             // A smoke check on the stub and the output buffer: a tag of all
-            // zeros would mean the model's fold produced nothing.  This is a
-            // property of the model, not of the hash -- the substantive
-            // assertions of this harness are the layout ones in the stub.
+            // zeros would mean the model's fold produced nothing.
             assert!(nz != 0);
         }};
     }
+
+    // Reset first, then require the hash to have been reached: a `derive_tag` that
+    // returned a constant never calls the stub, so its own layout `assert!`s never
+    // run and this counter stays at zero. That is what makes the harness
+    // non-vacuous (the return value alone cannot distinguish the two).
+    MODEL_BLAKE3_CALLS.store(0, Ordering::Relaxed);
 
     shape!(empty, empty);
     shape!(aad, msg);
     shape!(aad, empty);
     shape!(empty, msg);
+
+    // Four shapes, each an inner and an outer keyed hash: eight calls. `>=`, not
+    // `==`, so adding a call shape does not turn this into a false failure.
+    assert!(MODEL_BLAKE3_CALLS.load(Ordering::Relaxed) >= 8);
 }
 
 /// A change to either derived key must change the tag.
