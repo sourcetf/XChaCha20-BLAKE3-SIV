@@ -170,8 +170,8 @@ before 1.0 would be a revision bump, not a silent one.
 | --- | --- | --- |
 | Confidentiality (plaintext recovery) | 256-bit | the ChaCha20 key |
 | Forgery resistance | **256-bit** | BLAKE3 keyed mode as a PRF over a 256-bit key; a *target* problem, so no birthday search applies |
-| Context commitment **against a given ciphertext** (the target game) | `2^520` per attempt | a target hit in the 520-bit output: the width is what sets it. The literature's CMT-3 is *attacker-chosen*, not this — see below |
-| Key commitment **against a given ciphertext** (the target game) | `2^520` per attempt | the same, plus the derived key material bound into the tag's derivation across three independent values (`k_in`, `k_out`, `enc_seed`) |
+| Context commitment **against a given ciphertext** (the target game) | `2^-520` per candidate key (other than the real one) | a target hit in the 520-bit output: the width is what sets it. The literature's CMT-3 is *attacker-chosen*, not this — see below |
+| Key commitment **against a given ciphertext** (the target game) | `2^-520` per candidate key (other than the real one) | the same; the key material is bound into the tag's derivation across three independent values (`k_in`, `k_out`, `enc_seed`) |
 | Commitment in the **attacker-chosen** games (invisible salamanders, CMT-1/CMT-3) | **not derived here** | the adversary outputs both keys, both messages and `(C,T)`, so `2^520` does not describe it; the colliding-tag step is `2^128` and the completion is unanalysed. `SECURITY-ANALYSIS.md` §4.5 |
 | Tag collision resistance (the DAE bound's collision term) | **2^128** | the *chaining value*, not the tag: keyed BLAKE3's output is a function of its 256-bit state, so a state collision gives byte-identical tags of any length |
 
@@ -227,7 +227,7 @@ literature's names next to the number and let the reader assume it covered them:
 **`2^128` bounds *collisions*, not *targets*.** The state shortcut above helps only when
 both sides of the collision are the adversary's to search. A tag that has to be hit as
 given — a forged tag, or a tag that must also validate under a *second* key — is a target
-in the 520-bit output, still `2^520` per attempt. So forgery and commitment *against a
+in the 520-bit output, still a `2^-520` per-candidate probability (a `2^520` search). So forgery and commitment *against a
 given* ciphertext are untouched by the correction, and what `2^128` bounds is the
 `q²/2^257` collision term in the DAE bound and the two-time-pad event described under
 "Deterministic encryption" below. What `2^128` does *also* bound, in the attacker-chosen

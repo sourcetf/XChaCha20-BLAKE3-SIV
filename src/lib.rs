@@ -104,7 +104,7 @@
 //! | --- | --- | --- |
 //! | Confidentiality | 256-bit | the ChaCha20 key |
 //! | Forgery resistance | **256-bit** | BLAKE3 keyed mode as a PRF over a 256-bit key |
-//! | Context / key commitment (CMT-3, CMT-1/CMTk) | **`2^520` per attempt** against a given ciphertext | the tag hit as a *target*; the width does not set it |
+//! | Context / key commitment (CMT-3, CMT-1/CMTk) | **`2^-520` per candidate key** against a given ciphertext | the tag hit as a *target*; the width does not set it |
 //! | Collision resistance of the tag | **2^128** | the 256-bit chaining value the tag is a function of, not the tag's width |
 //!
 //! **Forgery: 256 bits is the ceiling, not a choice.**  Forgery resistance is
@@ -343,7 +343,7 @@ pub const KEY_LEN: usize = 32;
 ///   properties (§3 Corollary's two-time-pad event) and says nothing about forgery;
 /// * **forgery is unchanged**, and is bounded by the key (`2^256`) rather than by the tag:
 ///   key search dominates whatever the tag length, since guessing a 32-byte tag costs `2^-256`
-///   per attempt and searching the key costs `2^256`.
+///   per guess and searching the key costs `2^256`.
 ///
 /// (The bullet list above was duplicated once, verbatim but for the collision entry, in the
 /// revision that introduced the commitment correction — a merge artefact in the one doc
@@ -4155,7 +4155,9 @@ mod tests {
         let (ct1, tag1) = encrypt(&key1, &nonce1, aad, plaintext).unwrap();
         let (ct2, tag2) = encrypt(&key1, &nonce2, aad, plaintext).unwrap();
 
-        // Different nonces MUST produce different tags and ciphertexts
+        // Different nonces must produce different tags; the ciphertext bytes are pinned as a
+        // regression check (equal-length ciphertexts *could* coincide even under distinct
+        // tags, so this is not a property SIV guarantees).
         assert_ne!(tag1, tag2);
         assert_ne!(ct1, ct2);
     }
@@ -4990,8 +4992,11 @@ mod tests {
         let (ct_a, tag_a) = encrypt(&key, &nonce, b"ab", b"c").unwrap();
         let (ct_b, tag_b) = encrypt(&key, &nonce, b"a", b"bc").unwrap();
         assert_ne!(tag_a, tag_b, "A||M must not be ambiguous");
-        // Different tags imply different per-message keys, so the ciphertexts
-        // differ even though the plaintexts are equal in length.
+        // The ciphertexts are *pinned* here as a regression check on these two fixed
+        // inputs, not because SIV guarantees they differ: with equal-length plaintexts the
+        // two ciphertexts would coincide if `KS_a ⊕ KS_b == M_a ⊕ M_b`, which distinct tags
+        // do not rule out. (The property the construction promises — that neither split
+        // authenticates under the other's context — is the two `decrypt` assertions below.)
         assert_ne!(ct_a, ct_b);
 
         // Trailing zeros must not be strippable either.

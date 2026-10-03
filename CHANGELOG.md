@@ -7,6 +7,35 @@ tags have been cut yet.
 
 ## Unreleased
 
+### The commitment bound reads "`2^-520` per candidate key", not "`2^520` per attempt"; a flaky test assertion removed
+
+Two findings from an audit pass, one adopted and one corrected — recorded because the first
+changed how a *number* is written in five places, and the second was a real test bug.
+
+- **The target-commitment number is now written as a per-candidate probability.** Every site that
+  quoted "`2^520` per attempt" meant *"2^520 work to find a second key"*, but "per attempt" reads
+  as *"each attempt costs 2^520"*, which is not a probability and invited exactly the confusion an
+  auditor then reported: F-C5b argued the target bound is false and that an equal-`subkey` channel
+  makes a second key reachable in `2^256`. That channel is real but belongs to the **attacker-chosen**
+  game, where the adversary knows `K₁` and can aim at its `subkey`; in the **target** game the
+  adversary is given only `(C, T)` and does not know `K₁`, so a candidate key still has to hit the
+  given 520-bit tag, `2^-520` per candidate (`2^-264` over the whole key space). Writing the number
+  as `2^-520` per candidate key (with the `2^520` search as the equivalent work) removes the
+ambiguity. Updated in `README.md` (both tables and the two-games discussion), `SECURITY-ANALYSIS.md`
+(§3 Thm 2, §4.5's table and consequence bullets, §5 row 3, §6), and `src/lib.rs`'s security
+table. No number changed — only what it is a probability *of*.
+- **`prop_nonce_reuse_behavior` and `prop_aad_message_split_is_bound` no longer assert that the
+  ciphertexts differ.** SIV guarantees the *tags* differ (`2^-520` per fixed pair); it does not
+  guarantee `ct₁ ≠ ct₂`. The ciphertext is `M ⊕ KS(tag)`, so `ct₁ == ct₂` needs
+  `KS₁ ⊕ KS₂ == M₁ ⊕ M₂`, a `2^-8·|M|` event — with 1-byte messages, `2^-8`, i.e. a spurious
+  failure roughly once in 16,000 runs (deterministically reproducible). The assertion was testing
+  something the construction does not promise; the properties that *are* promised — distinct tags,
+  and neither context authenticating under the other — are still asserted, and the same
+  "distinct tags ⇒ distinct ciphertexts" overstatement in two `src/lib.rs` test comments is
+  corrected to say the ciphertext bytes are pinned as a regression input rather than derived.
+
+**No code or wire-format change:** the construction is untouched.
+
 ### L3.4 and L3.5 reduced to L3.3, so the assumption list is three primitive conjectures
 
 `SECURITY-ANALYSIS.md` §2.1 previously listed L3.4 ("the BLAKE3 tree preserves PRF-ness") and

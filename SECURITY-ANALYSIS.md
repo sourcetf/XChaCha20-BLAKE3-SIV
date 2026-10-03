@@ -544,7 +544,8 @@ they are stated separately:
   second key's tag computation outputs *that same value*, `T₁`. Since `T` is a PRF of `(N, A, M)`
   under `K` (the theorem above), this is a *target* problem, and the number is not a birthday at
   all: the adversary publishes `T` and needs the second key's computation to reproduce it, so the
-  cost is `2^520` per attempt — unchanged by the chaining-value correction below, which helps only
+  attempt succeeds with probability `2^-520` (a `2^520` search) — unchanged by the chaining-value
+  correction below, which helps only
   when both sides of a collision are the adversary's to search. (The `T`-coupling makes that
   concrete here: `T` determines the message through the KDF, so a collision found between two
   arbitrary tags is not a ciphertext that opens under two keys — it would have to be a fixed point
@@ -925,7 +926,7 @@ tag alone. The same argument applies to a multi-chunk input by fixing the subtre
 tail and colliding the prefix subtree's chaining value. This is a *collision* search, not a
 preimage: the adversary needs the two tags to agree *with each other*. A tag that must be hit *as
 given* — a forged tag, or a ciphertext that must open under a second key — is still a target in
-the 520-bit output and still costs `2^520` per attempt.
+the 520-bit output: each candidate succeeds with probability `2^-520`, so the search costs `2^520`.
 
 **Consequently, the numbers are these, and the pair (target, birthday) is now written out
 wherever the distinction matters. All of them still carry at least 128 bits of margin.**
@@ -934,7 +935,7 @@ wherever the distinction matters. All of them still carry at least 128 bits of m
 | --- | --- |
 | Tag collision, same key, `q` queries | `q² / 2^257` (≈ `2^128` at the birthday point) |
 | Derived `(key, nonce)` collision over `q` queries | `q² / 2^257` — see below: the tag term dominates it, and the KDF's own birthday is over a 328-bit state (256-bit chain value plus the 72-bit tail block), not the 352-bit output |
-| A tag agreeing with a *given* tag (forgery, second open, commitment **against a given ciphertext**) | `2^-520` per attempt; ×`q` for `q` targets |
+| A tag agreeing with a *given* tag (forgery, second open, commitment **against a given ciphertext**) | `2^-520` per candidate key; ×`q` for `q` targets |
 | Forgery (one decryption query) | `2^-520`, plus the tag-collision terms |
 | **Attacker-chosen commitment game** (CMT-1/CMT-3 as the literature writes them — the adversary *outputs* both keys, both messages and `(C,T)`) | **not derived here**: it is not a target, so `2^520` does not apply; the only step this document can price is the colliding-tag search, `q²/2^257` (`2^128` birthday), and the completion step is a fixed point that is **not analysed**. See "The two commitment games" below |
 | Exhaustive key search | `2^256` |
@@ -988,12 +989,13 @@ reader looking for "what would settle it" should go.
   merely as hard to double-open as it is to key-search, which is precisely the failure the SIV
   commitment literature (and the 16-byte tags of AES-SIV / AES-GCM-SIV) is about. So the old
   rationale reached the right *decision* — the tag must be wider than 32 bytes — through the
-  wrong *property*: it is the target bound, not a birthday bound, and the number to quote is
-  `2^520` per attempt rather than `2^260`.
+  wrong *property*: it is the target bound, not a birthday bound, and the number to quote is a
+  `2^-520` per-candidate probability (a `2^520` search), not the `2^260` birthday the width was once
+  claimed to set.
 * **What the width does *not* buy is collision resistance**, which is `2^128` either way, and
   forgery, which is `2^256` either way (bounded by key search, which no tag length raises). The
   width is kept because the format is frozen at revision `v0.3` *and* because it is what makes the
-  **target** commitment `2^520` per attempt; a revision that shortened the tag to 32 bytes would
+  **target** commitment `2^-520` per candidate key; a revision that shortened the tag to 32 bytes would
   give up that target bound (and, at `2^256 · 2^-256 ≈ 1`, the property outright). It would not by
   itself settle the *attacker-chosen* games of the literature, whose bound this document does not
   derive (see "The two commitment games" above) — the width governs the game this document can
@@ -1190,7 +1192,7 @@ refutation, and the status of the attempt.
 | --- | --- | --- | --- |
 | 1 | A1, A2, A3 (PRF security of the primitives) | A distinguisher for ChaCha20 / HChaCha20 / keyed BLAKE3 | **Not attempted, and not attemptable by test**: these are open problems in cryptanalysis. The evidence is the primitives' standing, their published test vectors (replayed here), and the fact that the construction's use of them is standard |
 | 2 | Tag is a PRF over `(N,A,M)` | Two distinct `(N,A,M)` with equal tags under one key | A *fixed* pair is out of reach (`2^-520`); *searching* for a pair is the chain-value birthday, `q²/2^257` (§4.5), also out of reach. *Structural* variants tested: length ambiguity, A/M swap, trailing zeros, single-byte changes in A and M, key and nonce reaching the tag. Not testable: both numbers are bounds on computation |
-| 3 | Key commitment **against a given ciphertext** (the target game) | A `(C,T)` that opens under two keys | Against a given `(C,T)` this is a target and stays out of reach (`2^520` per attempt); the *birthday* level for a colliding pair is `2^128` (§4.5), which an invisible-salamander attack against a fixed ciphertext cannot use. *Mechanism* tested: both derived tag keys reach the tag (`test_tag_binds_both_derived_keys`) and Kani proves the inner head and the outer input are what the spec says. **The literature's CMT-1/CMT-3 games are attacker-chosen, not this target; their bound is not derived here** — see the row below and §4.5, "The two commitment games" |
+| 3 | Key commitment **against a given ciphertext** (the target game) | A `(C,T)` that opens under two keys | Against a given `(C,T)` this is a target and stays out of reach (`2^-520` per candidate key, a `2^520` search); the *birthday* level for a colliding pair is `2^128` (§4.5), which an invisible-salamander attack against a fixed ciphertext cannot use. *Mechanism* tested: both derived tag keys reach the tag (`test_tag_binds_both_derived_keys`) and Kani proves the inner head and the outer input are what the spec says. **The literature's CMT-1/CMT-3 games are attacker-chosen, not this target; their bound is not derived here** — see the row below and §4.5, "The two commitment games" |
 | 4 | Keystream is tag-dependent | `ct₁ ⊕ ct₂ = M₁ ⊕ M₂` under one nonce, or `ct` invariant under an AAD change | **Tested**: `nonce_reuse_does_not_reuse_the_keystream` (message change, AAD change, first-block check, attached and in-place paths) |
 | 5 | The two ChaCha20 uses are separate | The key-material block equals the message keystream | **Tested**: `the_key_material_block_is_not_the_message_keystream` (16 trials, key, nonce and keystream compared); the residual is §4.1 |
 | 6 | The KDF consumes the whole tag | A tag byte that does not move the derived key | **Proved + tested**: Kani (all 65 bytes consumed), `test_every_tag_byte_reaches_the_ciphertext` |
@@ -1287,7 +1289,7 @@ missing later (L3.6, §2.1).
   new weakness.** The tag's 65 bytes are a view of a 256-bit chain value (§4.5), so a tag
   collision costs a `2^128` birthday search and the two-time-pad leak of §3's Corollary rides
   on the same event; `q²/2^257` is `2^-129` at `q = 2^64`. Forgery and commitment-against-a-given
-  tag are target problems and remain where they were — `2^520` per attempt for commitment, `2^256`
+  tag are target problems and remain where they were — a `2^-520` per-candidate probability for commitment, `2^256`
   for forgery — because commitment was never a birthday property, so the width still governs it
   (a 32-byte tag would be enumerated in the key space, §4.5). An earlier
   revision of this document and of `README.md` advertised `2^260`; that number was wrong, the
@@ -1315,8 +1317,8 @@ missing later (L3.6, §2.1).
   exactly the key-search level. Nor does the width raise the *collision* level: 65 bytes and 32
   bytes both collide at `2^128`, because both are functions of the same 256-bit chaining value
   (§4.5). What the width *does* buy is the target commitment, and the two sentences coexist
-  because they are about different attacks: a second key that opens a *given* ciphertext costs
-  `2^520` with 65 bytes, and would cost only `2^256` — the key-search level, i.e. not committing
+  because they are about different attacks: a second key that opens a *given* ciphertext costs a
+  `2^520` search with 65 bytes, and would cost only `2^256` — the key-search level, i.e. not committing
   at all — with 32. So the width is load-bearing, and the fact that the wire format is frozen is
   the second reason it stays rather than the only one.
 
@@ -1390,8 +1392,8 @@ target bounds are §4.5's, and each harness named in the last column is describe
 | Related-key | key schedule | **not applicable**: the construction is keyed by one uniformly random 256-bit key, and the per-message keys are PRF outputs of distinct nonces (Thm 1). No key class is exposed |
 | Length extension | Merkle–Damgård padding | **not applicable**: BLAKE3 finalises with a flag, and the encoding carries explicit `|A|`/`|M|` (§4.4). Its real descendants — re-splitting `A ‖ M`, trailing zeros — are defeated by A4 and pinned by `test_aad_message_split_is_unambiguous` |
 | Collision (incl. Joux multicollisions, herding) | the tag | `2^128` by birthday over the 256-bit chain value, via the fixed-tail procedure of §4.5; no tag width raises it |
-| Commitment **against a given ciphertext** (the target game — what the `2^520` belongs to) | a ciphertext that opens under two keys or contexts, with the ciphertext *given* | **`2^520` per attempt** — a target, not a birthday; the two-level tag and the three independent derived values close the derivation route (Thm 2) |
-| Commitment in the **attacker-chosen** games (invisible salamanders, CMT-1/CMT-3) | a ciphertext the *adversary* chooses, opening under two keys or contexts it also chooses | **not derived here** — not a target, so `2^520` does not describe it; the colliding-tag search is `2^128` (state birthday) and the completion is an unanalysed fixed point. §4.5, "The two commitment games", and §5 row 17 |
+| Commitment **against a given ciphertext** (the target game — what the `2^520` belongs to) | a ciphertext that opens under two keys or contexts, with the ciphertext *given* | **`2^-520` per candidate key (other than the real one)** — a target, not a birthday; enumerating the whole key space yields `2^256 · 2^-520 ≈ 2^-264` second keys. (The `2^-256` a *uniformly random* key "succeeds" with is that it is almost surely the real key, i.e. key recovery, not a second key.) The wide tag is what sets this (Thm 2) |
+| Commitment in the **attacker-chosen** games (invisible salamanders, CMT-1/CMT-3) | a ciphertext the *adversary* chooses, opening under two keys or contexts it also chooses | **`2^128`** — a `subkey` collision (all three derived values are functions of the 256-bit `subkey`) gives two keys with identical tags *and* keystreams, so the completion is immediate. This was closed in `v0.2` by `K`-in-input and is **not** closed by the two-level tag: the honest record of that trade. §4.5, "The two commitment games", and §5 row 17 |
 | Forgery (tag guess, second preimage) | the tag | `min(2^256 key search, 2^520 tag guess)` = the key search; the fault-assisted variants are §8.2's subject |
 | Two-time pad | a tag collision between two messages | the same `2^128` event; when it happens the observer pays nothing (§3's Corollary) |
 | Nonce misuse (related nonce, IV reuse) | SIV's misuse model | **by design**: reuse degrades to equality plus the collision term above; a keystream derived from `(K, N)` alone would leak `M₁ ⊕ M₂` always (`nonce_reuse_does_not_reuse_the_keystream`) |

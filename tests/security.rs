@@ -202,12 +202,19 @@ proptest! {
         prop_assert_eq!(&ct1, &ct1b);
         prop_assert_eq!(tag1, tag1b);
 
-        // A different message under the same nonce: different tag, different
-        // ciphertext, and each still authenticates under its own tag.
+        // A different message under the same nonce: different **tag**, and each still
+        // authenticates under its own tag.
+        //
+        // The *ciphertexts* are deliberately not asserted to differ. SIV guarantees the tag
+        // differs (`2^-520`), and the ciphertext is `M ⊕ KS(tag)`, so `ct1 == ct2` would need
+        // `KS₁ ⊕ KS₂ == M₁ ⊕ M₂` — a `2^-8·|M|` event, not a contradiction. With 1-byte
+        // messages that is `2^-8`, so an earlier version of this test carried a
+        // `prop_assert_ne!(&ct1, &ct2)` that failed spuriously roughly once in 16,000 runs
+        // (and, once the corpus grows, more often than that). It asserted something SIV does
+        // not promise; the property that *is* promised — distinct tags — is the line above.
         prop_assume!(other != pt);
         let (ct2, tag2) = encrypt(&key, &nonce, &aad, &other).unwrap();
         prop_assert_ne!(tag1, tag2);
-        prop_assert_ne!(&ct1, &ct2);
 
         let back1 = decrypt(&key, &nonce, &aad, &ct1, &tag1).unwrap();
         prop_assert_eq!(back1.as_slice(), pt.as_slice());
@@ -238,10 +245,15 @@ proptest! {
         // The tags must differ, because the two lengths are encoded. Under an
         // ambiguous encoding these would be equal and one ciphertext would
         // authenticate under the other's context.
+        //
+        // As above, the ciphertexts are not asserted to differ: here the plaintext bytes are
+        // *identical* (`a ‖ b == a2 ‖ b2`), so `ct1 == ct2` reduces to `KS₁ == KS₂`, a
+        // `2^-8·len` event that the two distinct tags do not rule out. The property that
+        // matters — the two contexts are not interchangeable — is the pair of decryptions
+        // below, not a byte comparison of the ciphertexts.
         let (ct1, tag1) = encrypt(&key, &nonce, &a, &b).unwrap();
         let (ct2, tag2) = encrypt(&key, &nonce, &a2, &b2).unwrap();
         prop_assert_ne!(tag1, tag2);
-        prop_assert_ne!(&ct1, &ct2);
 
         // Concretely: a ciphertext authenticated under (a2, b2) must not verify
         // when presented with aad = a.
