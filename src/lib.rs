@@ -1120,6 +1120,18 @@ pub mod locked {
         /// useful a caller could do about it, and the caller is about to free or reuse the
         /// range anyway.
         ///
+        /// # It owns the range, and clears a `VM_DONTDUMP` it did not set
+        ///
+        /// `MADV_DODUMP` clears `VM_DONTDUMP` for the whole page-aligned range whatever set
+        /// it, and this call does not record whether *it* was the one that set it. So if the
+        /// caller (or another library) excluded these pages from core dumps independently,
+        /// `unlock_range` silently removes that exclusion. The crate's own [`LockedKey`] is
+        /// unaffected — its page is freshly and exclusively owned, and `lock_range` is the
+        /// only thing that ever advised it — but a caller pairing `lock_range`/`unlock_range`
+        /// on memory it does not own outright should treat this as "the range is now
+        /// dumpable" rather than "restored to how I found it". The symmetric caveat applies
+        /// to `lock_range`'s failure path, which unconditionally `munlock`s.
+        ///
         /// Idempotent for an unlocked range.
         pub fn unlock_range(ptr: *const u8, len: usize) {
             if len == 0 {

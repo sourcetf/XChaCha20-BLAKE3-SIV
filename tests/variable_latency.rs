@@ -62,9 +62,11 @@ const ALLOWED: &[(&str, &str)] = &[
 ///   `tests/decision_scope.rs`, which holds that shape);
 /// * six `if decision*.is_err()` checks: the fail-closed shape, on all three call sites --
 ///   the two decrypt entry points and, under `ultra`, `encrypt`'s cross-check of its own tag
-///   against the witness. They branch on a discriminant the *caller* wrote as a constant, so
-///   they depend on nothing secret, which is what makes them constant-time and why they are
-///   listed rather than suppressed;
+///   against the witness. These *do* depend on the secret-derived accept/reject decision;
+///   what makes them constant-time is that each arm writes a *constant* discriminant into
+///   the slot rather than a value selected from the condition, so memcheck sees no taint on
+///   the branch and the outcome bit they reveal is the one the mode is designed to reveal
+///   anyway. They are listed rather than suppressed because they are a branch on that bit;
 /// * `decrypt_bounded`'s length check and the `MAX_MSG_SIZE` checks in `derive_tag`:
 ///   lengths, which are public;
 /// * the `locked` module: `Page` allocation, `LockedKey::new`, `lock_range`'s

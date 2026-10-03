@@ -54,6 +54,16 @@ hygiene defect. **No wire-format change.**
   `warn`.
 - **`ultra` needs an OS entropy source** (`rng` → `getrandom`) and does not build on bare-metal
   `no_std`; documented, with the `hardened,dual-mac,locked` alternative.
+- **Follow-ups closed**: the witness's primitive-internal state (`block`/`hchacha20`'s `s`/`v`,
+  `compress`'s `state`/`m`, and the `Output` compression results) is now wiped — the module had
+  disclosed this as a gap and left it to `scrub_stack`; the differential fixture now straddles
+  the *actual* contiguous-hash boundary (the switch is on `48 + |A| + |M|`, so the message
+  lengths are 2000 and 65488, not 2048 and 65536 — the old pair was 48 bytes off and witnessed
+  the switch only *inside* the window); `ref_impl.py`'s independence claim is now scoped to the
+  primitive layer it actually is (the construction glue is a transcription, so the differential
+  catches divergence, not a shared misreading); the fuzz target also feeds `decrypt` tags and
+  ciphertexts taken straight from the fuzzer and requires them to re-encrypt to themselves if
+  they authenticate; and `unlock_range` documents that it clears a `VM_DONTDUMP` it did not set.
 
 ### The commitment bound reads "`2^-520` per candidate key", not "`2^520` per attempt"; a flaky test assertion removed
 

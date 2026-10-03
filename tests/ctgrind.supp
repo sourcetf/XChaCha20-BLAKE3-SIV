@@ -84,7 +84,7 @@
 # `constant_time_eq_does_not_branch_on_operands` in tests/ctgrind.rs poisons both
 # operands, requires valgrind to report nothing from the comparison itself, and
 # only unpoisons the resulting `Choice` before branching on it. The timing screen
-# in tests/security.rs additionally checks position-independence end to end.
+# in tests/timing.rs additionally checks position-independence end to end.
 
 {
    siv-accept-or-reject-decision

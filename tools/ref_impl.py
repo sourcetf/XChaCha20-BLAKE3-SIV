@@ -7,10 +7,20 @@ derivation, and a **two-level keyed BLAKE3** MAC as the tag, whose output also
 derives the per-message encryption key and nonce.  The tag is computed in two
 levels (NMAC-shaped) so that no hash message contains the master key.
 
-This is deliberately NOT derived from the Rust code under test.  It exists so
-the known-answer vectors can be regenerated after any change to the
-construction, and so a shared bug would have to be made independently in two
-implementations to slip through.
+This is deliberately NOT derived from the Rust code under test, and it exists so the
+known-answer vectors can be regenerated after any change to the construction.
+
+**How independent it is, stated precisely**, because "independent" invites over-reading.
+It is independent at the *primitive* layer: it uses the third-party `blake3` module and
+hand-writes ChaCha20/HChaCha20 from the RFCs, and it self-checks against values published
+by others (below), so a *primitive* error has to be made twice to slip through. Above that
+layer the construction glue -- the domain strings, the counter placement, the field order
+and widths, the two-level split -- is a hand transcription of the same design, with no
+external anchor. So the differential suite catches **divergence** between this file and
+`src/lib.rs`, not a *shared misreading* of the specification: if both were changed to
+transcribe the same wrong layout, the vectors would agree and the fixtures would be
+regenerated to match. The construction-layer anchor is the specification itself
+(`SECURITY-ANALYSIS.md` §1) plus the crate's own KATs, not this file.
 
 Before it emits anything it self-checks against values published by others:
 
@@ -20,7 +30,8 @@ Before it emits anything it self-checks against values published by others:
 
 The BLAKE3 anchor carries the most weight: the MAC *is* the tag construction, so
 without an external check the tag vectors below would only be validated against
-this same file.
+this same file. None of these three anchors is the construction glue, for the
+reason above.
 
 Usage:
     python3 tools/ref_impl.py           # self-checks + prints all vectors

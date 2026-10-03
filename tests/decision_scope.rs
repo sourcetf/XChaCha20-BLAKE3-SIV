@@ -62,13 +62,14 @@ fn brace_blocks(needle: &str) -> Vec<String> {
     out
 }
 
-/// Locate both `accept_or_reject` definitions by name and return their full text,
-/// body included, brace-matched.
+/// Locate `accept_or_reject` by name and return its full text, body included,
+/// brace-matched.
 ///
-/// There are two because the function is `#[cfg]`-selected: the default build
-/// converts one `Choice`, and `--features hardened` converts two. Only one of them
-/// exists in any given build, and both are in the source, so a test can inspect
-/// both.
+/// There is exactly **one** body, with the `hardened` gates inside it rather than a
+/// second `#[cfg]`-selected definition: two bodies would be two functions to a mutation
+/// campaign that does not evaluate `cfg` (`cargo mutants`), and the one not compiled in a
+/// given run reads there as an uncaught mutant. (An earlier version of this comment said
+/// "there are two"; the source has one, and the assertion below requires it.)
 fn definitions() -> Vec<String> {
     brace_blocks("fn accept_or_reject(")
 }

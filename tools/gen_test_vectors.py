@@ -104,9 +104,19 @@ def load_ref():
 #: a comparison device, so it must not be the same construction whose output it is
 #: checking.
 DIGEST_PAIRS = [
-    (2_048, 0),      # the bottom of the contiguous-buffer window, in full below
-    (65_536, 0),     # the top of that window: still one call
-    (65_537, 0),     # one byte past it: three calls again
+    # The contiguous-buffer switch is on `head.len() + aad.len() + msg.len()` against
+    # `TAG_CONCAT_MIN..=TAG_CONCAT_LIMIT` (2048..=65536), and `head` is
+    # `8 + NONCE_LEN + 16` = 48 bytes. So the message lengths that straddle the window
+    # are 2000 and 65488, not 2048 and 65536 -- an earlier version of this list said
+    # the latter and was wrong by the head's 48 bytes. Both boundaries are here, on
+    # each side, so the switch itself is witnessed against the reference rather than
+    # only against the crate's own two call shapes.
+    (1_999, 0),      # 48 + 1999 = 2047: below the window, three calls
+    (2_000, 0),      # 48 + 2000 = 2048: the bottom of the window, one call
+    (2_048, 0),      # inside the window
+    (65_488, 0),     # 48 + 65488 = 65536: the top of the window, still one call
+    (65_489, 0),     # 48 + 65489 = 65537: one byte past it, three calls again
+    (65_536, 0),     # also past it (48 + 65536 = 65584), a second three-call witness
     (100_000, 64),
     (1_000_000, 12_345),
     (1_048_576, 0),  # 1 MiB

@@ -1,8 +1,9 @@
-//! Fuzz the AEAD end to end: encrypt then decrypt, and decrypt arbitrary bytes.
+//! Fuzz the AEAD end to end: encrypt then decrypt, decrypt *arbitrary* wire bytes, and
+//! check that a failed in-place decrypt leaves no plaintext behind.
 //!
 //! Run:  cargo +nightly fuzz run roundtrip
 //!
-//! Two properties, both of which must hold for *every* input:
+//! Four properties, all of which must hold for *every* input:
 //!
 //!   1. **No panic, no out-of-bounds, no hang.** The input is arbitrary bytes,
 //!      interpreted as `(key, nonce, aad, plaintext)`; every field length is a
@@ -12,7 +13,18 @@
 //!      a single flipped bit — in the ciphertext, the tag, or the AAD —
 //!      decryption must return an error and must not hand back the plaintext.
 //!      That is the property an implementation which compared a prefix, or which
-//!      returned plaintext before verifying, would violate.
+//!      returned plaintext before verifying, would violate. (This is now
+//!      unconditional: when the field `mode` selects is empty, the tag is corrupted
+//!      instead of the check being skipped.)
+//!   3. **Arbitrary wire bytes neither panic nor authenticate wrongly.** A tag and
+//!      ciphertext taken straight from the fuzzer — not the output of `encrypt` —
+//!      are fed to `decrypt`. Either it rejects, or (with the `2^-520` probability a
+//!      random 65-byte tag authenticates) it accepts and the recovered plaintext must
+//!      re-encrypt to exactly the ciphertext and tag it came with. An earlier version
+//!      of this target only ever fed `decrypt` the output of `encrypt` or a one-bit
+//!      corruption of it, so a *structurally* invalid tag never reached it.
+//!   4. **A failed in-place decrypt zeroizes the caller's buffer** — checked on every
+//!      failing in-place call, not only when `mode` happened to pick the tag.
 //!
 //! Structured rather than raw: the first two bytes choose which field to corrupt,
 //! so the fuzzer spends its budget on meaningful cases instead of discarding
@@ -61,7 +73,10 @@ fuzz_target!(|data: &[u8]| {
     let back = decrypt(&key, &nonce, aad, &ct, &tag).expect("round trip must verify");
     assert_eq!(back.as_slice(), pt, "round trip must recover the plaintext");
 
-    // Property 2: corrupt exactly one thing and require rejection.
+    // Property 2: corrupt exactly one thing and require rejection. The final arm makes
+    // this unconditional -- when the selected field is empty there is nothing to corrupt,
+    // so the tag (always `TAG_LEN` bytes) is corrupted instead, rather than the check
+    // being skipped as it was before.
     let mut bad_ct = ct.clone();
     let mut bad_tag = tag;
     let mut bad_aad = aad.to_vec();
@@ -82,7 +97,7 @@ fuzz_target!(|data: &[u8]| {
                 "a corrupted tag byte must not authenticate"
             );
         }
-        _ if !bad_aad.is_empty() => {
+        2 if !bad_aad.is_empty() => {
             let i = (mode as usize / 3) % bad_aad.len();
             bad_aad[i] ^= 1 << (mode % 8);
             assert!(
@@ -90,7 +105,36 @@ fuzz_target!(|data: &[u8]| {
                 "a corrupted AAD byte must not authenticate"
             );
         }
-        _ => {}
+        _ => {
+            let i = (mode as usize / 3) % TAG_LEN;
+            bad_tag[i] ^= 1 << (mode % 8);
+            assert!(
+                decrypt(&key, &nonce, aad, &ct, &bad_tag).is_err(),
+                "a corrupted tag byte must not authenticate"
+            );
+        }
+    }
+
+    // Property 3: arbitrary wire bytes. Take a tag and ciphertext straight from the
+    // fuzzer (not from `encrypt`) and require either rejection, or acceptance that is
+    // self-consistent -- the recovered plaintext must re-encrypt to exactly the bytes
+    // presented. This is the structurally-invalid input the target never used to reach.
+    if rest.len() >= TAG_LEN {
+        let (raw_tag, raw_ct) = rest.split_at(TAG_LEN);
+        let raw_tag: [u8; TAG_LEN] = raw_tag.try_into().unwrap();
+        if let Ok(recovered) = decrypt(&key, &nonce, b"", raw_ct, &raw_tag) {
+            let (re_ct, re_tag) =
+                encrypt(&key, &nonce, b"", &recovered).expect("re-encrypt must succeed");
+            assert_eq!(
+                re_ct.as_slice(),
+                raw_ct,
+                "an authenticating ciphertext must re-encrypt to itself"
+            );
+            assert_eq!(
+                re_tag, raw_tag,
+                "an authenticating tag must re-encrypt to itself"
+            );
+        }
     }
 
     // The in-place paths, including the wipe-on-failure contract.
@@ -104,18 +148,16 @@ fuzz_target!(|data: &[u8]| {
         Err(_) => panic!("the honest in-place round trip must verify"),
     }
 
-    // A failing in-place decrypt must leave no plaintext behind.
+    // Property 4: a failing in-place decrypt must leave no plaintext behind. The tag is
+    // corrupted unconditionally (it is always `TAG_LEN` bytes), so this runs on every
+    // input rather than only when `mode` selected the tag.
+    let mut bad_tag2 = tag;
+    bad_tag2[0] ^= 0x01;
     let mut buf3 = ct.clone();
-    if !bad_tag_is_ok(&bad_tag, &tag) && decrypt_in_place_detached(&key, &nonce, aad, &mut buf3, &bad_tag).is_err() {
+    if decrypt_in_place_detached(&key, &nonce, aad, &mut buf3, &bad_tag2).is_err() {
         assert!(
             buf3.iter().all(|&b| b == 0),
             "a failed in-place decrypt must zeroize the buffer"
         );
     }
 });
-
-/// Only used to skip the wipe assertion when the "corruption" left the tag
-/// unchanged (possible when the flip lands on a bit that was already set).
-fn bad_tag_is_ok(bad: &[u8; TAG_LEN], good: &[u8; TAG_LEN]) -> bool {
-    bad == good
-}

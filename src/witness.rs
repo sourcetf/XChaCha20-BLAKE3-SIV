@@ -58,18 +58,25 @@ use crate::{DOM_ENC, DOM_PRE, DOM_TAG, NONCE_LEN, SUBKEY_DOMAIN, TAG_LEN};
 
 /// Volatile-zero a slice.
 ///
-/// The witness wipes every key-derived *buffer* it allocates or is handed, and `ultra` does not
-/// count cost, so this is applied liberally. Stated precisely, because an earlier version of
-/// this comment claimed more than the code does: the **construction** buffers (`material`'s
-/// blocks, `inner`, `outer`, `enc_material`'s output) are wiped, but the primitive-internal
-/// scalar state (`block`'s `s`/`v`, `hchacha20`'s `s`/`v`, `compress`'s `state`/`m`) is not —
-/// the crate's own `chacha20_block`/`hchacha20` do wipe theirs, so this is a gap rather than a
-/// policy. It is partly covered by the `scrub_stack()` the entry points run after the witness
-/// call, and closing it fully is a pending tidy-up. This is also what keeps `tools/ctgrind.sh`
-/// quiet: the first version of this module left its BLAKE3 chaining values in a
-/// `Vec<[u32; 8]>`, and memcheck reported a conditional jump in glibc's `free` — the freed
-/// chunk's payload held poisoned data, and the allocator reads part of it. Wiping before the
-/// buffer is released is both correct hygiene and what removes the report.
+/// The witness wipes every key-derived buffer it allocates or is handed, and `ultra` does not
+/// count cost, so this is applied liberally. That now includes the primitive-internal state:
+/// `block`'s and `hchacha20`'s `s`/`v` (the key words and the permutation state), `compress`'s
+/// `state`/`m`, and the compression outputs in `Output::chaining_value`/`root_output_bytes`.
+/// An earlier version of this comment disclosed those as a gap — the crate's own
+/// `chacha20_block`/`hchacha20` wipe theirs — and it is closed here rather than left to the
+/// `scrub_stack()` the entry points run afterwards.
+///
+/// What is still *not* covered, honestly: a value returned by value (a `[u32; 8]` CV, the
+/// `[u8; 32]` from `hchacha20`) leaves a return temporary this function cannot name, exactly
+/// as `src/lib.rs::derive_enc`'s doc describes for its own 44-byte aggregate. The construction
+/// buffers are written through caller slices for that reason; these small primitive returns
+/// are not, so `scrub_stack` remains the cover for them.
+///
+/// This is also what keeps `tools/ctgrind.sh` quiet: the first version of this module left its
+/// BLAKE3 chaining values in a `Vec<[u32; 8]>`, and memcheck reported a conditional jump in
+/// glibc's `free` — the freed chunk's payload held poisoned data, and the allocator reads part
+/// of it. Wiping before the buffer is released is both correct hygiene and what removes the
+/// report.
 #[inline(never)]
 fn wipe<T>(value: &mut T) {
     let bytes = core::mem::size_of::<T>();
@@ -131,6 +138,11 @@ fn block(key: &[u8; 32], counter: u32, nonce: &[u8; 12]) -> [u8; 64] {
         let w = v[i].wrapping_add(s[i]).to_le_bytes();
         out[i * 4..i * 4 + 4].copy_from_slice(&w);
     }
+    // `s` and `v` hold the key words and the key-dependent permutation state; the crate's
+    // own `chacha20_block` wipes its equivalents, so this does too (an earlier version of
+    // this module disclosed the omission as a gap).
+    wipe(&mut v);
+    wipe(&mut s);
     out
 }
 
@@ -202,6 +214,9 @@ fn hchacha20(key: &[u8; 32], nonce: &[u8; 16]) -> [u8; 32] {
     for (i, idx) in [0usize, 1, 2, 3, 12, 13, 14, 15].iter().enumerate() {
         out[i * 4..i * 4 + 4].copy_from_slice(&v[*idx].to_le_bytes());
     }
+    // As in `block`: `s`/`v` carry the key words and the permutation state.
+    wipe(&mut v);
+    wipe(&mut s);
     out
 }
 
@@ -303,6 +318,12 @@ fn compress(
         out[i] = state[i] ^ state[i + 8];
         out[i + 8] = state[i + 8] ^ cv[i];
     }
+    // `state` is the keyed CV plus the message words; `m` is the (permuted) message block,
+    // which for the tag passes is plaintext-derived and for the KDF is tag-derived. Both
+    // are key-derived in the sense that matters here, so both are wiped like the crate's
+    // own compression path does not need to (its `blake3` call is a black box).
+    wipe_words(&mut state);
+    wipe_words(&mut m);
     out
 }
 
@@ -324,13 +345,18 @@ struct Output {
 
 impl Output {
     fn chaining_value(&self) -> [u32; 8] {
-        first8(&compress(
+        // Name the compression output so it can be wiped: `first8(&compress(..))` would
+        // leave the other eight key-derived words in an unnamed temporary.
+        let mut words = compress(
             &self.input_cv,
             &self.block_words,
             self.counter,
             self.block_len,
             self.flags,
-        ))
+        );
+        let cv = first8(&words);
+        wipe_words(&mut words);
+        cv
     }
 
     fn root_output_bytes(&self, out: &mut [u8]) {
@@ -338,7 +364,7 @@ impl Output {
         // and the output block index *is* the counter, so saying so is clearer anyway.
         for (counter, chunk) in out.chunks_mut(2 * 32).enumerate() {
             let counter = counter as u64;
-            let words = compress(
+            let mut words = compress(
                 &self.input_cv,
                 &self.block_words,
                 counter,
@@ -351,6 +377,8 @@ impl Output {
                     *dst = *src;
                 }
             }
+            // The compression output is the key-derived root block (or a chunk of it).
+            wipe_words(&mut words);
         }
     }
 }
