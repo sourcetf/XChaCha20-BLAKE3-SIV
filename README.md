@@ -826,9 +826,9 @@ works unprivileged, and the emulator is extracted into `~/.local/bin`.
   build, the AVX2 kernel with `-C target-feature=+avx2` (Miri refuses a
   `#[target_feature]` call whose feature is not enabled, which is why it is a
   separate run), the NEON kernel by cross-interpreting the aarch64 target, and
-  big-endian execution by cross-interpreting s390x (`verify.sh --miri` runs all
-  four; the s390x pass executes the boundary corpus, which is the byte-order
-  sensitive one).
+  big-endian execution by cross-interpreting s390x (both `verify.sh --miri` and
+  the Deep Miri job run all four; the s390x pass executes the boundary corpus,
+  which is the byte-order sensitive one).
 - **Kani** — bounded model checking of the construction shape: that the domain,
   key and both lengths reach the hash in the layout the spec fixes for the
   three-part inner shape; that a key change moves *some* output byte (the

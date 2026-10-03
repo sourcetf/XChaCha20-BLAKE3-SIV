@@ -51,7 +51,13 @@ jobs:
   miri:
     name: Miri (UB detection)
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    # 90, not 60: this job now carries five Miri runs -- the unsafe-path pass, the
+    # tree-borrows pass, the AVX2 pass, the aarch64 NEON cross-interpretation and the
+    # s390x big-endian cross-interpretation (added with this raise; measured ~5 min on
+    # a development host and expect several times that on a shared runner, since Miri
+    # interprets rather than executes). A job that runs past its `timeout-minutes`
+    # reads as `cancelled`, not as `failure`, which is how a cut-off audit hides.
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       # Miri is only available on nightly; on stable, `rustup component add miri`
@@ -123,6 +129,22 @@ jobs:
               test_aarch64_neon_kernel_matches_scalar \
               test_simd_xor_matches_scalar_and_raw \
               test_zeroize_covers_unaligned_prefix
+
+      # Big-endian, by interpretation: s390x is 64-bit BE, so this is the one run
+      # where the `from_le_bytes`/`to_le_bytes` sites and the SIMD byte order are
+      # not identity functions -- and it needs no emulator or cross toolchain.
+      # README/tests-README described this run for a while before anything
+      # executed it; `verify.sh --miri` now does, and so does this job.
+      # `test_all_accelerated_paths_agree_on_a_boundary_corpus` is the
+      # byte-order-sensitive one: it folds every ciphertext and tag byte of a
+      # corpus crossing every internal boundary into a pinned digest. Measured
+      # ~5 minutes on a development host.
+      - name: miri, big-endian (s390x)
+        run: |
+          cargo +nightly miri setup --target s390x-unknown-linux-gnu >/dev/null
+          MIRIFLAGS="-Zmiri-disable-isolation -Zmiri-strict-provenance" \
+            cargo +nightly miri test --release --features pure --target s390x-unknown-linux-gnu --lib -- \
+              test_all_accelerated_paths_agree_on_a_boundary_corpus
 
   tsan:
     name: ThreadSanitizer (concurrency)

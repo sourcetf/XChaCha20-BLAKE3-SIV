@@ -219,7 +219,8 @@ cargo deny --offline check
   `qemu-x86_64 -cpu Nehalem` (SSE2 only), aarch64 under qemu (NEON), i686 under
   qemu (pure scalar) and s390x big-endian under Miri, so it is a cross-
   implementation equivalence check rather than a known-answer test. The
-  cross-execution CI job runs it on both accelerated targets.
+  cross-execution CI job runs it on both accelerated targets, and the Deep Miri
+  job (and `verify.sh --miri`) runs the s390x cross-interpretation.
 - **Miri covers every accelerated path**, not just the default one: the AVX2
   kernel runs when the build enables the feature (`detect_avx2` reports the
   compiled feature set under Miri, since it cannot run CPUID there), and the NEON
