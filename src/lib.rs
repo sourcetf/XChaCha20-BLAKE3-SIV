@@ -104,7 +104,7 @@
 //! | --- | --- | --- |
 //! | Confidentiality | 256-bit | the ChaCha20 key |
 //! | Forgery resistance | **256-bit** | BLAKE3 keyed mode as a PRF over a 256-bit key |
-//! | Context / key commitment (CMT-3, CMT-1/CMTk) | **`2^-520` per candidate key** against a given ciphertext | the tag hit as a *target*; the width does not set it |
+//! | Context / key commitment (CMT-3, CMT-1/CMTk) | **`2^-520` per candidate key** against a given ciphertext | the tag hit as a *target*: the 520-bit width is what sets it |
 //! | Collision resistance of the tag | **2^128** | the 256-bit chaining value the tag is a function of, not the tag's width |
 //!
 //! **Forgery: 256 bits is the ceiling, not a choice.**  Forgery resistance is
