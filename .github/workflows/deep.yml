@@ -548,8 +548,20 @@ jobs:
           set -euo pipefail
           # One invocation, all features: the run and the report cannot be split
           # across different feature sets, and `report` takes no feature flags.
+          #
+          # `-- --skip timing` for the same reason the blocking test matrix uses it:
+          # `cargo llvm-cov` instruments every line, which makes each operation ~70x
+          # more expensive, and the statistical timing screen's resolution model does
+          # not survive that. Measured on this job (a GitHub runner, instrumented):
+          # `t = 13.78` (means 23245.9 vs 23288.9 ns/op) and `t = 51.14` at 43 ns/op
+          # resolution -- both reported as leaks by a screen whose threshold is
+          # `t < 10`, on the same code that passes with `t < 0.4` on a quiet host. The
+          # screen is advisory in CI by measurement (its own job, `continue-on-error`),
+          # so it must not gate the coverage number; `tests/timing.rs` is not in the
+          # report either (the lcov has `src/lib.rs` and `src/witness.rs` only), so
+          # skipping the target does not move the denominator.
           cargo llvm-cov --all-features --release --lcov --output-path lcov.info \
-            --fail-under-lines 95
+            --fail-under-lines 95 -- --skip timing
 
       # An inventory, deliberately not labelled an SBOM: a CycloneDX or SPDX
       # document needs a generator that is not installed here, and calling

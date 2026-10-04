@@ -8,6 +8,20 @@ green push to `main` — which are build artefacts of that job, not construction
 
 ## Unreleased
 
+### The coverage job ran the timing screen instrumented, and called the result a leak
+
+`Deep checks` went red on the commit before this one, and the failing step was the line-floor
+step — but not for the line floor. `cargo llvm-cov` instruments every line, making each
+operation ~70x more expensive (measured in the job's own log: 23.2 us per 1 KiB decrypt
+against ~0.33 us plain), and the statistical timing screen's resolution model does not survive
+that: it reported `t = 13.78` (means 23245.9 vs 23288.9 ns/op — a 0.2% difference blown up by
+the instrumented fixed costs) and `t = 51.14`, both above its `t < 10` threshold, on the same
+code that passes with `t < 0.4` on a quiet host. The screen is advisory in CI **by
+measurement** (its own job is `continue-on-error`), and the blocking matrix already runs
+`-- --skip timing`; the coverage step now does too. It does not move the denominator: the lcov
+report contains only `src/lib.rs` and `src/witness.rs`, so the skipped target contributed no
+lines to it. (The coverage floor itself passes locally at 95.65% of lines.)
+
 ### The complete attack-review round: a sweep that failed 3/3, and counts that were one short per shard
 
 The complete version of the incremental attack report (14 units, all of the lightweight
