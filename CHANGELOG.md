@@ -54,6 +54,18 @@ measurement contradicted. **No wire-format change.**
   5 -> 7: the new branches test the allocator's and the `munlock` syscall's return values,
   which are public facts about the process, never key/nonce/AAD/message content). Both are
   exactly the tripwires they exist to be.
+- **`fork` is now disclosed as a boundary** (the review's medium-low item): the child inherits
+  the key bytes and the `MADV_DONTDUMP` advice but *not* the `mlock` — `VmLck` is per-process —
+  so a forked child can read the key and its copy can reach swap after a COW write or once the
+  parent drops its own; `execve` also resets the dumpable flag. The `LockedKey` docs, README's
+  boundary list and SECURITY-ANALYSIS §8.2 now say so, with the measured rows (child reads the
+  plaintext, child `VmLck` = 0, the child's page swaps after one COW write). A service that
+  forks should load keys after the fork or re-`mlock` in the child.
+- **Two `Deref`/RAII hazards written down** rather than left to be discovered: `Key`'s
+  deref target makes `key.clone()` a plain `[u8; 32]` copy that is not wiped on drop (the
+  type deliberately has no `Clone` impl; use `Key::from_bytes` for a real copy), and it
+  makes `key_a == key_b` a short-circuiting array comparison rather than a `subtle` one;
+  `mem::forget`/`Box::leak` on a `LockedKey` leaks the lock quota until the process exits.
 - Also on this push: the whole-buffer `random::fill` assertion is a count again (~6e-6
   false-failure bound) instead of demanding zero sentinel matches, which failed ~22% of the
   time on a correct fill and turned two CI jobs red; and the MSRV job now runs

@@ -737,6 +737,20 @@ impl Key {
     }
 }
 
+/// # Why `Deref` is worth a warning
+///
+/// It makes `key.as_slice()`-style borrowing ergonomic, and it also means two things
+/// compile that a reader may not expect:
+///
+/// * `key.clone()` is `[u8; 32]::clone(&*key)` -- a **plain array copy** that does not go
+///   through `Key` again, so the copy is not wiped on drop. An audit pointed this out;
+///   `Key` deliberately does not implement `Clone`, and the deref target does. Copy
+///   deliberately, with [`Key::from_bytes`], if the copy is meant to be a `Key`.
+/// * `key_a == key_b` compares the *arrays* (`Deref` coercion), which short-circuits on
+///   the first differing byte and does not use `subtle`. That is a comparison of two
+///   secrets the caller already holds, not of a secret against an attacker's guess, so it
+///   is not the timing problem `ConstantTimeEq` exists for -- but a caller comparing a
+///   guess against a key should not reach for `==` here.
 impl core::ops::Deref for Key {
     type Target = [u8; KEY_LEN];
     #[inline]
@@ -1476,11 +1490,35 @@ pub mod locked {
 
     /// A `Key` that is locked into RAM (and excluded from core dumps) for its lifetime.
     ///
+    /// Dropping frees the page and drops the lock; `mem::forget` (or `Box::leak`) leaves
+    /// the page locked and charged against `RLIMIT_MEMLOCK` until the process exits, the
+    /// same caveat every RAII lock has. The `Deref` impl carries the same two warnings as
+    /// `crate::Key`'s: `key.clone()` copies the plain array, and `==` compares it
+    /// short-circuiting.
+    ///
     /// `ultra`'s answer to the part of the wipe story a volatile store cannot reach:
     /// while this value is alive its pages cannot be swapped out, and a core dump will
     /// not contain them. It does **not** cover a debugger attached to the process, a
     /// hypervisor reading guest memory, or cold-boot remanence — see the README's
     /// "cannot fix for you" list.
+    ///
+    /// # `fork` is the boundary that surprises services
+    ///
+    /// **The lock does not survive `fork`, and the key does.** A forked child gets a
+    /// copy-on-write copy of the parent's pages, so it can read the key bytes (and the
+    /// integrity tag) directly; `VmLck` accounting is per-process, so the child's copy is
+    /// *not* locked and can be written to swap after a write splits the COW page (or after
+    /// the parent drops its own key). What the child *does* inherit is
+    /// `MADV_DONTDUMP` and the dumpable flag, so `locked::deny_debugging()` still helps —
+    /// but a dump exclusion is not a lock. This is Linux semantics, not a property of this
+    /// crate, and it is the reason a service that forks should load its keys **after** the
+    /// fork (or in each child), or re-`mlock` in the child, rather than inheriting them.
+    /// An audit measured each row of that table (parent locked, child reads the plaintext,
+    /// child `VmLck` = 0, child's pages swappable after a COW write); this paragraph is the
+    /// disclosure that measurement asked for.
+    ///
+    /// `execve` is the other edge: it resets the dumpable flag (`deny_debugging` does not
+    /// cross a successful `exec`), so an exec'd child is dumpable again until it calls it.
     ///
     /// `LockedKey::new` fails when the OS refuses (`ENOMEM` from `RLIMIT_MEMLOCK` is the
     /// usual one), rather than silently leaving the key unprotected: the whole point is

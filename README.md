@@ -648,6 +648,17 @@ deployment.
   hardware for the physical end. A library that allocates through `alloc` and runs
   on an OS it does not own is not where they belong, and this one does not pretend
   otherwise.
+- **`fork` copies the key and drops the lock.** `mlock` is per-process: a forked child
+  inherits the parent's pages (it can read the key bytes, and the integrity tag) but its
+  own `VmLck` is zero, so its copy is *not* locked and can reach swap — after a
+  copy-on-write split, or once the parent drops its key. What the child does inherit is
+  `MADV_DONTDUMP` and the dumpable flag, so `locked::deny_debugging()` still applies, but
+  a dump exclusion is not a lock. A service that forks should load keys after the fork
+  (or in each child) or re-`mlock` there; `execve` also resets the dumpable flag, so an
+  exec'd child is dumpable again until it calls `deny_debugging()` itself. (Measured, not
+  assumed: parent locked, child reads the plaintext, child `VmLck` = 0, the child's pages
+  swap after one COW write.) An earlier revision of this list named debuggers, hypervisors,
+  cold boot and hibernation but not `fork`, which is the one a server actually hits.
 - **Bounding the input is the caller's job.** `decrypt` allocates a buffer as large
   as its ciphertext argument, so the peak for the call is twice the message — the
   ciphertext the caller already holds, plus the plaintext — and the format's own
