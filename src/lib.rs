@@ -2109,7 +2109,10 @@ fn blake3_keyed_multi(key: &[u8; 32], parts: &[&[u8]], out: &mut [u8]) {
     // `ChunkState` built from the key on the multi-chunk path), and audits measured
     // exactly that: a copy of `k_in` left in dead stack frames on the `hardened` build
     // for inputs above ~950 bytes, readable across threads, thread-stack reuse and
-    // `fork` until `scrub_stack` (which `ultra` runs) covers it. The shape depends on
+    // `fork` until `scrub_stack` (which `ultra` runs) covers it. The same region holds
+    // shorter fragments of the other two secrets -- a 4-byte prefix of `k_out` (at
+    // `k_in + 0x40`) and of `enc_seed` in one probe -- so "the residue is `k_in` only"
+    // would be too narrow, even though a 4-byte prefix is not a key. The shape depends on
     // the profile: with this crate's release profile (LTO on) it is the full 32 bytes,
     // with LTO off a 16-24 byte prefix, and the deepest frames move with the
     // overflow-checks setting -- so "no copy survives" is false in a way codegen
