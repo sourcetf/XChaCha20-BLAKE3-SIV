@@ -2149,8 +2149,8 @@ fn blake3_keyed_multi(key: &[u8; 32], parts: &[&[u8]], out: &mut [u8]) {
     // build (Rust ChaCha backend) `k_in` appears as an 8-16 byte prefix on encryption
     // and a full 32 bytes on decryption, with `k_out` at a 16-byte half; and the
     // release/no-default decrypt paths leave 8-12 bytes of `enc_nonce`, which a scan
-    // anchored on whole 32-byte keys does not see at all. No single configuration left both a
-    // whole `k_in` and a whole `k_out` in reach -- the two configurations that come
+    // anchored on whole 32-byte keys does not see at all. No single configuration left
+    // both a whole `k_in` and a whole `k_out` in reach -- the two configurations that come
     // closest split them (release keeps `k_in` whole, `k_out` short; debug keeps
     // `k_out` whole, `k_in` not at all) -- so an offline forgery still needs a
     // second source, but "which secret, how long, how many copies" is a property of
