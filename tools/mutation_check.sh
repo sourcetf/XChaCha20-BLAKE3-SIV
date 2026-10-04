@@ -76,10 +76,7 @@ run_ctgrind() {
     # The same classification the real check uses: a report inside this crate
     # means the leak was seen.
     local vg
-    vg=""
-    for c in "${VALGRIND:-}" "$HOME/valgrind/usr/bin/valgrind" "$(command -v valgrind 2>/dev/null || true)"; do
-      if [ -n "$c" ] && [ -x "$c" ]; then vg="$c"; break; fi
-    done
+    vg="$(find_valgrind)"
     if [ -z "$vg" ]; then
       echo "SKIPPED: no valgrind found (see tools/ctgrind.sh --setup)" >&2
       return 3
@@ -99,12 +96,40 @@ run_ctgrind() {
   )
 }
 
+# The valgrind to use, or nothing. One function so the preflight in the driver and the
+# check itself cannot disagree.
+#
+# An explicit `VALGRIND=` is honoured *strictly*, the same rule as `tools/ctgrind.sh`: if
+# it is set, it is the only candidate, so an unusable value means "could not run" rather
+# than a cue to fall through to a system valgrind. Without that, the hiding
+# `tools/gate_selftest.sh` does with `VALGRIND=/nonexistent` would be defeated on a
+# machine that has one, and the control would report a tool defect that is really a hole
+# in the control.
+find_valgrind() {
+  if [ -n "${VALGRIND:-}" ]; then
+    [ -x "$VALGRIND" ] && printf '%s\n' "$VALGRIND"
+    return 0
+  fi
+  local c
+  for c in "$HOME/valgrind/usr/bin/valgrind" "$(command -v valgrind 2>/dev/null || true)"; do
+    if [ -n "$c" ] && [ -x "$c" ]; then printf '%s\n' "$c"; return 0; fi
+  done
+  return 0
+}
+
 # Returns 1 when the suite fails (the mutation was caught), 0 when it passes.
 # The driver's convention is "1 = caught", so cargo's own exit status is mapped
 # rather than passed through -- cargo reports 101 for a failing test run, which
 # would otherwise read as an unrelated error.
+#
+# 2 means "the mutated tree does not build". That is *not* a caught mutation: the
+# detector never ran, and collapsing a compile error into "caught" is how this row
+# could report success while checking nothing (an audit pointed it out). The build is
+# therefore separated from the run.
 run_kat() {
   local dir="$1"
+  ( cd "$dir" && CARGO_TARGET_DIR="$dir/target-kat" \
+      cargo test --release --lib --no-run >/dev/null 2>&1 ) || return 2
   local status=0
   ( cd "$dir" && CARGO_TARGET_DIR="$dir/target-kat" cargo test --release --lib >/dev/null 2>&1 ) || status=$?
   if [ "$status" -eq 0 ]; then return 0; fi
@@ -117,6 +142,24 @@ check_one() {
   echo "--- $name ---"
   echo "    mutation: $4"
   echo "    must be caught by: $check"
+  # Baseline first: the check must PASS on an unmutated copy. Without it a "caught"
+  # verdict cannot be interpreted -- the check could be failing for a reason of its own
+  # (an unbuildable tree, a pre-existing test failure, a broken suppression), which
+  # would make every mutation look caught. `run_kat` in particular mapped *any*
+  # non-zero exit to "caught", so a patch that only broke the build passed this row.
+  copy_tree "$dir.baseline"
+  set +e
+  "$check" "$dir.baseline"
+  local base=$?
+  set -e
+  case "$base" in
+    3) echo "    could not run the baseline (tooling unavailable)"; return 3 ;;
+    0) echo "    baseline: $check passes on the unmutated tree" ;;
+    *) echo "FAIL: $check does not pass on an UNMUTATED tree (exit $base), so a" >&2
+       echo "      'caught' verdict for $name would be meaningless. Fix the check" >&2
+       echo "      before trusting this row." >&2
+       return 1 ;;
+  esac
   copy_tree "$dir"
   "$mutation" "$dir"
   set +e
@@ -125,6 +168,9 @@ check_one() {
   set -e
   case "$status" in
     1) echo "    ok: caught" ;;
+    2) echo "FAIL: the mutated tree does not build, so $check never ran and this row" >&2
+       echo "      proves nothing. A mutation must be a semantic fault, not a syntax one." >&2
+       return 1 ;;
     # `return 3`, not a bare `echo`: the driver distinguishes "not caught" from
     # "could not run", and a skip that returns 0 makes the whole tool report
     # "all mutations were caught" without having tested anything.
@@ -139,15 +185,26 @@ want="${1:-all}"
 rc=0
 skipped=0
 if [ "$want" = "all" ] || [ "$want" = "ctgrind" ]; then
-  set +e
-  check_one ctgrind mutate_ctgrind run_ctgrind \
-    "ct_eq -> == in both decrypt paths"
-  status=$?
-  set -e
-  # `check_one` answers 1 for "not caught" and 3 for "could not run": the first is a
-  # finding about the check, the second is a gap in it, and collapsing them into one
-  # exit status is how a skipped run becomes a green one.
-  if [ "$status" -eq 3 ]; then skipped=$((skipped + 1)); elif [ "$status" -ne 0 ]; then rc=1; fi
+  # Preflight, so "no valgrind" answers exit 3 *before* the baseline copy, its build and
+  # the mutation's build. The lookup cannot disagree with `run_ctgrind`'s because both
+  # call `find_valgrind`. It also keeps `tools/gate_selftest.sh` cheap: it hides valgrind,
+  # and without this it would pay two full builds to learn what it already knows.
+  if [ -z "$(find_valgrind)" ]; then
+    echo "--- ctgrind ---"
+    echo "    SKIPPED: no valgrind found (see tools/ctgrind.sh --setup); not running the"
+    echo "    baseline or the mutation."
+    skipped=$((skipped + 1))
+  else
+    set +e
+    check_one ctgrind mutate_ctgrind run_ctgrind \
+      "ct_eq -> == in both decrypt paths"
+    status=$?
+    set -e
+    # `check_one` answers 1 for "not caught" and 3 for "could not run": the first is a
+    # finding about the check, the second is a gap in it, and collapsing them into one
+    # exit status is how a skipped run becomes a green one.
+    if [ "$status" -eq 3 ]; then skipped=$((skipped + 1)); elif [ "$status" -ne 0 ]; then rc=1; fi
+  fi
 fi
 if [ "$want" = "all" ] || [ "$want" = "kat" ]; then
   set +e

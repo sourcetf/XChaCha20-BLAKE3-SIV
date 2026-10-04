@@ -20,10 +20,20 @@
 # Exit codes: 0 every gate honours the convention; 1 one of them does not.
 set -euo pipefail
 
+# Hard recursion guard. This file runs `verify.sh`, and `verify.sh` runs this file; the
+# call there is marker-guarded, but if that guard is ever removed the two would spin
+# forever instead of failing (measured: nested `verify.sh --ctgrind` processes, no
+# output, no exit). A second entry point is a mistake, and it says so.
+if [ "${XSIV_IN_GATE_SELFTEST:-}" = "1" ]; then
+  echo "gate contract: refusing to recurse (XSIV_IN_GATE_SELFTEST is already set)" >&2
+  exit 3
+fi
+
 cd "$(dirname "$0")/.."
 export PATH="$HOME/.cargo/bin:$PATH"
 REAL_CARGO_HOME="${CARGO_HOME:-$HOME/.cargo}"
 REAL_RUSTUP_HOME="${RUSTUP_HOME:-$HOME/.rustup}"
+REAL_HOME="$HOME"
 CARGO_BIN_DIR="$(dirname "$(command -v cargo)")"
 
 WORK="$(mktemp -d)"
@@ -42,6 +52,21 @@ printf '#!/bin/sh\nexit 0\n' > "$HIDDEN_HOME/valgrind/usr/bin/valgrind"
 chmod -x "$HIDDEN_HOME/valgrind/usr/bin/valgrind"
 
 fail=0
+
+# A throwaway `HOME` whose `cargo` is a stub with the given exit status.
+#
+# Needed because `verify.sh` and `tools/fi_check.sh` both prepend `$HOME/.cargo/bin` to
+# `PATH` themselves, so a stub that is only *on* PATH loses to the real toolchain: an
+# earlier version of the two checks below did that and silently ran the real five-minute
+# campaign instead of the stub. Pointing `HOME` at this makes the stub win, which is what
+# "the toolchain cannot run" has to mean for these checks.
+make_fake_home() {  # <cargo exit status>
+  local home="$WORK/home-$1"
+  mkdir -p "$home/.cargo/bin"
+  printf '#!/bin/sh\nexit %s\n' "$1" > "$home/.cargo/bin/cargo"
+  chmod +x "$home/.cargo/bin/cargo"
+  printf '%s\n' "$home"
+}
 
 hidden_run() {  # prints output, returns the tool's status
   local out rc
@@ -84,36 +109,72 @@ check_exit_3() {  # label, command...
 echo "gate contract: 'could not run' is exit 3, never 0"
 check_exit_3 "tools/ctgrind.sh"       bash tools/ctgrind.sh
 check_exit_3 "tools/cache_profile.sh" bash tools/cache_profile.sh 4
-check_exit_3 "tools/mutation_check.sh" bash tools/mutation_check.sh
+# `ctgrind` only: with valgrind hidden that is the mutation that answers 3, and asking
+# for just it keeps this control from running the `kat` mutation's real builds (it needs
+# no valgrind, so it would run them) every time.
+check_exit_3 "tools/mutation_check.sh" bash tools/mutation_check.sh ctgrind
 
-# The tool's own exit status only helps if the caller honours it: `verify.sh` calls
-# `tools/ctgrind.sh` directly, and that is where the skip used to be absorbed. The
-# mapping is asserted by its text, anchored on the comparison, so a refactor that
-# removes the handling fails here instead of silently turning skips back into passes.
-if grep -q 'if \[ "\$ctgrind_rc" -eq 3 \]' verify.sh; then
-  echo "  ok: verify.sh maps ctgrind's exit 3 to a skipped stage"
-else
-  echo "FAIL: verify.sh no longer maps tools/ctgrind.sh's exit 3 to a skipped stage," >&2
-  echo "      so a run without valgrind would count as a pass again." >&2
+# The tool's own exit status only helps if the caller honours it, so what follows is
+# *behavioural*. An earlier version grepped `verify.sh` for the exact string
+# `if [ "$ctgrind_rc" -eq 3 ]` and each tool for a line starting with `exit 3`: both are
+# satisfied only by the implementation they were written against, so a rewrite that keeps
+# the behaviour (`case $rc in 3)`, `exit "$E_COULD_NOT_RUN"`) read as a failure, and
+# neither could see a tool that was not in the list at all -- an audit injected an `exit 0`
+# skip into `tools/fi_check.sh` and this file stayed green.
+
+# 1. A stage the caller *named* must not be skipped and then reported as a success. The
+#    core stages are made instant by a `cargo` that succeeds, so this exercises verify.sh's
+#    skip handling and nothing else.
+HOME_OK="$(make_fake_home 0)"
+set +e
+vs_out="$(XSIV_IN_GATE_SELFTEST=1 \
+          PATH="$HOME_OK/.cargo/bin:$STUB:$CARGO_BIN_DIR:/usr/bin:/bin" HOME="$HOME_OK" \
+          VALGRIND=/nonexistent timeout 300 bash ./verify.sh --ctgrind 2>&1)"
+vs_rc=$?
+set -e
+if [ "$vs_rc" -eq 124 ]; then
+  echo "FAIL: verify.sh did not finish within 300 s with a stub toolchain, so the stub" >&2
+  echo "      is not the toolchain it used." >&2
   fail=1
+elif [ "$vs_rc" -eq 0 ]; then
+  echo "FAIL: verify.sh exited 0 after --ctgrind was asked for and skipped. A stage the" >&2
+  echo "      caller named must not come back as a success." >&2
+  printf '%s\n' "$vs_out" | tail -5 | sed 's/^/      | /' >&2
+  fail=1
+elif ! printf '%s\n' "$vs_out" | grep -q 'named on the command line and did not run'; then
+  echo "FAIL: verify.sh exited $vs_rc for an explicitly named, skipped stage but did not" >&2
+  echo "      say so, so it may be failing for an unrelated reason." >&2
+  printf '%s\n' "$vs_out" | tail -5 | sed 's/^/      | /' >&2
+  fail=1
+else
+  echo "  ok: verify.sh fails (exit $vs_rc) when a stage it was asked for is skipped"
 fi
 
-# And the same invariant for anything else that shells out to a tool which can
-# answer "could not run": every such call site must compare against 3.
-for tool in tools/ctgrind.sh tools/cache_profile.sh tools/mutation_check.sh; do
-  if grep -q '^ *exit 3' "$tool"; then
-    echo "  ok: $tool has an exit-3 path"
-  else
-    echo "FAIL: $tool has no 'exit 3' path; if it can answer 'could not run' it must" >&2
-    echo "      say so with a status a caller can distinguish from success." >&2
-    fail=1
-  fi
-done
+# 2. A campaign that cannot run must not report itself complete. `tools/fi_check.sh` has no
+#    exit-3 path (it either runs or fails), so the invariant here is "non-zero, and not the
+#    completion line", with a `cargo` that fails.
+HOME_FAIL="$(make_fake_home 1)"
+set +e
+fi_out="$(HOME="$HOME_FAIL" PATH="$HOME_FAIL/.cargo/bin:/usr/bin:/bin" \
+          timeout 300 bash tools/fi_check.sh 2>&1)"
+fi_rc=$?
+set -e
+if [ "$fi_rc" -eq 0 ] || [ "$fi_rc" -eq 124 ] \
+   || printf '%s\n' "$fi_out" | grep -q 'campaign complete'; then
+  echo "FAIL: tools/fi_check.sh reported success (exit $fi_rc) with a cargo that fails." >&2
+  echo "      A campaign that could not run must not answer 0 -- the same defect this file" >&2
+  echo "      exists for, one tool further out." >&2
+  printf '%s\n' "$fi_out" | tail -5 | sed 's/^/      | /' >&2
+  fail=1
+else
+  echo "  ok: tools/fi_check.sh -> exit $fi_rc with a failing cargo (no silent skip)"
+fi
 
 echo
 if [ "$fail" -ne 0 ]; then
   echo "gate contract: FAILED" >&2
   exit 1
 fi
-echo "gate contract: every tool that can answer 'could not run' uses exit 3, and"
-echo "               verify.sh reports it as a skipped stage"
+echo "gate contract: the three tools that can answer 'could not run' use exit 3 under"
+echo "               hidden tooling; verify.sh fails when a stage it was asked for is"
+echo "               skipped; and a campaign that cannot run does not report completion."

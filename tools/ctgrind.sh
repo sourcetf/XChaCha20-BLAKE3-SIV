@@ -76,13 +76,29 @@ EOF
 fi
 
 # ── Locate valgrind ────────────────────────────────────────────────────
+#
+# An explicit `VALGRIND=...` is honoured *strictly*: if it is set, that is the only
+# candidate, and an unusable value is "could not run" rather than a cue to fall through
+# to some other valgrind on PATH. The fall-through was a real defect in the reverse
+# direction too -- `tools/gate_selftest.sh` hides valgrind by exporting
+# `VALGRIND=/nonexistent`, and on a machine with a system valgrind the old loop would
+# have quietly used that one instead, so the control would have reported a tool failure
+# that was really a hole in the control.
 VG=""
-for c in "${VALGRIND:-}" "$HOME/valgrind/usr/bin/valgrind" \
-         "$(command -v valgrind 2>/dev/null || true)"; do
-  if [ -n "$c" ] && [ -x "$c" ]; then VG="$c"; break; fi
-done
+if [ -n "${VALGRIND:-}" ]; then
+  [ -x "$VALGRIND" ] && VG="$VALGRIND"
+else
+  for c in "$HOME/valgrind/usr/bin/valgrind" \
+           "$(command -v valgrind 2>/dev/null || true)"; do
+    if [ -n "$c" ] && [ -x "$c" ]; then VG="$c"; break; fi
+  done
+fi
 if [ -z "$VG" ]; then
-  echo "SKIPPED: valgrind not found.  Run 'tools/ctgrind.sh --setup'." >&2
+  if [ -n "${VALGRIND:-}" ]; then
+    echo "SKIPPED: VALGRIND=$VALGRIND is not an executable file." >&2
+  else
+    echo "SKIPPED: valgrind not found.  Run 'tools/ctgrind.sh --setup'." >&2
+  fi
   # Exit 3, not 0: "could not run" has to be distinguishable from "ran and passed",
   # or a caller that only looks at the status counts this as a green check (which is
   # exactly what `verify.sh` did before it learned to map 3 to a skipped stage).
@@ -138,17 +154,49 @@ echo "suppressions: $SUPP_COUNT entry/entries, all naming accept_or_reject"
 # `strip=none` overrides the release profile's `strip = true`. Without symbols
 # valgrind prints `???` for every frame, and every suppression here matches on
 # function names, so the file silently stops suppressing anything.
-echo "building a static test binary..."
-RUSTFLAGS="-C target-feature=+crt-static -C strip=none" \
-  cargo test --release --target "$TARGET" --test ctgrind --no-run "${CARGO_ARGS[@]+"${CARGO_ARGS[@]}"}" >/dev/null
+#
+# The executable is taken from cargo's own JSON stream rather than from a glob over
+# the deps directory. Two reasons, both measured:
+#
+#   * the self-test used to build a *planted* copy into this same directory, and since
+#     the crate's identity (name, version, features, profile) decides `-C metadata`,
+#     the planted binary carries the same file name as the clean one. A glob plus
+#     `ls -t` then runs whichever was written last -- after one run, the planted one --
+#     so a second `tools/ctgrind.sh` in the same tree failed in 0.8 s with 8 reports
+#     inside `decrypt_in_place_detached`, on source that had not changed;
+#   * a glob also picks up binaries from other configurations, which share the prefix.
+cargo_ctgrind_executable() {  # reads cargo's `--message-format=json` stream on stdin
+  python3 -c '
+import json, sys
+exes = []
+for line in sys.stdin:
+    if not line.startswith("{"):
+        continue
+    try:
+        m = json.loads(line)
+    except ValueError:
+        continue
+    if m.get("reason") != "compiler-artifact" or not m.get("executable"):
+        continue
+    if (m.get("target") or {}).get("name") == "ctgrind":
+        exes.append(m["executable"])
+print(exes[-1] if exes else "")
+'
+}
 
-# `|| true` is load-bearing: this script runs with `set -o pipefail` and
-# `set -e`, and `grep -v` exits 1 when nothing is left, which killed the whole
-# script at this line -- silently, because the `[ -n "$BIN" ]` that reports it
-# never ran. A failure here has to arrive with a reason.
-BIN=$(ls -t "$DEPS_DIR/"ctgrind-* 2>/dev/null \
-      | grep -vE '\.(d|o)$' | head -1 || true)
-[ -n "$BIN" ] || { echo "could not find the ctgrind test binary under $DEPS_DIR/" >&2; exit 1; }
+echo "building a static test binary..."
+# Remove any previous ctgrind test binary first: a tree that already ran an earlier
+# version of the self-test has a *planted* one sitting here under this name, and with
+# the source unchanged cargo would call the target Fresh and hand that file back.
+# Deleting it costs one relink (measured ~5 s) and heals such a tree.
+rm -f "$DEPS_DIR"/ctgrind-*
+BIN="$(RUSTFLAGS="-C target-feature=+crt-static -C strip=none" \
+  cargo test --release --target "$TARGET" --test ctgrind --no-run --message-format=json \
+    "${CARGO_ARGS[@]+"${CARGO_ARGS[@]}"}" 2>/dev/null | cargo_ctgrind_executable)"
+[ -n "$BIN" ] || {
+  echo "could not find the ctgrind test binary: cargo reported no executable for it" >&2
+  exit 1
+}
 echo "binary: $BIN"
 
 # ── 1. The negative control must be detected ───────────────────────────
@@ -307,14 +355,16 @@ PLANT
   fi
 
   ( cd "$WORK/tree"
-    # Same directory the main build used, so the planted binary is found where this
-    # script looks for it (`$DEPS_DIR`) even when CARGO_TARGET_DIR is set.
-    export CARGO_TARGET_DIR="$TARGET_DIR"
+    # Its OWN target directory. Building into the main one -- which this did, on the
+    # theory that the planted binary then sits where the script looks for it -- wrote
+    # the leaky binary over the clean one (same crate, same metadata hash, same file
+    # name) and the next run, whose build cargo called Fresh, ran it. The planted
+    # binary is located by asking cargo now, so sharing a directory is not needed.
+    export CARGO_TARGET_DIR="$WORK/tree/target"
     RUSTFLAGS="-C target-feature=+crt-static -C strip=none" \
-      cargo test --release --target "$TARGET" --test ctgrind --no-run \
-      "${CARGO_ARGS[@]+"${CARGO_ARGS[@]}"}" >/dev/null )
-  planted_bin="$(ls -t "$DEPS_DIR/"ctgrind-* 2>/dev/null \
-                 | grep -vE '\.(d|o)$' | head -1 || true)"
+      cargo test --release --target "$TARGET" --test ctgrind --no-run --message-format=json \
+      "${CARGO_ARGS[@]+"${CARGO_ARGS[@]}"}" >"$WORK/planted-build.json" 2>/dev/null )
+  planted_bin="$(cargo_ctgrind_executable < "$WORK/planted-build.json")"
   [ -n "$planted_bin" ] || { echo "FAIL: no planted test binary" >&2; exit 1; }
 
   set +e

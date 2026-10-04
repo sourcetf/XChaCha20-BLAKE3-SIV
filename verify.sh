@@ -49,19 +49,25 @@ RUN_FUZZ=0
 RUN_TSAN=0
 RUN_TOOLS=0
 STRICT=0
+# Stages the caller *named* on the command line (not the ones `--deep`/`--all` switch on).
+# A narrow invocation is documented as "run what you can and list the rest", which is why
+# a skip is not automatically fatal -- but if the stage you explicitly asked for is the one
+# that did not run, exiting 0 reports a success you did not get. `tools/gate_selftest.sh`
+# asserts this behaviour rather than the text that implements it.
+EXPLICIT_KEYS=()
 for arg in "$@"; do
   case "$arg" in
-    --kani) RUN_KANI=1 ;;
-    --kani-only) RUN_KANI=1; KANI_ONLY=1 ;;
-    --cross-exec) RUN_CROSS_EXEC=1 ;;
+    --kani) RUN_KANI=1; EXPLICIT_KEYS+=(kani) ;;
+    --kani-only) RUN_KANI=1; KANI_ONLY=1; EXPLICIT_KEYS+=(kani) ;;
+    --cross-exec) RUN_CROSS_EXEC=1; EXPLICIT_KEYS+=(cross-exec) ;;
     # Kept as an alias: the stage used to execute aarch64 only.
-    --aarch64-exec) RUN_CROSS_EXEC=1 ;;
-    --miri) RUN_MIRI=1 ;;
-    --ctgrind) RUN_CTGRIND=1 ;;
-    --deny) RUN_DENY=1 ;;
-    --fuzz) RUN_FUZZ=1 ;;
-    --tsan) RUN_TSAN=1 ;;
-    --tools) RUN_TOOLS=1 ;;
+    --aarch64-exec) RUN_CROSS_EXEC=1; EXPLICIT_KEYS+=(cross-exec) ;;
+    --miri) RUN_MIRI=1; EXPLICIT_KEYS+=(miri) ;;
+    --ctgrind) RUN_CTGRIND=1; EXPLICIT_KEYS+=(ctgrind) ;;
+    --deny) RUN_DENY=1; EXPLICIT_KEYS+=(deny) ;;
+    --fuzz) RUN_FUZZ=1; EXPLICIT_KEYS+=(fuzz) ;;
+    --tsan) RUN_TSAN=1; EXPLICIT_KEYS+=(tsan) ;;
+    --tools) RUN_TOOLS=1; EXPLICIT_KEYS+=(tools) ;;
     # Same trick as `check.sh`: the usage text is this file's own header, so there is
     # only one copy to keep true. `--help` was not handled at all before, which made
     # `./verify.sh --help` an error rather than an answer.
@@ -83,11 +89,18 @@ step() { echo; echo "=== $* ==="; }
 # Skips are recorded, not just printed: a stage that did not run must not be reported
 # as one that passed. `--deep` and `--all` claim to have run everything, so they
 # refuse to finish while anything was skipped; a narrow invocation lists what it
-# skipped and still exits 0, which is the point of a narrow invocation.
+# skipped and exits 0 -- unless the skipped stage is one the caller named explicitly,
+# which would be a success report for something that did not happen.
 SKIPPED_STAGES=()
+SKIPPED_KEYS=()
+STAGE_KEY=""
 skip() {
   local stage="$1"; shift
   SKIPPED_STAGES+=("$stage")
+  if [ -n "$STAGE_KEY" ]; then
+    SKIPPED_KEYS+=("$STAGE_KEY")
+    STAGE_KEY=""
+  fi
   echo "SKIPPED ($stage): $*"
 }
 
@@ -127,7 +140,16 @@ if [ "$KANI_ONLY" -eq 0 ]; then
   # and this script reports that as a skipped stage. Both halves are checked here
   # (seconds), because "a skip counted as a pass" is the failure this script has
   # twice reported as a green run.
-  tools/gate_selftest.sh
+  #
+  # Guard: `tools/gate_selftest.sh` asserts this script's own skip handling by *running*
+  # it, so an unguarded call here recurses (it did: the nested verify.sh started another
+  # gate_selftest, and neither terminated). The marker makes the nesting explicit; the
+  # inner invocation has nothing to add because the outer one is the assertion.
+  if [ "${XSIV_IN_GATE_SELFTEST:-}" = "1" ]; then
+    echo "(gate contract control skipped: this verify.sh is being run by it)"
+  else
+    tools/gate_selftest.sh
+  fi
 
   step "3. test suite"
   cargo test --release
@@ -180,6 +202,7 @@ if [ "$KANI_ONLY" -eq 0 ]; then
 fi
 
 if [ "$RUN_CROSS_EXEC" -eq 1 ]; then
+  STAGE_KEY=cross-exec
   step "5. cross-architecture execution under qemu (aarch64 NEON, i686 32-bit, powerpc64 big-endian)"
   # Two configurations that cannot be exercised natively here:
   #
@@ -309,6 +332,7 @@ if [ "$RUN_CROSS_EXEC" -eq 1 ]; then
 fi
 
 if [ "$RUN_MIRI" -eq 1 ]; then
+  STAGE_KEY=miri
   step "6b. Miri (UB detection on the unsafe paths, both accelerated targets)"
   # Miri cannot run `__cpuid_count` (inline asm), so `detect_avx2` falls back to
   # the *compiled* feature set: a default build takes the SSE2 and scalar paths,
@@ -370,6 +394,7 @@ if [ "$RUN_MIRI" -eq 1 ]; then
 fi
 
 if [ "$RUN_CTGRIND" -eq 1 ]; then
+  STAGE_KEY=ctgrind
   step "7. ctgrind (constant-time, via valgrind memcheck)"
   # Marks secrets as undefined and lets memcheck report any branch or index that
   # depends on them. Two controls come with it: a deliberate leak in the test
@@ -397,6 +422,7 @@ if [ "$RUN_CTGRIND" -eq 1 ]; then
 fi
 
 if [ "$RUN_DENY" -eq 1 ]; then
+  STAGE_KEY=deny
   step "8. cargo-deny (advisories, licences, bans, sources)"
   if cargo deny --version >/dev/null 2>&1; then
     cargo deny check
@@ -407,6 +433,7 @@ if [ "$RUN_DENY" -eq 1 ]; then
 fi
 
 if [ "$RUN_TSAN" -eq 1 ]; then
+  STAGE_KEY=tsan
   step "7b. ThreadSanitizer over the concurrency test"
   # `tools/tsan.sh` runs its own negative control first: a deliberately racy test
   # must be *reported* before the crate's own run is allowed to mean anything.
@@ -424,6 +451,7 @@ if [ "$RUN_TSAN" -eq 1 ]; then
 fi
 
 if [ "$RUN_FUZZ" -eq 1 ]; then
+  STAGE_KEY=fuzz
   step "9. coverage-guided fuzzing (cargo-fuzz + libFuzzer + ASAN)"
   # Bounded by FUZZ_SECONDS so this stays usable in a pipeline; raise it for a
   # soak run. The target asserts round-trip correctness, rejection of every
@@ -465,6 +493,7 @@ if [ "$RUN_FUZZ" -eq 1 ]; then
 fi
 
 if [ "$RUN_TOOLS" -eq 1 ]; then
+  STAGE_KEY=tools
   step "10. tool-level gates (what CI runs on every push)"
   # Each of these answers 3 for "could not run" and non-zero for "found something",
   # and the difference is the whole point of the convention `tools/gate_selftest.sh`
@@ -597,6 +626,7 @@ if [ "$RUN_TOOLS" -eq 1 ]; then
 fi
 
 if [ "$RUN_KANI" -eq 1 ]; then
+  STAGE_KEY=kani
   step "6. Kani bounded model checking"
   # `-Z stubbing` is REQUIRED: several harnesses use #[kani::stub] to replace the
   # ChaCha20 permutation, the zeroization helper and the BLAKE3 commitment with
@@ -654,6 +684,25 @@ elif [ "$STRICT" -eq 1 ]; then
   echo "missing, or use the narrower invocation that does not claim to run it."
   exit 1
 else
+  # A narrow invocation tolerates skips -- but not for a stage it named itself. If
+  # `--ctgrind` was asked for and ctgrind could not run, reporting "all requested checks
+  # passed" is a success report for something that did not happen, which is the same
+  # defect as absorbing a skip into a pass, one level up.
+  asked_and_skipped=()
+  for want in ${EXPLICIT_KEYS[@]+"${EXPLICIT_KEYS[@]}"}; do
+    for got in ${SKIPPED_KEYS[@]+"${SKIPPED_KEYS[@]}"}; do
+      if [ "$want" = "$got" ]; then asked_and_skipped+=("$want"); break; fi
+    done
+  done
+  if [ "${#asked_and_skipped[@]}" -gt 0 ]; then
+    step "FAILED: ${asked_and_skipped[*]} was named on the command line and did not run"
+    for stage in "${SKIPPED_STAGES[@]}"; do echo "  skipped: $stage"; done
+    echo
+    echo "A narrow invocation may skip stages it did not ask for; a stage the caller"
+    echo "named is one this run promised to perform. The SKIPPED line above says what is"
+    echo "missing; install it, or drop the flag."
+    exit 1
+  fi
   step "all requested checks passed, apart from ${#SKIPPED_STAGES[@]} skipped stage(s)"
   for stage in "${SKIPPED_STAGES[@]}"; do echo "  skipped: $stage"; done
 fi

@@ -7,6 +7,57 @@ tags have been cut yet.
 
 ## Unreleased
 
+### Gate defects: a self-test that corrupted the artifact it was testing, and three rows that could pass without running
+
+An audit of the gates themselves (reproduced here before each fix) found defects of the class
+this repository has already been bitten by twice — a check whose *verdict* is not about the
+current source. **No code or wire-format change**, but `verify.sh --ctgrind`/`--deep`/`--all`
+could fail on unchanged source before this.
+
+- **`tools/ctgrind.sh`'s self-test wrote the planted binary into the *main* deps directory.**
+  The planted copy is the same crate, so `-C metadata` gives it the same file name as the
+  clean one; the main check then found it with `ls -t … | head -1`. Measured in a clean
+  clone: run 1 PASSed (and planted), run 2 — for which cargo says Fresh, so nothing was
+  rebuilt — reported 8 leaks inside `decrypt_in_place_detached` in **0.8 s**, on source that
+  had not changed. The self-test now builds into its own target directory, and both lookups
+  ask cargo (`--message-format=json`) for the executable instead of globbing; the main build
+  also removes any pre-existing `ctgrind-*` first, which heals a tree that already has one
+  (one relink). Verified: two consecutive runs now both exit 0, and the self-test still
+  catches the planted leak.
+- **`tools/fi_check.sh`** built every row into **one shared target directory**, which makes a
+  row's freshness depend on `cp` and `cargo` ordering: a row whose sources are older than the
+  shared dir's outputs silently runs the *previous* row's binary. Rows stay ahead of that, but
+  the clean baseline added below is built after its row is copied — and the first
+  `expect=fail` row then reported "expected fail, got pass" on an unmutated binary. Each row
+  (and baseline) now has a private target directory.
+- **`tools/fi_check.sh`'s `expect=fail` rows could pass on a *compile failure***: any non-zero
+  `cargo test` exit counted as detection. Each row now builds first, so "the detector failed"
+  means the test ran and failed; and an `expect=fail` row also requires a cached clean
+  baseline, so a detector that already fails unmutated cannot supply a vacuous pass. This
+  immediately caught a live one: `wipe-skipped`'s patch used `let _ = &mut buffer;`, which
+  does not compile (E0596 — the binding is not `mut`), so **nothing was testing the in-place
+  wipe**. The replacement compiles and the row now exercises what it claims.
+- **`tools/mutation_check.sh`** had no clean baseline and its KAT row mapped *any* non-zero
+  exit to "caught" — including a compile error. Both mutations now run against a baseline
+  first, and a mutated tree that does not build is reported as such rather than as a catch.
+- **`tools/gate_selftest.sh`** asserted the exit-3 convention by grepping for the text that
+  implements it (`if [ "$ctgrind_rc" -eq 3 ]`, `^ *exit 3`), so a behaviour-preserving rewrite
+  read as a failure, and it never looked at `tools/fi_check.sh` — an injected `exit 0` skip
+  there stayed green. It now checks behaviour: the three tools must answer 3 with the tooling
+  hidden, `verify.sh` must *fail* when a stage the caller named is skipped, and `fi_check.sh`
+  must not report completion with an unusable toolchain. It also refuses to recurse (running
+  it from `verify.sh`, which runs it, spun forever) and runs in 0.4 s instead of 5½ minutes.
+- **`verify.sh` under a narrow invocation**: `--ctgrind` with no valgrind printed "all
+  requested checks passed, apart from 1 skipped stage" and exited **0**. A stage the caller
+  names is now fatal when it does not run; stages skipped without being named are unchanged.
+- **`check.sh`** asserted a hard-coded `target/release/…rlib` at the end, which under
+  `CARGO_TARGET_DIR` can be an older artifact from a previous run. It is derived from the
+  target directory and must be newer than the run's start.
+- **The tools honour an explicit `VALGRIND=` strictly** (`ctgrind.sh`,
+  `mutation_check.sh`): an unusable value is "could not run" rather than a cue to fall through
+  to a system valgrind. That is what makes the gate test's hiding airtight on a machine that
+  has one.
+
 ### The `2^128` route is a key-commitment break, not a salamander
 
 A reader's independent analysis — matching what §4.5 of `SECURITY-ANALYSIS.md` already said about

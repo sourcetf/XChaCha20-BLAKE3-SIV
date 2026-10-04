@@ -35,8 +35,19 @@ export PATH="$HOME/.cargo/bin:$PATH"
 
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
-# One target directory for every row: only the local crate is rebuilt each time.
-export CARGO_TARGET_DIR="$WORK/target"
+
+# Every row (and every baseline) gets its OWN target directory, and the reason is a
+# defect this shared-directory version had: cargo calls a build Fresh by comparing the
+# output's mtime against the sources', so a row whose sources happen to be *older* than
+# the shared dir's outputs silently runs the previous row's binary. The rows used to
+# stay ahead of that by copying in order, but the clean baseline below is built *after*
+# the row it belongs to is copied -- so with one shared directory the first
+# `expect=fail` row ran the unmutated baseline binary and reported "expected fail, got
+# pass". Correctness must not depend on the order of `cp` and `cargo` in time; a private
+# directory per row costs one rebuild of the crate per row (its dependencies are
+# small) and cannot.
+# `CARGO_TARGET_DIR` is passed per invocation rather than exported, so no state leaks
+# between rows.
 
 # Sources only. `Cargo.toml` names its benchmark targets explicitly, so `benches/`
 # has to come along or the manifest does not resolve at all.
@@ -44,6 +55,30 @@ copy_tree() {
   mkdir -p "$1"
   cp -r src tests benches Cargo.toml Cargo.lock "$1/" 2>/dev/null || true
   cp -r src tests benches Cargo.toml Cargo.lock "$1/"
+}
+
+# A clean baseline, cached per (features, test target): the detector must PASS on an
+# unmutated tree, or an `expect=fail` row below could be satisfied by a detector that was
+# already failing for an unrelated reason. Cached because copying and building the tree
+# is the expensive part of this campaign, and several rows share a configuration.
+declare -A BASELINE_PASSES=()
+baseline_passes() {  # <features> <test target>
+  local key="$1|$2"
+  if [ -z "${BASELINE_PASSES[$key]:-}" ]; then
+    local dir="$WORK/baseline-$(printf '%s' "$key" | tr -c 'a-zA-Z0-9' '_')"
+    copy_tree "$dir"
+    local args=(--quiet --release --test "$2")
+    if [ -n "$1" ]; then
+      # shellcheck disable=SC2206
+      args+=($1)
+    fi
+    if ( cd "$dir" && CARGO_TARGET_DIR="$dir/target" cargo test "${args[@]}" ) > "$WORK/baseline.log" 2>&1; then
+      BASELINE_PASSES[$key]=yes
+    else
+      BASELINE_PASSES[$key]=no
+    fi
+  fi
+  [ "${BASELINE_PASSES[$key]}" = yes ]
 }
 
 # A row: run <name> <features> <detector test target> <expected: pass|fail> <patch fn>
@@ -60,8 +95,29 @@ run_row() {
     # shellcheck disable=SC2206
     args+=($features)
   fi
+
+  # The patch has to leave a tree that BUILDS. "The detector failed" must mean the test
+  # failed, not that the planted change did not compile -- for the `expect=fail` rows that
+  # distinction *is* the row, and an audit turned `branch-forced` green by replacing the
+  # semantic patch with a `compile_error!`, since any non-zero `cargo test` exit was read
+  # as detection.
+  if ! ( cd "$dir" && CARGO_TARGET_DIR="$dir/target" cargo test --no-run "${args[@]}" ) > "$WORK/$name.build.log" 2>&1; then
+    printf 'FAIL %-22s the mutated tree does not build, so the detector never ran\n' "$name" >&2
+    printf '                        -- see %s\n' "$LOG_KEEP/$name.build.log" >&2
+    tail -20 "$WORK/$name.build.log" >&2
+    exit 1
+  fi
+
+  # ...and an `expect=fail` row additionally needs the detector to be capable of passing
+  # on an unmutated tree, or it would "detect" a pre-existing failure.
+  if [ "$expect" = "fail" ] && ! baseline_passes "$features" "$target"; then
+    printf 'FAIL %-22s the detector already fails on an UNMUTATED tree, so this row\n' "$name" >&2
+    printf '                        would pass vacuously -- see %s\n' "$LOG_KEEP/baseline.log" >&2
+    exit 1
+  fi
+
   local got=pass
-  if ! ( cd "$dir" && cargo test "${args[@]}" ) > "$WORK/$name.log" 2>&1; then
+  if ! ( cd "$dir" && CARGO_TARGET_DIR="$dir/target" cargo test "${args[@]}" ) > "$WORK/$name.log" 2>&1; then
     got=fail
   fi
   if [ "$got" = "$expect" ]; then
@@ -231,7 +287,14 @@ old = "    zeroize_slice(buffer);"
 # The 4-space pattern also matches inside the 8-space one, so this covers the
 # decision's wipes and the entry point's in one pass.
 assert s.count(old) >= 2, f"in-place wipe sites: {s.count(old)}"
-open(p, "w").write(s.replace(old, "    let _ = &mut buffer;"))
+# The replacement has to COMPILE. `let _ = &mut buffer;` was here and does not: the
+# parameter is `buffer: &mut [u8]` and the *binding* is not declared `mut`, so taking
+# `&mut buffer` is E0596 ("cannot borrow as mutable, as it is not declared as mutable").
+# Nothing built, and because this row's detector "failed" by failing to compile, the row
+# reported OK while testing nothing. The build check in `run_row` is what flushed that
+# out; `core::hint::black_box(&mut buffer)` fails for the same reason, so the no-op is a
+# read of the slice instead.
+open(p, "w").write(s.replace(old, "    let _ = buffer.len();"))
 PY
 }
 

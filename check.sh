@@ -89,6 +89,10 @@ fi
 STAGE_NO=0
 T0_ALL=$SECONDS
 SUMMARY=()
+# A timestamp taken before any stage runs, so the summary can tell an artifact *this* run
+# produced apart from one an earlier run left behind.
+STAMP="$(mktemp)"
+trap 'rm -f "$STAMP"' EXIT
 
 note() { printf '%s\n' "$*"; }
 ok()   { printf '%s  ok%s  %s\n'  "$C_GREEN"  "$C_OFF" "$*"; }
@@ -350,11 +354,17 @@ if [ "${#SUMMARY[@]}" -gt 0 ]; then
   for line in "${SUMMARY[@]}"; do printf '  - %s\n' "$line"; done
 fi
 
-HOST_ARTIFACT=target/release/libxchacha20_blake3_siv.rlib
-if [ -f "$HOST_ARTIFACT" ]; then
+# The host rlib this run was supposed to produce. Derived from `CARGO_TARGET_DIR`, because
+# the builds above honour it: the hard-coded `target/...` pointed at a directory the build
+# may not have written to, where an *older* rlib from a previous run would satisfy the
+# assertion. It must also be newer than the run started, so a stale artifact cannot stand
+# in for one this run produced.
+TARGET_DIR="${CARGO_TARGET_DIR:-target}"
+HOST_ARTIFACT="$TARGET_DIR/release/libxchacha20_blake3_siv.rlib"
+if [ -f "$HOST_ARTIFACT" ] && [ "$HOST_ARTIFACT" -nt "$STAMP" ]; then
   printf 'artifact: %s\n' "$HOST_ARTIFACT"
 else
-  fail "expected host artifact missing: $HOST_ARTIFACT"
+  fail "expected host artifact missing or stale: $HOST_ARTIFACT (target dir: $TARGET_DIR)"
   exit 1
 fi
 
