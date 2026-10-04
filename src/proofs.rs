@@ -159,13 +159,16 @@ fn zeroize_slice_clears_unaligned_window() {
 
 // ── ChaCha20 stream ───────────────────────────────────────────────────
 //
-// Design note.  Measured on this machine, one concrete `chacha20_block` costs
-// ~320 s of CBMC time (the 20-round permutation alone is ~62 s, and each
-// 64-byte `zeroize_array` is charged at ~29 s; `chacha20_block` contains two of
-// them, and `chacha20_apply` adds the per-block keystream wipe).  Any harness
-// that calls the real permutation more than once therefore cannot finish in a
-// normal verification loop, and one that makes the key/counter symbolic does not
-// finish at all.
+// Design note.  Measured on an older CBMC, one concrete `chacha20_block` cost
+// ~320 s of model-checking time (the 20-round permutation alone ~62 s, each 64-byte
+// `zeroize_array` ~29 s). Those figures are now pessimistic by roughly an order of
+// magnitude: with Kani 0.68.0 / CBMC 6.11.0 the one harness that runs the real
+// permutation (`hchacha20_matches_draft_vector`, 20 rounds, real inputs) finishes in
+// **37 s**, and the whole 12-harness shard set runs in ~875 s with the slowest single
+// harness at ~460 s (an audit measured the suite; the 37 s was re-measured here). The
+// *design* is unchanged — the permutation and the wipe are still stubbed where the
+// property does not need them, because symbolic-key harnesses over the real rounds
+// still do not terminate — but the numbers above are history, not current costs.
 //
 // That is a tool limitation, not a property of the code, so these harnesses are
 // split along the line where the *interesting* logic actually lives:
@@ -200,10 +203,11 @@ fn stub_chacha20_block(key: &[u8; 32], counter: u32, nonce: &[u8; 12]) -> [u8; 6
 
 /// A no-op stand-in for `zeroize_array`.
 ///
-/// CBMC models each `write_volatile` individually and charges ~29 s per 64-byte
-/// wipe, which dominates any harness that calls `chacha20_apply` (it wipes the
-/// keystream buffer once per block).  For harnesses whose property has nothing
-/// to do with wiping, that cost buys nothing, so it is stubbed out here.
+/// CBMC models each `write_volatile` individually, and the original note here
+/// charged ~29 s per 64-byte wipe (again an older-CBMC figure; today's toolchain is
+/// far faster, see the module head).  Whatever the constant, it lands once per block
+/// in any harness that calls `chacha20_apply`, and for a harness whose property has
+/// nothing to do with wiping that cost buys nothing — so it is stubbed out here.
 ///
 /// Zeroization is *not* left unverified: `zeroize_slice_clears_all_bytes` and
 /// `zeroize_slice_clears_unaligned_window` below exercise the real
@@ -326,12 +330,15 @@ fn hchacha20_matches_draft_vector() {
 // different story, and it is worth being explicit rather than shipping harnesses
 // that look impressive and prove nothing.
 //
-// Measured cost: a single concrete `chacha20_block` takes ~320 s of CBMC time,
-// because the tool bit-blasts the whole 20-round permutation plus its unrolled
-// loops.  An end-to-end `encrypt`/`decrypt` harness invokes HChaCha20 (20
-// rounds), the subkey block, the tag block, the encryption-key block and then
-// the keystream — five permutations, so well over 25 minutes each, and that is
-// with *concrete* inputs.  With symbolic plaintext it does not terminate at all.
+// Cost, then and now: the original note here put a single concrete
+// `chacha20_block` at ~320 s because the tool bit-blasts the whole 20-round
+// permutation plus its unrolled loops — measured again with Kani 0.68.0 / CBMC
+// 6.11.0, the one harness that runs the real rounds takes **37 s** and the whole
+// 12-harness set ~875 s.  The structural point stands: an end-to-end
+// `encrypt`/`decrypt` harness invokes HChaCha20 (20 rounds), the subkey block, the
+// tag block, the encryption-key block and then the keystream — five permutations —
+// and with *symbolic* plaintext it does not terminate at all.  So the AEAD level is
+// still reached through the model, not by proving the primitive end to end.
 //
 // Two consequences:
 //

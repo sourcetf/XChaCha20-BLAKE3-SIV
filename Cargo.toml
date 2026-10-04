@@ -53,7 +53,10 @@ getrandom = { version = "0.4", optional = true, default-features = false }
 #     for i686 is belt-and-braces rather than necessary. And nothing on i686 runs
 #     *this crate's* SIMD -- its kernels are gated on x86_64/aarch64 -- so the qemu
 #     run there exercises the 32-bit scalar paths, which is what it is for.)
-#   * Miri, which cannot execute C or the CPU-feature detection.
+#   * Miri, which cannot execute C -- the `pure` count below is the one the scripts
+#     pass so that the run does not depend on Miri's CPU-feature detection reporting
+#     nothing (measured: on x86_64 the runs pass with and without it, because the
+#     detection reports no features under Miri either way).
 #
 # Either way the wire format is identical -- the KATs, the differential fixture
 # and `test_all_accelerated_paths_agree_on_a_boundary_corpus` pin the bytes, and

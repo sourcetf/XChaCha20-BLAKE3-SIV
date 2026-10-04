@@ -2070,11 +2070,16 @@ fn blake3_keyed_multi(key: &[u8; 32], parts: &[&[u8]], out: &mut [u8]) {
     // named buffer holding key material in this file is wiped, and the dependency's
     // state is wiped by the two calls below. What it cannot reach are the
     // dependency's *by-value* temporaries (the `Hasher::new_keyed` return, a
-    // `ChunkState` built from the key on the multi-chunk path), and an audit measured
-    // exactly that: the 32 bytes of `k_in` left in the caller thread's dead stack
-    // frames on the default build for inputs above ~950 bytes, until `scrub_stack`
-    // (which `ultra` runs) covers them. An earlier revision of this comment called it
-    // "no copy of the MAC key survives the call" without that qualification.
+    // `ChunkState` built from the key on the multi-chunk path), and audits measured
+    // exactly that: a copy of `k_in` left in dead stack frames on the `hardened` build
+    // for inputs above ~950 bytes, readable across threads, thread-stack reuse and
+    // `fork` until `scrub_stack` (which `ultra` runs) covers it. The shape depends on
+    // the profile: with this crate's release profile (LTO on) it is the full 32 bytes,
+    // with LTO off a 16-24 byte prefix, and the deepest frames move with the
+    // overflow-checks setting -- so "no copy survives" is false in a way codegen
+    // chooses, and `tools/stack_residue.sh` only searches for the master key. An
+    // earlier revision of this comment said "no copy of the MAC key survives the call"
+    // without any of that.
     reader.zeroize();
     hasher.zeroize();
 }

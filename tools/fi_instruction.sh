@@ -165,8 +165,10 @@ scan() {  # label, features
 scan_shard() {  # bin, label, quick, model, shard, nshards
   python3 - "$@" <<'PY'
 import re
+import errno
 import subprocess
 import sys
+import time
 
 binpath, label, quick, model = sys.argv[1], sys.argv[2], sys.argv[3] == "--quick", sys.argv[4]
 shard, nshards = int(sys.argv[5]), int(sys.argv[6])
@@ -262,13 +264,40 @@ if checked == 0:
 total = sum(s for _, s, _ in covered)
 stride = 1
 
+def reopen_for_write(path):
+    """Open the shard's binary for writing, retrying the kernel's transient
+    `ETXTBSY` ("text file busy").
+
+    The binary is written, closed, executed, reopened and restored per fault, because
+    executing a file that is open for writing is `ETXTBSY`. `subprocess.run` reaps its
+    child before returning, so the reopen *should* always succeed -- but the full
+    16-shard sweep reproduced `ETXTBSY` four times in this environment (WSL2), which
+    aborted the whole scan from inside a `finally:` and left no summary at all. Treat it
+    as transient and retry; a persistent refusal still raises, so a real problem is not
+    swallowed.
+    """
+    for attempt in range(60):
+        try:
+            return open(path, "r+b")
+        except OSError as e:
+            if e.errno != errno.ETXTBSY or attempt == 59:
+                raise
+            time.sleep(0.05)
+    raise AssertionError("unreachable")
+
+
 def run():
-    r = subprocess.run([binpath], capture_output=True, text=True, timeout=5)  # a NOPed
+    # Bytes, decoded with `errors="replace"`: a corrupted binary that crashes can
+    # write non-UTF-8 to stderr, and `text=True` turned that into a
+    # `UnicodeDecodeError` escaping the shard (measured in the full sweep: 0xe1 and
+    # 0xf0 at offsets 90 and 17). The verdict only looks for one ASCII needle, so a
+    # replaced byte cannot change it.
+    r = subprocess.run([binpath], capture_output=True, timeout=5)  # a NOPed
     # branch inside a loop hangs; the test itself needs milliseconds, so anything
     # past a few seconds is that hang, not a slow success
     if r.returncode == 0:
         return "rejected"
-    blob = r.stdout + r.stderr
+    blob = (r.stdout + r.stderr).decode("utf-8", "replace")
     if "forged tag accepted" in blob:
         return "accepted"
     return "crashed"
@@ -298,7 +327,7 @@ for off, bit in faults:
     # was ~20 GB of I/O for this scan. The handle cannot stay open across the run --
     # executing a file that is open for writing is ETXTBSY -- so it is written,
     # closed, executed, reopened and restored.
-    with open(binpath, "r+b") as fh:
+    with reopen_for_write(binpath) as fh:
         fh.seek(off)
         was = fh.read(1)[0]
         if model == "nop":
@@ -314,7 +343,7 @@ for off, bit in faults:
     except subprocess.TimeoutExpired:
         verdict = "crashed"
     finally:
-        with open(binpath, "r+b") as fh:
+        with reopen_for_write(binpath) as fh:
             fh.seek(off)
             fh.write(bytes([was]))
     if verdict == "accepted":
@@ -342,10 +371,14 @@ if accepted:
         print(f"      ... and {len(accepted) - 8} more")
 # Machine-readable for the caller: every accepting byte, and the subset that is inside
 # `accept_or_reject` -- two files, because the driver gates on the second one.
+# A trailing newline on both files, always: the driver aggregates with
+# `cat shard-*.accepted | grep -c .`, and without it the last line of one shard's file
+# merges with the first line of the next, so the printed total was
+# `true count - (files with entries - 1)` (measured: 4 printed as 3, 15 as 7).
 with open(sys.argv[1] + ".accepted", "w") as fh:
-    fh.write("\n".join(str(x) for x in accepted))
+    fh.write("".join(f"{x}\n" for x in accepted))
 with open(sys.argv[1] + ".accepted_decision", "w") as fh:
-    fh.write("\n".join(str(x) for x in accepted if "accept_or_reject" in symbol_of(x)))
+    fh.write("".join(f"{x}\n" for x in accepted if "accept_or_reject" in symbol_of(x)))
 with open(sys.argv[1] + ".ranges", "w") as fh:
     fh.write("\n".join(f"{n} {s}" for _a, s, n in ranges))
 PY

@@ -8,6 +8,58 @@ green push to `main` — which are build artefacts of that job, not construction
 
 ## Unreleased
 
+### The complete attack-review round: a sweep that failed 3/3, and counts that were one short per shard
+
+The complete version of the incremental attack report (14 units, all of the lightweight
+version's units at full scale plus the repository's own suites and the verification tool layer)
+found no cryptographic defect; what it did find was that one of this repository's own gates
+**cannot be run to completion on this host**, and that a published count was systematically low.
+Both are fixed here and re-measured; the rest is documentation the new measurements sharpened.
+**No wire-format change.**
+
+- **`tools/fi_instruction.sh`'s full `--bits` sweep failed 3/3 for the audit** (and therefore
+  could not regenerate the documented opt-out/hardened/ultra residuals at all): four shards
+  died on `ETXTBSY` when the `finally:` block reopened the shard's binary to restore the byte it
+  had patched (the kernel still had the previous child's image busy — `subprocess.run` reaps its
+  child, so this is transient, but it aborted the entire scan and printed no summary), and two
+  shards died on `UnicodeDecodeError` because a crashed binary wrote non-UTF-8 to stderr and
+  `run()` captured with `text=True`. The reopen now retries a transient `ETXTBSY` (and still
+  raises if it persists), and `run()` captures bytes and decodes with `errors="replace"` — the
+  verdict looks for one ASCII needle, so a replaced byte cannot change it. Re-run here: the full
+  `--bits` and `--nop` sweeps both complete and gate correctly (decision-scoped zero in
+  `hardened` and `ultra`, non-zero in the opt-out control).
+- **The sweep's "total" undercounted by one per shard file with entries.** The accepted-offset
+  files were written with `"\n".join(...)` (no trailing newline) and aggregated with
+  `cat shard-*.accepted | grep -c .`, so the last line of one file merged with the first line of
+  the next: 4 printed as 3, 15 as 7. The files now always end with a newline, and the numbers
+  are re-measured and re-documented (README and `tests/README.md`): `(total, inside the
+  decision)` — opt-out `17, 0` (nop) and `163, 4` (bits); `hardened` `1, 0` and `5, 0`; `ultra`
+  `0, 0` and `5, 0`.
+- **The `k_in` residue's shape depends on the profile, and reaches further than one frame.** The
+  audit's full-scale probe: with this crate's release profile (LTO on) the full 32 bytes survive
+  in dead frames above ~950-byte inputs; with LTO off it is a 16–24 byte prefix, and the frame
+  depth moves with `overflow-checks`. It is also readable across threads, after thread-stack
+  reuse, and in a `fork`ed child, until `scrub_stack` (which `ultra` runs) covers it. The
+  `blake3_keyed_multi` comment now says all of that instead of "the 32 bytes".
+- **Two more claims measured, and corrected where they were too strong or too old**: `--features
+  pure` is *not* required for the Miri runs on x86_64 (Miri's CPU-feature detection reports
+  nothing, so the C kernels are never dispatched — with or without the feature, the runs pass);
+  the scripts keep passing it so the run does not depend on that. And the CBMC cost figures in
+  `src/proofs.rs` (≈320 s per concrete permutation, ≈29 s per wipe, "well over 25 minutes" per
+  AEAD harness) are an order of magnitude pessimistic on the current toolchain: the one harness
+  that runs the real permutation verifies in **37 s**, and the whole 12-harness set is ~875 s
+  with the slowest at ~460 s. The design they justify is unchanged; the numbers are marked as
+  history. `tests/README.md` also now spells out that the harnesses need the entry points'
+  flags (`-Z stubbing -Z unstable-options`) — the bare `cargo kani --features pure` fails to
+  compile six of the twelve, which is caller knowledge the repo had left implicit.
+- **The audit's fault matrix quantified the two-fault boundary the README states.** Two site
+  pairs (`c2+ini1`, `ci0+ci1`) are individually invisible and jointly accept every probe — the
+  honest ciphertext included — in **all three configurations**; `i1+a` (a shortened second
+  comparison plus an inverted first gate) accepts 0.37–0.43% of forgeries on `hardened` and 0 of
+  2,000,000 on `ultra`; a fault zeroing `derive_tag`'s stores accepts a zero tag on `hardened`
+  and the opt-out build and is rejected on `ultra`. Those numbers now sit in the README's fault
+  rows, next to the hand-modelled 2,573-attempt/2,000,000-attempt figures.
+
 ### The audit and attack reviews, worked through in parallel: a reachable abort, a lock failure path, and residue the witness claimed to wipe
 
 This entry covers the two third-party reviews end to end: the line-by-line audit's remaining
