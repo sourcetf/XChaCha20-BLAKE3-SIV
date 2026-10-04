@@ -47,6 +47,16 @@ sensitive, the second shares LLC and DRAM with whatever else is on the host). **
 smaller than that are the same number**, which is why most of the `hardened`-vs-`opt-out` column
 pairs below read as ties and why this section does not quote a figure to three digits.
 
+**The `ultra`-cost table below was re-measured after the witness's residue-wipe pass** (the
+copies the audit found unwiped: `Output`'s CV and message block, the streaming locals, the
+preallocated CV stack), and that campaign ran while the third-party audit was executing its own
+suites on this host, so its **own** noise floor is larger: across its 189 reference
+measurements the median pass-to-pass spread is **12.7%**, the 90th percentile **105%** and the
+worst cell **148%**. That is why only that table was taken from the noisier campaign: the
+witness change moved 1 MiB decryption from 10.1x to 12.4x (~23%, above even that floor, and
+consistent in all three passes), while the other tables' cells moved by amounts inside it. A
+quieter re-run of the whole campaign is the right way to refresh them.
+
 `opt-out` is `--no-default-features` (one comparison), `hardened` is the default (two gates,
 the second independently *shaped*, fail-closed, and both constant-time comparison *shapes*), `ultra` adds
 the witness cross-check and the `locked`/`rng`/`dual-mac` layers. All three produce **identical
@@ -102,11 +112,12 @@ comparison, and both are the price of a defence rather than an accident:
   its share is inside the noise floor by 1 MiB (391 → 394 us, i.e. a tie inside the
   noise floor). Encryption pays nothing for it: 0.95 → 0.94 us.
 * **`ultra`'s witness is a per-byte cost on decrypt**, because it is a scalar
-  re-implementation: **2.5x the default at 64 B, 3.6x at 1 KiB, 10.0x at 64 KiB,
-  10.1x at 1 MiB** — which is why the round trip above ends near 0.23x. Its in-place
-  *encryption* is untouched (385 us against 386 us at 1 MiB) because that path
-  carries no witness; the allocating `encrypt`, which does, lands at 6.9x the
-  default on the round trip at 1 MiB. If a deployment wants the fault model and not
+  re-implementation: **2.7x the default at 64 B, 4.0x at 1 KiB, 11.0x at 64 KiB,
+  12.4x at 1 MiB** (re-measured after the residue-wipe pass; the small sizes are at
+  or inside the campaign's own noise floor, the large ones are not) — which is why the
+  round trip above ends near 0.19x. Its in-place *encryption* is untouched (0.92-1.05x
+  at every size) because that path carries no witness; the allocating `encrypt`, which
+  does, lands at 7.1x the default on the round trip at 1 MiB. If a deployment wants the fault model and not
   the cost, `hardened,dual-mac` — `ultra`'s two fault-model layers, without the witness
   and without the `locked`/`rng` layers — is the configuration to measure against; the
   table's `opt-out` and `hardened` columns bracket it, since `dual-mac` costs one extra
@@ -128,13 +139,13 @@ This is the table the layer and fault rows cite, because a ratio against the
 
 | Message | decrypt | encrypt | round trip (in place) | round trip (allocating) |
 | --- | --- | --- | --- | --- |
-| 64 B | 2.46x | 1.56x | 2.06x | 2.33x |
-| 256 B | 2.70x | 1.45x | 2.26x | 2.43x |
-| 1 KiB | 3.56x | 1.31x | 2.60x | 3.02x |
-| 4 KiB | 5.81x | 1.20x | 3.76x | 4.40x |
-| 16 KiB | 9.05x | 1.18x | 4.75x | 6.23x |
-| 64 KiB | 10.00x | 1.00x | 5.77x | 6.52x |
-| 1 MiB | 10.12x | 1.00x | 5.83x | 6.90x |
+| 64 B | 2.73x | 1.50x | 2.20x | 2.48x |
+| 256 B | 3.24x | 1.32x | 2.44x | 2.87x |
+| 1 KiB | 3.96x | 1.43x | 2.82x | 3.30x |
+| 4 KiB | 6.93x | 1.28x | 4.02x | 4.96x |
+| 16 KiB | 10.37x | 1.05x | 5.46x | 6.65x |
+| 64 KiB | 11.02x | 1.05x | 6.06x | 6.59x |
+| 1 MiB | 12.41x | 0.92x | 6.47x | 7.07x |
 
 The encrypt column is the point made above, in numbers: it is a tie at 64 KiB and
 beyond (the witness runs only on the allocating `encrypt`, which is why the
@@ -176,7 +187,7 @@ none of it. For large messages, use the in-place API.
 
 **Every number above is the default build.** `ultra` is a different trade and is
 measured separately in its own section: its independent second implementation costs
-2.5x at 64 bytes and 10.1x at 1 MiB on decryption, because it is scalar and re-runs
+2.7x at 64 bytes and 12.4x at 1 MiB on decryption, because it is scalar and re-runs
 the tag pass per byte (the figures are the "what the `ultra` layer costs" table in
 "The three configurations, measured"). Nothing above changes if you turn `ultra` on and then off again — the
 default build's machine code is untouched by the feature.

@@ -8,6 +8,25 @@ green push to `main` — which are build artefacts of that job, not construction
 
 ## Unreleased
 
+### `ultra`'s cost table re-measured: 12.4x on 1 MiB decryption, not 10.1x
+
+The three-pass campaign behind `performance.md`'s "what the `ultra` layer costs" table was
+re-run after the witness's residue-wipe pass, because that pass added work to the witness's hot
+path (the `Output` drop, the streaming locals, the CV stack's preallocation). The result:
+`ultra` decryption now costs **2.73x / 3.24x / 3.96x / 6.93x / 10.37x / 11.02x / 12.41x** the
+default across 64 B → 1 MiB, against the previously documented 2.46/2.70/3.56/5.81/9.05/10.00/
+10.12, and the round trip 2.2-6.5x in place and 2.5-7.1x allocating. The encrypt column stays at
+0.92-1.50x (the in-place path carries no witness).
+
+Two honesty notes, both in the file: the campaign ran while the third-party audit was executing
+its own suites on this host, so **its own noise floor is larger** (median pass-to-pass spread
+12.7%, p90 105%, worst 148%, against 6.8%/10%/15% for the earlier quiet-host campaign) — which
+is why only the `ultra` table was taken from it: the 1 MiB decryption move (~23%) is above even
+that floor and consistent in all three passes, while the other tables' cells moved by amounts
+inside it and are left alone. The README's witness rows and the `performance.md` summary bullet
+carry the new figures; the two places that quote "10.1x" as the number that *led* to a finding
+say so explicitly.
+
 ### `cache_profile.sh --trace` ran for the first time: lackey's lines start with a space
 
 The address-trace mode — the one technique in this repository that can see a
