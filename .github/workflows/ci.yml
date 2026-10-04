@@ -247,8 +247,13 @@ jobs:
 
       # `--all-features` so the `rng` feature's dependency chain is covered too:
       # a transitive dependency can raise the real MSRV above this crate's own.
+      #
+      # `--skip timing` for the same reason the blocking matrix below uses it: the
+      # statistical timing screen is advisory by measurement (a hosted VM reports
+      # t ~ 11 with no possible cause, against a threshold of 10), so it must not
+      # gate a job whose subject is the minimum toolchain.
       - name: build and test at the declared MSRV
-        run: cargo test --release --all-features
+        run: cargo test --release --all-features -- --skip timing
 
       # Deliberately NOT running clippy here. An MSRV is a statement about the
       # language and library API surface, which is what building and testing

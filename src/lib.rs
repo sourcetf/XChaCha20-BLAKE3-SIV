@@ -4989,17 +4989,19 @@ mod tests {
     #[cfg(feature = "rng")]
     #[test]
     fn test_random_fill_covers_whole_buffer() {
-        // Every byte must differ from the sentinel, not merely one of them: an
-        // earlier revision asserted `any(...)`, which a `fill` that wrote a single
-        // byte (or only a prefix) satisfied -- the test named "whole buffer" could
-        // not see the defect it was named for (measured: a `dest[0] = 0x01`
-        // mutant passed it).
+        // A count, not "no byte equals the sentinel". An earlier revision asserted
+        // `any(...)`, which a `fill` that wrote a single byte satisfied -- the test
+        // named "whole buffer" could not see the defect it was named for. Demanding
+        // *zero* matches overshot the other way: a correct random fill reproduces the
+        // sentinel byte with probability 1/256 per byte, so "none of 64" fails about
+        // 22% of the time (measured in CI: two jobs red on this line). Four or fewer
+        // matches has probability ~6e-6 for a correct fill, while a prefix-writing
+        // `fill` leaves the whole tail at the sentinel -- far more than four.
         let mut buf = [0xAAu8; 64];
         crate::random::fill(&mut buf).unwrap();
         let untouched = buf.iter().filter(|&&b| b == 0xAA).count();
-        assert_eq!(
-            untouched,
-            0,
+        assert!(
+            untouched <= 4,
             "{untouched} of {} bytes still hold the sentinel: fill did not cover \
              the whole buffer",
             buf.len()

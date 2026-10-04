@@ -70,7 +70,14 @@ change**: every item is a test, a harness, or a claim about one.
   exists for; `tests/mac_commitment.rs`'s early-return arm passed while asserting nothing, so
   any `encrypt` failure satisfied it; `tests/decision.rs` swept all 65 tag bytes through
   `decrypt` but flipped only the last byte through `decrypt_in_place_detached`;
-  `src/lib.rs`'s `random::fill` test asserted "some byte changed" (a one-byte fill passed);
+  `src/lib.rs`'s `random::fill` test asserted "some byte changed" (a one-byte fill passed;
+  the first fix demanded *zero* sentinel matches, which fails ~22% of the time on a correct
+  fill — CI caught that in two jobs — so it is now a count with a ~6e-6 false-failure
+  bound, still far below what a prefix-writing fill leaves behind);
+  the MSRV job now runs `-- --skip timing` like the blocking matrix does, because the
+  statistical timing screen is advisory **by measurement** (a hosted VM reports t ≈ 11 with
+  no possible cause, against a threshold of 10) and must not gate a job whose subject is the
+  minimum toolchain — that flake turned the MSRV job red on this push;
   its AAD/message coverage test claimed "any bit" while flipping bit 0 of every byte (the bit
   position now rotates); and the in-crate `locked` test returned silently when the kernel
   refused to lock, making "verified" and "never ran" both read `ok` (a runtime refusal is now
