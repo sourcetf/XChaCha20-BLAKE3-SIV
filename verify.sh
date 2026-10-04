@@ -224,8 +224,8 @@ if [ "$KANI_ONLY" -eq 0 ]; then
     echo "         (rustup target add aarch64-unknown-linux-musl)"
   fi
   # riscv64 has no SIMD backend compiled at all, so this type-checks the
-  # scalar-only configuration (see `.cargo/config.toml` for why it is not
-  # linked/executed).
+  # scalar-only configuration.  Stage 5 (`--cross-exec`) also links and executes
+  # it; this entry stays because it is cheap and runs without qemu.
   if rustup target list --installed 2>/dev/null | grep -q riscv64gc-unknown-linux-musl; then
     cargo check --target riscv64gc-unknown-linux-musl --all-targets --features ultra,pure
   else
@@ -293,7 +293,7 @@ if [ "$RUN_CROSS_EXEC" -eq 1 ]; then
     fi
 
     # The two self-contained-musl targets need no cross toolchain: ppc64 and
-    # riscv64 are tier-2 and tier-1, so `rustup target add` brings prebuilt std, and
+    # riscv64 are tier-2, so `rustup target add` brings prebuilt std, and
     # rust-std ships the self-contained crt objects *and* musl's libc, so rust-lld
     # can link them.  The details differ per target, each found by making it work:
     #
