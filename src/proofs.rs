@@ -164,7 +164,7 @@ fn zeroize_slice_clears_unaligned_window() {
 // `zeroize_array` ~29 s). Those figures are now pessimistic by roughly an order of
 // magnitude: with Kani 0.68.0 / CBMC 6.11.0 the one harness that runs the real
 // permutation (`hchacha20_matches_draft_vector`, 20 rounds, real inputs) finishes in
-// **37 s**, and the whole 12-harness shard set runs in ~875 s with the slowest single
+// **37 s**, and the whole shard set (13 harnesses) runs in ~875 s with the slowest single
 // harness at ~460 s (an audit measured the suite; the 37 s was re-measured here). The
 // *design* is unchanged — the permutation and the wipe are still stubbed where the
 // property does not need them, because symbolic-key harnesses over the real rounds
@@ -256,20 +256,29 @@ fn chacha20_counter_sequencing_is_exact() {
     assert_eq!(tail_ctr, start + 3, "partial tail used the wrong counter");
 }
 
-/// The same sequencing property for the XOR entry point, plus the involution
-/// `(p ^ k) ^ k == p` for a partial final block.
+/// The XOR entry point's buffer handling across a **block boundary**: one full
+/// block plus a tail must be XORed with the keystream of *consecutive* counters
+/// (the tail from the counter after the full block), and applying it a second time
+/// must return the plaintext.
 ///
-/// The permutation is stubbed as above, so this checks the wrapper's buffer
-/// handling rather than the cipher.
+/// The permutation is stubbed as above, so this is about the wrapper rather than
+/// the cipher, and the counter sequence itself is pinned by
+/// `chacha20_counter_sequencing_is_exact`; what this adds is the XOR path's
+/// per-block dispatch at a length that crosses blocks — the first version used a
+/// single 20-byte partial block and so never advanced the counter — plus the
+/// involution on the partial tail. (Longer buffers were tried and abandoned here:
+/// every byte of the buffer is a loop bound for CBMC, and 130 bytes at
+/// `unwind 200` exhausted its memory. 66 bytes at `unwind 80` verifies in ~77 s
+/// and already crosses the boundary; the sequencing harness covers the rest.)
 #[kani::proof]
 #[kani::stub(chacha20_block, stub_chacha20_block)]
 #[kani::stub(zeroize_array, noop_zeroize_array)]
-#[kani::unwind(40)]
+#[kani::unwind(80)]
 fn chacha20_keystream_involution_partial_blocks() {
     let key = [0x5Au8; 32];
     let nonce = [0xA5u8; 12];
     let ctr = 0x1122_3344u32;
-    let len = 20usize; // one partial block: exercises the tail slice
+    let len = 66usize; // one full block plus a 2-byte tail: the counter must advance
 
     let mut pt: Vec<u8> = Vec::new();
     for _ in 0..len {
@@ -278,12 +287,17 @@ fn chacha20_keystream_involution_partial_blocks() {
 
     let mut ct = vec![0u8; len];
     chacha20_keystream(&key, ctr, &nonce, &pt, &mut ct);
-    assert_eq!(ct.len(), len);
 
-    // The ciphertext must be the plaintext XOR the stubbed keystream prefix.
-    let expect = stub_chacha20_block(&key, ctr, &nonce);
+    // The ciphertext must be the plaintext XOR the stubbed keystream, block by
+    // block: byte `i` comes from the block at `ctr + i/64`, offset `i%64`. (That
+    // is the part a single-block harness could not see.)
     for i in 0..len {
-        assert_eq!(ct[i], pt[i] ^ expect[i]);
+        let expect = stub_chacha20_block(&key, ctr + (i / 64) as u32, &nonce);
+        assert_eq!(
+            ct[i],
+            pt[i] ^ expect[i % 64],
+            "keystream mismatch at byte {i}"
+        );
     }
 
     // Involution, compared byte-by-byte (`assert_eq!` on slices would lower to
@@ -334,7 +348,7 @@ fn hchacha20_matches_draft_vector() {
 // `chacha20_block` at ~320 s because the tool bit-blasts the whole 20-round
 // permutation plus its unrolled loops — measured again with Kani 0.68.0 / CBMC
 // 6.11.0, the one harness that runs the real rounds takes **37 s** and the whole
-// 12-harness set ~875 s.  The structural point stands: an end-to-end
+// 13-harness set ~875 s.  The structural point stands: an end-to-end
 // `encrypt`/`decrypt` harness invokes HChaCha20 (20 rounds), the subkey block, the
 // tag block, the encryption-key block and then the keystream — five permutations —
 // and with *symbolic* plaintext it does not terminate at all.  So the AEAD level is
@@ -782,11 +796,12 @@ fn tag_is_keyed_hash_of_the_whole_context() {
     // then AAD, then message) at every call -- but *only when it is called*.
     // Returning a constant from `derive_tag` without ever reaching the hash
     // would satisfy a mere "the tag is non-zero" check while skipping every
-    // layout assertion. So each shape reconstructs the tag it *must* be, by
-    // evaluating the model on the expected construction, and compares all
-    // `TAG_LEN` bytes. That makes the harness non-vacuous: an omitted hash call,
-    // a dropped field (including the nonce, which the stub's own assertions
-    // never read back), or a wrong field order all make the two disagree.
+    // layout assertion. What this harness shows is therefore narrower than the
+    // paragraph that used to stand here claimed: the macro below only smoke-checks
+    // that the tag is non-zero, and the reconstruction-and-compare lives in
+    // `tag_matches_the_model_on_a_concrete_input`, which rebuilds the tag from the
+    // model on a concrete input and compares all `TAG_LEN` bytes -- that is where a
+    // dropped field (the nonce included) or a wrong field order is caught.
     //
     // A macro rather than a loop or a helper function: each shape has to be its
     // own call site (see the doc comment), and a helper would take the slices as

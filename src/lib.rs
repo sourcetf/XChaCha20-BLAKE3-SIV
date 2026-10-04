@@ -74,8 +74,9 @@
 //!   [`decrypt_in_place_detached`], for protocols that keep the tag separate or
 //!   want to avoid a second allocation.  They do not allocate the message buffer,
 //!   but they are **not allocation-free**, and an earlier revision of this line
-//!   said they were: `derive_tag` tries one contiguous buffer when the AAD +
-//!   message total lands in `TAG_CONCAT_MIN..=TAG_CONCAT_LIMIT` (2 KiB..64 KiB),
+//!   said they were: `derive_tag` tries one contiguous buffer when
+//!   `48 + aad.len() + msg.len()` lands in `TAG_CONCAT_MIN..=TAG_CONCAT_LIMIT`
+//!   (2 KiB..64 KiB — so in message lengths, 2000..=65488 for a 48-byte head),
 //!   falling back to the three-part hash if the allocator refuses, and under
 //!   `ultra` `decrypt_in_place_detached` allocates two witness buffers fallibly,
 //!   so it can return [`Error::AllocationFailed`].  The message-sized buffers are
@@ -1572,9 +1573,10 @@ pub mod locked {
     ///
     /// Dropping frees the page and drops the lock; `mem::forget` (or `Box::leak`) leaves
     /// the page locked and charged against `RLIMIT_MEMLOCK` until the process exits, the
-    /// same caveat every RAII lock has. The `Deref` impl carries the same two warnings as
-    /// `crate::Key`'s: `key.clone()` copies the plain array, and `==` compares it
-    /// short-circuiting.
+    /// same caveat every RAII lock has. The `Deref` impl carries the same warning as
+    /// `crate::Key`'s: `key.clone()` copies the plain array. (The other `Deref` hazard,
+    /// `==`, is closed: this type has its own constant-time `PartialEq`, so `==` no longer
+    /// falls through to a short-circuiting array comparison.)
     ///
     /// `ultra`'s answer to the part of the wipe story a volatile store cannot reach:
     /// while this value is alive its pages cannot be swapped out, and a core dump will
@@ -2936,7 +2938,10 @@ pub fn decrypt_bounded(
 /// Decrypt `buffer` in place, verifying the detached tag.
 ///
 /// On failure the buffer is zeroized, so unverified plaintext is never left in
-/// place. Note this destroys the caller's buffer on the failure path.
+/// place. Note this destroys the caller's buffer on the failure path — including
+/// the *length* error below, which returns before anything is written: the wipe
+/// is unconditional so that "the call failed" and "the buffer still holds what
+/// the caller put there" can never both be true.
 ///
 /// # Allocation
 ///
@@ -2953,7 +2958,16 @@ pub fn decrypt_in_place_detached(
     buffer: &mut [u8],
     tag: &[u8; TAG_LEN],
 ) -> Result<(), Error> {
-    check_lengths(buffer.len(), aad.len())?;
+    // The buffer is wiped on *every* failure, including this one: the contract above
+    // says so, and an audit found this path returning `AadTooLong`/`MessageTooLong`
+    // with the caller's bytes untouched while every other failure path wiped. (No
+    // plaintext exists yet here — nothing has been written — but an unconditional
+    // contract is the one a caller can rely on, and it matches the allocation-failure
+    // arm below.)
+    if let Err(e) = check_lengths(buffer.len(), aad.len()) {
+        zeroize_slice(buffer);
+        return Err(e);
+    }
 
     // `ultra` needs the ciphertext later, and the in-place transform consumes it, so a copy is
     // taken. This was the first version's bug: the witness was handed `buffer` *after* the XOR,
@@ -5749,8 +5763,11 @@ mod tests {
     /// implementations disagree on, so a *wrong* witness would reject everything, and a
     /// witness that agreed for the wrong reason (say, a stub) would be worse than none. The
     /// lengths sweep every structural boundary the construction has — the ChaCha20 block, the
-    /// SIMD widths, the tag's contiguous-buffer window at 2048 and 65536, and BLAKE3's chunk
-    /// boundaries at 1024 — because those are where two implementations most plausibly differ.
+    /// SIMD widths, BLAKE3's chunk boundaries at 1024, and the tag's contiguous-buffer window,
+    /// which flips on `48 + aad + msg` at 2048 and 65536: with the 13-byte AAD here those are
+    /// message lengths **1987** and **65475**, so the list brackets each flip with its
+    /// neighbours (the flips were missing until an audit checked the arithmetic behind this
+    /// sentence).
     #[cfg(feature = "ultra")]
     #[test]
     fn test_witness_agrees_with_the_main_path() {
@@ -5759,8 +5776,8 @@ mod tests {
         let aad_len = 13usize;
 
         for len in [
-            0usize, 1, 63, 64, 65, 127, 255, 256, 257, 511, 512, 513, 1023, 1024, 1025, 2047, 2048,
-            2049, 4096, 16384, 65535, 65536, 65537,
+            0usize, 1, 63, 64, 65, 127, 255, 256, 257, 511, 512, 513, 1023, 1024, 1025, 1986, 1987,
+            1988, 2047, 2048, 2049, 4096, 16384, 65474, 65475, 65476, 65535, 65536, 65537,
         ] {
             let pt: Vec<u8> = (0..len).map(|i| (i % 251) as u8).collect();
             let aad: Vec<u8> = (0..aad_len).map(|i| (i % 241) as u8).collect();

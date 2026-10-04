@@ -130,9 +130,9 @@ ensure_target() {
   rustup target add "$target" >/dev/null 2>&1
 }
 
-# `qemu-user` ships every emulator this project uses (qemu-aarch64, qemu-i386),
-# so one download covers the whole cross-execution stage; only the lookup is
-# per-architecture.  Mirrors verify.sh's find_qemu.
+# `qemu-user` ships every emulator this project uses (qemu-aarch64, qemu-i386,
+# qemu-ppc64, qemu-riscv64), so one download covers the whole cross-execution
+# stage; only the lookup is per-architecture.  Mirrors verify.sh's find_qemu.
 find_qemu() {
   local name="$1" arch var c
   arch="$(printf '%s' "${name#qemu-}" | tr '[:lower:]-' '[:upper:]_')"
@@ -149,14 +149,25 @@ find_qemu() {
 # `qemu-user-static` is only a small metapackage pointing at `qemu-user`, which
 # is where the actual (statically linked) binaries live -- so `qemu-user` is
 # the package to fetch.  Every step is best-effort: no emulator simply means
-# the aarch64 execution stage is skipped, not that the build fails.
+# that target's execution stage is skipped, not that the build fails.
+#
+# All four are checked, not just aarch64: this used to return as soon as
+# `qemu-aarch64` was found, so a host that had only that one never fetched the
+# rest -- and because `verify.sh --cross-exec` now needs `qemu-riscv64` as well,
+# `./check.sh --all` (the documented one-command provisioning path) failed on
+# exactly the fresh hosts it exists for.
+QEMU_EMULATORS=(qemu-aarch64 qemu-i386 qemu-ppc64 qemu-riscv64)
 provision_qemu() {
-  if find_qemu qemu-aarch64 >/dev/null; then
-    ok "aarch64 emulator present: $(find_qemu qemu-aarch64)"
+  local missing=() em
+  for em in "${QEMU_EMULATORS[@]}"; do
+    find_qemu "$em" >/dev/null || missing+=("$em")
+  done
+  if [ "${#missing[@]}" -eq 0 ]; then
+    ok "emulators present: ${QEMU_EMULATORS[*]}"
     return 0
   fi
   if ! command -v apt-get >/dev/null || ! command -v dpkg-deb >/dev/null; then
-    skip "no apt-get/dpkg-deb; cannot fetch an aarch64 emulator"
+    skip "no apt-get/dpkg-deb; cannot fetch: ${missing[*]}"
     return 1
   fi
 
@@ -178,7 +189,7 @@ provision_qemu() {
        [ -n "$deb" ]
        dpkg-deb -x "$deb" ./x
        mkdir -p "$(dirname "$dest")"
-       for em in qemu-aarch64 qemu-i386 qemu-ppc64; do
+       for em in "${QEMU_EMULATORS[@]}"; do
          cp "./x/usr/bin/$em" "$HOME/.local/bin/$em"
          chmod +x "$HOME/.local/bin/$em"
        done
@@ -315,9 +326,13 @@ fi
 # interpreted aarch64 target, no qemu -- and ctgrind, cargo-deny, fuzzing, TSAN and the
 # tool-level gates) rather than being replaced by `--kani`, which would have silently
 # dropped the rest.  miri used to be omitted here, so `--fast --all` quietly ran a
-# smaller set than `verify.sh --all` minus cross-exec.  Note the expansion also drops
-# the strict mode that `--all` implies, which is right: a `--fast` run does not claim to
-# be complete, so an unavailable miri is a skip rather than a failure.
+# smaller set than `verify.sh --all` minus cross-exec.  Note what dropping `--all`'s
+# strict bookkeeping does **not** change: the names in the expansion are passed to
+# `verify.sh` as explicit requests, and a stage that was named and could not run is a
+# failure (exit 1), not a skip -- so `--fast --all` on a host without miri, valgrind or
+# Kani ends in a FAILED line that says which stage was missing, rather than in a
+# quieter success.  A comment here claimed the opposite (that an unavailable miri is a
+# skip under `--fast`); it never was, and an audit caught the difference.
 if [ "$FAST" -eq 1 ]; then
   FILTERED=()
   saw_all=0

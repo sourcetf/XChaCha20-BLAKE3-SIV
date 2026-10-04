@@ -737,6 +737,9 @@ if [ "$RUN_TOOLS" -eq 1 ]; then
     if [ "$local_rc" -eq 3 ]; then
       # "Could not run" is a skipped stage, and `--deep`/`--all` refuse to finish while one
       # is recorded. Treating 3 as 0 was the same silence this script removes elsewhere.
+      # The tool emits 3 itself when the measurement cannot run (cargo failing to build or
+      # start); before it did, a build failure arrived as exit 101 and was read as a
+      # measurement change by the branch below.
       skip "stack residue" "tools/stack_residue.sh could not run (exit 3; see above)"
     elif [ "$local_rc" -ne 0 ] && [ "$local_rc" -ne 3 ]; then
       echo "ADVISORY: tools/stack_residue.sh reported a change (exit $local_rc) -- see" >&2

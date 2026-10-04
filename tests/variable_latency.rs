@@ -72,8 +72,9 @@ const ALLOWED: &[(&str, &str)] = &[
 ///   the slot rather than a value selected from the condition, so memcheck sees no taint on
 ///   the branch and the outcome bit they reveal is the one the mode is designed to reveal
 ///   anyway. They are listed rather than suppressed because they are a branch on that bit;
-/// * `decrypt_bounded`'s length check and the `MAX_MSG_SIZE` checks in `derive_tag`:
-///   lengths, which are public;
+/// * `decrypt_bounded`'s length check, `decrypt_in_place_detached`'s (which wipes the
+///   caller's buffer before returning — see that function's docs), and the `MAX_MSG_SIZE`
+///   checks in `derive_tag`: lengths, which are public;
 /// * the `locked` module: `Page` allocation, `LockedKey::new`, `lock_range`'s
 ///   alignment, and `page_size()`'s auxv walk. Every branch there tests a public fact
 ///   -- a `/proc` open, a full auxv entry, `AT_PAGESZ`, a plausible page size, a
@@ -128,7 +129,7 @@ const ALLOWED: &[(&str, &str)] = &[
 /// unlock left a page locked *and* dumpable, which an audit reproduced under a syscall
 /// filter).
 const CONTROL_FLOW: &[(&str, usize)] = &[
-    ("if", 37),
+    ("if", 38),
     ("while", 10),
     ("for", 26),
     ("loop", 0),

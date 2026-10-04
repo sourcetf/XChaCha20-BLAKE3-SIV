@@ -272,5 +272,17 @@ fn main() {
 RS
 
 cd "$WORK"
+# Exit codes are the repository's convention: 0 = measured, nothing found; 1 = measured,
+# residue found (the probe below exits 1 for that); 3 = could not run. The distinction
+# matters to verify.sh, which reports 1 as ADVISORY (a change in compiler-chosen layout
+# must not fail a `--deep` run) but a *skipped stage* for 3. Nothing produced a 3 here
+# before -- so a build failure (cargo exits 101) was reported as "residue changed", which
+# is a measurement claim about a run that never happened.
+rc=0
 # shellcheck disable=SC2086
-cargo run --release --quiet $FEATURES
+cargo run --release --quiet $FEATURES || rc=$?
+if [ "$rc" -ne 0 ] && [ "$rc" -ne 1 ]; then
+  echo "SKIPPED: the measurement could not run (cargo exited $rc; see above)" >&2
+  exit 3
+fi
+exit "$rc"

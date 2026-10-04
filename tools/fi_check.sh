@@ -60,6 +60,33 @@ copy_tree() {
   cp -r src tests benches Cargo.toml Cargo.lock "$1/"
 }
 
+# Require the run's log to show that tests actually ran.
+#
+# `cargo test -- <filter>` whose filter matches nothing prints "0 passed; ... N filtered
+# out" and exits 0, so an argument that silently became a *name filter* turns the row into a
+# vacuous OK. Measured, and the reason this guard exists: the `dual-mac-blocks-tag-
+# substitution` row passed the bare word `ultra` instead of `--features ultra`, so it was
+# `cargo test --test decision ultra` -- zero tests, exit 0, verdict OK, for as long as the
+# row existed. Every row now has to show a test count.
+assert_tests_ran() {  # <log> <row name>
+  local log="$1" name="$2"
+  local line
+  line="$(grep -E '^test result:' "$log" | tail -1 || true)"
+  if [ -z "$line" ]; then
+    printf 'FAIL %-22s no "test result" line in the log, so cargo test never ran a test\n' "$name" >&2
+    printf '                        binary -- see %s\n' "$log" >&2
+    exit 1
+  fi
+  local passed failed
+  passed="$(printf '%s' "$line" | sed -n 's/.* \([0-9]\+\) passed.*/\1/p')"
+  failed="$(printf '%s' "$line" | sed -n 's/.* \([0-9]\+\) failed.*/\1/p')"
+  if [ "${passed:-0}" -eq 0 ] && [ "${failed:-0}" -eq 0 ]; then
+    printf 'FAIL %-22s the filter matched no tests (%s), so this row proves nothing\n' \
+      "$name" "$line" >&2
+    exit 1
+  fi
+}
+
 # A clean baseline, cached per (features, test target): the detector must PASS on an
 # unmutated tree, or an `expect=fail` row below could be satisfied by a detector that was
 # already failing for an unrelated reason. Cached because copying and building the tree
@@ -76,6 +103,7 @@ baseline_passes() {  # <features> <test target>
       args+=($1)
     fi
     if ( cd "$dir" && CARGO_TARGET_DIR="$dir/target" cargo test "${args[@]}" ) > "$WORK/baseline.log" 2>&1; then
+      assert_tests_ran "$WORK/baseline.log" "baseline($key)"
       BASELINE_PASSES[$key]=yes
     else
       BASELINE_PASSES[$key]=no
@@ -123,6 +151,7 @@ run_row() {
   if ! ( cd "$dir" && CARGO_TARGET_DIR="$dir/target" cargo test "${args[@]}" ) > "$WORK/$name.log" 2>&1; then
     got=fail
   fi
+  assert_tests_ran "$WORK/$name.log" "$name"
   if [ "$got" = "$expect" ]; then
     printf '  OK   %-22s %-22s %s (detector %s)\n' "$name" "$features" "$expect" "$target"
     return 0
@@ -347,7 +376,12 @@ run_row both-checks-neutralised "--features hardened" decision fail patch_both_c
 # is *rejected* -- which is the whole return on the feature's cost, and the reason a
 # `ultra` user gets something the default build does not. (Without `dual-mac` the row
 # above shows the opposite: both builds accept it.)
-run_row dual-mac-blocks-tag-substitution "ultra" decision pass patch_recomputed_tag_ignored
+#
+# The feature argument is `--features ultra`, not `ultra`: this row carried the bare word
+# for as long as it existed, which made it `cargo test --test decision ultra` -- `ultra` is
+# then a *test-name filter*, zero tests ran, and the row reported OK without testing
+# anything (an audit found it; `assert_tests_ran` above is the guard).
+run_row dual-mac-blocks-tag-substitution "--features ultra" decision pass patch_recomputed_tag_ignored
 
 # ...and the same fault with the witness *removed*. `ultra` implies `dual-mac`, so the row
 # above passes even if `dual-mac`'s recomputation were dead -- the independent

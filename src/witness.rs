@@ -52,38 +52,42 @@
 //! wrong on both sides and cannot show up here as a disagreement; the external anchor for the
 //! wire format is the differential fixture against `tools/ref_impl.py`, not this cross-check.
 
-use alloc::vec::Vec;
-
 use crate::{DOM_ENC, DOM_PRE, DOM_TAG, NONCE_LEN, SUBKEY_DOMAIN, TAG_LEN};
 
 /// Volatile-zero a slice.
 ///
 /// The witness wipes every key-derived buffer it names, and `ultra` does not count cost, so
 /// this is applied liberally. That includes the primitive-internal state: `block`'s and
-/// `hchacha20`'s `s`/`v` (the key words and the permutation state) and the 4-byte load/output
-/// copies around them, `compress`'s `state`/`m`, the compression outputs in
-/// `Output::chaining_value`/`root_output_bytes`, and the streaming locals in
-/// `ChunkState::update`/`Hasher::update`/`add_chunk_cv`/`finalize_xof`. `Output` has a `Drop`
-/// that wipes its key CV and its message block, so the node built by
-/// `parent_output(..).chaining_value()` — which no caller names — is zeroed on the way out.
-/// An earlier version of this comment disclosed several of these as a gap (the crate's own
-/// `chacha20_block`/`hchacha20` wipe theirs); they are closed here rather than left to the
-/// `scrub_stack()` the entry points run afterwards.
+/// `hchacha20`'s `s`/`v` (the key words and the permutation state), `compress`'s
+/// `state`/`m`, the compression outputs in `Output::chaining_value`/`root_output_bytes`, and
+/// the streaming locals in `ChunkState::update`/`Hasher::update`/`add_chunk_cv`/
+/// `finalize_xof`. `Output` has a `Drop` that wipes its key CV and its message block, so the
+/// node built by `parent_output(..).chaining_value()` — which no caller names — is zeroed on
+/// the way out.
 ///
-/// What is still *not* covered, honestly: a value returned by value leaves a return temporary
-/// this function cannot name -- a `[u32; 8]` CV, the `[u8; 32]` from `hchacha20`, and the
-/// 65-byte tags `tag`/`decrypt`/`encrypt_tag` return, exactly as `src/lib.rs::derive_enc`'s
-/// doc describes for its own 44-byte aggregate. The construction buffers are written through
-/// caller slices for that reason; the caller (`src/lib.rs`) wipes its own copies of the tags,
-/// and `scrub_stack` remains the cover for the return slots themselves.
+/// What is still *not* covered, honestly — two classes, and an earlier revision of this
+/// comment claimed the first of them was:
+///
+///   * **By-value return temporaries**, which no wipe in the callee can name: a `[u32; 8]`
+///     CV, the `[u8; 32]` from `hchacha20`, and the 65-byte tags `tag`/`decrypt`/
+///     `encrypt_tag` return, exactly as `src/lib.rs::derive_enc`'s doc describes for its own
+///     44-byte aggregate. The construction buffers are written through caller slices for that
+///     reason; the caller (`src/lib.rs`) wipes its own copies of the tags, and `scrub_stack`
+///     remains the cover for the return slots themselves.
+///   * **Short-lived 4-byte copies inside the BLAKE3 code**: the `[u8; 4]` built from the key
+///     in `Hasher::new_keyed`, the one built from a message word in `words_from_le_bytes`, and
+///     the per-word output copies in `hchacha20`. The sentence that used to stand here said
+///     these were wiped; nothing names them, so they are not. They are left rather than paid
+///     for with a volatile store per word — four bytes of a 32-byte key is not a key, and
+///     `tools/stack_residue.sh` searches for the whole value — and `scrub_stack` covers the
+///     region afterwards under `ultra`.
 ///
 /// This is also what keeps `tools/ctgrind.sh` quiet: the first version of this module left its
 /// BLAKE3 chaining values in a `Vec<[u32; 8]>`, and memcheck reported a conditional jump in
 /// glibc's `free` — the freed chunk's payload held poisoned data, and the allocator reads part
-/// of it. Wiping before the buffer is released is both correct hygiene and what removes the
-/// report. The CV stack reserves BLAKE3's maximum tree depth up front so it never reallocates:
-/// a reallocating `Vec` frees a block whose live elements were copied out, and no wipe in this
-/// module could reach that block.
+/// of it. The CV stack is a fixed array with a length now (`CvStack`), so it is wiped in
+/// place and there is nothing to free at all — which also means a keyed call performs **no
+/// heap allocation** and cannot abort on an allocation refusal (see `CvStack`'s doc).
 #[inline(never)]
 fn wipe<T>(value: &mut T) {
     let bytes = core::mem::size_of::<T>();
@@ -520,10 +524,42 @@ impl ChunkState {
 const CV_STACK_RESERVE: usize = 64;
 
 /// Keyed BLAKE3, streaming, with XOF output.
+///
+/// `cv_stack` is a fixed array with a length, **not a `Vec`**, and that is a correctness
+/// property rather than an optimisation. A keyed call runs *after* the caller has derived
+/// `k_in`/`k_out`/`enc_seed` (and, on the decrypt paths, after the recovered plaintext is in
+/// a buffer), so an allocation refusal here would abort the process -- skipping every wipe,
+/// with the derived keys and the plaintext still in memory. That is the failure class
+/// `derive_tag`'s window buffer was fixed for; an audit found the same shape here, in a
+/// `Vec::with_capacity`. Sixty-four entries cover every input a 64-bit chunk counter can
+/// describe, so nothing is given up by not having a growable stack.
+struct CvStack {
+    cvs: [[u32; 8]; CV_STACK_RESERVE],
+    len: usize,
+}
+
+impl CvStack {
+    fn new() -> Self {
+        CvStack {
+            cvs: [[0u32; 8]; CV_STACK_RESERVE],
+            len: 0,
+        }
+    }
+
+    fn push(&mut self, cv: [u32; 8]) {
+        // Unreachable: the depth is bounded by the counter's width. A panic (rather than a
+        // silent drop) is the right failure here -- a witness that forgot a chaining value
+        // would disagree with the main path on a huge input instead of saying why.
+        assert!(self.len < CV_STACK_RESERVE, "witness: CV stack exhausted");
+        self.cvs[self.len] = cv;
+        self.len += 1;
+    }
+}
+
 pub struct Hasher {
     key_words: [u32; 8],
     chunk: ChunkState,
-    cv_stack: Vec<[u32; 8]>,
+    cv_stack: CvStack,
     flags: u32,
 }
 
@@ -545,7 +581,7 @@ impl Hasher {
         Hasher {
             key_words,
             chunk: ChunkState::new(&key_words, 0, flags),
-            cv_stack: Vec::with_capacity(CV_STACK_RESERVE),
+            cv_stack: CvStack::new(),
             flags,
         }
     }
@@ -556,14 +592,14 @@ impl Hasher {
             // The popped CV is key-derived; wipe the slot it leaves behind as well as the copy
             // this function folds, so nothing in the stack's storage outlives its use.
             //
-            // `Vec::pop` alone would move the value out and shorten the length, leaving the
-            // old bytes in storage the Vec still owns -- and wiping the returned copy would
+            // A `Vec::pop` alone would move the value out and shorten the length, leaving the
+            // old bytes in storage the stack still owns -- and wiping the returned copy would
             // not touch them. An audit pointed at this comment, which claimed the slot was
-            // wiped when it was not. Zero the slot first, then truncate.
-            let last = self.cv_stack.len() - 1;
-            let mut left = self.cv_stack[last];
-            wipe_words(&mut self.cv_stack[last]);
-            self.cv_stack.truncate(last);
+            // wiped when it was not. Zero the slot first, then shorten.
+            let last = self.cv_stack.len - 1;
+            let mut left = self.cv_stack.cvs[last];
+            wipe_words(&mut self.cv_stack.cvs[last]);
+            self.cv_stack.len = last;
             new_cv = parent_cv(&left, &new_cv, &self.key_words, self.flags);
             wipe_words(&mut left);
             chunks >>= 1;
@@ -576,10 +612,10 @@ impl Hasher {
 
     /// Wipe everything this hasher accumulated, before its buffers are released.
     fn wipe_state(&mut self) {
-        for cv in self.cv_stack.iter_mut() {
+        for cv in self.cv_stack.cvs[..self.cv_stack.len].iter_mut() {
             wipe_words(cv);
         }
-        self.cv_stack.clear();
+        self.cv_stack.len = 0;
         wipe_words(&mut self.key_words);
         wipe_words(&mut self.chunk.cv);
         wipe(&mut self.chunk.block);
@@ -606,11 +642,16 @@ impl Hasher {
 
     pub fn finalize_xof(&self, out: &mut [u8]) {
         let mut output = self.chunk.output();
-        let mut remaining = self.cv_stack.len();
+        let mut remaining = self.cv_stack.len;
         while remaining > 0 {
             remaining -= 1;
             let mut cv = output.chaining_value();
-            output = parent_output(&self.cv_stack[remaining], &cv, &self.key_words, self.flags);
+            output = parent_output(
+                &self.cv_stack.cvs[remaining],
+                &cv,
+                &self.key_words,
+                self.flags,
+            );
             // `parent_output` copied it into the new node; wipe this frame's copy. The
             // node being replaced is wiped by `Output`'s `Drop`.
             wipe_words(&mut cv);
@@ -743,9 +784,11 @@ fn enc_material(
 ///
 /// Used by `ultra` to cross-check the main path bit for bit. The output is a caller slice
 /// rather than a `Vec` on purpose: allocation belongs to `src/lib.rs`, where it is fallible
-/// and taken *before* any key material exists, and an allocation inside this function would
-/// abort the process on refusal instead of returning `Error::AllocationFailed`. The caller
-/// wipes both the slice and the tag when it is done.
+/// and taken *before* any key material exists. **Nothing in this module allocates** — the
+/// chaining-value stack is a fixed array (see `CvStack`) — so no path here can abort on an
+/// allocation refusal, which at this point in the call would skip every wipe with the derived
+/// keys and the recovered plaintext still in reach. The caller wipes both the slice and the
+/// tag when it is done.
 pub fn decrypt(
     key: &[u8; 32],
     nonce: &[u8; NONCE_LEN],
@@ -803,6 +846,10 @@ pub fn encrypt_tag(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // The witness's own code is allocation-free (see `CvStack`); only these tests build
+    // `Vec`s, so the import lives here rather than in the module.
+    use alloc::vec::Vec;
 
     /// Locate a disagreement: the ChaCha20 block first, then HChaCha20, then BLAKE3.
     #[test]

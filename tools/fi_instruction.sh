@@ -69,7 +69,11 @@ export PATH="$HOME/.cargo/bin:$PATH"
 export CC="${CC:-$HOME/.local/bin/cc}"
 
 WORK="$(mktemp -d)"
-trap 'rm -rf "$WORK"' EXIT
+# Keep the work directory on failure: the FAIL messages below point at files under
+# $WORK (`*.accepted_decision`, the per-shard logs), and an unconditional cleanup
+# deleted them in the same exit that printed the path -- the defect `fi_check.sh`
+# already fixed for its own logs. A successful run cleans up.
+trap 'rc=$?; if [ "$rc" -eq 0 ]; then rm -rf "$WORK"; else echo "instruction-sweep logs kept in $WORK (exit $rc)" >&2; fi' EXIT
 export CARGO_TARGET_DIR="$WORK/target"
 
 quick=""
@@ -435,7 +439,8 @@ if [ "$hardened_d" -ne 0 ] || [ "$ultra_d" -ne 0 ]; then
   echo "FAIL: $hardened_d accepting fault(s) inside the decision in the hardened build" >&2
   echo "      and $ultra_d in the ultra one. The second gate (and, under ultra, the" >&2
   echo "      independent implementation) exist so that no single fault in the decision" >&2
-  echo "      accepts. See \$WORK/*.accepted_decision for the bytes." >&2
+  echo "      accepts. See $WORK/*.accepted_decision for the bytes (the directory is" >&2
+  echo "      kept on failure)." >&2
   ok=0
 fi
 if [ "$MODEL" = "bits" ] && [ "$default_d" -eq 0 ]; then

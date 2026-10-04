@@ -156,10 +156,24 @@ if [ "${1:-}" = "--trace" ]; then
       # the thing this mode exists to compare.
       input="$side"
       [ "$side" = zero2 ] && input=zero
+      # The run's exit status is captured, not discarded. `| grep ... || true` (the first
+      # version of this line) hid a crashed or panicking client: a client that dies at a
+      # key-independent point leaves *identically truncated* traces on both sides, so the
+      # determinism control and the two-key comparison can both pass and the mode prints
+      # "PASS" with no verdict behind it. An audit reproduced exactly that with a fake
+      # valgrind that printed 50 `L` lines and exited 1: two PASS lines, exit 0.
+      set +e
       setarch --addr-no-randomize "$VALGRIND" --tool=lackey --trace-mem=yes \
         "$TARGET_DIR/release/examples/xsiv_stdin" ${extra[@]+"${extra[@]}"} \
         < "$work/t-$input.txt" 2>&1 \
-        | grep -E "^[[:space:]]*[LSM] " > "$work/$phase-$side.trace" || true
+        | grep -E "^[[:space:]]*[LSM] " > "$work/$phase-$side.trace"
+      rc=${PIPESTATUS[0]}
+      set -e
+      if [ "$rc" -ne 0 ]; then
+        echo "SKIPPED: the $phase/$side lackey run exited $rc (valgrind forwards the" >&2
+        echo "         client's status), so there is no trace verdict to report." >&2
+        exit 3
+      fi
     done
     # A trace that carries no load/store lines is not a trace -- keep this guard even
     # though the filter is now right, because a valgrind that cannot start lackey (an
@@ -332,9 +346,19 @@ gen "$vectors" 00 2 > "$work/in-longer.txt"
 profile() {  # args..., then in-file and out-file are last two
   local extra=("${@:1:$#-2}")
   local in="${@: -2:1}" out="${@: -1}"
+  # Valgrind forwards the client's exit status, so a non-zero return means the profile is
+  # of a run that failed -- the counters in it are whatever the client managed before it
+  # died. The same hole the trace mode had (see there), closed here too: refuse to report
+  # a verdict from a run that did not complete.
+  local rc=0
   "$VALGRIND" --tool=cachegrind --cache-sim=yes --branch-sim=yes \
     --cachegrind-out-file="$out" "$TARGET_DIR/release/examples/xsiv_stdin" \
-    ${extra[@]+"${extra[@]}"} < "$in" > /dev/null 2>&1
+    ${extra[@]+"${extra[@]}"} < "$in" > /dev/null 2>&1 || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    echo "SKIPPED: a cachegrind run exited $rc (valgrind forwards the client's status)," >&2
+    echo "         so its counters describe an incomplete run and no verdict follows." >&2
+    exit 3
+  fi
 }
 
 # Read the counters out of the profile rather than out of `cg_annotate`'s text

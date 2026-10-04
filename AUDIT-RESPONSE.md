@@ -112,7 +112,7 @@ not about the current source.
 | `Cargo.toml`'s `i686-unknown-linux-musl` note | with no i686 C toolchain BLAKE3 falls back to Rust backends and the plain build works; nothing on i686 runs this crate's SIMD | corrected |
 | `.cargo/config.toml`'s "riscv64 linking does not work" | it links with an alias, `-C link-self-contained=yes`, a `self-contained` `-L`, and a non-PIE link; the suite then runs under `qemu-riscv64` — and the one test that still hung was a weak `libc::getrandom` symbol LLD resolves to the current PC, fixed by forcing the archive member (§2.7) | corrected (`6efac1f`), completed this round; riscv64 execution is now wired into `verify.sh --cross-exec` and the `cross-exec` job |
 | "Miri, which cannot execute C — hence `pure`" | `pure` is belt-and-braces on x86_64 (Miri's CPU-feature detection reports nothing, so the C kernels are never dispatched) | softened in `Cargo.toml` and `tests/README.md` (`63e27e7`) |
-| Kani cost figures (≈320 s per permutation, "well over 25 minutes") | on the current toolchain the real-permutation harness runs in 37 s and the whole 12-harness set in ~875 s | marked as history in `src/proofs.rs` (`63e27e7`), and the required flags (`-Z stubbing -Z unstable-options`) are spelled out in `tests/README.md` |
+| Kani cost figures (≈320 s per permutation, "well over 25 minutes") | on the current toolchain the real-permutation harness runs in 37 s and the whole 13-harness set in ~875 s | marked as history in `src/proofs.rs` (`63e27e7`), and the required flags (`-Z stubbing -Z unstable-options`) are spelled out in `tests/README.md` |
 | CI coverage percentages and counts (96.71% / 88 of 2181, 97.92% / 116 of 5573) | three runs of the same command gave 96.51 / 96.66 / 96.71% of lines and 97.71 / 97.92% of regions | the comment now quotes the floor and points at the job's output (`63e27e7`); the counts had already gone (`c907e47`) |
 | The qemu run was described as `qemu-x86_64 -cpu Nehalem` (SSE2-only) | no such runner exists in the repository | removed from the crate docs, `tests/README.md` and `bench` texts (`4e52680`) |
 | The avalanche test implied it covered the ChaCha20 round function | corrupting the round constant leaves it green (the KATs catch that) | the test says what it does and does not cover |
@@ -282,7 +282,7 @@ record skips, not passes — and the reports' own measurements are the substitut
   tamper attempts, the window corpus, AAD/message extremes, and libFuzzer runs — all negative.
 * Feature matrix: every configuration builds, tests and produces identical wire bytes; i686 and
   aarch64 execute under qemu; `overflow-checks` changes nothing observable.
-* Verification tools: Kani 12/12 SUCCESSFUL; Miri with no UB (including full `--lib` and
+* Verification tools: Kani 13/13 SUCCESSFUL (the twelve the reports measured plus the concrete tag comparison added in `8dcc09e`); Miri with no UB (including full `--lib` and
   per-test runs); TSAN clean with its control detected; `cargo-audit`/`cargo-deny` clean; the
   coverage floor passes.
 * Structural scale experiments (a 352-bit equality from one call chain, `b0`/`b1` segment

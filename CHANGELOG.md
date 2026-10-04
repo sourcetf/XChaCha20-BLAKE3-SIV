@@ -8,6 +8,84 @@ green push to `main` — which are build artefacts of that job, not construction
 
 ## Unreleased
 
+### Four audits and a fix round: a fault row that ran no tests, an abort in `ultra`, and nine smaller defects
+
+A fresh adversarial pass over the tree — four independent read-only audits (core construction
+and API; witness and Kani; tools and workflows; tests and doc claims), every candidate then
+verified here before being fixed or rejected. **No wire-format change.**
+
+- **`tools/fi_check.sh`'s `dual-mac-blocks-tag-substitution` row ran zero tests.** The row
+  passed the bare word `ultra` where the argument is a cargo flag string, so `run_row` built
+  `cargo test --quiet --release --test decision ultra` — and `ultra` is then a libtest
+  *name filter*, matching neither test in `tests/decision.rs`. Zero tests, exit 0, verdict
+  `OK`, for as long as the row existed; the README cites the row as the executable evidence
+  that `ultra` rejects a stored-tag substitution, and it was testing nothing. Fixed to
+  `--features ultra` (the row now genuinely runs and passes), and `run_row`/`baseline_passes`
+  now require every log to show a `test result:` line with at least one test executed, so a
+  mistyped argument fails loudly instead of reporting a vacuous pass. Re-ran the campaign:
+  14/14 rows, including the repaired row.
+- **The witness's chaining-value stack was an infallible 2 KiB allocation — an abort, after the
+  keys existed.** `witness::Hasher::new_keyed` used `Vec::with_capacity(64)`, reached from all
+  three `ultra` entry points *after* `k_in`/`k_out`/`enc_seed` are derived and after the decrypt
+  paths have recovered plaintext; an allocator refusal there aborts the process and skips every
+  wipe — the exact failure class `derive_tag`'s window buffer was fixed for, reintroduced one
+  layer down (and `witness::decrypt`'s own doc claimed the module allocated nothing). The stack
+  is now a fixed array with a length (`CvStack`): no allocation anywhere in the witness, no
+  abort path, and the module doc is true. Measured cost change is inside the campaign's noise
+  floor (3.1% slower at 64 B, 3.0% faster at 1 KiB, opposite signs; `performance.md`'s tables
+  stand). The witness's own differential tests, `tests/ultra.rs` and the extended length sweep
+  all pass on the reworked stack.
+- **`decrypt_in_place_detached` did not wipe the buffer on a length error.** Its contract says
+  "on failure the buffer is zeroized", and every other failure path (authentication,
+  allocation) did; `AadTooLong`/`MessageTooLong` returned with the caller's bytes untouched.
+  The length-error arm now wipes too, so the contract is unconditional. Checked against the
+  mutation campaign's scope before and after: the mutant set is still exactly the 17 the
+  committed evidence records (the new statements produce no mutants), so the evidence is
+  unchanged.
+- **`tools/cache_profile.sh` ignored the profiled run's exit status**, in both modes. A client
+  that crashed at a key-independent point leaves *identically truncated* traces, so the
+  determinism control and the two-key comparison could both pass on a failed run: measured
+  with a fake valgrind that prints 50 load lines and exits 1 — two `PASS` lines and exit 0.
+  Both modes now capture the client's status (valgrind forwards it) and answer "could not run"
+  (exit 3) instead; the fake now exits 3, the real paths still pass, and both `--selftest`
+  modes still detect their planted leak.
+- **`check.sh` provisioned three of the four emulators.** It stopped as soon as `qemu-aarch64`
+  was found and copied only aarch64/i386/ppc64, so a fresh host running the documented
+  one-command path (`./check.sh --all`) failed in `verify.sh` where `qemu-riscv64` was then
+  missing — on exactly the hosts the provisioning exists for. All four are now checked and
+  installed.
+- **`tools/stack_residue.sh` never emitted exit 3**, so a build failure (cargo exits 101)
+  reached `verify.sh` as "reported a change" — an advisory line about a measurement that never
+  happened, which `--deep` cannot fail on. The tool now maps anything but 0 (clean) and 1
+  (residue found) to 3 ("could not run"), which `verify.sh` already handles as a recorded skip.
+- **`tools/fi_instruction.sh` deleted the evidence its failure message pointed at**: the EXIT
+  trap removed `$WORK` unconditionally, and the FAIL line says "see `$WORK/*.accepted_decision`".
+  The directory is kept on failure now (as `tools/fi_check.sh` already did), and the message
+  prints the real path.
+- **`check.sh`'s `--fast --all` comment described the wrong behaviour**: it claimed an
+  unavailable miri is a skip under `--fast`, but the stages the expansion names are explicit
+  requests to `verify.sh`, and a stage that was named and could not run is a failure. The
+  comment now says so.
+- **Doc corrections the audits verified one by one:** README and `SECURITY-ANALYSIS.md`
+  published the pre-fix fault-sweep counts (3→4 in the decision for the opt-out bit model, and
+  `ultra`'s bit-model total 4→5); the `variable_latency` description said it excludes
+  `src/witness.rs` (it scans it) and that its allow-list has one entry (it has three);
+  the Kani section said no harness reads the nonce back (the concrete
+  `tag_matches_the_model_on_a_concrete_input` rebuilds the head with it and compares all 65
+  bytes); the harness counts said twelve/six-stubbed (thirteen, seven stubbed); the CHANGELOG
+  called `--trace 4` "the script's 4-vector default" (the default is 12); `LockedKey`'s doc still
+  warned that `==` short-circuits (it has a constant-time `PartialEq` now); the crate docs gave
+  the tag's contiguous-buffer window as "AAD + message" where the predicate is
+  `48 + aad + msg`; two `proofs.rs` comments claimed reconstruction-and-compare work that the
+  symbolic macro does not do; and the witness test's length sweep did not bracket either flip
+  point of that window (now 1986–1988 and 65474–65476, in message lengths for its 13-byte AAD).
+- **The Kani involution harness now crosses a block boundary.** Its doc claimed "the same
+  sequencing property for the XOR entry point" but its 20-byte buffer was a single partial
+  block, so no counter advance was exercised. It now uses 66 bytes (one full block plus a
+  tail) and checks byte `i` against the stub for counter `ctr + i/64` — verifying in ~77 s
+  locally. (`unwind 200` over 130 bytes exhausted CBMC's memory; the harness doc records the
+  boundary that was found.)
+
 ### riscv64's one hanging test was a weak-symbol link artefact, and the target executes now
 
 The riscv64 cross-execution recipe had exactly one test that hung
@@ -72,8 +150,9 @@ below are the ones that changed something here. **No wire-format change.**
   instruction lines between a `00…` and an `ff…` key). Both halves were already handled — the
   guard is value-independent since the previous round, and instruction fetches are excluded from
   an *address* comparison on purpose — and re-measured here both modes PASS on a pristine tree
-  (131,292 accesses enc, 179,611 round trip with the script's 4-vector default; 13 counters
-  identical).
+  (131,292 accesses enc, 179,611 round trip at `--trace 4`; the script's default is 12
+  vectors -- an earlier revision of this line called 4 the default; 13 counters identical in
+  counts mode at 4 vectors per side).
 - **Two figures are now ranges with their spread written down.** `performance.md` records that
   an independent build measured `dual-mac` at 1.69–1.81x where this repository's rows state
   +30–40%, and `ultra`'s 1 KiB allocating decryption at 4.62x against 3.96x here, and states the
@@ -250,11 +329,11 @@ Both are fixed here and re-measured; the rest is documentation the new measureme
   the scripts keep passing it so the run does not depend on that. And the CBMC cost figures in
   `src/proofs.rs` (≈320 s per concrete permutation, ≈29 s per wipe, "well over 25 minutes" per
   AEAD harness) are an order of magnitude pessimistic on the current toolchain: the one harness
-  that runs the real permutation verifies in **37 s**, and the whole 12-harness set is ~875 s
+  that runs the real permutation verifies in **37 s**, and the whole 13-harness set is ~875 s
   with the slowest at ~460 s. The design they justify is unchanged; the numbers are marked as
   history. `tests/README.md` also now spells out that the harnesses need the entry points'
   flags (`-Z stubbing -Z unstable-options`) — the bare `cargo kani --features pure` fails to
-  compile six of the twelve, which is caller knowledge the repo had left implicit.
+  compile seven of the thirteen, which is caller knowledge the repo had left implicit.
 - **The audit's fault matrix quantified the two-fault boundary the README states.** Two site
   pairs (`c2+ini1`, `ci0+ci1`) are individually invisible and jointly accept every probe — the
   honest ciphertext included — in **all three configurations**; `i1+a` (a shortened second
