@@ -179,7 +179,16 @@ check_one() {
        return 1 ;;
   esac
   copy_tree "$dir"
+  set +e
   "$mutation" "$dir"
+  local patch_status=$?
+  set -e
+  if [ "$patch_status" -ne 0 ]; then
+    echo "FAIL: the mutation for $name could not be applied (patch exited $patch_status," >&2
+    echo "      which usually means its anchor moved in the source). The header lists" >&2
+    echo "      this as exit 1: it is neither 'caught' nor 'not caught'." >&2
+    return 1
+  fi
   set +e
   "$check" "$dir"
   local status=$?
@@ -200,6 +209,14 @@ check_one() {
 }
 
 want="${1:-all}"
+case "$want" in
+  all|ctgrind|kat) ;;
+  *)
+    echo "FAIL: unknown mutation '$want' (want all, ctgrind or kat)" >&2
+    # Without this the two `if`s below match nothing, nothing runs, and the tool
+    # reports "all mutations were caught" -- a green verdict for no work at all.
+    exit 1 ;;
+esac
 rc=0
 skipped=0
 if [ "$want" = "all" ] || [ "$want" = "ctgrind" ]; then
@@ -231,17 +248,24 @@ if [ "$want" = "all" ] || [ "$want" = "kat" ]; then
   set -e
   if [ "$status" -eq 3 ]; then skipped=$((skipped + 1)); elif [ "$status" -ne 0 ]; then rc=1; fi
 fi
+# The failure comes first. This used to exit 3 whenever anything was skipped, which
+# swallowed a real "NOT caught" into the exit-3 "tooling unavailable" the callers record
+# as a skipped stage -- the one direction this repository refuses.
+if [ "$rc" -ne 0 ]; then
+  echo
+  echo "one or more mutations were NOT caught" >&2
+  if [ "$skipped" -gt 0 ]; then
+    echo "($skipped other mutation(s) could not be run here; that is a gap in this" >&2
+    echo " check, not a pass)" >&2
+  fi
+  exit "$rc"
+fi
 if [ "$skipped" -gt 0 ]; then
   echo
   echo "$skipped mutation(s) could not be run (tooling unavailable): that is a gap" >&2
   echo "in this check, not a pass." >&2
   exit 3
 fi
-if [ "$rc" -eq 0 ]; then
-  echo
-  echo "all mutations were caught"
-else
-  echo
-  echo "one or more mutations were NOT caught" >&2
-fi
-exit "$rc"
+echo
+echo "all mutations were caught"
+exit 0

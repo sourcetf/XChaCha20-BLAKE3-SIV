@@ -72,7 +72,13 @@
 //!   for input whose length came from a network peer; see the note on [`decrypt`].
 //! * Detached, in-place: [`encrypt_in_place_detached`] /
 //!   [`decrypt_in_place_detached`], for protocols that keep the tag separate or
-//!   want to avoid a second allocation (and which never allocate themselves).
+//!   want to avoid a second allocation.  They do not allocate the message buffer,
+//!   but they are **not allocation-free**, and an earlier revision of this line
+//!   said they were: `derive_tag` builds one contiguous buffer with
+//!   `Vec::with_capacity` (infallible — a refusal aborts) when the AAD + message
+//!   total lands in `TAG_CONCAT_MIN..=TAG_CONCAT_LIMIT` (2 KiB..64 KiB), and under
+//!   `ultra` `decrypt_in_place_detached` allocates two witness buffers fallibly, so
+//!   it can return [`Error::AllocationFailed`].  See the type docs for both.
 //!
 //! Key properties:
 //!
@@ -110,7 +116,9 @@
 //! | --- | --- | --- |
 //! | Confidentiality | 256-bit | the ChaCha20 key |
 //! | Forgery resistance | **256-bit** | BLAKE3 keyed mode as a PRF over a 256-bit key |
-//! | Context / key commitment (CMT-3, CMT-1/CMTk) | **`2^-520` per candidate key** against a given ciphertext | the tag hit as a *target*: the 520-bit width is what sets it |
+//! | Key commitment against a given ciphertext | **`2^-520` per candidate key** (the *target* game) | the tag hit as a *target*: the 520-bit width is what sets it |
+//! | Context commitment (nonce/AAD) | **`≈ 2^256`** target / **`2^128`** attacker-chosen | the 256-bit inner digest the context feeds, not the tag's width |
+//! | Attacker-chosen commitment (the literature's CMT-1/CMT-3) | **key route `2^128`, context route `2^128`** — both with identical plaintexts; the different-message salamander is not assigned a number | the `subkey` collision and the inner-digest collision, each a birthday |
 //! | Collision resistance of the tag | **2^128** | the 256-bit chaining value the tag is a function of, not the tag's width |
 //!
 //! **Forgery: 256 bits is the ceiling, not a choice.**  Forgery resistance is
@@ -240,8 +248,11 @@
 
 extern crate alloc;
 
-// `vec!` is only used by the tests: every allocation in the library goes through
-// `alloc_zeroed`, which is fallible on purpose (see there).
+// `vec!` is only used by the tests. Every allocation in the library goes through
+// `alloc_zeroed` (fallible on purpose) **except one**: `derive_tag`'s concatenated
+// fast path builds a `Vec::with_capacity` of at most 64 KiB, whose failure would
+// abort, and the comment there says why. An earlier revision of this note said
+// "every allocation", which that line already contradicted.
 #[cfg(test)]
 use alloc::vec;
 use alloc::vec::Vec;
@@ -2725,6 +2736,14 @@ pub fn decrypt_bounded(
 ///
 /// On failure the buffer is zeroized, so unverified plaintext is never left in
 /// place. Note this destroys the caller's buffer on the failure path.
+///
+/// # Allocation
+///
+/// The plaintext buffer is the caller's, but this is not allocation-free: under
+/// `ultra` the independent witness needs two buffers of its own, allocated
+/// fallibly, so the call can return [`Error::AllocationFailed`]; and
+/// `derive_tag`'s concatenated fast path performs one bounded, infallible
+/// `Vec::with_capacity` (see the crate docs' note on the detached entry points).
 pub fn decrypt_in_place_detached(
     key: &[u8; 32],
     nonce: &[u8; NONCE_LEN],
@@ -4506,6 +4525,21 @@ mod tests {
         assert_eq!(pt, secret);
     }
 
+    /// The runtime-refusal path: a *failure* unless `XSIV_ALLOW_UNLOCKED=1` records
+    /// that this host knowingly runs unlocked (the convention `tests/locked.rs` and
+    /// `tests/ultra.rs` use). Returning quietly here made "the lock was verified" and
+    /// "the kernel refused to lock, so nothing ran" both read as `ok`.
+    #[cfg(feature = "locked")]
+    fn refuse_skip(e: isize) {
+        assert!(
+            std::env::var("XSIV_ALLOW_UNLOCKED").is_ok(),
+            "the kernel refused to lock memory ({e:?}), so this test would verify nothing. \
+             Raise RLIMIT_MEMLOCK or grant CAP_IPC_LOCK, or set XSIV_ALLOW_UNLOCKED=1 to \
+             record that this host knowingly runs unlocked."
+        );
+        std::eprintln!("SKIPPED: memory locking refused ({e:?}) and XSIV_ALLOW_UNLOCKED is set");
+    }
+
     /// A corrupted locked page must be *noticed*, at the first use after the corruption.
     ///
     /// The alternative is the failure this check exists to remove: a flipped bit in the key
@@ -4529,7 +4563,11 @@ mod tests {
     #[test]
     fn a_corrupted_locked_page_is_detected_on_use() {
         if !crate::locked::SUPPORTED {
-            return; // no page, no check; the locked suite's SKIPPED note covers this
+            // A compile-time property of the target (the locking syscalls are Linux
+            // only), so a skip; the *runtime* refusals below are failures unless the
+            // host says otherwise, matching tests/locked.rs and tests/ultra.rs.
+            std::eprintln!("SKIPPED: memory locking is unsupported on this target/architecture");
+            return;
         }
         let key = [0x5Au8; KEY_LEN];
 
@@ -4543,7 +4581,10 @@ mod tests {
                 .is_err();
                 assert!(panicked, "a flipped key byte was accepted by `as_bytes`");
             }
-            Err(_) => return, // the environment refuses to lock; the locked suite says so
+            Err(e) => {
+                refuse_skip(e);
+                return;
+            }
         }
 
         // (b) a flip in the integrity tag.
@@ -4559,7 +4600,10 @@ mod tests {
                     "a flipped integrity tag was accepted by `as_bytes`"
                 );
             }
-            Err(_) => return,
+            Err(e) => {
+                refuse_skip(e);
+                return;
+            }
         }
 
         // (c) the other half of the boundary: a flip in the *unused remainder* of the page must
@@ -4580,7 +4624,10 @@ mod tests {
                      check must cover exactly the bytes it verifies"
                 );
             }
-            Err(_) => return,
+            Err(e) => {
+                refuse_skip(e);
+                return;
+            }
         }
 
         // (d) an intact key still works.
@@ -4648,6 +4695,14 @@ mod tests {
     /// a table row, and advice does not fail a build. This test is the other half: the number
     /// the crate reports is *sufficient*, measured by spawning a thread with exactly that stack
     /// plus a small margin and running the AEAD on it.
+    ///
+    /// **Not a regression lock on the number itself**, and an earlier revision of this
+    /// doc read as though it were: with the default feature set `stack_requirement_bytes`
+    /// is 0 (`dual-mac` is what makes it 16384), so the assertion is that the *reported*
+    /// value is sufficient — and the margin (64 KiB in release, 1 MiB in debug) is 4x to
+    /// 64x the constant, so a constant under-reported within that margin still passes.
+    /// What it does pin is that the reported value does not *understate by more than the
+    /// margin*, which is the direction that would fault a caller's thread.
     ///
     /// The "too small" half — that a thread with less than the requirement faults inside
     /// `scrub_stack` — stays the hand measurement in the README's layer table, because a stack
@@ -4720,6 +4775,14 @@ mod tests {
     /// the ciphertext, the tag, and the key.  A construction that ignored part
     /// of its input (or a keystream that reused a block) would show up as a
     /// stuck region and fail the lower bound.
+    ///
+    /// **What this does not cover**, despite an earlier revision's phrasing: it is
+    /// not a regression test for the ChaCha20 round function or the block counter.
+    /// Measured by mutation: corrupting `chacha20_block`'s round constant leaves this
+    /// test green (the derived keys still vary with the message, so the tag still
+    /// avalanches) and is caught by the KATs instead — the two tests cover different
+    /// regressions, and this one's lower bound is about a stuck region, not about the
+    /// primitive's correctness.
     #[test]
     fn test_avalanche_single_bit_flip() {
         let key = [0x3Cu8; 32];
@@ -4751,9 +4814,9 @@ mod tests {
         assert_ne!(tag0, tag2);
         let bits = differing_bits(&tag0, &tag2);
         assert!(
-            bits > 32 * 8 / 4,
+            bits > (TAG_LEN * 8 / 4) as u32,
             "key bit flip changed only {bits} of {} tag bits",
-            32 * 8
+            TAG_LEN * 8
         );
 
         // Flip one bit of the nonce: everything must change.
@@ -4769,9 +4832,9 @@ mod tests {
         assert_ne!(tag0, tag4);
         let bits = differing_bits(&tag0, &tag4);
         assert!(
-            bits > 32 * 8 / 4,
+            bits > (TAG_LEN * 8 / 4) as u32,
             "aad bit flip changed only {bits} of {} tag bits",
-            32 * 8
+            TAG_LEN * 8
         );
     }
 
@@ -4926,14 +4989,20 @@ mod tests {
     #[cfg(feature = "rng")]
     #[test]
     fn test_random_fill_covers_whole_buffer() {
-        // A long run of identical bytes is overwhelmingly unlikely to be
-        // reproduced by chance; if `fill` wrote only a prefix, the tail would
-        // stay 0xAA.
+        // Every byte must differ from the sentinel, not merely one of them: an
+        // earlier revision asserted `any(...)`, which a `fill` that wrote a single
+        // byte (or only a prefix) satisfied -- the test named "whole buffer" could
+        // not see the defect it was named for (measured: a `dest[0] = 0x01`
+        // mutant passed it).
         let mut buf = [0xAAu8; 64];
         crate::random::fill(&mut buf).unwrap();
-        assert!(
-            buf.iter().any(|&b| b != 0xAA),
-            "fill produced identical bytes -- buffer untouched?"
+        let untouched = buf.iter().filter(|&&b| b == 0xAA).count();
+        assert_eq!(
+            untouched,
+            0,
+            "{untouched} of {} bytes still hold the sentinel: fill did not cover \
+             the whole buffer",
+            buf.len()
         );
     }
 
@@ -5166,8 +5235,13 @@ mod tests {
         assert_ne!(k_in.as_slice(), &buf2[0..32]);
     }
 
-    /// The MAC must cover the **whole** AAD and the **whole** message: flipping
-    /// any bit of either must change the tag.
+    /// The MAC must cover the **whole** AAD and the **whole** message: flipping a
+    /// bit of any byte of either must change the tag.
+    ///
+    /// The flipped bit rotates through all eight positions as the byte position
+    /// advances, so the sweep covers every bit position of every byte rather than
+    /// bit 0 of each. (An earlier revision flipped `^= 1` at every position and its
+    /// doc still said "any bit", which the sweep did not test.)
     #[test]
     fn test_tag_covers_every_aad_and_message_byte() {
         let key = [0x71u8; 32];
@@ -5179,13 +5253,13 @@ mod tests {
 
         for pos in 0..aad.len() {
             let mut a = aad.clone();
-            a[pos] ^= 1;
+            a[pos] ^= 1 << (pos % 8);
             let (_, t) = encrypt(&key, &nonce, &a, &msg).unwrap();
             assert_ne!(t, tag0, "AAD byte {pos} does not reach the tag");
         }
         for pos in 0..msg.len() {
             let mut m = msg.clone();
-            m[pos] ^= 1;
+            m[pos] ^= 1 << (pos % 8);
             let (_, t) = encrypt(&key, &nonce, &aad, &m).unwrap();
             assert_ne!(t, tag0, "message byte {pos} does not reach the tag");
         }
@@ -5258,16 +5332,11 @@ mod tests {
         assert_ne!(t1, t2, "A||M must not be ambiguous");
     }
 
-    /// `derive_tag` hashes the tag input either as three `update` calls or as one
-    /// contiguous buffer, whichever BLAKE3 is faster on (see the comment there).
-    /// That is a performance decision, so it must not be observable — and this
-    /// pins the two shapes to each other at the four totals where the choice
-    /// flips: one byte either side of `TAG_CONCAT_MIN` and of `TAG_CONCAT_LIMIT`.
-    ///
-    /// A one-byte message and a large AAD reach all four totals, so the buffers
-    /// stay small while AAD and message both stay non-empty (an empty part is the
-    /// case the two shapes could most easily disagree on, and the in-crate KATs
     /// The length guard, tested directly.
+    ///
+    /// (A truncated paragraph about `derive_tag`'s two hash call shapes used to sit
+    /// above this test — the test it described moved and kept its own copy of that
+    /// explanation, leaving the orphan glued to this one.)
     ///
     /// **64-bit only, and that is the point**: on a 32-bit target every possible
     /// `usize` is below `MAX_MSG_SIZE` (2^38), so the guard cannot fire at all and
@@ -5583,10 +5652,13 @@ mod tests {
     /// differing, which holds with probability `1 - 2^-352` and, importantly, is only
     /// *computable* by someone who already holds the master key. That makes it
     /// informational rather than exploitable, but it is also exactly the kind of thing a
-    /// refactor can silently destroy: make `derive_enc` ignore the tag, give the two call
-    /// sites the same nonce, or "simplify" the domain label away, and the two uses
-    /// collapse into one keystream with no other test noticing — the round trip still
-    /// works, and the tags still verify.
+    /// refactor can silently destroy: point the message keystream at `subkey` (or
+    /// `enc_seed`) with the derivation's nonce, drop the domain word from that nonce, or
+    /// otherwise give the two ChaCha20 calls the same key and nonce — and the two uses
+    /// collapse into one keystream with no other test noticing, because the round trip
+    /// still works and the tags still verify. (An earlier revision led with "make
+    /// `derive_enc` ignore the tag"; that alone does *not* collapse them, since the two
+    /// keystreams are keyed differently to begin with.)
     ///
     /// This test computes both keystreams for a spread of `(key, nonce, message)` triples
     /// and requires them to differ. It cannot prove the general statement; it pins the

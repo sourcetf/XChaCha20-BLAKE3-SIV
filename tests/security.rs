@@ -360,6 +360,31 @@ fn fuzz_decrypt_never_panics_and_never_returns_plaintext() {
             *b = rng.byte();
         }
 
+        // The in-place contract, on the structured round's own inputs: the in-place
+        // variant used to be exercised only in the unstructured rounds below, so the
+        // "valid tag but corrupted input" cases — the ones this round exists for —
+        // never reached `decrypt_in_place_detached` at all. `Ok` here is legitimate
+        // only when the round left the input intact, and then the buffer must be the
+        // plaintext that was encrypted; a failure must zero the caller's buffer.
+        macro_rules! in_place_contract {
+            ($buf_src:expr, $aad:expr, $tag:expr) => {{
+                let mut buf = $buf_src.clone();
+                match decrypt_in_place_detached(&key, &nonce, $aad, &mut buf, &$tag) {
+                    Ok(()) => assert_eq!(
+                        buf, ct,
+                        "round {round}: the in-place path accepted but wrote different bytes"
+                    ),
+                    Err(e) => {
+                        assert_eq!(e, Error::AuthenticationFailed);
+                        assert!(
+                            buf.iter().all(|&b| b == 0),
+                            "round {round}: failed in-place decrypt left data in the buffer"
+                        );
+                    }
+                }
+            }};
+        }
+
         // Round half the cases through a genuine encrypt, then corrupt, so the
         // "valid tag but corrupted input" path is reached too rather than only
         // the "random tag" path.
@@ -374,6 +399,7 @@ fn fuzz_decrypt_never_panics_and_never_returns_plaintext() {
                         let mut c = real_ct.clone();
                         c[i] ^= 1;
                         assert!(decrypt(&key, &nonce, &aad, &c, &t).is_err());
+                        in_place_contract!(c, &aad, t);
                         continue;
                     }
                     1 => {
@@ -386,6 +412,7 @@ fn fuzz_decrypt_never_panics_and_never_returns_plaintext() {
                             let mut a = aad.clone();
                             a[i] ^= 1;
                             assert!(decrypt(&key, &nonce, &a, &real_ct, &t).is_err());
+                            in_place_contract!(real_ct, &a, t);
                             continue;
                         }
                     }
@@ -406,6 +433,7 @@ fn fuzz_decrypt_never_panics_and_never_returns_plaintext() {
                 ),
                 Err(e) => assert_eq!(e, Error::AuthenticationFailed),
             }
+            in_place_contract!(real_ct, &aad, t);
             continue;
         }
 

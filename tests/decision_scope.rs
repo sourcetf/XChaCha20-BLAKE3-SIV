@@ -30,13 +30,109 @@ const LIB: &str = include_str!("../src/lib.rs");
 /// The suppression file itself.
 const SUPP: &str = include_str!("ctgrind.supp");
 
-/// Every brace-matched block in `LIB` that starts at `needle`, `needle` included.
+/// `LIB` with comments removed and string-literal contents blanked, cut at `mod tests {`.
+///
+/// Every presence and count assertion below runs on this, not on the raw file. Both
+/// of those used to be satisfiable without the code: delete a real line and add a
+/// comment (or a line inside `mod tests`) carrying the same text, and the count came
+/// back to its expected value. Stripping comments and stopping at the test module
+/// removes that. The scanner is a small state machine rather than `find("//")`,
+/// because a `//` inside a string literal used to cut a line short — which hid a real
+/// call site from the count — and a `/* … */` block was scanned as code.
+fn non_test_source() -> String {
+    let cut = LIB.find("mod tests {").expect("the test module must exist");
+    strip_comments(&LIB[..cut])
+}
+
+/// See `non_test_source`. Public to the file so each test can build it once.
+fn strip_comments(text: &str) -> String {
+    #[derive(PartialEq)]
+    enum Mode {
+        Code,
+        Line,
+        Block,
+        Str,
+    }
+    let b = text.as_bytes();
+    let mut out = String::with_capacity(text.len());
+    let mut mode = Mode::Code;
+    let mut i = 0usize;
+    while i < b.len() {
+        let c = b[i];
+        match mode {
+            Mode::Code => {
+                if c == b'/' && b.get(i + 1) == Some(&b'/') {
+                    mode = Mode::Line;
+                    i += 2;
+                } else if c == b'/' && b.get(i + 1) == Some(&b'*') {
+                    mode = Mode::Block;
+                    i += 2;
+                } else if c == b'"' {
+                    // Keep the opening quote; the contents are dropped in `Mode::Str`
+                    // and the closing quote is kept there, so a literal becomes `""`
+                    // and cannot satisfy a match on its contents.
+                    out.push('"');
+                    mode = Mode::Str;
+                    i += 1;
+                } else {
+                    out.push(c as char);
+                    i += 1;
+                }
+            }
+            Mode::Line => {
+                if c == b'\n' {
+                    out.push('\n');
+                    mode = Mode::Code;
+                }
+                i += 1;
+            }
+            Mode::Block => {
+                if c == b'*' && b.get(i + 1) == Some(&b'/') {
+                    mode = Mode::Code;
+                    i += 2;
+                } else {
+                    if c == b'\n' {
+                        out.push('\n');
+                    }
+                    i += 1;
+                }
+            }
+            Mode::Str => {
+                // String literals are copied through unchanged. They are recognised so
+                // that a `//` inside one is not read as a comment (which cut the rest
+                // of the line out of the scan); their contents are still *code* for
+                // the assertions below (`#[cfg(feature = "hardened")]` is a match on
+                // one), so blanking them would break the checks instead of hardening
+                // them.
+                if c == b'\\' {
+                    out.push(c as char);
+                    if let Some(n) = b.get(i + 1) {
+                        out.push(*n as char);
+                    }
+                    i += 2;
+                } else if c == b'"' {
+                    out.push('"');
+                    mode = Mode::Code;
+                    i += 1;
+                } else {
+                    out.push(c as char);
+                    i += 1;
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Every brace-matched block in the non-test source that starts at `needle`,
+/// `needle` included.
 ///
 /// Used to pull a block of the source out for assertions about its shape: the two
 /// `accept_or_reject` definitions, and the two `hardened` gate blocks.
 fn brace_blocks(needle: &str) -> Vec<String> {
+    let text = non_test_source();
     let mut out = Vec::new();
-    let mut rest = LIB;
+    let mut rest = text.as_str();
     while let Some(i) = rest.find(needle) {
         let after = &rest[i..];
         let open = after.find('{').expect("block without a body");
@@ -74,46 +170,64 @@ fn definitions() -> Vec<String> {
     brace_blocks("fn accept_or_reject(")
 }
 
-/// Every `fun:` and error-kind line in `tests/ctgrind.supp`, comments removed.
-fn suppression_lines(prefix: &str) -> Vec<String> {
+/// Every non-comment, non-empty line of `tests/ctgrind.supp`.
+fn suppression_lines() -> Vec<String> {
     SUPP.lines()
         .map(str::trim)
-        .filter(|l| !l.starts_with('#'))
-        .filter_map(|l| l.strip_prefix(prefix))
+        .filter(|l| !l.starts_with('#') && !l.is_empty())
         .map(str::to_string)
         .collect()
 }
 
+/// The `fun:` value of the one entry, if present.
+fn suppression_fun() -> Option<String> {
+    suppression_lines()
+        .into_iter()
+        .find_map(|l| l.strip_prefix("fun:").map(str::to_string))
+}
+
 #[test]
 fn the_suppression_file_names_only_the_decision() {
-    let funs = suppression_lines("fun:");
-    assert!(
-        !funs.is_empty(),
-        "tests/ctgrind.supp has no entries left: the file is the record of what \
-         has been examined and permitted, and an empty file would mean the SIV \
-         decision is no longer permitted anywhere -- see tools/ctgrind.sh, which \
-         requires at least one entry"
+    // The whole file, not just the `fun:` lines: `obj:`, `src:`, `Match:` and any other
+    // valgrind line kind widen an entry's scope, and the earlier version of this test
+    // only looked at `fun:` and `Memcheck:` lines -- everything else was unexamined.
+    let lines = suppression_lines();
+    let fun = suppression_fun().expect("the entry must carry a `fun:` line");
+    let expected = vec![
+        "{".to_string(),
+        "siv-accept-or-reject-decision".to_string(),
+        "Memcheck:Cond".to_string(),
+        format!("fun:{fun}"),
+        "}".to_string(),
+    ];
+    assert_eq!(
+        lines, expected,
+        "tests/ctgrind.supp must hold exactly one entry with exactly these five lines \
+         (brace, name, Memcheck:Cond, fun:..., brace). The file's header says \"exactly \
+         one entry\" and tools/ctgrind.sh refuses to run unless it names the decision, \
+         so any other line kind, an extra field inside the entry or a second entry \
+         needs this test updated deliberately"
     );
-    for f in &funs {
-        assert!(
-            f.contains("accept_or_reject"),
-            "tests/ctgrind.supp suppresses `{f}`. A valgrind entry permits *every* \
-             conditional jump in the function it names, not just the one that was \
-             reviewed, so an entry naming anything but the accept/reject decision \
-             silently re-opens the hole this file documents: a secret-dependent \
-             branch planted inside that function would pass the check."
-        );
-    }
 
-    let kinds = suppression_lines("Memcheck:");
-    assert!(!kinds.is_empty(), "entries without an error kind");
-    for k in &kinds {
-        assert_eq!(
-            k, "Cond",
-            "the decision is a conditional jump; permitting another error class \
-             (`{k}`) would permit something that was not reviewed"
-        );
-    }
+    // The exact function, not a name that merely contains it: `*accept_or_reject*`
+    // would match `my_accept_or_reject`, and a trailing wildcard would match any
+    // helper whose name starts the same way. The v0-mangled form puts the
+    // identifier's length (`16`) immediately before the symbol, which is what makes
+    // "ends with the symbol, preceded by its length" a check that rejects the
+    // look-alikes.
+    assert!(
+        fun.ends_with("accept_or_reject"),
+        "the suppression's `fun:` value `{fun}` must end in the decision symbol: a \
+         trailing wildcard would match every function whose name starts the same way"
+    );
+    let before = fun.trim_end_matches("accept_or_reject");
+    assert!(
+        before.ends_with("16"),
+        "the `fun:` value `{fun}` must be the mangled symbol of `accept_or_reject`, whose \
+         v0-mangled form puts the identifier length (`16`) right before it; `{before}` \
+         does not, so this entry may name a *different* function (`my_accept_or_reject`, \
+         `accept_or_reject_helper`, ...) while ending in the same text"
+    );
 }
 
 #[test]
@@ -129,16 +243,9 @@ fn the_suppressed_function_contains_only_the_decision() {
     );
     let def = &defs[0];
 
-    // Comments are stripped first: a future comment containing the word "for" or a
-    // question mark must not read as a loop or a `?`.
-    let code: String = def
-        .lines()
-        .map(|l| match l.find("//") {
-            Some(i) => &l[..i],
-            None => l,
-        })
-        .collect::<Vec<_>>()
-        .join("\n");
+    // Comments are stripped first -- by the same scanner the rest of the file uses,
+    // which unlike `find("//")` is not fooled by a `//` inside a string literal.
+    let code = strip_comments(def);
 
     for construct in ["for ", "while ", "loop ", "match "] {
         assert!(
@@ -210,6 +317,7 @@ fn the_suppressed_function_contains_only_the_decision() {
 /// shows the recomputation is what does the work.
 #[test]
 fn the_hardened_second_gate_is_recomputed() {
+    let code = non_test_source();
     let blocks = brace_blocks("let gates = {");
     assert_eq!(
         blocks.len(),
@@ -274,7 +382,7 @@ fn the_hardened_second_gate_is_recomputed() {
     // once per entry point, so a refactor that shares one computation between both
     // decrypt paths would remove a gate from one of them.
     assert_eq!(
-        LIB.matches("let first = computed_tag.ct_eq(tag) & tag.ct_eq(&computed_tag);")
+        code.matches("let first = computed_tag.ct_eq(tag) & tag.ct_eq(&computed_tag);")
             .count(),
         2,
         "the first gate must be computed once per decrypt entry point"
@@ -297,6 +405,7 @@ fn the_hardened_second_gate_is_recomputed() {
 /// silently drops.
 #[test]
 fn the_second_gate_uses_two_comparison_shapes_in_every_configuration() {
+    let _ = non_test_source(); // keep the call graph honest if this test is edited
     let body = brace_blocks("fn second_gate_comparison(");
     assert_eq!(body.len(), 1, "one `second_gate_comparison` expected");
     let body = &body[0];
@@ -350,6 +459,7 @@ fn the_second_gate_uses_two_comparison_shapes_in_every_configuration() {
 /// ordering is what is pinned here.
 #[test]
 fn the_decision_outcome_is_fail_closed() {
+    let code = non_test_source();
     let init = "let mut decision0: Result<(), Error> = Err(Error::AuthenticationFailed);\n    \
                 let mut decision1: Result<(), Error> = Err(Error::AuthenticationFailed);";
 
@@ -362,7 +472,7 @@ fn the_decision_outcome_is_fail_closed() {
     // the caller rejects if *either* slot does and the slots are written by separate
     // gate flows (see the assertion above).
     assert_eq!(
-        LIB.matches("let mut decision0: Result<(), Error> = Err(Error::AuthenticationFailed);")
+        code.matches("let mut decision0: Result<(), Error> = Err(Error::AuthenticationFailed);")
             .count(),
         3,
         "each call site must start slot 0 as a rejection: the two decrypt entry points, \
@@ -371,7 +481,7 @@ fn the_decision_outcome_is_fail_closed() {
          does: measured, one report inside `encrypt`)"
     );
     assert_eq!(
-        LIB.matches("let mut decision1: Result<(), Error> = Err(Error::AuthenticationFailed);")
+        code.matches("let mut decision1: Result<(), Error> = Err(Error::AuthenticationFailed);")
             .count(),
         3,
         "each call site must start slot 1 as a rejection"
@@ -379,12 +489,12 @@ fn the_decision_outcome_is_fail_closed() {
     // The checks sit in series, each jumping to the rejection, so accepting is the
     // fall-through of both: a single corrupted branch lands on a rejection.
     assert_eq!(
-        LIB.matches("if decision0.is_err() {").count(),
+        code.matches("if decision0.is_err() {").count(),
         3,
         "one first check per call site"
     );
     assert_eq!(
-        LIB.matches("if decision1.is_err() {").count(),
+        code.matches("if decision1.is_err() {").count(),
         3,
         "one second check per call site"
     );
@@ -399,7 +509,7 @@ fn the_decision_outcome_is_fail_closed() {
         // of 2 is what says so.
         let sequence = format!("{init}\n{default_call}\n{hardened_call}");
         assert_eq!(
-            LIB.matches(sequence.as_str()).count(),
+            code.matches(sequence.as_str()).count(),
             2,
             "both entry points must carry the fail-closed sequence:\n{sequence}"
         );
@@ -409,7 +519,7 @@ fn the_decision_outcome_is_fail_closed() {
     // out there), which is also what keeps the signature -- and the symbol the
     // suppression names -- identical in both builds.
     assert_eq!(
-        LIB.matches("accept_or_reject(auth_ok, auth_ok, ").count(),
+        code.matches("accept_or_reject(auth_ok, auth_ok, ").count(),
         2,
         "the default build must not compute a second comparison it does not use"
     );
@@ -422,7 +532,7 @@ fn the_decision_outcome_is_fail_closed() {
         "    *out1 = *out0;",
     ] {
         assert!(
-            LIB.contains(signature),
+            code.contains(signature),
             "the decision must take the outcome by `&mut`, not return it: {signature}"
         );
     }
@@ -430,9 +540,9 @@ fn the_decision_outcome_is_fail_closed() {
     // And the wipe lives in the *caller*, on the path every rejection takes -- the
     // decision function no longer touches the buffer, so a skipped call still wipes.
     assert_eq!(
-        LIB.matches("if decision0.is_err() {\n        zeroize_slice(")
+        code.matches("if decision0.is_err() {\n        zeroize_slice(")
             .count()
-            + LIB
+            + code
                 .matches("if decision1.is_err() {\n        zeroize_slice(")
                 .count(),
         4,
@@ -443,9 +553,9 @@ fn the_decision_outcome_is_fail_closed() {
     // paths. It is a different set of locals (the buffer is not written yet on that path),
     // so it is asserted separately rather than folded into the count above.
     assert_eq!(
-        LIB.matches("if decision0.is_err() {\n            zeroize_array(&mut k_in);")
+        code.matches("if decision0.is_err() {\n            zeroize_array(&mut k_in);")
             .count()
-            + LIB
+            + code
                 .matches("if decision1.is_err() {\n            zeroize_array(&mut k_in);")
                 .count(),
         2,
@@ -457,7 +567,7 @@ fn the_decision_outcome_is_fail_closed() {
     // exactly what the two-slot rewrite removed, and it is one opcode bit from
     // accepting a forgery.
     assert_eq!(
-        LIB.matches("if decision0.is_ok()").count() + LIB.matches("if decision1.is_ok()").count(),
+        code.matches("if decision0.is_ok()").count() + code.matches("if decision1.is_ok()").count(),
         0,
         "the accept path must not be reached by a conditional jump"
     );
@@ -476,7 +586,7 @@ fn the_decision_outcome_is_fail_closed() {
         ]
         .join("\n");
         assert_eq!(
-            LIB.matches(tail.as_str()).count(),
+            code.matches(tail.as_str()).count(),
             1,
             "the accept must be the fall-through of both reject checks:\n{tail}"
         );
@@ -485,7 +595,7 @@ fn the_decision_outcome_is_fail_closed() {
     // The witness is a `Choice` folded into the gate, and the `encrypt` cross-check is a
     // rejection path of its own — both are asserted, because the whole point of the feature is
     // that the agreement is *required* rather than consulted.
-    let non_test = &LIB[..LIB.find("mod tests {").expect("test module")];
+    let non_test = non_test_source();
     // Four bindings: the witness agreement itself under `ultra`, and the constant `true`
     // that the other configurations bind instead, in each of the two entry points. The
     // constant is what keeps the gate a single expression rather than one arm per

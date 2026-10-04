@@ -23,8 +23,10 @@
 //!      re-encrypt to exactly the ciphertext and tag it came with. An earlier version
 //!      of this target only ever fed `decrypt` the output of `encrypt` or a one-bit
 //!      corruption of it, so a *structurally* invalid tag never reached it.
-//!   4. **A failed in-place decrypt zeroizes the caller's buffer** — checked on every
-//!      failing in-place call, not only when `mode` happened to pick the tag.
+//!   4. **A failed in-place decrypt rejects and zeroizes the caller's buffer** —
+//!      the rejection itself is asserted, not only the wipe: with
+//!      `if ...is_err() { assert!(zeroed) }` an implementation that wrongly
+//!      returned `Ok` skipped the whole check.
 //!
 //! Structured rather than raw: the first two bytes choose which field to corrupt,
 //! so the fuzzer spends its budget on meaningful cases instead of discarding
@@ -148,16 +150,21 @@ fuzz_target!(|data: &[u8]| {
         Err(_) => panic!("the honest in-place round trip must verify"),
     }
 
-    // Property 4: a failing in-place decrypt must leave no plaintext behind. The tag is
-    // corrupted unconditionally (it is always `TAG_LEN` bytes), so this runs on every
-    // input rather than only when `mode` selected the tag.
+    // Property 4: a failing in-place decrypt must reject *and* leave no plaintext
+    // behind. Requiring the rejection -- not merely checking the buffer when one
+    // happens -- is the point: with `if ... .is_err() { assert!(zeroed) }` an
+    // implementation that wrongly returned `Ok` here skipped the wipe assertion
+    // entirely and the target still called it covered. The tag is corrupted
+    // unconditionally (it is always `TAG_LEN` bytes), so this runs on every input.
     let mut bad_tag2 = tag;
     bad_tag2[0] ^= 0x01;
     let mut buf3 = ct.clone();
-    if decrypt_in_place_detached(&key, &nonce, aad, &mut buf3, &bad_tag2).is_err() {
-        assert!(
-            buf3.iter().all(|&b| b == 0),
-            "a failed in-place decrypt must zeroize the buffer"
-        );
-    }
+    assert!(
+        decrypt_in_place_detached(&key, &nonce, aad, &mut buf3, &bad_tag2).is_err(),
+        "a corrupted tag must not authenticate in place"
+    );
+    assert!(
+        buf3.iter().all(|&b| b == 0),
+        "a failed in-place decrypt must zeroize the buffer"
+    );
 });

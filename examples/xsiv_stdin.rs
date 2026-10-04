@@ -37,9 +37,20 @@ fn from_hex(field: &str) -> Vec<u8> {
         return Vec::new();
     }
     assert!(field.len() % 2 == 0, "odd-length hex field: {field}");
+    // A leading sign is the one thing `from_str_radix` *accepts* that hex must not
+    // (`+1` decodes to 0x01); everything else that is not a hex digit is rejected by
+    // `from_str_radix` itself, loudly, through the `.expect` below.
+    //
+    // Deliberately not a per-byte `bytes().all(is_ascii_hexdigit)` scan, and the reason
+    // is measured: `tools/cache_profile.sh` compares *instruction counts* for two
+    // different keys, so a value-dependent predicate over the hex characters makes the
+    // harness's own profile depend on the key. With such a guard here the counts
+    // differential failed on a pristine tree ("FAIL: the enc cache or branch profile
+    // depends on the key", exit 1), because '0' and 'f' take different paths through it.
+    // These two comparisons execute the same instructions whatever the first byte is.
     assert!(
-        field.bytes().all(|b| b.is_ascii_hexdigit()),
-        "non-hex field: {field}"
+        !field.starts_with('+') && !field.starts_with('-'),
+        "signed hex field: {field}"
     );
     (0..field.len())
         .step_by(2)

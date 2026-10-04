@@ -58,4 +58,11 @@ if grep -q "WARNING: ThreadSanitizer" "$out"; then
   exit 1
 fi
 grep -E "^test result" "$out"
+# A `threads` target whose concurrent test was renamed or cfg'd out would print
+# "0 passed" and look clean; the named test's own line is what says it ran.
+if ! grep -q "^test concurrent_use_agrees_across_threads ... ok" "$out"; then
+  echo "FAIL: the concurrent test did not run, so step 2 proves nothing about it:" >&2
+  tail -20 "$out" >&2
+  exit 1
+fi
 echo "OK: no data race reported, and the control shows the run could have said so"

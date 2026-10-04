@@ -1,7 +1,7 @@
 //! The accept/reject decision, as a test that a *fault* can break.
 //!
-//! `tools/fi_check.sh` runs this in ten configurations — the ten rows of its
-//! **thirteen-row** campaign that name `--test decision` (two further rows drive
+//! `tools/fi_check.sh` runs this in eleven configurations — the eleven rows of its
+//! **fourteen-row** campaign that name `--test decision` (two further rows drive
 //! `tests/mac_commitment.rs` and one drives `tests/security.rs`) —
 //! each one a fault written down as a source change and applied to a fresh copy of the
 //! crate. On the clean `hardened` and opt-out (`--no-default-features`) builds it must
@@ -11,9 +11,10 @@
 //! both call-site checks neutralised. The rows that must pass are the countermeasures:
 //! the same neutralised, corrupted or substituted value on the `hardened` build, and the
 //! substituted tag on the `ultra` build, where the independent recomputation disagrees
-//! with it. (This comment has twice carried a stale count — first "three configurations",
-//! then "eleven rows" when the campaign already had thirteen — so the numbers here are
-//! written to be checkable against `tools/fi_check.sh`'s `run_row` lines.)
+//! with it. (This comment has three times carried a stale count — "three configurations",
+//! then "eleven rows" when the campaign already had thirteen, then "ten rows" when it had
+//! fourteen — so the numbers here are written to be checkable against `tools/fi_check.sh`'s
+//! `run_row` lines.)
 //!
 //! It is also a plain test: a tag or ciphertext with one bit flipped must be
 //! rejected, through both entry points, at the sizes where the tag is hashed in
@@ -57,13 +58,27 @@ fn a_forged_tag_must_not_be_accepted() {
             );
         }
 
-        // The in-place entry point has its own decision and needs its own check.
+        // The in-place entry point has its own decision and needs its own check —
+        // the same full sweep of all `TAG_LEN` byte positions, because a decision
+        // that only checked a prefix would be a *prefix-checking* implementation in
+        // place exactly as much as in the allocating path. (This used to flip only
+        // the last byte here while the module doc claimed "through both entry
+        // points".)
         let mut buf = pt.clone();
         let detached = encrypt_in_place_detached(&KEY, &NONCE, AAD, &mut buf).unwrap();
         assert_eq!(buf, ct);
         assert_eq!(detached, tag);
         decrypt_in_place_detached(&KEY, &NONCE, AAD, &mut buf, &detached).unwrap();
         assert_eq!(buf, pt);
+        for pos in 0..TAG_LEN {
+            let mut forged = detached;
+            forged[pos] ^= 0x80;
+            let mut buf = ct.clone();
+            assert!(
+                decrypt_in_place_detached(&KEY, &NONCE, AAD, &mut buf, &forged).is_err(),
+                "forged tag accepted in place at message length {pt_len}, tag byte {pos}"
+            );
+        }
 
         let mut forged = detached;
         forged[TAG_LEN - 1] ^= 0x01;
@@ -87,11 +102,14 @@ fn a_forged_tag_must_not_be_accepted() {
 /// ciphertext at all under the same key, nonce and AAD.
 ///
 /// `tools/fi_check.sh` writes that fault down as a source change (`let msg: &[u8] = &[];` at
-/// the top of `derive_tag`) and runs this test against it, in two configurations: the
-/// `hardened,dual-mac` build *fails* it — the fault is invisible there — and the `ultra`
-/// build passes, because the independent implementation in `witness` is a different program
-/// and its tag does depend on the message. That contrast is the whole argument for the
-/// second implementation; without it this test would only be another bit-flip test.
+/// the top of `derive_tag`) and runs **`tests/mac_commitment.rs`** against it, in two
+/// configurations: the `hardened,dual-mac` build *fails* it — the fault is invisible there —
+/// and the `ultra` build passes, because the independent implementation in `witness` is a
+/// different program and its tag does depend on the message. That contrast is the whole
+/// argument for the second implementation; without it that test would only be another
+/// bit-flip test. (This comment used to say the campaign runs "this test": the row's target is
+/// `mac_commitment`, not this file — both files carry a test for the same property, and the
+/// campaign's fault is applied to the other one.)
 #[test]
 fn a_tag_from_one_message_must_not_authenticate_another() {
     let a = b"the message the tag was issued for";

@@ -40,8 +40,12 @@
 # other check here. The variable is read by the self-test's inner invocation too, so the
 # planted-leak control runs in the same configuration as the check it guards.
 #
-# Exit codes: 0 = as expected; 1 = a profile depended on a secret, or a check could
-# not run, or the self-test found that this tool cannot detect a planted leak.
+# Exit codes, matching the repository convention: 0 = as expected; 1 = a profile
+# depended on a secret, or the self-test found that this tool cannot detect a planted
+# leak; 3 = could not run (no valgrind, no `lackey`, or an inner run that could not
+# start) -- 3 and not 1, so a caller can tell "found something" from "did not look",
+# and `verify.sh` records it as a skipped stage instead of a pass. (This list said 1 for
+# "could not run" until an audit compared it with the code.)
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
@@ -166,8 +170,11 @@ if [ "${1:-}" = "--selftest" ]; then
   # name and reported "detected by " with an empty field.
   mode_name="${mode:-counts}"
   work="$(mktemp -d)"; trap 'rm -rf "$work"' EXIT
-  cp -r src tests examples benches tools Cargo.toml Cargo.lock "$work/" 2>/dev/null || true
-  cp -r src tests examples tools Cargo.toml Cargo.lock "$work/"
+  # One copy. This used to be two (`... 2>/dev/null || true` then a plain retry that
+  # listed fewer trees); GNU `cp -r` nests into directories that already exist, so the
+  # second copied everything again as `$work/src/src`, `$work/tools/tools`, ... and, being
+  # the unguarded one, aborted the script on a full disk.
+  cp -r src tests examples benches tools Cargo.toml Cargo.lock "$work/"
   python3 - "$work/src/lib.rs" <<'PY'
 import sys
 p = sys.argv[1]
@@ -185,11 +192,26 @@ s = s.replace(old, """    // Deliberately leaky, for tools/cache_profile.sh --se
     // simplified enough that no secret-dependent address reached the trace. The table
     // is 4 MiB so that even cachegrind's counts move, and the index selects one cache
     // line out of 65536.
+    //
+    // The *count* of touched entries depends on the secret too, and that half is not
+    // decoration: a single access per call is invisible to the counts (the same one
+    // miss whichever line it lands on), so with only the line above this self-test
+    // passed while measuring nothing but the harness's own input parsing -- an audit
+    // showed the "detected" verdict was that parsing difference, not the leak. Both
+    // halves are planted so each mode is exercised by a leak of the class it claims:
+    // the counts see the extra accesses, the trace sees the secret-dependent address.
     static TABLE: [u8; 4 << 20] = [7u8; 4 << 20];
     let table: &[u8; 4 << 20] = core::hint::black_box(&TABLE);
     let idx = ((tag[0] as usize) << 12) & ((1 << 22) - 1);
+    let n = ((tag[0] ^ tag[1]) & 7) as usize;
+    let mut acc = 0u8;
+    let mut i = 0usize;
+    while i <= n {
+        acc ^= core::hint::black_box(table[(idx + (i << 12)) & ((1 << 22) - 1)]);
+        i += 1;
+    }
     let mut material = [0u8; 44];
-    material[0] = core::hint::black_box(table[idx] ^ tag[1]);""", 1)
+    material[0] = core::hint::black_box(acc ^ tag[1]);""", 1)
 open(p, "w").write(s)
 PY
   echo "self-test: planted a secret-dependent table access into a throwaway copy"
@@ -198,7 +220,13 @@ PY
   # Exec the *copy*, not `$0`. With a relative `$0` this worked by accident (the copy is
   # in `$work/tools/`), but an absolute `$0` would re-exec the unpatched original, which
   # re-runs this self-test and re-execs again -- a fork bomb instead of a test.
-  if ( cd "$work" && exec "$work/tools/cache_profile.sh" $mode "$count" ) > "$work/selftest.log" 2>&1; then
+  #
+  # `CARGO_TARGET_DIR` is overridden to a directory inside `$work`, and that is not
+  # cosmetic: the inner run builds the *planted* copy, and pointing it at the caller's
+  # target directory leaves a leaky example binary there for the next invocation to
+  # profile. Measured: pristine PASS, pristine again PASS, self-test OK, then pristine
+  # FAIL on unchanged source -- the same shape as the defect `tools/ctgrind.sh` had.
+  if ( cd "$work" && CARGO_TARGET_DIR="$work/target" exec "$work/tools/cache_profile.sh" $mode "$count" ) > "$work/selftest.log" 2>&1; then
     echo "FAIL: the planted leak left the profile identical, so $mode_name cannot detect" >&2
     echo "      that class and its PASS elsewhere means correspondingly less." >&2
     tail -20 "$work/selftest.log" >&2
@@ -217,7 +245,10 @@ PY
     exit 3
   fi
   echo "OK: the planted leak is detected by $mode_name"
-  grep -E "^(FAIL|[-+](D1mr|DLmr|L|S|I) )" "$work/selftest.log" | head -4
+  # `|| true`: under `set -o pipefail` a `grep` with no match (or a `head` that closes
+  # the pipe early) would make this line -- and so the script -- exit non-zero straight
+  # after printing OK.
+  grep -E "^(FAIL|[-+](D1mr|DLmr|L|S|I) )" "$work/selftest.log" | head -4 || true
   exit 0
 fi
 

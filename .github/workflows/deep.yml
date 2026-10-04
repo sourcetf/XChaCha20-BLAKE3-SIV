@@ -359,7 +359,7 @@ jobs:
   mutation:
     name: verify the verifier (mutation check)
     runs-on: ubuntu-latest
-    # This job carries the fault campaign (thirteen rows, each a build), the mutation
+    # This job carries the fault campaign (fourteen rows, each a build), the mutation
     # campaign, and the two quick instruction sweeps -- the heaviest set in the file.
     # A job that runs past its `timeout-minutes` reads as `cancelled`, not as `failure`,
     # so each heavy sweep is wrapped in its own `timeout <secs>`: a hung sweep is then
@@ -369,7 +369,9 @@ jobs:
     # The bit-flip sweep is eight times its `nop` sibling *and* sweeps three
     # configurations, one of which (`ultra`) has the largest swept region -- measured at
     # 3m18s on four cores of a fast machine and considerably longer on a shared runner,
-    # which is why the quick stride is 13 and its cap is the largest below.
+    # which is why `--quick` narrows the *ranges* rather than coarsening the sample (it
+    # sweeps every byte of the decision function at stride 1; an earlier revision of this
+    # comment repeated an older stride-13 description) and why its cap is the largest below.
     timeout-minutes: 150
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -387,7 +389,7 @@ jobs:
           sudo apt-get install --no-install-recommends -y valgrind
           valgrind --version
 
-      # The fault-injection counterpart: a campaign of thirteen rows written down as
+      # The fault-injection counterpart: a campaign of fourteen rows written down as
       # source changes, each with the build it applies to, the test that acts as its
       # detector, and the outcome that is expected. Three of the rows are the
       # interesting ones: one skipped branch accepts a forgery on the default build
@@ -507,8 +509,10 @@ jobs:
     # not editable that way: it falls when code is added that nothing runs, which is
     # the change worth stopping.
     #
-    # 95 is deliberately loose against the measured 96.71% of *lines* (88 of 2181
-    # missed) and 97.92% of *regions* (116 of 5573) -- this command, `--all-features`,
+    # 95 is deliberately loose against the measured 96.71% of *lines* and 97.92% of
+    # *regions*. (The missed/total counts this comment used to give alongside those
+    # percentages did not reproduce them, so they are gone; the gate is the 95 floor,
+    # and the percentages come from the coverage job's own output.) -- this command, `--all-features`,
     # on the development host, re-measured 2026-10-03 after the two-level tag change.
     # `--fail-under-lines` compares against the line figure. The totals move when
     # `cargo-llvm-cov` changes what it counts -- an earlier revision of this comment

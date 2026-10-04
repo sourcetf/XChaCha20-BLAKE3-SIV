@@ -53,7 +53,22 @@ def load(directory):
     # `mutants.json` carries the description of each mutant; `outcomes.json` carries the
     # verdict. Both are keyed by the mutant's `name`, which contains a line number -- so
     # the join is done on the name, and the *reporting* key below drops the line number.
-    by_name = {m["name"]: m for m in mutants}
+    if not isinstance(mutants, list) or not isinstance(outcomes, dict):
+        print(
+            f"FAIL: {directory} has an unexpected shape (mutants.json must be a list, "
+            f"outcomes.json an object); got {type(mutants).__name__} and "
+            f"{type(outcomes).__name__}",
+            file=sys.stderr,
+        )
+        sys.exit(EXIT_COULD_NOT_RUN)
+    try:
+        by_name = {m["name"]: m for m in mutants}
+    except (TypeError, KeyError) as e:
+        # Parseable JSON in a shape this tool does not know is "could not compare" (3), not
+        # "the evidence is stale" (1): the caller turns 1 into a hard failure that says the
+        # committed evidence does not describe this run, which would be wrong.
+        print(f"FAIL: {directory}/mutants.json has an unexpected schema: {e}", file=sys.stderr)
+        sys.exit(EXIT_COULD_NOT_RUN)
     results = {}
     seen = {}
     for outcome in outcomes.get("outcomes", []):
@@ -122,6 +137,15 @@ def main():
         for key in sorted(fresh, key=describe):
             if fresh[key] == "MissedMutant":
                 print(f"  {describe(key)}")
+
+    if not fresh and not committed:
+        print(
+            "FAIL: both evidence directories are empty, so there is nothing to compare; "
+            "'the committed evidence describes this run' would be true of any two empty "
+            "sets. Expected at least one mutant on each side.",
+            file=sys.stderr,
+        )
+        sys.exit(EXIT_COULD_NOT_RUN)
 
     if problems:
         print()

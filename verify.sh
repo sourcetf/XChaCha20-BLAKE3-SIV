@@ -155,6 +155,11 @@ if [ "$KANI_ONLY" -eq 0 ]; then
   cargo test --release
   # `rng` gates the `random` module and its tests.
   cargo test --release --features rng
+  # `locked` gates the mlock'd-key type and its in-crate integrity test. The audit
+  # found no host-side entry for it (the cross-target job only runs `cargo check`
+  # and qemu), so a machine where mlock is refused would never have said so here.
+  # The test itself reports a skip to stderr when the platform refuses to lock.
+  cargo test --release --features locked
 
   # The security tests are in `tests/security.rs` and run with the rest above,
   # but they are called out because one of them is a fuzz loop -- if it starts
@@ -523,7 +528,7 @@ if [ "$RUN_TOOLS" -eq 1 ]; then
     esac
   }
 
-  # The fault campaign: thirteen rows, each a source change (or its absence) with an
+  # The fault campaign: fourteen rows, each a source change (or its absence) with an
   # expected effect on a detector. `tools/mutation_check.sh` is the other direction --
   # it plants known bugs and requires the *checks* to fail, because a check that cannot
   # fail is not a check.
@@ -615,7 +620,11 @@ if [ "$RUN_TOOLS" -eq 1 ]; then
     bash tools/stack_residue.sh
     local_rc=$?
     set -e
-    if [ "$local_rc" -ne 0 ] && [ "$local_rc" -ne 3 ]; then
+    if [ "$local_rc" -eq 3 ]; then
+      # "Could not run" is a skipped stage, and `--deep`/`--all` refuse to finish while one
+      # is recorded. Treating 3 as 0 was the same silence this script removes elsewhere.
+      skip "stack residue" "tools/stack_residue.sh could not run (exit 3; see above)"
+    elif [ "$local_rc" -ne 0 ] && [ "$local_rc" -ne 3 ]; then
       echo "ADVISORY: tools/stack_residue.sh reported a change (exit $local_rc) -- see" >&2
       echo "          above. This measures compiler-chosen stack layout, so it does not" >&2
       echo "          fail the run (CI's stack-residue job is continue-on-error)." >&2
@@ -639,8 +648,15 @@ if [ "$RUN_KANI" -eq 1 ]; then
   # `-j` (the thread pool's default width) is not cosmetic: without it Kani
   # verifies one harness at a time, so the suite spends its life on a single
   # core. With it, the independent harnesses run concurrently.
-  cargo kani -j --output-format=terse --features pure -Z stubbing -Z unstable-options \
-    --extra-pointer-checks
+  if ! command -v cargo-kani >/dev/null 2>&1; then
+    # Without this, `cargo kani` exits 101 (no such subcommand) and `set -e` fails the whole
+    # run -- a request for an optional stage turning into a hard failure, instead of the
+    # skipped stage the convention and check.sh's help describe.
+    skip "Kani" "cargo-kani is not installed (cargo install --locked kani-verifier && cargo-kani setup)"
+  else
+    cargo kani -j --output-format=terse --features pure -Z stubbing -Z unstable-options \
+      --extra-pointer-checks
+  fi
 fi
 
 # Each hint is printed only for the step that was actually skipped.
@@ -668,6 +684,9 @@ if [ "$RUN_KANI" -eq 0 ] || [ "$RUN_CROSS_EXEC" -eq 0 ] || [ "$RUN_MIRI" -eq 0 ]
   fi
   if [ "$RUN_TOOLS" -eq 0 ]; then
     echo "(the tool-level gates skipped; pass --tools to include them.)"
+  fi
+  if [ "$RUN_TSAN" -eq 0 ]; then
+    echo "(ThreadSanitizer skipped; it is part of --deep/--all.)"
   fi
   echo "(Pass --deep --tools for Kani + qemu execution + Miri + ctgrind + deny + fuzz +"
   echo " ThreadSanitizer + the tool-level gates; --deep and --all are the same set.)"

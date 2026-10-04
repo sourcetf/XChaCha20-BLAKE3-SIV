@@ -291,6 +291,17 @@ if [ "$rc" -ne 0 ] && [ "$rc" -ne 99 ]; then
   echo "FAIL: valgrind exited $rc" >&2
   exit "$rc"
 fi
+# The four filters above must have matched four tests. A filter that matches
+# nothing makes libtest print "0 passed" and exit 0, and valgrind then has nothing
+# to report either -- so the count is the only thing that says the check ran at
+# all. (Measured: renaming one test in tests/ctgrind.rs turned this whole stage
+# into a silent no-op.)
+if ! printf '%s\n' "$out" | grep -qE '^test result: ok\. 4 passed'; then
+  echo "FAIL: the four named constant-time tests did not all run -- a renamed or" >&2
+  echo "      moved test makes this check pass while testing nothing. Output was:" >&2
+  printf '%s\n' "$out" | tail -25 >&2
+  exit 1
+fi
 echo "PASS: nothing in this crate branches on secret data, beyond the one"
 echo "      documented SIV accept/reject decision (see tests/ctgrind.supp)."
 if [ "$noise" -gt 0 ]; then

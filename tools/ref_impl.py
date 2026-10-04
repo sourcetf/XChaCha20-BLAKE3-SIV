@@ -261,8 +261,13 @@ def self_check():
     key = bytes(range(0x00, 0x20))
     nonce = bytes.fromhex("000000090000004a00000000")
     blk = chacha20_block(key, 1, nonce)
-    assert blk[:16].hex() == "10f1e7e4d13b5915500fdd1fa32071c4", blk[:16].hex()
-    assert blk[16:32].hex() == "c7d1f4c733c068030422aa9ac3d46c4e", blk[16:32].hex()
+    # The whole 64-byte block, not the first 32: this is the anchor the ChaCha20 half of
+    # every vector below rests on, and comparing half of a published vector leaves the
+    # other half unanchored. (An audit pointed out that only blk[:32] was compared.)
+    assert blk.hex() == (
+        "10f1e7e4d13b5915500fdd1fa32071c4c7d1f4c733c068030422aa9ac3d46c4e"
+        "d2826446079faa0914c2d705d98b02a2b5129cd1de164eb9cbd083e8a2503c4e"
+    ), blk.hex()
 
     # draft-irtf-cfrg-xchacha-03 §2.2.1 HChaCha20.
     hk = bytes.fromhex("000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f")

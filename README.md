@@ -170,9 +170,9 @@ before 1.0 would be a revision bump, not a silent one.
 | --- | --- | --- |
 | Confidentiality (plaintext recovery) | 256-bit | the ChaCha20 key |
 | Forgery resistance | **256-bit** | BLAKE3 keyed mode as a PRF over a 256-bit key; a *target* problem, so no birthday search applies |
-| Context commitment **against a given ciphertext** (the target game) | `2^-520` per candidate key (other than the real one) | a target hit in the 520-bit output: the width is what sets it. The literature's CMT-3 is *attacker-chosen*, not this — see below |
-| Key commitment **against a given ciphertext** (the target game) | `2^-520` per candidate key (other than the real one) | the same; the key material is bound into the tag's derivation across three separate values (`k_in`, `k_out`, `enc_seed`) |
-| Commitment in the **attacker-chosen** games (invisible salamanders, CMT-1/CMT-3) | **key-commitment half: `2^128`, with identical plaintexts; salamander half: not derived here** | the adversary outputs both keys, both messages and `(C,T)`, so `2^520` does not describe it. A `subkey` collision at `2^128` gives two keys whose derived material, tag and keystream all coincide — one `(C,T)` valid under both, decrypting to the **same** plaintext. Two *different* messages instead need `KS₁ ≠ KS₂`, hence different material, so that half is the fixed point `T = tag(K₂, N, A, C ⊕ KS₂(T))` and is not analysed. `SECURITY-ANALYSIS.md` §4.5, Thm 2 and §8.1 |
+| Context commitment (nonce/AAD) | **key-holder target: `≈ 2^256`; attacker-chosen: `2^128`, completion immediate** | the context enters the tag's *hash input* (`X`), not the tag's *key*, so the 65-byte width does **not** set this bound: a second context that reproduces a given `X` is a preimage of BLAKE3's 256-bit chaining value (`≈ 2^256`), and two *chosen* contexts whose `X` values collide are a `2^128` birthday — after which the tag, and therefore the derived keystream, are equal, so both openings share one plaintext and no fixed point is needed. The byte components of the AAD are what this exposes; a length re-split has too few candidates to reach a 256-bit preimage at all. An earlier revision of this row wrote `2^-520` per candidate key and "the width is what sets it", which is the *key*-search game, not this one — see below |
+| Key commitment **against a given ciphertext** (the target game) | `2^-520` per candidate key (other than the real one) | a target hit in the 520-bit output: the width is what sets it. The key enters the tag through `k_in` (the inner digest) and `k_out` (the tag's own derivation); `enc_seed` does **not** enter the tag at all — it keys the KDF *whose input is the tag*, which is how the tag binds the keystream material too. The literature's CMT-3 is *attacker-chosen*, not this — see below |
+| Commitment in the **attacker-chosen** games (invisible salamanders, CMT-1/CMT-3) | **two priced routes at `2^128`, both with identical plaintexts (key half and context half); the different-message salamander is not derived here** | the adversary outputs both keys (or contexts), both messages and `(C,T)`, so `2^520` does not describe it. A `subkey` collision at `2^128` gives two keys whose derived material, tag and keystream all coincide — one `(C,T)` valid under both, decrypting to the **same** plaintext (the key half). A collision of the inner digest `X` between two *chosen contexts* under one key does the same for the context half: equal tag, equal KDF output, equal keystream, one plaintext, completion immediate. The salamander — two *different* messages — is what is left: it needs `KS₁ ≠ KS₂`, hence two keys, so its object is the fixed point `T = tag(K₂, N, A, C ⊕ KS₂(T))` and it is not analysed. `SECURITY-ANALYSIS.md` §4.5, Thm 2 and §8.1 |
 | Tag collision resistance (the DAE bound's collision term) | **2^128** | the *chaining value*, not the tag: keyed BLAKE3's output is a function of its 256-bit state, so a state collision gives byte-identical tags of any length |
 
 **On forgery: 256 bits is the ceiling, not a choice.** Forgery resistance is
@@ -216,25 +216,35 @@ literature's names next to the number and let the reader assume it covered them:
   `CMT-1`/`CMT-3` (and the "invisible salamanders" attack): the adversary *outputs the entire
   tuple* — two keys (or two contexts), two messages, and the `(C, T)` — and wins if one `(C, T)`
   validates under both. There is no fixed value to hit, so a target bound is the wrong shape for
-  it, and **this file does not have the number that fits the whole of it.** One half is priced: a
-  `subkey` collision at `2^128` gives two keys whose derived material, tag and keystream all
-  coincide, so one `(C, T)` validates under both — **key commitment, broken at `2^128`**, and the
-  two keys decrypt it to the *same* plaintext. The other half is not: the *salamander* needs the
-  two openings to be two *different* messages, which requires `KS₁ ≠ KS₂` and therefore different
-  derived material — so the `2^128` route cannot supply it, and the object to find becomes the
-  fixed point `T = tag(K₂, N, A, C ⊕ KS₂(T))` over the 520-bit tag space (`≈ 2^520` on the obvious
-  route; `SECURITY-ANALYSIS.md` §4.5 does not claim that is optimal). On top of that, the
-  colliding-*tag* search is `q²/2^257` with birthday point `2^128` (the state collision above).
-  So the construction's commitment in those games rests partly on a computed route and partly on
-  the design argument (three separate derived values bound into a two-level tag, §4.10 and
-  Thm 2), and `SECURITY-ANALYSIS.md` records the unanalysed half as an open obligation rather
-  than a bound.
+  it, and **this file does not have the number that fits the whole of it.** Two of its three
+  routes are priced, and both complete immediately *because* their plaintexts coincide:
+  * the **key** route: a `subkey` collision at `2^128` gives two keys whose derived material, tag
+    and keystream all coincide — **key commitment, broken at `2^128`** — and the two keys decrypt
+    the one `(C, T)` to the *same* plaintext;
+  * the **context** route: two *chosen* contexts under one key (a second AAD or nonce) whose
+    inner digests collide at `2^128` give the same tag, and the KDF's input is the tag rather
+    than the context, so the keystream is the same too — one `(C, T)`, two contexts, one
+    plaintext, no fixed point to solve. (This is CMT-3's context half; earlier revisions here
+    and in §4.5 priced only the key route and called *all* of the remainder a fixed point, which
+    is true of the different-message case alone.)
+  * the **salamander** route — two *different* messages — is the one not derived: it needs
+    `KS₁ ≠ KS₂`, hence two keys with different material, and the object to find becomes the fixed
+    point `T = tag(K₂, N, A, C ⊕ KS₂(T))` over the 520-bit tag space (`≈ 2^520` on the obvious
+    route; `SECURITY-ANALYSIS.md` §4.5 does not claim that is optimal).
+  On top of that, the colliding-*tag* search is `q²/2^257` with birthday point `2^128` (the state
+  collision above). So the construction's commitment in those games rests on two computed routes
+  at `2^128` — Thm 2's `k_in`/`k_out` cascade for the key route, the 256-bit inner digest for the
+  context route; both same-plaintext — plus the design argument, and `SECURITY-ANALYSIS.md`
+  records the different-message case as an open obligation rather than a bound.
 
 **`2^128` bounds *collisions*, not *targets*.** The state shortcut above helps only when
 both sides of the collision are the adversary's to search. A tag that has to be hit as
 given — a forged tag, or a tag that must also validate under a *second* key — is a target
 in the 520-bit output, still a `2^-520` per-candidate probability (a `2^520` search). So forgery and commitment *against a
-given* ciphertext are untouched by the correction, and what `2^128` bounds is the
+given* ciphertext are untouched by the correction. (The context row above is the one place the
+object to hit is neither 520-bit nor the key: moving a given `(C, T)` to a second *context* means
+reproducing the 256-bit inner digest `X`, so that target is `≈ 2^256` and no tag width reaches it.)
+What `2^128` bounds is the
 `q²/2^257` collision term in the DAE bound and the two-time-pad event described under
 "Deterministic encryption" below. What `2^128` does *also* bound, in the attacker-chosen
 game, is the search that *starts* the attack — a lower bound on that search, not a bound on

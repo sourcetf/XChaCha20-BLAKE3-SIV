@@ -11,6 +11,14 @@
 //! (ChaCha20 blocks, the SSE2/NEON/AVX2 SIMD widths, and BLAKE3's chunk
 //! boundary).  The in-crate KATs cover a handful of inputs; this covers the
 //! boundaries where stream-cipher wrappers and buffered hashes actually break.
+//!
+//! **Bounds on the coverage, stated here rather than assumed.** The full-byte
+//! sweeps below stop at `msg_len <= 300` and `aad_len <= 130` (their tests say
+//! why); above those sizes the coverage is the sampled differential
+//! (`tools/broad_differential.py`) and the fuzzer, not this file. And the
+//! large-size fixture replays only `encrypt`/`decrypt` against its digests —
+//! the detached and in-place entry points are exercised at the small sizes, not
+//! at 1 MiB.
 
 use xchacha20_blake3_siv::{decrypt, encrypt, TAG_LEN};
 
@@ -208,6 +216,11 @@ fn differential_every_position_is_authenticated() {
     // Count what was actually swept. The row filter below is a size cap, and a
     // regenerated fixture whose sizes all exceeded it would make this test scan
     // zero positions and pass vacuously; the floor at the end forbids that.
+    //
+    // The cap is a cost bound, not a boundary: each swept byte costs one full
+    // decryption, so the 300-byte rows are ~600 positions each, while a 1 MiB row
+    // would be 2^20. Above the cap the sampled differential and the fuzzer cover
+    // the same property with random positions.
     let mut swept_rows = 0usize;
     let mut swept_positions = 0usize;
     for (msg_len, aad_len, ct, tag) in &f.rows {
@@ -250,6 +263,8 @@ fn differential_every_position_is_authenticated() {
 fn differential_every_aad_bit_is_authenticated() {
     let f = parse_fixture();
     // As above: a floor, so a fixture with no small-AAD rows cannot make this vacuous.
+    // The 130 cap is the same cost bound as the message sweep's 300: the AAD sweep is
+    // O(aad_len) per row, and the fixture's non-empty AADs go up to 130.
     let mut swept_rows = 0usize;
     for (msg_len, aad_len, ct, tag) in &f.rows {
         if *aad_len > 130 {
@@ -281,8 +296,10 @@ fn differential_every_aad_bit_is_authenticated() {
 /// — which left everything above `TAG_CONCAT_LIMIT` (65 536 bytes) witnessed only
 /// by the claim that the tag's hash *call shape* does not change the bytes it
 /// produces. These rows check that claim against the reference implementation
-/// instead: 64 KiB is the largest message that still takes the contiguous path,
-/// 65 537 is one byte past it, and the rest are larger.
+/// instead. The switch is on the *total* `48 + aad + msg`, so with this fixture's
+/// empty AAD the boundary in message lengths is 65488 (the last contiguous-path
+/// message here) and 65489 (the first three-part one); an earlier revision of this
+/// comment said 64 KiB/65 537, which ignored the 48-byte head.
 ///
 /// The digest is plain BLAKE3 over `ciphertext || tag` — a comparison device, so
 /// deliberately not the keyed construction whose output it is checking.
@@ -303,9 +320,17 @@ fn differential_large_vectors_match_reference() {
         let digest = hex_decode(it.next().expect("digest"));
         rows.push((msg_len, aad_len, digest));
     }
+    // The fixture holds nine vectors. The floor is the count *and* the two sizes that
+    // straddle `TAG_CONCAT_MIN`/`TAG_CONCAT_LIMIT`, so dropping rows (or the boundary
+    // pair) fails here instead of shrinking the test silently.
+    let sizes: Vec<usize> = rows.iter().map(|(m, _, _)| *m).collect();
     assert!(
-        rows.len() >= 6,
-        "large fixture lost vectors: {}",
+        rows.len() >= 9
+            && sizes.contains(&1999)
+            && sizes.contains(&2000)
+            && sizes.contains(&65488)
+            && sizes.contains(&65489),
+        "large fixture lost vectors: {} at {sizes:?}",
         rows.len()
     );
 

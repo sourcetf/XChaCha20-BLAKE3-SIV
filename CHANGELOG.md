@@ -2,10 +2,96 @@
 
 Short, and deliberately about **the wire format** first: this construction is not a
 standard, so a consumer needs to know when the bytes move. Versions below refer to
-construction revisions; the crate version in `Cargo.toml` is `0.1.0` and no release
-tags have been cut yet.
+construction revisions; the crate version in `Cargo.toml` is `0.1.0`, and no *semantic*
+release tag has been cut (the CI release job publishes rolling `sha-<short>` tags — one per
+green push to `main` — which are build artefacts of that job, not construction revisions).
 
 ## Unreleased
+
+### A second `2^128` commitment route, and harnesses that could not fail
+
+A line-by-line audit of `8ae80ce` (the revision the review above was cut from) found four
+classes of problem, all reproduced here before the fix. **No wire-format or behavioural
+change**: every item is a test, a harness, or a claim about one.
+
+- **The attacker-chosen commitment game has three routes, and two of them are priced.** The
+  key route (`subkey` collision, equal material ⇒ equal tags *and* keystreams, same
+  plaintext) was already recorded. The **context** route was not: with one key and one
+  message, two chosen contexts whose inner digests `X = B3(k_in, DOM_PRE ‖ N ‖ le64|A| ‖ …)`
+  collide give the *same tag*, and the KDF's input is the tag rather than the context, so the
+  keystream is equal too — one `(C, T)` validates under both contexts for the same plaintext,
+  with **no fixed-point step**. That is `2^128` (a birthday over the 256-bit digest), and
+  "the completion is a fixed point" was therefore wrong as a general statement. The
+  key-holder context target is **`≈ 2^256`** (a preimage of the same digest, no tag width
+  involved), so the README's context-commitment row — which quoted `2^-520` per candidate key
+  and "the width is what sets it" — described the *key*-search game, not this one. Corrected
+  in README's security table and its "two games" section, `SECURITY-ANALYSIS.md` Thm 2's
+  commitment bullet and the paragraph that replaced "commitment to the nonce and the
+  lengths: same argument, byte for byte", §4.5's table row and completion analysis, §5 row
+  17, §5.1's procedure table (a context route next to the key route), and §8.1 (a context row
+  of its own; the target row no longer claims contexts).
+- **`enc_seed` does not enter the tag**, and the README said it did ("the key material is
+  bound into the tag's derivation across three separate values"). It keys the KDF *whose
+  input is the tag*, which is the reverse direction; the tag binds `k_in` (inner digest) and
+  `k_out` (outer hash). Corrected there and in the "two games" prose.
+- **The Kani tag harness could not see a truncated tag or a swapped `k_in`/`k_out`.** The
+  stub never checked the *width* of the buffer it was asked to fill, so an outer hash over
+  `&mut tag[..40]` passed every assertion, and with symbolic keys nothing said which secret
+  belonged to which hash. The stub now asserts 32/44/`TAG_LEN` output widths, and a new
+  harness — `tag_matches_the_model_on_a_concrete_input` — reconstructs the expected tag
+  through the model on one concrete input and compares all 65 bytes, which catches both the
+  swap and a truncation. It is a harness of its own rather than a block in the symbolic one
+  because mixing the two pushed that harness's CBMC run past fifteen minutes (measured). The
+  macro's comment claimed that reconstruction already happened — it did not; that comment is
+  now accurate, as is the module's "not covered" list. Measured on copies: the clean tree
+  verifies in 83 s, a `k_in`/`k_out` swap fails the byte comparison in 78 s, and an outer
+  hash over `&mut tag[..40]` fails the stub's width assertion in 9 s — where before the
+  change both mutants passed every harness in the shard. `tests/README.md` and `tests/decision.rs`'s campaign counts are corrected with it
+  (eleven `--test decision` rows of fourteen, not ten of thirteen).
+- **Two source-scanning tests could be satisfied by comments.** `tests/counter_range.rs` now
+  strips comments *and* string literals with a small scanner (a `//` inside a literal used to
+  cut the rest of its line out of the scan, and `/* … */` was scanned as code), tolerates
+  whitespace before `(` and calls spanning lines, rejects `use … as …` aliases of a scanned
+  name, and asserts an **exact** per-name call census (13 sites) instead of a floor — a
+  renamed `chacha20_block` used to drop the count to 11 and still pass. `tests/decision_scope.rs`
+  runs every presence/count assertion on comment-stripped **non-test** source, and the
+  suppression file must be exactly its five lines with a mangled symbol that ends in
+  `accept_or_reject` preceded by its v0 length (`my_accept_or_reject` and `*accept_or_reject*`
+  are rejected). Verified by mutation on a copy in each direction (counter `7` fails, the
+  rename fails, a multi-line call with a space before `(` is counted).
+- **Two gates did not check that their named tests ran.** `tools/ctgrind.sh` and
+  `tools/tsan.sh` accepted libtest's "0 passed" — a filter that matches nothing exits 0 and
+  valgrind has nothing to report either — so a renamed test would have turned either into a
+  silent no-op. Both now require the named tests to appear in the run.
+- **Assertions that did not assert**: `fuzz/fuzz_targets/roundtrip.rs` checked the in-place
+  wipe only `if ... .is_err()`, so an implementation that wrongly returned `Ok` skipped the
+  check; `tests/security.rs` exercised the in-place failure contract only in the
+  unstructured (random-tag) rounds, never on the "valid tag, corrupted input" rounds it
+  exists for; `tests/mac_commitment.rs`'s early-return arm passed while asserting nothing, so
+  any `encrypt` failure satisfied it; `tests/decision.rs` swept all 65 tag bytes through
+  `decrypt` but flipped only the last byte through `decrypt_in_place_detached`;
+  `src/lib.rs`'s `random::fill` test asserted "some byte changed" (a one-byte fill passed);
+  its AAD/message coverage test claimed "any bit" while flipping bit 0 of every byte (the bit
+  position now rotates); and the in-crate `locked` test returned silently when the kernel
+  refused to lock, making "verified" and "never ran" both read `ok` (a runtime refusal is now
+  a failure unless `XSIV_ALLOW_UNLOCKED=1`, matching `tests/locked.rs`). `verify.sh` gained
+  the missing host-side `cargo test --release --features locked` entry. In `src/witness.rs`,
+  `add_chunk_cv`'s comment claimed the popped CV's slot was wiped "as well as the copy" —
+  `Vec::pop` does not write the storage it shortens past, so the slot is now zeroed before
+  the truncation (the by-value return temporaries the same doc discloses remain disclosed).
+- **Doc claims corrected in place**, each with what the code actually does: the crate doc's
+  "the detached entry points never allocate" (they make one bounded infallible
+  `Vec::with_capacity` in `derive_tag`'s concatenated path, and `ultra`'s
+  `decrypt_in_place_detached` allocates two witness buffers fallibly); the "every allocation
+  goes through `alloc_zeroed`" note; the in-crate security table's
+  "Context / key commitment (CMT-3, CMT-1/CMTk) | `2^-520` per candidate key" row (three rows
+  now, matching README); the avalanche test's implication that it covers the ChaCha20 round
+  function (an audit's mutation: corrupting the round constant left it green while the KATs
+  failed); the stack-requirement test's implication that it locks the 16 KiB constant
+  (`need` is 0 without `dual-mac`, and the margin is 4–64× the constant); the large-fixture
+  comment's "64 KiB / 65 537" (the switch is on `48 + aad + msg`, so 65488/65489 with an
+  empty AAD); and an orphaned half-sentence of a doc comment that had been left glued to the
+  length-guard test when the test it described moved.
 
 ### Gate defects: a self-test that corrupted the artifact it was testing, and three rows that could pass without running
 
@@ -77,6 +163,16 @@ experiment against `tools/ref_impl.py` confirms what the route actually gives:
   cheapest route to it we can see is the `2^520` search over the tag space (about one fixed point
   per key pair, if the map behaves as a random function). That is not a proof that no cheaper
   route exists, and the document says so rather than claiming one.
+- **A second `2^128` route, and its completion is not circular either.** The same review's second
+  pass priced the *context* half: with one key and one message, two chosen contexts (a different
+  AAD or nonce) whose inner digests `X = B3(k_in, DOM_PRE ‖ N ‖ le64|A| ‖ …)` collide give equal
+  tags — and the KDF's input is the tag, not the context, so the keystream is equal too. One
+  `(C, T)` then validates under both contexts for the **same plaintext**, with no fixed point to
+  solve and no second key needed. So the game has three routes, not two: key half `2^128`, context
+  half `2^128` (both same-plaintext breaks), different-message salamander not derived. An earlier
+  revision of §4.5 and of README called the completion step "a fixed point" without qualification
+  and priced only the key half; both now carry all three, and a same-key context move is recorded
+  as a **`2^256`** target (a preimage of the 256-bit inner digest) rather than a `2^520` one.
 
 So the accurate statement is: **`v0.3` reopens a key-commitment break at `2^128`, at the cost of
 the same plaintext; the salamander half was never at `2^128` and is not analysed.** Corrected in
@@ -327,8 +423,12 @@ format is unchanged** (still `v0.3`): the code changes below are internal.
   birthday (`2^384`)". It is not: all three are deterministic functions of the single **256-bit**
   `subkey = HChaCha20(K, N₁)`, so two keys agreeing on the triple need a `subkey` collision — a
   **`2^128`** birthday, the same order as the tag's own collision bound. Worse, that means `v0.3`
-  **reopens** a complete invisible-salamander at `2^128` (equal material ⇒ equal tags *and* equal
-  keystreams) that `v0.2`'s `K`-in-input step had closed; the two-level tag does not close it.
+  **reopens a key-commitment break at `2^128`** — equal material ⇒ equal tags *and* equal
+  keystreams — that `v0.2`'s `K`-in-input step had closed; the two-level tag does not close it.
+  (*Corrected in the `v0.3` review*: this entry first called it "a complete invisible-salamander
+  at `2^128`", which overstates the route — equal material means equal keystreams, so the two
+  openings share a plaintext and the different-message salamander is not reached at all. See "The
+  `2^128` route is a key-commitment break, not a salamander" above.)
   The route is in the *attacker-chosen* commitment game this crate never priced, and it is
   `2^128` (infeasible), so the *target* commitment (`2^-520` per candidate key) is untouched — but
   the claim and the number were both false and are corrected in every file that carried them, with
@@ -406,9 +506,10 @@ derived material, which gives one ciphertext that opens under both. `v0.2` defea
 tag does not bind `K`, and deriving three values instead of one does **not** restore the closure:
 all three are deterministic functions of the single 256-bit `subkey = HChaCha20(K, N₁)`, so the
 route costs a `2^128` **subkey** birthday over the `2^256` key space — the same order as the tag's
-own collision bound, **not** a 768-bit `2^384` event. So `v0.3` reopens a complete
-invisible-salamander at `2^128` in the *attacker-chosen* commitment game (the literature's
-CMT-1/CMT-3) that `v0.2`'s `K`-in-input had closed. It is `2^128` — infeasible today — and it is a
+own collision bound, **not** a 768-bit `2^384` event. So `v0.3` reopens a
+**key-commitment break** at `2^128` in the *attacker-chosen* commitment game (the literature's
+CMT-1/CMT-3) that `v0.2`'s `K`-in-input had closed — with the two openings sharing a plaintext,
+so it is not the different-message salamander this sentence once called it. It is `2^128` — infeasible today — and it is a
 game this crate never priced, so the bound it does claim is untouched: the **target** commitment
 (a *given* ciphertext) stays `2^-520` per candidate key, and the `2^128` collision bound is
 unchanged. The trade for removing L3.6 is real rather than free, and a revision that wanted both
@@ -555,7 +656,7 @@ KDF's 328-bit state is the 256-bit chaining value plus the 9-byte tail of its
 `"XSIV-ENC" ‖ T` (73-byte) input, and the 352-bit output is `km[0..44]`, because `enc_nonce` is
 12 bytes, not the 24 the API takes. The counts reconcile too: the control-flow table
 (`tests/variable_latency`, 35/10/26/0/5 and 3/5/21/0/0), the 32 `from_le_bytes`/`to_le_bytes`
-call sites, the thirteen-row fault campaign (ten `--test decision`, two `mac_commitment`, one
+call sites, the fourteen-row fault campaign (eleven `--test decision`, two `mac_commitment`, one
 `security`), the committed mutation evidence (17 mutants, 15 caught, 2 unviable, 0 missed), and
 the 95% coverage floor under `--all-features`. `performance.md`'s two tables also validate each
 other: dividing its "ultra over default" column into its "over `XChaCha20Poly1305`" column
@@ -1544,7 +1645,7 @@ Asked which items are expensive and which are cheap, and whether anything cheap 
 | --- | --- | --- |
 | Constant-time discipline, no tables, no secret indices | free (a design property) | all three |
 | Volatile wipes | free | all three |
-| Second gate (two recomputed comparisons, fail-closed) | +10.8% at 64 B, +0.4% at 1 MiB | `hardened` |
+| Second gate (two recomputed comparisons, fail-closed) | +10.8% at 64 B, +0.4% at 1 MiB (**superseded**: re-measured for `v0.3` as +25% at 64 B, +24% at 256 B, +23% at 1 KiB, +11% at 4 KiB, within the noise floor from 16 KiB up — the second comparison was added to every build and the small sizes were re-measured) | `hardened` |
 | **Second comparison *shape* (8-byte fold vs `subtle`'s loop)** | **+1.4 ns per decryption (0.1% at 64 B)** | **was `dual-mac`-only; now every gate-building configuration (`hardened` and above — not the opt-out build, which compiles neither gate nor fold)** |
 | `deny_debugging` (`prctl`) | one syscall, once, opt-in | `locked` (ultra) |
 | Key integrity tag | +42 ns per use | `locked` (ultra) |
@@ -1826,7 +1927,8 @@ than asserted, because a gate that fails upstream is a gate someone deletes.
 - The `hardened` feature is **on by default** (`default = ["hardened"]`). A hardening
   property that most callers never enable is a hardening property most callers do not
   have, and the measured cost is +10.8% at 64 bytes, +8.9% at 256, +3.6% at 1 KiB and
-  below +4.5% from 4 KiB up (against `--no-default-features`). The opt-out is
+  below +4.5% from 4 KiB up against `--no-default-features` (**superseded**: the `v0.3`
+  re-measurement gives +25%/+24%/+23%/+11%, within the noise floor from 16 KiB up). The opt-out is
   `default-features = false`; it stays measured, tested, and covered by its own CI
   runs (`tools/ctgrind.sh --no-default-features`, `tools/fi_check.sh`'s `*-plain`
   rows).
@@ -1927,7 +2029,7 @@ than asserted, because a gate that fails upstream is a gate someone deletes.
 
 `tests/README.md` now records what the checks do not reach: the exhaustive
 byte-position scans stop at msg_len ≤ 300 and aad_len ≤ 130 (above that the coverage is
-sampling), the differential fixture is 55 vectors and a lock rather than a sample (the
+sampling), the differential fixture is 58 vectors and a lock rather than a sample (the
 sampling is the scheduled 4000-vector differential and the fuzzing), there is no
 performance gate (and why), and the coverage floor is global rather than per-path.
 
@@ -2304,11 +2406,13 @@ code supports:
   rather than a copy (see the entries above). **No wire-format change**; the KATs and
   both differential fixtures replay unchanged. Measured cost of the default build
   against `--no-default-features`: +10.8% at 64 bytes, +8.9% at 256, +3.6% at 1 KiB,
-  below +4.5% from 4 KiB up.
+  below +4.5% from 4 KiB up. (**Superseded**: the `v0.3` re-measurement gives +25% at 64 B,
+  +24% at 256 B, +23% at 1 KiB, +11% at 4 KiB, within the noise floor from 16 KiB up; the
+  figures above were taken before the second comparison shape was added to every build.)
 - **Fault-injection check** (`tools/fi_check.sh`) plus its detector
   (`tests/decision.rs`), and a CI step for both.
 - **Large-message reference vectors** (`tests/vectors_differential_large.txt`):
-  six sizes from 2 KiB to 1 MiB as digests, so the sizes above the tag's
+  nine sizes from 1999 B to 1 MiB as digests, so the sizes around the tag's
   contiguous-buffer threshold are witnessed against the reference implementation
   rather than only against this crate's own two call shapes.
 - Lint gates: `clippy::undocumented_unsafe_blocks`, and `missing_docs` for the

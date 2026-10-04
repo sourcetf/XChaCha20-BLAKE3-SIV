@@ -57,6 +57,13 @@ def load_ref():
         # exit 3 (could not run), not a failure.
         print(f"could not run: {e} (pip install blake3)", file=sys.stderr)
         sys.exit(3)
+    # Anchor the reference before trusting it as the oracle: `self_check()` replays RFC 8439
+    # §2.3.2, draft-irtf-cfrg-xchacha-03 §2.2.1 and BLAKE3's five official keyed vectors.
+    # `gen_test_vectors.py` calls this; this tool used to compare against whatever
+    # `ref_impl.py` happened to compute, with nothing standing behind it. (The construction
+    # glue above the primitives is a transcription either way -- see `ref_impl.py`'s own
+    # note on how far its independence reaches.)
+    ref.self_check()
     return ref
 
 
@@ -146,8 +153,18 @@ def main():
         i = argv.index("--features")
         features = argv[i + 1]
         del argv[i:i + 2]
-    count = int(argv[0]) if argv else 4000
-    seed = int(argv[1]) if len(argv) > 1 else 20260925
+    try:
+        count = int(argv[0]) if argv else 4000
+        seed = int(argv[1]) if len(argv) > 1 else 20260925
+    except ValueError:
+        print(f"FAIL: want numeric <count> [seed], got {argv!r}", file=sys.stderr)
+        sys.exit(1)
+    if count < 1:
+        # Not exit 3: nothing about the environment prevents this run, the caller asked for
+        # zero comparisons, and reporting "all vectors match" for an empty loop is a pass
+        # for no work. `verify.sh`'s `BROAD_VECTORS` is the knob that can do this.
+        print(f"FAIL: --count must be at least 1, got {count}", file=sys.stderr)
+        sys.exit(1)
 
     ref = load_ref()
     pairs = list(vectors(count, seed))

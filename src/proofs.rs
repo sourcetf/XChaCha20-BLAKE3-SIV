@@ -461,12 +461,14 @@ fn max_msg_size_boundary_matches_counter_capacity() {
 //   * no master key is in any hash message (the inner head is `DOM_PRE`, not the
 //     old `DOM_TAG || K || …`).
 //
-// One field is *not* covered by this shard, stated so the bullet above is not read
-// as more than it is: the nonce `N` occupies `head[8..32]` and no harness varies or
-// inspects it (the stub checks the domain prefix, the head length and the two length
-// fields).  A regression that dropped `N` from the head would pass every harness
-// here; that property is pinned by `test_tag_matches_blake3_over_the_documented_input`
-// and the differential fixture instead.
+// One field is *not* varied by this shard's symbolic harnesses, stated so the bullet
+// above is not read as more than it is: the nonce `N` occupies `head[8..32]` and no
+// symbolic harness varies it (the stub checks the domain prefix, the head length and
+// the two length fields).  A regression that dropped `N` from the head is caught by
+// the concrete comparison in `tag_matches_the_model_on_a_concrete_input` (which
+// reconstructs the head, nonce included) and by
+// `test_tag_matches_blake3_over_the_documented_input` with the real BLAKE3; the
+// symbolic harnesses alone would not see it.
 //
 // What is *not* provable — and must not be claimed — is BLAKE3's collision
 // resistance or PRF security. "Distinct inputs give distinct tags" is a
@@ -507,6 +509,13 @@ fn head_lengths(head: &[u8]) -> (u64, u64) {
     (u64::from_le_bytes(aad_len), u64::from_le_bytes(msg_len))
 }
 
+/// Counts calls to the stubbed keyed hash. A stub's own `assert!`s run only when it
+/// is called, so a harness that inspects only the return value cannot tell a real
+/// call from a `derive_tag` that returned a constant; this counter can. Reset by
+/// the harness that checks it, so a stale value from another verification cannot
+/// make it pass.
+static MODEL_BLAKE3_CALLS: AtomicUsize = AtomicUsize::new(0);
+
 /// A stand-in for `blake3_keyed_multi` whose output depends on the key and on
 /// every input byte.
 ///
@@ -541,13 +550,6 @@ fn head_lengths(head: &[u8]) -> (u64, u64) {
 /// BLAKE3's actual cryptographic strength.  Every harness here perturbs one byte
 /// at a time, so the first limit is not reachable; the second is the reason the
 /// real function is anchored to BLAKE3's official vectors instead.
-/// Counts calls to the stubbed keyed hash. A stub's own `assert!`s run only when it
-/// is called, so a harness that inspects only the return value cannot tell a real
-/// call from a `derive_tag` that returned a constant; this counter can. Reset by
-/// the harness that checks it, so a stale value from another verification cannot
-/// make it pass.
-static MODEL_BLAKE3_CALLS: AtomicUsize = AtomicUsize::new(0);
-
 fn model_blake3_keyed_multi(key: &[u8; 32], parts: &[&[u8]], out: &mut [u8]) {
     MODEL_BLAKE3_CALLS.fetch_add(1, Ordering::Relaxed);
     // ── Assert the call shape, directly on the arguments ──
@@ -578,6 +580,14 @@ fn model_blake3_keyed_multi(key: &[u8; 32], parts: &[&[u8]], out: &mut [u8]) {
         // The inner hash's three-update shape: the fixed-width head, then AAD,
         // then the message.  The head starts with DOM_PRE -- the master key is
         // *not* in it (that is the point of the two-level shape).
+        //
+        // The output width is part of the shape: a call that asked the model for
+        // fewer than 32 bytes would leave the rest of the inner buffer at whatever
+        // the caller had there, and the fold's own output would depend on
+        // `out.len()` (it wraps at that width).  An audit found the harnesses could
+        // not see a tag truncated past byte 40 precisely because nothing asserted
+        // the output width; this assertion and the DOM_TAG one below are the fix.
+        assert!(out.len() == 32);
         assert!(parts[0].len() == HEAD_LEN);
         assert!(parts[0][0..8] == DOM_PRE[..]);
 
@@ -597,10 +607,14 @@ fn model_blake3_keyed_multi(key: &[u8; 32], parts: &[&[u8]], out: &mut [u8]) {
             // `derive_enc`: the domain word and the whole tag, nothing else, so
             // a truncated tag cannot reach the encryption key derivation.
             assert!(parts[0].len() == 8 + TAG_LEN);
+            assert!(out.len() == 44);
         } else if parts[0][0..8] == DOM_TAG[..] {
             // The outer tag hash: `DOM_TAG || X`, exactly the 32-byte inner
             // digest and nothing else, so a truncated digest cannot reach the tag.
             assert!(parts[0].len() == OUTER_LEN);
+            // ...and the caller must want the whole tag: `&mut tag[..40]` used to
+            // satisfy every assertion in this file.
+            assert!(out.len() == TAG_LEN);
         } else {
             // `derive_tag`'s inner contiguous path: byte-for-byte the same input
             // as the three-part shape above, so the head's own length fields must
@@ -612,6 +626,7 @@ fn model_blake3_keyed_multi(key: &[u8; 32], parts: &[&[u8]], out: &mut [u8]) {
             // shapes at the four totals where the choice flips.)
             assert!(parts[0][0..8] == DOM_PRE[..]);
             assert!(parts[0].len() >= HEAD_LEN);
+            assert!(out.len() == 32);
             let (aad_len, msg_len) = head_lengths(parts[0]);
             let total = (HEAD_LEN as u64)
                 .wrapping_add(aad_len)
@@ -671,9 +686,19 @@ fn model_blake3_keyed_multi(key: &[u8; 32], parts: &[&[u8]], out: &mut [u8]) {
 /// constant without reaching the hash would satisfy a harness that only inspects
 /// the return value — which is what the earlier version did. The harness therefore
 /// requires the hash to have been reached, through the call counter the stub
-/// increments. (Reconstructing the expected tag and comparing hashes would be
-/// stronger, but it is exactly the "loop over every input byte" this module's
-/// sizing notes rule out: measured, it pushes CBMC past its unwind budget.)
+/// increments.
+///
+/// **Two kinds of shape, doing two different jobs.** The four symbolic shapes
+/// exercise the four input combinations under the stub's per-call assertions
+/// (and the counter), but with symbolic keys they cannot say *which* secret
+/// reaches which hash — nothing symbolic distinguishes "inner keyed by `k_in`"
+/// from "inner keyed by `k_out`", and the nonce is only *present*, not read back.
+/// `tag_matches_the_model_on_a_concrete_input` covers both: it reconstructs the whole
+/// expected tag through the model on one concrete input and compares all `TAG_LEN`
+/// bytes, which catches a swapped `k_in`/`k_out` or a tag truncated past byte 40. (It
+/// is a separate harness, not a block here: the reconstruction is affordable only
+/// because it is concrete, and adding it to this symbolic harness pushed its CBMC run
+/// past fifteen minutes — measured.)
 ///
 /// Four shapes of input: all-zero lengths, both non-empty (where the two encoded
 /// lengths differ, 4 vs 8, so a mix-up between the length fields cannot hide),
@@ -723,6 +748,15 @@ fn tag_is_keyed_hash_of_the_whole_context() {
     // A macro rather than a loop or a helper function: each shape has to be its
     // own call site (see the doc comment), and a helper would take the slices as
     // symbolic parameters, which is the same merge by another route.
+    //
+    // The macro's own assertion is a smoke check only (`nz != 0`): with symbolic
+    // keys the model folds *one of* them into each hash, and nothing symbolic says
+    // which value belongs to the inner hash and which to the outer one, so a
+    // `derive_tag` that swapped `k_in` and `k_out` (or truncated the output) still
+    // produces a nonzero tag here.  `tag_matches_the_model_on_a_concrete_input`
+    // is the harness that reconstructs the expected tag and compares all `TAG_LEN`
+    // bytes; an earlier revision of this comment claimed this macro did that, and
+    // it did not.
     macro_rules! shape {
         ($a:expr, $m:expr) => {{
             let tag = derive_tag(&k_in, &k_out, &nonce, $a, $m);
@@ -752,6 +786,57 @@ fn tag_is_keyed_hash_of_the_whole_context() {
     assert!(MODEL_BLAKE3_CALLS.load(Ordering::Relaxed) >= 8);
 }
 
+/// The tag, compared byte for byte against the model, on one **concrete** input.
+///
+/// Why this is a harness of its own rather than a block inside the symbolic one: with
+/// symbolic keys the model folds whatever key it is handed, so nothing in the proof says
+/// which of the two secrets belongs to the inner hash and which to the outer one — a
+/// `derive_tag` that swapped `k_in`/`k_out` passed every harness in this shard (an audit
+/// measured it). Concrete inputs make the expected tag computable *here*, so the
+/// comparison covers all `TAG_LEN` bytes and catches both the swap and a tag truncated
+/// at the call site. Mixing the block into the symbolic harness pushed its CBMC run past
+/// fifteen minutes (measured) because that harness is the expensive one; separated, the
+/// concrete proof is cheap and the symbolic one keeps its previous cost.
+///
+/// What it does not generalise: the nonce is one fixed value here (the symbolic shapes
+/// and the in-crate KATs cover variation), and it proves one input rather than all of
+/// them. It is a structural regression check — the tag must be the model evaluated on
+/// the documented construction — not a statement about every input.
+#[kani::proof]
+#[kani::stub(blake3_keyed_multi, model_blake3_keyed_multi)]
+#[kani::stub(zeroize_array, noop_zeroize_array)]
+fn tag_matches_the_model_on_a_concrete_input() {
+    let k_in_c = [0x11u8; 32];
+    let k_out_c = [0x22u8; 32];
+    let nonce_c = [0x33u8; NONCE_LEN];
+    let aad_c: &[u8] = b"aad!";
+    let msg_c: &[u8] = b"message!";
+    let got = derive_tag(&k_in_c, &k_out_c, &nonce_c, aad_c, msg_c);
+
+    // The documented input, rebuilt here exactly as the specification writes it.
+    let mut head = [0u8; HEAD_LEN];
+    head[..8].copy_from_slice(&DOM_PRE);
+    head[8..8 + NONCE_LEN].copy_from_slice(&nonce_c);
+    head[8 + NONCE_LEN..16 + NONCE_LEN].copy_from_slice(&(aad_c.len() as u64).to_le_bytes());
+    head[16 + NONCE_LEN..24 + NONCE_LEN].copy_from_slice(&(msg_c.len() as u64).to_le_bytes());
+
+    let mut x = [0u8; 32];
+    model_blake3_keyed_multi(&k_in_c, &[&head, aad_c, msg_c], &mut x);
+    let mut outer = [0u8; OUTER_LEN];
+    outer[..8].copy_from_slice(&DOM_TAG);
+    outer[8..].copy_from_slice(&x);
+    let mut want = [0u8; TAG_LEN];
+    model_blake3_keyed_multi(&k_out_c, &[&outer], &mut want);
+
+    // Folded into one byte rather than `assert_eq!`, which would lower to `memcmp` and
+    // inflate the unwind bound (same reason as elsewhere here).
+    let mut diff = 0u8;
+    for i in 0..TAG_LEN {
+        diff |= got[i] ^ want[i];
+    }
+    assert!(diff == 0);
+}
+
 /// A change to either derived key must change the tag.
 ///
 /// **What this does not establish**, despite what an earlier version of this doc
@@ -762,7 +847,8 @@ fn tag_is_keyed_hash_of_the_whole_context() {
 /// 18 minutes (measured, twice). The full-width property is covered instead by
 /// `test_tag_matches_blake3_over_the_documented_input` in `lib.rs`, which runs
 /// the **real** BLAKE3 and compares all 65 bytes, and by
-/// `derive_enc_reads_every_tag_byte` below.
+/// `tag_matches_the_model_on_a_concrete_input`. (`derive_enc_reads_every_tag_byte`
+/// below does *not* cover it: that harness never calls `derive_tag`.
 #[kani::proof]
 #[kani::stub(blake3_keyed_multi, model_blake3_keyed_multi)]
 #[kani::stub(zeroize_array, noop_zeroize_array)]
@@ -846,8 +932,10 @@ fn derive_enc_reads_every_tag_byte() {
 ///
 /// Complements `tag_is_keyed_hash_of_the_whole_context`, which checks the
 /// concatenation is right; this checks that no byte is dropped on the way in.
-/// The three-byte and four-byte inputs keep every position beyond a naive
-/// 1-byte prefix.
+/// The four-byte AAD and four-byte message keep every position beyond a naive
+/// 1-byte prefix. (An earlier revision of this line said "three-byte and
+/// four-byte inputs"; the three-byte one is in
+/// `tag_changes_when_the_key_changes`, not here.)
 #[kani::proof]
 #[kani::stub(blake3_keyed_multi, model_blake3_keyed_multi)]
 #[kani::stub(zeroize_array, noop_zeroize_array)]
@@ -889,7 +977,11 @@ fn nib(c: u8) -> u8 {
     match c {
         b'0'..=b'9' => c - b'0',
         b'a'..=b'f' => c - b'a' + 10,
-        _ => 0,
+        // Loud rather than silent: this used to map any other byte to 0, which
+        // would quietly turn a typo'd vector (or an uppercase digit) into a
+        // different, valid-looking input. Bare `panic!()`: a formatted message
+        // would pull `core::fmt` into the verification scope.
+        _ => panic!(),
     }
 }
 

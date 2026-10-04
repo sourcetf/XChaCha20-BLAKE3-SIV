@@ -41,7 +41,7 @@ ones the noise floor was computed over.
 
 **Noise floor, measured rather than assumed**: the reference implementation is the *same code*
 in all nine runs (three configurations × three passes), so the spread of its own cells is the
-floor. Across the 63 pass-to-pass cells (189 runs, three passes each), the median spread is **6.8%**, the 90th
+floor. Across the 189 reference measurements (63 pass-to-pass cells, three passes each), the median spread is **6.8%**, the 90th
 percentile **10%**, the worst cell **15%** (the small sizes and 1 MiB — the first is CPU-boost
 sensitive, the second shares LLC and DRAM with whatever else is on the host). **Differences
 smaller than that are the same number**, which is why most of the `hardened`-vs-`opt-out` column

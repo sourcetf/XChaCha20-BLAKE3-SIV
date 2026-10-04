@@ -16,6 +16,7 @@
 # Usage:  tools/check_kani_cfg.sh
 set -euo pipefail
 
+export PATH="$HOME/.cargo/bin:$PATH"
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
@@ -103,9 +104,51 @@ out="$(RUSTFLAGS="--cfg kani" cargo check --release --quiet 2>&1)"
 status=$?
 set -e
 if [ "$status" -ne 0 ]; then
-  printf '%s\n' "$out" | grep -E "^error|^ *-->" | head -30 >&2
+  # `|| true`: under `set -o pipefail` a `grep` with no match, or a `head` that closes
+  # the pipe early (141), would abort the script here -- before the two lines below, which
+  # are the diagnosis.
+  printf '%s\n' "$out" | grep -E "^error|^ *-->" | head -30 >&2 || true
   echo "FAIL: the Kani harnesses do not compile against this revision of the crate." >&2
   echo "      (They are only built under --cfg kani, so nothing else would notice.)" >&2
   exit 1
 fi
-echo "PASS: the harnesses still fit the crate's internals."
+# ...and a control for the direction a green check cannot see. A passing type-check proves
+# only that the crate compiles *with* `--cfg kani`: if the gate that pulls the harnesses in
+# were removed, nothing under `#[cfg(kani)]` would be compiled and this script would still
+# print PASS. An audit deleted `#[cfg(kani)] mod proofs;` from a copy and watched it stay
+# green. So the check is run once more against a copy with a deliberate type error planted
+# *inside* a `#[cfg(kani)]` item: that run must fail.
+CONTROL="$WORK/control"
+mkdir -p "$CONTROL"
+( cd "$WORK/crate" && tar -cf - . ) | ( cd "$CONTROL" && tar -xf - )
+python3 - "$CONTROL/src/lib.rs" <<'PLANTEOF'
+import sys
+
+p = sys.argv[1]
+s = open(p).read()
+anchor = "#[cfg(kani)]\nmod proofs;"
+if anchor not in s:
+    sys.exit("the #[cfg(kani)] gate is not where this control expects it: %s" % p)
+plant = anchor + """
+
+#[cfg(kani)]
+fn _kani_compile_control() -> u8 {
+    // Deliberately not a u8. Compiled only when `--cfg kani` reaches this file, which is
+    // the property the check above claims and can otherwise not see.
+    "not a u8"
+}
+"""
+open(p, "w").write(s.replace(anchor, plant, 1))
+PLANTEOF
+set +e
+( cd "$CONTROL" && RUSTFLAGS="--cfg kani" cargo check --release --quiet >/dev/null 2>&1 )
+control_status=$?
+set -e
+if [ "$control_status" -eq 0 ]; then
+  echo "FAIL: a deliberate type error inside a #[cfg(kani)] item did not fail the" >&2
+  echo "      type-check, so the PASS above says nothing about the harnesses being" >&2
+  echo "      compiled at all -- it only says the crate compiles without them." >&2
+  exit 1
+fi
+echo "PASS: the harnesses still fit the crate's internals (control: a planted"
+echo "      #[cfg(kani)] type error is caught, so they really are compiled here)."

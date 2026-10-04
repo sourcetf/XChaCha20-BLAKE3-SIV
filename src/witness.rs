@@ -504,7 +504,15 @@ impl Hasher {
         while chunks & 1 == 0 {
             // The popped CV is key-derived; wipe the slot it leaves behind as well as the copy
             // this function folds, so nothing in the stack's storage outlives its use.
-            let mut left = self.cv_stack.pop().expect("witness: CV stack underflow");
+            //
+            // `Vec::pop` alone would move the value out and shorten the length, leaving the
+            // old bytes in storage the Vec still owns -- and wiping the returned copy would
+            // not touch them. An audit pointed at this comment, which claimed the slot was
+            // wiped when it was not. Zero the slot first, then truncate.
+            let last = self.cv_stack.len() - 1;
+            let mut left = self.cv_stack[last];
+            wipe_words(&mut self.cv_stack[last]);
+            self.cv_stack.truncate(last);
             new_cv = parent_cv(&left, &new_cv, &self.key_words, self.flags);
             wipe_words(&mut left);
             chunks >>= 1;

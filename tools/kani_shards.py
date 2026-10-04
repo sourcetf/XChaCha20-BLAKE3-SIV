@@ -87,6 +87,14 @@ def harnesses():
         if inline:
             names.append(inline.group(1))
             continue
+        # The attribute may share its line with *other* attributes and then the `fn`
+        # (`#[kani::proof] #[kani::unwind(9)] fn foo()`): neither of the two shapes above
+        # matches that, so the harness was dropped silently -- the failure the comment at
+        # the top of this function says the parser exists to prevent.
+        inline_more = re.match(r"#\[kani::proof\]\s*(?:#\[[^\]]*\]\s*)+fn\s+([A-Za-z0-9_]+)", stripped)
+        if inline_more:
+            names.append(inline_more.group(1))
+            continue
         if stripped == "#[kani::proof]":
             armed = True
             continue

@@ -1,7 +1,11 @@
 #!/usr/bin/env bash
 # Measure what key material survives in the stack frames of an AEAD call.
 #
-# This is a *measurement*, not a gate, and it is not wired into CI on purpose.
+# This is a *measurement*, not a gate, and it is wired in as an advisory: CI has a
+# `stack residue` job that runs it in both configurations under `continue-on-error`, and
+# `verify.sh`'s tool stage runs it and reports a change as ADVISORY rather than as a
+# failure. (The header used to say it was not wired into CI at all, which stopped being
+# true when that job was added.)
 # What it finds today is dominated by the `blake3` dependency: its XOF output
 # buffer sits in frames this crate cannot name, let alone wipe (the key itself is
 # not left -- measured). A gate that fails for a reason upstream of this crate
@@ -28,8 +32,14 @@ trap 'rm -rf "$WORK"' EXIT
 # feature bundle whose `scrub_stack` is supposed to clear the residue.
 FEATURES=""
 case "${1:-}" in
+  "") ;;
   --pure)  FEATURES="--features=xchacha20-blake3-siv/pure" ;;
   --ultra) FEATURES="--features=xchacha20-blake3-siv/ultra" ;;
+  *)
+    echo "usage: tools/stack_residue.sh [--pure | --ultra]" >&2
+    # Silently ignoring an unknown option ran the default build while the caller thought
+    # it had asked for another one.
+    exit 1 ;;
 esac
 
 mkdir -p "$WORK/src"
@@ -226,7 +236,13 @@ fn main() {
 
     if failures == 0 {
         println!();
-        println!("PASS: this crate leaves neither the master key nor the locked integrity tag");
+        if dependency_leaks_tag {
+            println!("PASS: no master key in the call-chain stack region, and no residue of");
+            println!("      this crate's own code -- the 8-byte locked integrity tag above IS");
+            println!("      left, by the blake3 dependency's XOF buffer, as the note below says.");
+        } else {
+            println!("PASS: this crate leaves neither the master key nor the locked integrity tag");
+        }
         println!("      in the call-chain stack region, and the control shows the scan");
         println!("      produces no false positives.");
         if dependency_leaks_tag {

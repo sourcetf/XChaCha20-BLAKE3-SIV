@@ -40,10 +40,21 @@ fn a_tag_must_commit_to_the_message_it_was_issued_for() {
     let (ct_issued, tag_issued) = match encrypt(&KEY, &NONCE, AAD, issued_for) {
         Ok(pair) => pair,
         // `ultra`'s answer to the planted fault: it will not produce a tag it cannot vouch
-        // for, which is a defence. Nothing further can be asserted about a pair that was
-        // never issued — and if this arm is reached on a *clean* build, the clean rows of the
-        // campaign fail instead, because they require this test to pass.
+        // for, which is a defence. But reaching this arm must not be a silent pass — an
+        // earlier revision returned here unconditionally, so an `encrypt` that failed for
+        // *any* reason (a broken `check_lengths`, an allocation failure, an implementation
+        // that always errored) satisfied this test with zero assertions executed. The arm
+        // therefore asserts the only legitimate cause: the `ultra` witness disagreeing,
+        // which surfaces as `AuthenticationFailed`.
         Err(e) => {
+            if !cfg!(feature = "ultra") {
+                panic!("encrypt refused a legitimate small message outside `ultra`: {e:?}");
+            }
+            assert!(
+                matches!(e, xchacha20_blake3_siv::Error::AuthenticationFailed),
+                "the `ultra` refusal must be the independent implementation disagreeing, \
+                 not {e:?}"
+            );
             eprintln!(
                 "encrypt refused to issue a tag ({e:?}): the independent implementation \
                  disagreed, which is the countermeasure this test is paired with"
