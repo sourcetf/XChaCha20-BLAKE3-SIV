@@ -238,11 +238,13 @@ guarantees are stated for release.
 
 ### 2.7 riscv64: executed now, and what the old "hang" actually was
 
-The link recipe is verified and the whole suite runs under `qemu-riscv64` — 61/61 lib, 15/15
-security, 10/10 locked, 8/8 ultra, 6/6 differential, 3/3 timing (383 s here) and every other
-target. The old note in `.cargo/config.toml` ("linking does not work … the scalar fallback is
-therefore not executed here") was wrong and was corrected in an earlier round; what this round
-found is that the one test that still seemed to hang was not an emulator interaction at all.
+The link recipe is verified and the suite runs under `qemu-riscv64` — 61/61 lib, 15/15
+security, 10/10 locked, 8/8 ultra, 6/6 differential, 3/3 timing (383 s here), and the other
+binaries as well (`ctgrind` is the one exclusion, as on every cross target: it shells out to
+valgrind, which cannot run under qemu). The old note in `.cargo/config.toml` ("linking does not
+work … the scalar fallback is therefore not executed here") was wrong and was corrected in an
+earlier round; what this round found is that the one test that still seemed to hang was not an
+emulator interaction at all.
 
 `tests/ultra.rs::every_layer_answers_correctly_in_the_ultra_build` asks for OS entropy, and the
 `libc` crate declares musl's `getrandom` as a **weak** symbol. A weak undefined reference does not
@@ -352,8 +354,9 @@ record skips, not passes — and the reports' own measurements are the substitut
 * CI at the commit that carries this document: the `CI` workflow green; `Formal verification`
   and `Deep checks` green at the two commits before it and re-running for it (their results are
   visible on the commit page).
-* riscv64: the fourteen test binaries executed under `qemu-riscv64` (all green, `timing`
-  included), and the target now runs in `verify.sh --cross-exec` and the `cross-exec` job.
+* riscv64: the test binaries executed under `qemu-riscv64` (all green, `timing` included,
+  `ctgrind` excluded for valgrind as on every cross target), and the target now runs in
+  `verify.sh --cross-exec` and the `cross-exec` job.
 
 ## 4. What would settle the items left open
 

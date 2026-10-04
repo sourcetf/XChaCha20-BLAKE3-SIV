@@ -44,11 +44,14 @@ linker = "rust-lld"
 #     static-PIE link starts and then segfaults under qemu-user (measured both
 #     ways; the non-PIE binary runs).
 #
-# With those, all fourteen test binaries link and the whole suite runs under
-# `qemu-riscv64`, including `tests/ultra.rs` (8/8, the one that used to hang) and
-# `timing` (3/3, 383 s here).  One more flag is required because of a weak-symbol
-# interaction, and it is the reason the earlier revision of this comment reported a
-# hang instead:
+# With those, all fourteen test binaries link, and twelve of them run under
+# `qemu-riscv64` (plus `timing`, 3/3 in 383 s here).  `ctgrind` is the one
+# exclusion, for the same reason it is excluded on every cross target: it shells
+# out to valgrind, which cannot run under qemu.  The executed set includes
+# `tests/ultra.rs` (8/8, the one that used to hang) and `tests/locked.rs`
+# (10/10, skipping the locking cases as unsupported on this architecture).  One
+# more flag is required because of a weak-symbol interaction, and it is the reason
+# the earlier revision of this comment reported a hang instead:
 #
 #   * `-C link-arg=--undefined=getrandom`.  The `libc` crate declares musl's
 #     `getrandom` **weak**, and a weak undefined reference does not make the
