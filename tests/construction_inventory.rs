@@ -92,16 +92,22 @@ fn the_primitive_uses_are_the_ones_the_analysis_covers() {
         );
     }
 
-    // A floor on the *table*, so shrinking the inventory itself cannot go unnoticed. It is
-    // deliberately computed from `PRIMITIVE_CALLS` and not from the source: the per-call
-    // `assert_eq!(found, expected)` above already fails if a call site is deleted from
-    // `src/lib.rs`, so a source-reading floor here would be redundant, and an earlier comment
-    // claiming this "stops deleting the functions from making the assertions vacuous" was
-    // describing work the loop above does. What this line actually guards is the table.
+    // The table is pinned by two equalities, not a floor. `>= 15` let a single-count row
+    // be deleted silently: the row's own `assert_eq!` then never ran, and the remaining
+    // rows still cleared the floor (the counts sum to 17 today, so even a two-count row
+    // could go without crossing it). Removing any row now fails here, and updating these
+    // numbers is the deliberate act the failure message asks for.
+    let names: Vec<&str> = PRIMITIVE_CALLS.iter().map(|(name, _)| *name).collect();
     let total: usize = PRIMITIVE_CALLS.iter().map(|(_, n)| n).sum();
-    assert!(
-        total >= 15,
-        "the inventory table shrank below the recorded total: {total}"
+    assert_eq!(
+        PRIMITIVE_CALLS.len(),
+        8,
+        "the inventory has {} rows, not the recorded 8: {names:?}",
+        PRIMITIVE_CALLS.len()
+    );
+    assert_eq!(
+        total, 17,
+        "the inventory's counts sum to {total}, not the recorded 17: {names:?}"
     );
 }
 
@@ -204,5 +210,19 @@ fn the_derivation_nonce_does_not_use_xchacha20s_nul_padding() {
     assert!(
         body.contains("chacha20_keystream_raw(&subkey, 1, &subkey_nonce, &mut block1);"),
         "the encryption-seed block no longer uses counter 1 with that nonce"
+    );
+    // Both halves of the XChaCha20-style derivation the S2 prose depends on: the subkey
+    // comes from `nonce[0..16]`, and the continuation nonce's second half from
+    // `nonce[16..24]`. Without these the test held for a `nonce[8..24]` subkey input
+    // (which would evaluate ChaCha20 at the same domain point XChaCha20-Poly1305 uses)
+    // and for a stale second half, while its four other assertions stayed green.
+    assert!(
+        body.contains("let mut subkey = hchacha20(key, &nonce[0..16].try_into().unwrap());"),
+        "the subkey must come from `HChaCha20(key, nonce[0..16])` -- that input slice is \
+         what the different-ChaCha20-domain-point argument is about"
+    );
+    assert!(
+        body.contains("subkey_nonce[4..12].copy_from_slice(&nonce[16..24]);"),
+        "the continuation nonce's second half must come from `nonce[16..24]`"
     );
 }

@@ -11,8 +11,10 @@
 //! Compiled only under `cfg(kani)`, so they add nothing to normal builds or
 //! to `cargo test`.
 //!
-//! Each harness states a property that must hold for *all* inputs in its
-//! symbolic domain — not just the concrete values used by the unit tests.
+//! Each harness states a property, and its own doc says what domain it quantifies
+//! over: most take symbolic inputs, while the KAT anchors, the constant properties
+//! and the sequencing experiments run concrete values and say so rather than
+//! implying full coverage.
 //!
 //! # Sizing the harnesses (why some bounds look arbitrary)
 //!
@@ -85,11 +87,14 @@ use core::sync::atomic::{AtomicUsize, Ordering};
 
 // ── Zeroization ───────────────────────────────────────────────────────
 
-/// `zeroize_slice` must clear every byte of the slice it is given, for every
-/// possible misalignment of the slice start.
+/// `zeroize_slice` must clear every byte of the slice it is given.
 ///
-/// Regression guard: the previous implementation began its chunked loop at the
-/// offset of the first aligned byte, leaving the unaligned prefix intact.
+/// This harness covers the short-length path only: `len` is at most 5, so
+/// `zeroize_raw`'s `usize`-chunk loop never runs and the slicing-misalignment
+/// regression cannot show here. The misaligned-start case — where the previous
+/// implementation began its chunked loop at the first aligned byte and left the
+/// prefix intact — is `zeroize_slice_clears_unaligned_window` below, which sweeps
+/// all eight offsets.
 #[kani::proof]
 #[kani::unwind(8)]
 fn zeroize_slice_clears_all_bytes() {
@@ -116,9 +121,11 @@ fn zeroize_slice_clears_all_bytes() {
 /// backing keeps every loop under the `unwind(24)` bound.  With a 32-byte
 /// backing the suffix loop could run 32 times and CBMC reported a *spurious*
 /// "unwinding assertion loop 2" failure rather than a counterexample.  Nothing
-/// is lost by shrinking it: `zeroize_slice` writes in `usize` (8-byte) chunks,
-/// and `len` still reaches 15 with `off` sweeping all eight misalignments, so
-/// both the unaligned-prefix path and the multi-chunk path are exercised.
+/// is lost by shrinking it: `off` still sweeps all eight misalignments and `len`
+/// still reaches 15, so a window with `off > 0` exercises the byte-prefix path
+/// and (when `len >= 8 + off`) one full `usize` chunk write.  Two or more chunk
+/// stores do not fit at this size; the multi-chunk iteration is covered by the
+/// 64-byte unit test in `lib.rs`, not here.
 #[kani::proof]
 #[kani::unwind(24)]
 fn zeroize_slice_clears_unaligned_window() {
@@ -153,10 +160,12 @@ fn zeroize_slice_clears_unaligned_window() {
 // ── ChaCha20 stream ───────────────────────────────────────────────────
 //
 // Design note.  Measured on this machine, one concrete `chacha20_block` costs
-// ~320 s of CBMC time (the 20-round permutation alone is ~62 s, and the three
-// `zeroize_array` calls in it are ~29 s each).  Any harness that calls the real
-// permutation more than once therefore cannot finish in a normal verification
-// loop, and one that makes the key/counter symbolic does not finish at all.
+// ~320 s of CBMC time (the 20-round permutation alone is ~62 s, and each
+// 64-byte `zeroize_array` is charged at ~29 s; `chacha20_block` contains two of
+// them, and `chacha20_apply` adds the per-block keystream wipe).  Any harness
+// that calls the real permutation more than once therefore cannot finish in a
+// normal verification loop, and one that makes the key/counter symbolic does not
+// finish at all.
 //
 // That is a tool limitation, not a property of the code, so these harnesses are
 // split along the line where the *interesting* logic actually lives:
@@ -172,10 +181,13 @@ fn zeroize_slice_clears_unaligned_window() {
 //   encodes its own arguments, so the harness can assert the exact counter
 //   sequence in seconds instead of hours.
 
-/// A stand-in for `chacha20_block` that stamps its arguments into the output.
+/// A stand-in for `chacha20_block` that stamps part of its arguments into the output.
 ///
 /// It is deliberately not a real cipher: its only job is to let a harness observe
-/// which `(key, counter, nonce)` each output block was produced from.
+/// the counter a block was produced from.  Bytes 0..4 receive the counter, 4..8
+/// `nonce[0..4]`, 8..12 `nonce[8..12]`, 12..16 `key[0..4]` and 16..20
+/// `key[28..32]`; the remaining 44 bytes are zero, so key and nonce bytes outside
+/// those fields are not observable through it.
 fn stub_chacha20_block(key: &[u8; 32], counter: u32, nonce: &[u8; 12]) -> [u8; 64] {
     let mut out = [0u8; 64];
     out[0..4].copy_from_slice(&counter.to_le_bytes());
@@ -212,6 +224,10 @@ fn noop_zeroize_array<T>(_value: &mut T) {}
 /// field back is enough to identify which counter produced each block.  That
 /// keeps the harness free of any comparison loop (and therefore of the
 /// `memcmp`/unwind interaction described above).
+///
+/// The key, nonce, start and length are concrete literals: this is a bounded
+/// experiment on the wrapper's sequencing, not a statement over all keys, and
+/// the permutation itself is stubbed out (the KATs pin the real one).
 #[kani::proof]
 #[kani::stub(chacha20_block, stub_chacha20_block)]
 #[kani::stub(zeroize_array, noop_zeroize_array)]
@@ -289,8 +305,10 @@ fn chacha20_keystream_involution_partial_blocks() {
 /// takes several minutes; it is kept because it is the only formal anchor for
 /// the round function and the output-word selection.
 #[kani::proof]
-// `hex32`/`hex16` decode 32/16 bytes with a 2-iteration-per-byte loop, and the
-// HChaCha20 core runs 10 double-rounds, so the default bound is far too low.
+// `hex32`/`hex16` decode 32/16 bytes one output byte per loop iteration (two
+// `nib` calls in the body), the HChaCha20 core runs 10 double-rounds, and its
+// output loop runs 8 times, so the default bound is far too low; 40 covers the
+// longest loop (32 iterations, in `hex32`) with room for its exit.
 #[kani::unwind(40)]
 fn hchacha20_matches_draft_vector() {
     let key = hex32("000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f");
@@ -337,7 +355,8 @@ fn hchacha20_matches_draft_vector() {
 //   `tests/differential_reference.rs` replays it across every internal length
 //   boundary.  The reference self-checks against the published RFC 8439 /
 //   HChaCha20 and BLAKE3-official vectors before it emits anything.
-// * `test_nonce_misuse_resistance`, `test_key_commitment`,
+// * `test_message_swap_under_a_reused_nonce_is_rejected`,
+//   `test_tag_changes_when_only_the_key_changes`,
 //   `test_decrypt_does_not_leak_plaintext_on_failure`,
 //   `test_detached_rejects_tampering_and_wipes`, the `test_avalanche_*`
 //   diffusion checks, and the construction pins
@@ -428,6 +447,10 @@ fn max_msg_size_fits_in_the_block_counter() {
 /// logically implied by it; it is kept because it states the *reason* the bound
 /// exists in terms of the counter, so a reader who changes `MAX_MSG_SIZE` sees
 /// both the arithmetic and the boundary in one place.
+///
+/// The `as usize` below (like the one in `check_lengths_boundary_is_exact`)
+/// assumes a 64-bit `usize`; on a 32-bit target the product truncates and the
+/// harness fails at an assertion rather than passing silently.
 #[kani::proof]
 fn max_msg_size_boundary_matches_counter_capacity() {
     let blocks = (u32::MAX as u64) + 1;
@@ -486,9 +509,14 @@ fn max_msg_size_boundary_matches_counter_capacity() {
 //     on a proof.  (A harness that ran it is impossible: real BLAKE3 lowers to
 //     inline asm, which CBMC rejects.)
 //   * The stub verifies the *shape* of each call, by asserting on the arguments
-//     at the call site.  A wrong-but-well-shaped call — right layout, wrong
-//     secret fed into the key parameter — is caught only because the model now
-//     folds `key` into its output; before that fix it was invisible.
+//     at the call site.  The model also folds `key` into its output, which is what
+//     lets the symbolic `tag_changes_when_the_key_changes` see a `derive_tag` that
+//     ignores a caller-visible key.  It cannot say *which* secret reaches which
+//     internal call — the symbolic keys are interchangeable, so a swapped
+//     `k_in`/`k_out` inside `derive_tag` passes every symbolic harness (the
+//     concrete `tag_matches_the_model_on_a_concrete_input` is the one that catches
+//     it), and `derive_enc`'s key choice is never compared against a model
+//     evaluation at any call site here.
 
 /// Fixed width of the inner hash's head: domain word, nonce, and the two
 /// little-endian lengths.  Must match `derive_tag`.
@@ -528,12 +556,15 @@ static MODEL_BLAKE3_CALLS: AtomicUsize = AtomicUsize::new(0);
 /// What the model does preserve, and what the harnesses below therefore really
 /// test:
 ///
-///   * **The key is bound.**  Its bytes are folded into the output, so a call
-///     site passing the wrong key changes the result.  This is load-bearing: an
-///     earlier version of this function accepted `key` and never read it, so
-///     `derive_enc` passing `k_in` where `enc_seed` belongs would have passed
-///     every harness in this shard.  The parameter is now used, and the doc
-///     bullets that claimed key binding when there was none are gone.
+///   * **The key reaches the output.**  Its bytes are folded into the model, so a
+///     harness that varies the caller-visible key sees the result move.  This is
+///     load-bearing: an earlier version accepted `key` and never read it, so
+///     `tag_changes_when_the_key_changes` could not have noticed a `derive_tag`
+///     that ignored its key arguments.  What folding does *not* establish is that
+///     the right secret reaches each internal call — the symbolic keys are
+///     interchangeable, so a swapped `k_in`/`k_out` passes the symbolic
+///     harnesses, and `derive_enc`'s key choice is never compared with a model
+///     evaluation here.  See the shard's "two further limits" note above.
 ///   * **Any single-byte edit to the input is visible.**  Each input byte is
 ///     XORed into one accumulator slot, and the output byte at that slot is a
 ///     function of it, so changing one byte by a nonzero amount changes the
@@ -674,19 +705,24 @@ fn model_blake3_keyed_multi(key: &[u8; 32], parts: &[&[u8]], out: &mut [u8]) {
 /// ```
 ///
 /// `k_in`, `k_out` and `nonce` are symbolic, so this holds for every possible
-/// secret material.  Because the model is injective in each input byte, a field
-/// dropped from either hash — either length, the domain separator, the digest —
-/// changes the result and fails the assertion.  The stub also asserts that the
-/// inner head starts with `DOM_PRE` and the outer input with `DOM_TAG`, and that
-/// the outer input is exactly the 32-byte digest: that is what pins the removal
-/// of the master key from the hash input and the two-level shape.
+/// secret material.  The stub checks the shape of each call it receives — domain
+/// prefixes, the head length, both encoded lengths against the actual parts, and
+/// the output widths — so a length, domain separator or digest dropped from
+/// either hash fails those assertions.  The nonce bytes themselves are not read
+/// back by the stub (the shard note above says the same); the concrete harness
+/// below reconstructs the head including the nonce.  The outer input being
+/// exactly `DOM_TAG || X` is what pins the master key's removal from the hash
+/// input and the two-level shape.
 ///
-/// **The harness, not only the stub, carries the assertion.** A stub's `assert!`s
-/// run only if the stubbed function is *called*, so a `derive_tag` that returned a
-/// constant without reaching the hash would satisfy a harness that only inspects
-/// the return value — which is what the earlier version did. The harness therefore
-/// requires the hash to have been reached, through the call counter the stub
-/// increments.
+/// **The harness keeps the stub's assertions from being skipped.** A stub's
+/// `assert!`s run only if the stubbed function is *called*, so a `derive_tag` that
+/// returned a constant without reaching the hash would satisfy a harness that only
+/// inspects the return value — which is what the earlier version did. The harness
+/// therefore requires the hash to have been reached, through the call counter the
+/// stub increments, and adds a nonzero-output smoke check. What its own assertion
+/// cannot do is compare the tag against a reconstruction; that is
+/// `tag_matches_the_model_on_a_concrete_input` below, and the layout catches above
+/// all live in the stub's per-call assertions.
 ///
 /// **Two kinds of shape, doing two different jobs.** The four symbolic shapes
 /// exercise the four input combinations under the stub's per-call assertions
@@ -930,11 +966,12 @@ fn derive_enc_reads_every_tag_byte() {
 /// A change to the associated data or to the message must change the tag, for
 /// **every** byte position of either.
 ///
-/// Complements `tag_is_keyed_hash_of_the_whole_context`, which checks the
-/// concatenation is right; this checks that no byte is dropped on the way in.
+/// Complements `tag_is_keyed_hash_of_the_whole_context`, which pins the call
+/// layout and the output widths; this checks that no AAD or message byte is
+/// dropped on the way in.
 /// The four-byte AAD and four-byte message keep every position beyond a naive
 /// 1-byte prefix. (An earlier revision of this line said "three-byte and
-/// four-byte inputs"; the three-byte one is in
+/// four-byte inputs"; the three-byte inputs are in
 /// `tag_changes_when_the_key_changes`, not here.)
 #[kani::proof]
 #[kani::stub(blake3_keyed_multi, model_blake3_keyed_multi)]

@@ -127,8 +127,10 @@ fn strip_comments(text: &str) -> String {
 /// Every brace-matched block in the non-test source that starts at `needle`,
 /// `needle` included.
 ///
-/// Used to pull a block of the source out for assertions about its shape: the two
-/// `accept_or_reject` definitions, and the two `hardened` gate blocks.
+/// Used to pull a block of the source out for assertions about its shape: the one
+/// `accept_or_reject` definition (an earlier version of this comment said "the two",
+/// which was true before the `#[cfg]`-selected bodies were merged; `definitions()`
+/// asserts there is exactly one) and the two `hardened` gate blocks.
 fn brace_blocks(needle: &str) -> Vec<String> {
     let text = non_test_source();
     let mut out = Vec::new();
@@ -263,6 +265,10 @@ fn the_suppressed_function_contains_only_the_decision() {
          branch is on a constant"
     );
 
+    // Keywords are matched with their trailing space. A spelling without one (`if(`,
+    // `while(`) would slip past this scan, which is a known limit of reading source: the
+    // mechanical evidence is ctgrind, which sees the compiled form, and `cargo fmt
+    // --check` is a CI gate whose rustfmt always writes the space.
     let branches = code.matches("if ").count();
     assert_eq!(
         branches, 2,
@@ -376,6 +382,16 @@ fn the_hardened_second_gate_is_recomputed() {
             1,
             "the second gate must be built from one `gate_pair` computation:\n{block}"
         );
+        // And the pair really is the block's *return*: the mutation this catches is
+        // `(first, first)`, which reuses the first gate as the second — every count
+        // above still holds under it (the `second` bindings and the `&`s remain), so a
+        // fingerprint that only requires the two names to appear nearby would pass it.
+        assert_eq!(
+            block.matches("(first, second)").count(),
+            1,
+            "the gate block must return `(first, second)`, not a pair built from one gate \
+             twice:\n{block}"
+        );
     }
 
     // And the duplication is real duplication: the first gate's expression appears
@@ -389,8 +405,14 @@ fn the_hardened_second_gate_is_recomputed() {
     );
 }
 
-/// The second gate compares through two *differently written* comparisons, in every
-/// configuration — not only under `dual-mac`.
+/// The second gate compares through two *differently written* comparisons, wherever
+/// the gates are built — not only under `dual-mac`.
+///
+/// The name used to say "in every configuration", which overclaimed: this test reads
+/// source text and so also runs under `--no-default-features`, where
+/// `second_gate_comparison` and `ct_eq_independent` are not compiled at all. That build
+/// is the documented single-gate baseline and has no gates for this assertion to be
+/// about, so the claim is scoped to the configurations that build them.
 ///
 /// This is a boundary that was wrong once and is cheap to keep right: the differently written
 /// comparison (an 8-byte fold into a `u64`, against `subtle`'s per-byte loop) used to be gated
@@ -404,7 +426,7 @@ fn the_hardened_second_gate_is_recomputed() {
 /// to live in a `#[cfg]`-selected arm, and a `#[cfg]` is exactly what a build configuration
 /// silently drops.
 #[test]
-fn the_second_gate_uses_two_comparison_shapes_in_every_configuration() {
+fn the_second_gate_uses_two_comparison_shapes_wherever_the_gates_are_built() {
     let _ = non_test_source(); // keep the call graph honest if this test is edited
     let body = brace_blocks("fn second_gate_comparison(");
     assert_eq!(body.len(), 1, "one `second_gate_comparison` expected");
@@ -419,11 +441,25 @@ fn the_second_gate_uses_two_comparison_shapes_in_every_configuration() {
         "the fold comparison must be unconditional -- a `#[cfg]` here is how the default build \
          lost this defence before:\n{body}"
     );
-    assert!(
-        body.contains("plain & also"),
-        "the independent fold must be ANDed into the returned `Choice`, not merely computed: \
-         keeping the `let also = ...` line but returning `plain` alone passed this test \
-         before:\n{body}"
+    // The AND must be the function's *return expression*, not a discarded computation:
+    // an earlier version of this assertion only searched for the substring `plain & also`,
+    // so `let _ = plain & also; plain` — the fold computed and thrown away — passed it.
+    // Compare the last non-empty line of the body (comments and the closing brace
+    // removed) instead.
+    let code = strip_comments(body);
+    let last = code
+        .trim_end()
+        .strip_suffix('}')
+        .expect("second_gate_comparison must end in a closing brace")
+        .lines()
+        .rev()
+        .find(|l| !l.trim().is_empty())
+        .map(str::trim)
+        .unwrap_or("");
+    assert_eq!(
+        last, "plain & also",
+        "the independent fold must be the returned `Choice`, not merely computed: keeping \
+         the `let also = ...` line but returning `plain` alone passed this test before:\n{body}"
     );
     assert!(
         !body.contains("subtle::Choice::from(1)"),
@@ -619,6 +655,16 @@ fn the_decision_outcome_is_fail_closed() {
         2,
         "each decrypt entry point must compare the witness tag against the computed tag"
     );
+    // `encrypt` has no `computed_tag` in scope: its cross-check compares the witness tag
+    // against the tag it just derived (`&tag`). Pinned separately, because the count above
+    // is about the two decrypt paths and a `Choice::from(1)` placeholder here would not
+    // change it. The comparison, not the binding's exact spelling, is what is required.
+    assert_eq!(
+        non_test.matches("witness_tag.ct_eq(&tag)").count(),
+        1,
+        "`encrypt` must build its witness agreement from the witness tag and its own tag, \
+         not a placeholder"
+    );
     // The two decrypt paths compare the witness plaintext against the recovered one in
     // different shapes: `decrypt` (slices) and `decrypt_in_place_detached` (a slice
     // against the caller's buffer). One of each, so a `Choice::from(1)` rewrite that
@@ -646,9 +692,16 @@ fn the_decision_outcome_is_fail_closed() {
         1,
         "`encrypt` must cross-check the tag with the independent implementation"
     );
+    // The declaration is `#[cfg(feature = "ultra")] mod witness;`: a bare
+    // `LIB.contains("mod witness;")` held in every build while proving nothing about the
+    // `ultra` build (and would also hold if the module were compiled into the opt-out
+    // baseline, changing the documented feature set). Pin the gated declaration, which is
+    // the text the `ultra` build compiles.
     assert!(
-        LIB.contains("mod witness;"),
-        "the independent implementation must be compiled in"
+        LIB.contains("#[cfg(feature = \"ultra\")]\nmod witness;"),
+        "the independent implementation must be declared as the `ultra`-gated module \
+         `witness`: a bare `mod witness;` would compile it into every build, and a missing \
+         gate would silently move the feature boundary"
     );
     // `encrypt`'s cross-check goes through the same function rather than comparing and
     // branching at its own call site: as an `if !bool::from(..ct_eq(..))` it is a branch on
@@ -661,7 +714,10 @@ fn the_decision_outcome_is_fail_closed() {
         "`ultra`'s encrypt-side cross-check must go through the one suppressed decision"
     );
     assert!(
-        !non_test.contains("if !bool::from(witness::encrypt_tag"),
-        "the witness agreement must not be branched on at the call site"
+        !non_test.contains("bool::from(witness::"),
+        "the witness agreement must not be branched on at the call site, in any spelling: \
+         `bool::from` on a witness result is a branch on the tag, which no suppression entry \
+         covers (valgrind reported it: one report inside `encrypt`, `tools/ctgrind.sh \
+         --features ultra`)"
     );
 }

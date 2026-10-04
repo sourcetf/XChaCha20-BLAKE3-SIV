@@ -15,10 +15,10 @@
 //! **Bounds on the coverage, stated here rather than assumed.** The full-byte
 //! sweeps below stop at `msg_len <= 300` and `aad_len <= 130` (their tests say
 //! why); above those sizes the coverage is the sampled differential
-//! (`tools/broad_differential.py`) and the fuzzer, not this file. And the
-//! large-size fixture replays only `encrypt`/`decrypt` against its digests —
-//! the detached and in-place entry points are exercised at the small sizes, not
-//! at 1 MiB.
+//! (`tools/broad_differential.py`) and the fuzzer, not this file. The large-size
+//! fixture replays both call shapes against its digests — the allocating
+//! `encrypt`/`decrypt` pair and the detached in-place pair — at the sizes where
+//! the tag's concatenation window changes.
 
 use xchacha20_blake3_siv::{decrypt, encrypt, TAG_LEN};
 
@@ -136,8 +136,18 @@ fn parse_fixture() -> Fixture {
         .try_into()
         .expect("24-byte nonce");
 
-    assert!(!rows.is_empty(), "fixture has no vectors");
-    assert!(rows.len() >= 40, "fixture lost vectors: {}", rows.len());
+    // The exact count, not a floor. `>= 40` was satisfied after deleting any nine rows,
+    // and deleting a row removes its boundary from the coverage while the test stays
+    // green; 49 is what `tools/gen_test_vectors.py --check` reports for the checked-in
+    // fixture. Regenerating the fixture with a different set is meant to require
+    // editing this line deliberately.
+    assert_eq!(
+        rows.len(),
+        49,
+        "the differential fixture changed size: {} rows (49 are checked in; update this \
+         line deliberately together with tools/gen_test_vectors.py)",
+        rows.len()
+    );
 
     Fixture { key, nonce, rows }
 }
@@ -249,10 +259,16 @@ fn differential_every_position_is_authenticated() {
             );
         }
     }
-    assert!(
-        swept_rows >= 10 && swept_positions > 0,
-        "the sweep skipped everything ({swept_rows} rows, {swept_positions} positions): the \
-         fixture no longer has rows under the size cap"
+    // Exact, not a floor: `>= 10` and `> 0` were satisfied after deleting rows, and the
+    // point of counting is that the sweep covers the fixture's below-cap rows in full.
+    // The numbers come from the checked-in fixture under this test's cap (40 of its 49
+    // rows, 5871 ciphertext+tag positions): a fixture regeneration that changes either
+    // should fail here.
+    assert_eq!(
+        (swept_rows, swept_positions),
+        (40, 5871),
+        "the swept set changed ({swept_rows} rows, {swept_positions} positions): the cap \
+         or the fixture moved, so update these counts deliberately"
     );
 }
 
@@ -283,10 +299,13 @@ fn differential_every_aad_bit_is_authenticated() {
             );
         }
     }
-    assert!(
-        swept_rows >= 5,
-        "the AAD sweep covered only {swept_rows} non-empty rows: the fixture no longer has \
-         rows under the size cap"
+    // Exact, as above: 16 non-empty AAD rows below the cap (the fixture's non-empty AADs
+    // top out at 130). A floor of 5 would survive eleven rows being dropped from the
+    // sweep.
+    assert_eq!(
+        swept_rows, 16,
+        "the AAD sweep covered {swept_rows} non-empty rows, not the fixture's 16 below the \
+         cap: update the count deliberately if the fixture changed"
     );
 }
 
@@ -320,18 +339,23 @@ fn differential_large_vectors_match_reference() {
         let digest = hex_decode(it.next().expect("digest"));
         rows.push((msg_len, aad_len, digest));
     }
-    // The fixture holds nine vectors. The floor is the count *and* the two sizes that
-    // straddle `TAG_CONCAT_MIN`/`TAG_CONCAT_LIMIT`, so dropping rows (or the boundary
-    // pair) fails here instead of shrinking the test silently.
+    // The fixture holds nine vectors. The count is exact and the two sizes that
+    // straddle `TAG_CONCAT_MIN`/`TAG_CONCAT_LIMIT` are required, so dropping rows (or
+    // the boundary pair) fails here instead of shrinking the test silently.
     let sizes: Vec<usize> = rows.iter().map(|(m, _, _)| *m).collect();
+    assert_eq!(
+        rows.len(),
+        9,
+        "the large fixture changed size: {} rows at {sizes:?} (9 are checked in; update \
+         this line deliberately together with tools/gen_test_vectors.py)",
+        rows.len()
+    );
     assert!(
-        rows.len() >= 9
-            && sizes.contains(&1999)
+        sizes.contains(&1999)
             && sizes.contains(&2000)
             && sizes.contains(&65488)
             && sizes.contains(&65489),
-        "large fixture lost vectors: {} at {sizes:?}",
-        rows.len()
+        "large fixture lost a boundary vector: {sizes:?}"
     );
 
     for (msg_len, aad_len, want) in &rows {
@@ -355,5 +379,34 @@ fn differential_large_vectors_match_reference() {
             pt.as_slice(),
             "roundtrip at msg_len={msg_len}"
         );
+
+        // And the detached in-place shape at the same sizes, against the same digest:
+        // these are the rows where the tag's concatenation window changes, so a
+        // coverage claim about them that exercised only the allocating entry point
+        // would miss exactly the call shape the in-place API uses.
+        let mut buf = pt.clone();
+        let in_place_tag =
+            xchacha20_blake3_siv::encrypt_in_place_detached(&key, &nonce, &aad, &mut buf).unwrap();
+        assert_eq!(
+            in_place_tag, tag,
+            "detached tag differs from the allocating one at msg_len={msg_len}"
+        );
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(&buf);
+        hasher.update(&in_place_tag);
+        assert_eq!(
+            hasher.finalize().as_bytes().as_slice(),
+            want.as_slice(),
+            "detached digest mismatch at msg_len={msg_len} aad_len={aad_len}"
+        );
+        xchacha20_blake3_siv::decrypt_in_place_detached(
+            &key,
+            &nonce,
+            &aad,
+            &mut buf,
+            &in_place_tag,
+        )
+        .unwrap();
+        assert_eq!(buf, pt, "detached roundtrip at msg_len={msg_len}");
     }
 }

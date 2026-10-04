@@ -58,25 +58,32 @@ use crate::{DOM_ENC, DOM_PRE, DOM_TAG, NONCE_LEN, SUBKEY_DOMAIN, TAG_LEN};
 
 /// Volatile-zero a slice.
 ///
-/// The witness wipes every key-derived buffer it allocates or is handed, and `ultra` does not
-/// count cost, so this is applied liberally. That now includes the primitive-internal state:
-/// `block`'s and `hchacha20`'s `s`/`v` (the key words and the permutation state), `compress`'s
-/// `state`/`m`, and the compression outputs in `Output::chaining_value`/`root_output_bytes`.
-/// An earlier version of this comment disclosed those as a gap — the crate's own
-/// `chacha20_block`/`hchacha20` wipe theirs — and it is closed here rather than left to the
+/// The witness wipes every key-derived buffer it names, and `ultra` does not count cost, so
+/// this is applied liberally. That includes the primitive-internal state: `block`'s and
+/// `hchacha20`'s `s`/`v` (the key words and the permutation state) and the 4-byte load/output
+/// copies around them, `compress`'s `state`/`m`, the compression outputs in
+/// `Output::chaining_value`/`root_output_bytes`, and the streaming locals in
+/// `ChunkState::update`/`Hasher::update`/`add_chunk_cv`/`finalize_xof`. `Output` has a `Drop`
+/// that wipes its key CV and its message block, so the node built by
+/// `parent_output(..).chaining_value()` — which no caller names — is zeroed on the way out.
+/// An earlier version of this comment disclosed several of these as a gap (the crate's own
+/// `chacha20_block`/`hchacha20` wipe theirs); they are closed here rather than left to the
 /// `scrub_stack()` the entry points run afterwards.
 ///
-/// What is still *not* covered, honestly: a value returned by value (a `[u32; 8]` CV, the
-/// `[u8; 32]` from `hchacha20`) leaves a return temporary this function cannot name, exactly
-/// as `src/lib.rs::derive_enc`'s doc describes for its own 44-byte aggregate. The construction
-/// buffers are written through caller slices for that reason; these small primitive returns
-/// are not, so `scrub_stack` remains the cover for them.
+/// What is still *not* covered, honestly: a value returned by value leaves a return temporary
+/// this function cannot name -- a `[u32; 8]` CV, the `[u8; 32]` from `hchacha20`, and the
+/// 65-byte tags `tag`/`decrypt`/`encrypt_tag` return, exactly as `src/lib.rs::derive_enc`'s
+/// doc describes for its own 44-byte aggregate. The construction buffers are written through
+/// caller slices for that reason; the caller (`src/lib.rs`) wipes its own copies of the tags,
+/// and `scrub_stack` remains the cover for the return slots themselves.
 ///
 /// This is also what keeps `tools/ctgrind.sh` quiet: the first version of this module left its
 /// BLAKE3 chaining values in a `Vec<[u32; 8]>`, and memcheck reported a conditional jump in
 /// glibc's `free` — the freed chunk's payload held poisoned data, and the allocator reads part
 /// of it. Wiping before the buffer is released is both correct hygiene and what removes the
-/// report.
+/// report. The CV stack reserves BLAKE3's maximum tree depth up front so it never reallocates:
+/// a reallocating `Vec` frees a block whose live elements were copied out, and no wipe in this
+/// module could reach that block.
 #[inline(never)]
 fn wipe<T>(value: &mut T) {
     let bytes = core::mem::size_of::<T>();
@@ -107,16 +114,23 @@ const CHACHA_CONST: [u32; 4] = [0x61707865, 0x3320646e, 0x79622d32, 0x6b206574];
 fn block(key: &[u8; 32], counter: u32, nonce: &[u8; 12]) -> [u8; 64] {
     let mut s = [0u32; 16];
     s[0..4].copy_from_slice(&CHACHA_CONST);
+    // The key and nonce words are assembled field by field rather than through a
+    // `[u8; 4]` temporary: a 4-byte copy of key bytes is a thing a wipe can name, and in
+    // a loop over the whole message (one block per 64 bytes) wiping each one measured
+    // ~30% of `ultra`'s large-message decryption. Reading the bytes straight into the
+    // `u32` leaves no such copy to wipe; `s`/`v`, which do hold the key words, are wiped
+    // below.
     for i in 0..8 {
-        let mut w = [0u8; 4];
-        w.copy_from_slice(&key[i * 4..i * 4 + 4]);
-        s[4 + i] = u32::from_le_bytes(w);
+        s[4 + i] = u32::from_le_bytes([key[i * 4], key[i * 4 + 1], key[i * 4 + 2], key[i * 4 + 3]]);
     }
     s[12] = counter;
     for i in 0..3 {
-        let mut w = [0u8; 4];
-        w.copy_from_slice(&nonce[i * 4..i * 4 + 4]);
-        s[13 + i] = u32::from_le_bytes(w);
+        s[13 + i] = u32::from_le_bytes([
+            nonce[i * 4],
+            nonce[i * 4 + 1],
+            nonce[i * 4 + 2],
+            nonce[i * 4 + 3],
+        ]);
     }
 
     let mut v = s;
@@ -134,9 +148,15 @@ fn block(key: &[u8; 32], counter: u32, nonce: &[u8; 12]) -> [u8; 64] {
     }
 
     let mut out = [0u8; 64];
+    // Byte-wise, so the keystream word never exists as a named 4-byte temporary: that
+    // shape would need a wipe, and the per-word wipe was the other half of the measured
+    // cost above.
     for i in 0..16 {
-        let w = v[i].wrapping_add(s[i]).to_le_bytes();
-        out[i * 4..i * 4 + 4].copy_from_slice(&w);
+        let x = v[i].wrapping_add(s[i]);
+        out[i * 4] = x as u8;
+        out[i * 4 + 1] = (x >> 8) as u8;
+        out[i * 4 + 2] = (x >> 16) as u8;
+        out[i * 4 + 3] = (x >> 24) as u8;
     }
     // `s` and `v` hold the key words and the key-dependent permutation state; the crate's
     // own `chacha20_block` wipes its equivalents, so this does too (an earlier version of
@@ -186,15 +206,17 @@ fn keystream_xor(key: &[u8; 32], counter: u32, nonce: &[u8; 12], input: &[u8], o
 fn hchacha20(key: &[u8; 32], nonce: &[u8; 16]) -> [u8; 32] {
     let mut s = [0u32; 16];
     s[0..4].copy_from_slice(&CHACHA_CONST);
+    // As in `block`: field by field, so no 4-byte key copy exists to wipe.
     for i in 0..8 {
-        let mut w = [0u8; 4];
-        w.copy_from_slice(&key[i * 4..i * 4 + 4]);
-        s[4 + i] = u32::from_le_bytes(w);
+        s[4 + i] = u32::from_le_bytes([key[i * 4], key[i * 4 + 1], key[i * 4 + 2], key[i * 4 + 3]]);
     }
     for i in 0..4 {
-        let mut w = [0u8; 4];
-        w.copy_from_slice(&nonce[i * 4..i * 4 + 4]);
-        s[12 + i] = u32::from_le_bytes(w);
+        s[12 + i] = u32::from_le_bytes([
+            nonce[i * 4],
+            nonce[i * 4 + 1],
+            nonce[i * 4 + 2],
+            nonce[i * 4 + 3],
+        ]);
     }
 
     let mut v = s;
@@ -318,10 +340,12 @@ fn compress(
         out[i] = state[i] ^ state[i + 8];
         out[i + 8] = state[i + 8] ^ cv[i];
     }
-    // `state` is the keyed CV plus the message words; `m` is the (permuted) message block,
-    // which for the tag passes is plaintext-derived and for the KDF is tag-derived. Both
-    // are key-derived in the sense that matters here, so both are wiped like the crate's
-    // own compression path does not need to (its `blake3` call is a black box).
+    // `state` is the CV followed by the IV, counter, block length and flags, with the
+    // message words mixed in by `round`; `m` is the (permuted) message block. Neither is
+    // "key-derived" in general -- `m` is AAD or plaintext in the tag's passes and a derived
+    // key or the tag in the KDF's -- but message blocks are treated as sensitive here too,
+    // so both are wiped (the `blake3` crate's own compression path is a black box with no
+    // equivalent hook).
     wipe_words(&mut state);
     wipe_words(&mut m);
     out
@@ -341,6 +365,18 @@ struct Output {
     counter: u64,
     block_len: u32,
     flags: u32,
+}
+
+impl Drop for Output {
+    /// The node holds the key CV (`input_cv`, which is the key words for the bottom chunk)
+    /// and a message block (`block_words`, the two child CVs at a parent) for its whole
+    /// life. Wiping on drop covers every node that no call site could wipe itself, including
+    /// the unnamed temporary in `parent_output(..).chaining_value()` and the node
+    /// `Hasher::finalize_xof` replaces on each merge.
+    fn drop(&mut self) {
+        wipe_words(&mut self.input_cv);
+        wipe_words(&mut self.block_words);
+    }
 }
 
 impl Output {
@@ -372,9 +408,12 @@ impl Output {
                 self.flags | ROOT,
             );
             for (word, four) in words.iter().zip(chunk.chunks_mut(4)) {
-                let le = word.to_le_bytes();
-                for (dst, src) in four.iter_mut().zip(le.iter()) {
-                    *dst = *src;
+                // Byte-wise, as in `block`: the word is key-derived, and a named
+                // `[u8; 4]` of it would be a copy to wipe (at a per-word cost). The
+                // `enumerate` keeps the final chunk's short tail working, which a fixed
+                // 0..4 index would not.
+                for (k, dst) in four.iter_mut().enumerate() {
+                    *dst = (*word >> (8 * k)) as u8;
                 }
             }
             // The compression output is the key-derived root block (or a chunk of it).
@@ -437,14 +476,20 @@ impl ChunkState {
     fn update(&mut self, mut input: &[u8]) {
         while !input.is_empty() {
             if self.block_len == BLAKE3_BLOCK {
-                let words = words_from_le_bytes(&self.block);
-                self.cv = first8(&compress(
+                let mut words = words_from_le_bytes(&self.block);
+                // Name the compression output rather than writing
+                // `first8(&compress(..))`: the unnamed `[u32; 16]` temporary would keep the
+                // other eight key-derived words past the statement, where no wipe reaches it.
+                let mut full = compress(
                     &self.cv,
                     &words,
                     self.chunk_counter,
                     BLAKE3_BLOCK as u32,
                     self.flags | self.start_flag(),
-                ));
+                );
+                self.cv = first8(&full);
+                wipe_words(&mut full);
+                wipe_words(&mut words);
                 self.blocks_compressed += 1;
                 self.block = [0u8; BLAKE3_BLOCK];
                 self.block_len = 0;
@@ -467,6 +512,12 @@ impl ChunkState {
         }
     }
 }
+
+/// BLAKE3's maximum tree depth: the reference implementation keeps at most one CV per
+/// level and 2^64 bytes is 2^54 chunks, so 64 is a safe bound for any input. Reserving the
+/// stack up front means it never reallocates -- a reallocating `Vec` frees a block holding
+/// the live chaining values it just copied out, which no wipe here could reach.
+const CV_STACK_RESERVE: usize = 64;
 
 /// Keyed BLAKE3, streaming, with XOF output.
 pub struct Hasher {
@@ -494,7 +545,7 @@ impl Hasher {
         Hasher {
             key_words,
             chunk: ChunkState::new(&key_words, 0, flags),
-            cv_stack: Vec::new(),
+            cv_stack: Vec::with_capacity(CV_STACK_RESERVE),
             flags,
         }
     }
@@ -518,6 +569,9 @@ impl Hasher {
             chunks >>= 1;
         }
         self.cv_stack.push(new_cv);
+        // `new_cv` is a `Copy` copy of the value the stack now owns; wipe this frame's
+        // copy (the caller wipes its own after the call).
+        wipe_words(&mut new_cv);
     }
 
     /// Wipe everything this hasher accumulated, before its buffers are released.
@@ -536,9 +590,11 @@ impl Hasher {
     pub fn update(&mut self, mut input: &[u8]) {
         while !input.is_empty() {
             if self.chunk.len() == BLAKE3_CHUNK {
-                let cv = self.chunk.output().chaining_value();
+                let mut cv = self.chunk.output().chaining_value();
                 let total = self.chunk.chunk_counter + 1;
                 self.add_chunk_cv(cv, total);
+                // The stack owns a copy now; wipe this frame's.
+                wipe_words(&mut cv);
                 self.chunk = ChunkState::new(&self.key_words, total, self.flags);
             }
             let want = BLAKE3_CHUNK - self.chunk.len();
@@ -553,12 +609,11 @@ impl Hasher {
         let mut remaining = self.cv_stack.len();
         while remaining > 0 {
             remaining -= 1;
-            output = parent_output(
-                &self.cv_stack[remaining],
-                &output.chaining_value(),
-                &self.key_words,
-                self.flags,
-            );
+            let mut cv = output.chaining_value();
+            output = parent_output(&self.cv_stack[remaining], &cv, &self.key_words, self.flags);
+            // `parent_output` copied it into the new node; wipe this frame's copy. The
+            // node being replaced is wiped by `Output`'s `Drop`.
+            wipe_words(&mut cv);
         }
         output.root_output_bytes(out);
     }

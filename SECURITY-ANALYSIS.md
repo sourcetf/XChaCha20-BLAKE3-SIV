@@ -549,7 +549,9 @@ they are stated separately:
   second key's tag computation outputs *that same value*, `T₁`. Since `T` is a PRF of `(N, A, M)`
   under `K` (the theorem above), this is a *target* problem, and the number is not a birthday at
   all: the adversary publishes `T` and needs the second key's computation to reproduce it, so the
-  attempt succeeds with probability `2^-520` (a `2^520` search) — unchanged by the chaining-value
+  attempt succeeds with probability `2^-520` per candidate key, and enumerating the whole `2^256`
+  key space succeeds with probability `≈ 2^-264` (the `2^520` search is the tag-*guess* route, not
+  this one) — unchanged by the chaining-value
   correction below, which helps only
   when both sides of a collision are the adversary's to search. (The `T`-coupling makes that
   concrete here: `T` determines the message through the KDF, so a collision found between two
@@ -961,7 +963,9 @@ tag alone. The same argument applies to a multi-chunk input by fixing the subtre
 tail and colliding the prefix subtree's chaining value. This is a *collision* search, not a
 preimage: the adversary needs the two tags to agree *with each other*. A tag that must be hit *as
 given* — a forged tag, or a ciphertext that must open under a second key — is still a target in
-the 520-bit output: each candidate succeeds with probability `2^-520`, so the search costs `2^520`.
+the 520-bit output: each candidate key succeeds with probability `2^-520`, so a full enumeration of
+the `2^256`-key space succeeds with probability `≈ 2^-264` (a tag *guess* is the `2^520` search; a
+key search cannot run more trials than there are keys).
 
 **Consequently, the numbers are these, and the pair (target, birthday) is now written out
 wherever the distinction matters. All of them still carry at least 128 bits of margin.**
@@ -1036,8 +1040,9 @@ looking for "what would settle it" should go.
   merely as hard to double-open as it is to key-search, which is precisely the failure the SIV
   commitment literature (and the 16-byte tags of AES-SIV / AES-GCM-SIV) is about. So the old
   rationale reached the right *decision* — the tag must be wider than 32 bytes — through the
-  wrong *property*: it is the target bound, not a birthday bound, and the number to quote is a
-  `2^-520` per-candidate probability (a `2^520` search), not the `2^260` birthday the width was once
+  wrong *property*: it is the target bound, not a birthday bound, and the number to quote is
+  `2^-520` per candidate key (`≈ 2^-264` over the whole `2^256` key space), not the `2^260` birthday
+  the width was once
   claimed to set.
 * **What the width does *not* buy is collision resistance**, which is `2^128` either way, and
   forgery, which is `2^256` either way (bounded by key search, which no tag length raises). The
@@ -1247,7 +1252,7 @@ refutation, and the status of the attempt.
 | --- | --- | --- | --- |
 | 1 | A1, A2, A3 (PRF security of the primitives) | A distinguisher for ChaCha20 / HChaCha20 / keyed BLAKE3 | **Not attempted, and not attemptable by test**: these are open problems in cryptanalysis. The evidence is the primitives' standing, their published test vectors (replayed here), and the fact that the construction's use of them is standard |
 | 2 | Tag is a PRF over `(N,A,M)` | Two distinct `(N,A,M)` with equal tags under one key | A *fixed* pair is out of reach (`2^-520`); *searching* for a pair is the chain-value birthday, `q²/2^257` (§4.5), also out of reach. *Structural* variants tested: length ambiguity, A/M swap, trailing zeros, single-byte changes in A and M, key and nonce reaching the tag. Not testable: both numbers are bounds on computation |
-| 3 | Key commitment **against a given ciphertext** (the target game) | A `(C,T)` that opens under two keys | Against a given `(C,T)` this is a target and stays out of reach (`2^-520` per candidate key, a `2^520` search); the *birthday* level for a colliding pair is `2^128` (§4.5), which an invisible-salamander attack against a fixed ciphertext cannot use. *Mechanism* tested: both derived tag keys reach the tag (`test_tag_binds_both_derived_keys`) and Kani proves the inner head's domain/length fields and the outer input are what the spec says (it does not read the nonce back; that binding is pinned by `test_tag_matches_blake3_over_the_documented_input`). **The literature's CMT-1/CMT-3 games are attacker-chosen, not this target; their bound is not derived here** — see the row below and §4.5, "The two commitment games" |
+| 3 | Key commitment **against a given ciphertext** (the target game) | A `(C,T)` that opens under two keys | Against a given `(C,T)` this is a target and stays out of reach (`2^-520` per candidate key; the whole `2^256` key space succeeds with probability `≈ 2^-264`); the *birthday* level for a colliding pair is `2^128` (§4.5), which an invisible-salamander attack against a fixed ciphertext cannot use. *Mechanism* tested: both derived tag keys reach the tag (`test_tag_binds_both_derived_keys`) and Kani proves the inner head's domain/length fields and the outer input are what the spec says (it does not read the nonce back; that binding is pinned by `test_tag_matches_blake3_over_the_documented_input`). **The literature's CMT-1/CMT-3 games are attacker-chosen, not this target; their bound is not derived here** — see the row below and §4.5, "The two commitment games" |
 | 4 | Keystream is tag-dependent | `ct₁ ⊕ ct₂ = M₁ ⊕ M₂` under one nonce, or `ct` invariant under an AAD change | **Tested**: `nonce_reuse_does_not_reuse_the_keystream` (message change, AAD change, first-block check, attached and in-place paths) |
 | 5 | The two ChaCha20 uses are separate | The key-material block equals the message keystream | **Tested**: `the_key_material_block_is_not_the_message_keystream` (16 trials, key, nonce and keystream compared); the residual is §4.1 |
 | 6 | The KDF consumes the whole tag | A tag byte that does not move the derived key | **Proved + tested**: Kani (all 65 bytes consumed), `test_every_tag_byte_reaches_the_ciphertext` |

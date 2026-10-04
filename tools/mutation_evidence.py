@@ -33,7 +33,12 @@ EXIT_COULD_NOT_RUN = 3
 
 
 def load(directory):
-    """`{(function, genre, replacement, index): outcome}` for one evidence directory."""
+    """Load one evidence directory.
+
+    Returns `(results, outcomes)`: the joined map described above, and the raw
+    `outcomes.json` object (which carries the cargo-mutants version and the missed
+    count).
+    """
     mutants_path = os.path.join(directory, "mutants.json")
     outcomes_path = os.path.join(directory, "outcomes.json")
     for path in (mutants_path, outcomes_path):
@@ -71,7 +76,26 @@ def load(directory):
         sys.exit(EXIT_COULD_NOT_RUN)
     results = {}
     seen = {}
-    for outcome in outcomes.get("outcomes", []):
+    # A parseable file in a shape this tool does not know is "could not compare" (3):
+    # before this check, `{"outcomes": "oops"}` iterated the string and died with an
+    # AttributeError, so `verify.sh` read a schema change as stale evidence (exit 1)
+    # rather than as a tool that could not run.
+    raw_outcomes = outcomes.get("outcomes")
+    if not isinstance(raw_outcomes, list):
+        print(
+            f"FAIL: {directory}/outcomes.json has no 'outcomes' list -- schema changed? "
+            f"(got {type(raw_outcomes).__name__})",
+            file=sys.stderr,
+        )
+        sys.exit(EXIT_COULD_NOT_RUN)
+    for outcome in raw_outcomes:
+        if not isinstance(outcome, dict):
+            print(
+                f"FAIL: {directory}/outcomes.json has a non-object entry in 'outcomes' -- "
+                f"schema changed? (got {type(outcome).__name__})",
+                file=sys.stderr,
+            )
+            sys.exit(EXIT_COULD_NOT_RUN)
         scenario = outcome.get("scenario")
         if not isinstance(scenario, dict) or "Mutant" not in scenario:
             continue  # the Baseline entry

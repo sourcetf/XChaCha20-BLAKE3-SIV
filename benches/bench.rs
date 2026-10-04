@@ -6,12 +6,14 @@ fn bench_encrypt(c: &mut Criterion) {
 
     c.bench_function("encrypt", |b| {
         b.iter(|| {
-            let _ = encrypt(
+            // `black_box` the result: with the returned `(ciphertext, tag)` unused,
+            // nothing would force the computation to be kept.
+            let _ = black_box(encrypt(
                 black_box(&[0xAAu8; 32]),
                 black_box(&[0xBBu8; 24]),
                 black_box(b"associated data"),
                 black_box(&plaintext),
-            );
+            ));
         })
     });
 }
@@ -22,13 +24,14 @@ fn bench_decrypt(c: &mut Criterion) {
 
     c.bench_function("decrypt", |b| {
         b.iter(|| {
-            let _ = decrypt(
+            // As in `bench_encrypt`: the recovered `Plaintext` must be observed.
+            let _ = black_box(decrypt(
                 black_box(&[0xAAu8; 32]),
                 black_box(&[0xBBu8; 24]),
                 black_box(b"associated data"),
                 black_box(&ct),
                 black_box(&tag),
-            );
+            ));
         })
     });
 }

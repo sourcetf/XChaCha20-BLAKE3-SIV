@@ -107,9 +107,21 @@ fi
 # An extracted valgrind needs its own library directory, and it must be set
 # *before* valgrind is invoked — otherwise even `--version` fails to start.
 if [ -d "$HOME/valgrind/usr/libexec/valgrind" ]; then
-  export VALGRIND_LIB="$HOME/valgrind/usr/libexec/valgrind"
+  export VALGRIND_LIB="${VALGRIND_LIB:-$HOME/valgrind/usr/libexec/valgrind}"
 fi
-echo "using valgrind: $VG ($("$VG" --version 2>&1 | head -1))"
+# valgrind has to actually start. A binary that exists but cannot (an extracted copy
+# whose library dir is elsewhere) used to pass this line -- the command substitution
+# inside `echo` swallowed the failure -- and then surface as "the deliberate leak was
+# not detected", which reads as a finding about this crate rather than about the tool.
+set +e
+VG_VERSION="$("$VG" --version 2>&1)"
+vg_rc=$?
+set -e
+if [ "$vg_rc" -ne 0 ] || [ -z "$VG_VERSION" ]; then
+  echo "SKIPPED: valgrind at $VG cannot start (missing VALGRIND_LIB? see 'tools/ctgrind.sh --setup')" >&2
+  exit 3
+fi
+echo "using valgrind: $VG ($VG_VERSION)"
 
 TARGET=x86_64-unknown-linux-gnu
 SUPP="$(pwd)/tests/ctgrind.supp"
@@ -138,10 +150,28 @@ DEPS_DIR="$TARGET_DIR/$TARGET/release/deps"
 SUPP_FUNS="$(grep -v '^[[:space:]]*#' "$SUPP" | grep -o 'fun:.*' | sed 's/^fun://' || true)"
 SUPP_COUNT="$(printf '%s\n' "$SUPP_FUNS" | grep -c . || true)"
 SUPP_BAD="$(printf '%s\n' "$SUPP_FUNS" | grep -v 'accept_or_reject' | grep . || true)"
-if [ "$SUPP_COUNT" -lt 1 ] || [ -n "$SUPP_BAD" ]; then
+# ...and *every* non-comment line has to be a block marker, a Memcheck kind, or a
+# frame naming accept_or_reject. This used to look only at `fun:` lines, so an
+# `obj:` or `src:` entry -- which suppresses a whole object or source file just as
+# effectively -- was invisible to it, while the header still claimed the file was
+# refused unless every entry named the decision. (A block's *name* line -- the bare
+# identifier between `{` and the first `Tool:kind` line, `siv-accept-or-reject-decision`
+# here -- is allowed too; the first version of this check rejected the real file for it.) The name has to *end* with
+# accept_or_reject (a Rust mangled name ends in its length-prefixed identifier), so
+# `fun:not_accept_or_reject_but_wide` is rejected too. (`*` is allowed in the
+# prefix: the mangled symbol carries a compiler-hash wildcard, `_RNvCs*_20…`, and
+# the first version of this check rejected the real file for it.)
+SUPP_OTHER="$(grep -v '^[[:space:]]*#' "$SUPP" | grep -v '^[[:space:]]*$' \
+  | grep -vE '^[[:space:]]*(\{|\}|Memcheck:[A-Za-z0-9_:.-]+|[A-Za-z0-9_.-]+)[[:space:]]*$' \
+  | grep -vE '^[[:space:]]*fun:(accept_or_reject|[A-Za-z0-9_$.*?]*16accept_or_reject)[[:space:]]*$' || true)"
+if [ "$SUPP_COUNT" -lt 1 ] || [ -n "$SUPP_BAD" ] || [ -n "$SUPP_OTHER" ]; then
   echo "FAIL: tests/ctgrind.supp must suppress accept_or_reject and nothing else." >&2
-  echo "      Entries that name anything else permit every branch in that" >&2
-  echo "      function, which is how a planted leak inside decrypt once passed." >&2
+  echo "      A frame naming anything else permits every branch in that function" >&2
+  echo "      (how a planted leak inside decrypt once passed), and obj:/src: entries" >&2
+  echo "      widen it just as effectively. Every frame line must be a fun: naming it." >&2
+  if [ -n "$SUPP_OTHER" ]; then
+    printf '%s\n' "$SUPP_OTHER" | sed 's/^/      rejected line: /' >&2
+  fi
   printf '%s\n' "$SUPP_FUNS" | sed 's/^/      names: /' >&2
   exit 1
 fi

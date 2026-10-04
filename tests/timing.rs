@@ -37,9 +37,26 @@
 //! separate job that is allowed to fail (visible in the checks list), while the
 //! strict run is `./verify.sh --deep` on a quiet machine, where they report
 //! `t < 0.4`. The threshold itself is unchanged: the same test must still pass on
-//! hardware that can support the measurement.
+//! hardware that can support the measurement. The three loops in this file are
+//! serialised against each other (`TIMING_LOCK` below), because libtest runs them in
+//! parallel by default and that CPU contention would land in the numbers the tests
+//! attribute to the code.
 
 use xchacha20_blake3_siv::{decrypt, encrypt, TAG_LEN};
+
+/// Serialises the three measurement loops in this file.
+///
+/// libtest runs tests in parallel by default, and the CI job (`cargo test --release
+/// --test timing`) does not pass `--test-threads=1`: without this guard the three
+/// microsecond-scale loops share cores and caches, inflating the per-class variance and
+/// moving `t` for reasons the header's noise discussion does not cover. A poisoned lock
+/// is ignored deliberately — one failing measurement must not turn the others into
+/// panics, since each test's own assertion decides.
+static TIMING_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+fn timing_guard() -> std::sync::MutexGuard<'static, ()> {
+    TIMING_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+}
 
 // ── Statistical timing screen (dudect-style) ─────────────────────────
 //
@@ -104,7 +121,16 @@ fn welch_t(a: &[f64], b: &[f64]) -> f64 {
     let vb = b.iter().map(|x| (x - mb).powi(2)).sum::<f64>() / (m - 1.0);
     let denom = (va / n + vb / m).sqrt();
     if denom == 0.0 {
-        0.0
+        // Both classes were perfectly constant. If their means differ, that is the
+        // *strongest* possible signal (the t of infinite samples would be unbounded),
+        // not "no difference": an earlier version returned 0.0 here, so a leak visible
+        // without any within-class jitter landed on the passing side of `t < 10`. Equal
+        // constant means really are no difference and stay 0.
+        if ma == mb {
+            0.0
+        } else {
+            f64::INFINITY
+        }
     } else {
         (ma - mb).abs() / denom
     }
@@ -196,12 +222,18 @@ fn resolution_ns(a: &[f64], b: &[f64]) -> f64 {
 /// byte at a time. `subtle::ConstantTimeEq` must make the two classes
 /// indistinguishable.
 ///
-/// Sensitivity: a plain `==` on a 65-byte tag would differ by roughly the cost
-/// of the bytes it skips — tens to hundreds of nanoseconds per operation against
-/// a floor of a few nanoseconds here — so a regression to `==` is well within
-/// reach of this screen.
+/// Sensitivity, in the terms the test prints. A plain `==` on a 65-byte tag exits
+/// after the bytes that match, so the difference between a first-byte and a
+/// last-byte mismatch is tens of nanoseconds here; the resolution the screen
+/// achieves is the same order — measured between ~8 and ~57 ns/op depending on host
+/// and load (the test prints the current value; this file's own last release run:
+/// 24 ns/op for this test). A tens-of-ns effect is therefore *at* the floor, not
+/// comfortably inside it: the screen catches gross regressions (an early exit
+/// skipping hundreds of nanoseconds, or a per-byte difference), while the mechanical
+/// evidence for the comparison itself is ctgrind.
 #[test]
 fn timing_tag_comparison_does_not_leak_position() {
+    let _guard = timing_guard();
     let key = [0x42u8; 32];
     let nonce = [0x55u8; 24];
     let pt = [0xABu8; 256];
@@ -247,6 +279,7 @@ fn timing_tag_comparison_does_not_leak_position() {
 /// No operation may branch on the *contents* of the key.
 #[test]
 fn timing_does_not_depend_on_key_contents() {
+    let _guard = timing_guard();
     let nonce = [0x55u8; 24];
     let aad = b"aad";
     let pt = [0xABu8; 512];
@@ -303,6 +336,7 @@ fn timing_does_not_depend_on_key_contents() {
 /// tests are described as a screen rather than as evidence.
 #[test]
 fn timing_screen_can_detect_a_real_difference() {
+    let _guard = timing_guard();
     // Mutable, so the work cannot be hoisted out of the sampling loop. A
     // constant buffer made an earlier version measure nothing at all: LLVM
     // computed the loop-invariant result once and both sides came out identical.

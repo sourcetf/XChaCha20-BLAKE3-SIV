@@ -29,6 +29,13 @@
 //! the `(` and may span lines, `use … as …` aliases of a scanned name are rejected
 //! outright, and the call count is asserted **exactly** rather than as a floor — a
 //! floor let a renamed `chacha20_block` drop the count from 13 to 11 and still pass.
+//!
+//! Scope, because "whole call graph" is wider than the mechanism: the scan reads
+//! `src/lib.rs`, the module that owns these keystream entry points. `src/witness.rs`
+//! has its own ChaCha20 counter loop (`keystream_xor`) but makes no call to the names
+//! below, and `src/proofs.rs` is `#[cfg(kani)]`; a call *moved* into either file would
+//! leave this census unchanged. Within `src/lib.rs` the count is exact, which is what
+//! makes a new call site here fail rather than hide under a floor.
 
 use xchacha20_blake3_siv::MAX_MSG_SIZE;
 

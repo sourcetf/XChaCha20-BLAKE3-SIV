@@ -1,12 +1,21 @@
 //! Concurrent use: the crate must be correct when many threads call it at once.
 //!
-//! Nothing in the public API takes `&mut` on shared state, and the whole suite
-//! runs single-threaded by default, so the one piece of global state the crate
-//! *does* have is the interesting part: the cached AVX2 detection (`AVX2_CACHE`
-//! in `src/lib.rs`, an `AtomicU8`).  A single-threaded test cannot reach the case
-//! where several threads populate that cache from cold, so this test compares the
-//! threads' results with each other rather than against a reference computed up
+//! The only other test that uses a thread (`tests/locked.rs` moves a key to one and
+//! joins it) never has two threads inside the crate at once, so the one piece of global
+//! state the crate *does* have is the interesting part: the cached AVX2 detection
+//! (`AVX2_CACHE` in `src/lib.rs`, an `AtomicU8`). A single-threaded test cannot reach
+//! the case where several threads populate that cache from cold, so this test compares
+//! the threads' results with each other rather than against a reference computed up
 //! front — computing one would warm the cache and remove the case under test.
+//!
+//! `AVX2_CACHE` is an atomic, read and written with `Ordering::Relaxed`, so by the
+//! language's memory model it is *not* a data race and ThreadSanitizer does not
+//! report it. What the sanitizer run shows is that there is no *other*
+//! unsynchronised shared state in the crate: a clean pass over every path that
+//! touches shared memory. (An earlier version of this comment said "the race
+//! itself is what TSAN reports", which was wrong for an atomic cache; the
+//! deliberately racy negative control below is what proves the sanitizer is
+//! actually watching.)
 //!
 //! The run that makes this concrete is ThreadSanitizer, which is why the test
 //! keeps every thread on the same inputs:
@@ -18,8 +27,7 @@
 //!
 //! A data race in the cache would not corrupt the derived material (the answer
 //! CPUID returns is the same whichever thread asks), so the assertions here are
-//! about the *outputs* staying identical across threads; the race itself is what
-//! TSAN reports.
+//! about the *outputs* staying identical across threads.
 
 use std::thread;
 
@@ -27,7 +35,10 @@ use xchacha20_blake3_siv::{
     decrypt, decrypt_in_place_detached, encrypt, encrypt_in_place_detached, TAG_LEN,
 };
 
-/// More threads than this machine has cores, so the first calls genuinely race.
+/// Threads to spawn: enough that the first calls into the cold cache overlap. It does
+/// not need to exceed the core count — an audit host has exactly 32 cores and the
+/// window is still reachable, because all the threads are spawned before any is
+/// joined — but on smaller CI runners it does.
 const THREADS: usize = 32;
 const ROUNDS: usize = 64;
 

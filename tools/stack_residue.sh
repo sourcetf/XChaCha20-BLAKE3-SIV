@@ -24,6 +24,11 @@
 # Usage:  tools/stack_residue.sh [--pure | --ultra]
 set -euo pipefail
 
+# `cargo run` below is invoked directly, so this tool has to find cargo itself.
+# `verify.sh` exports the path, but a direct `tools/stack_residue.sh` used to die
+# with "cargo: command not found" on a machine where that is not already on PATH.
+export PATH="$HOME/.cargo/bin:$PATH"
+
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT

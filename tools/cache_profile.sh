@@ -244,6 +244,20 @@ PY
     echo "         about it. Exit 3 is 'could not run', not 'detected'." >&2
     exit 3
   fi
+  # A non-zero inner exit is not by itself the planted leak being detected: the inner
+  # run's own controls can fail (an audit showed the pristine counts verdict once failed
+  # on the harness's input parsing, which would have satisfied an "any non-zero"
+  # self-test). Require the inner log to carry the mode's actual key-dependence verdict.
+  case "$mode" in
+    --trace) expect_fail='FAIL: the (enc|roundtrip) address trace depends on the values of a secret' ;;
+    *)       expect_fail='FAIL: the (enc|roundtrip) cache or branch profile depends on the key' ;;
+  esac
+  if ! grep -Eq "$expect_fail" "$work/selftest.log"; then
+    echo "FAIL: the inner run failed, but not with the planted leak's key-dependence" >&2
+    echo "      verdict, so this self-test cannot say $mode_name detects that class." >&2
+    tail -20 "$work/selftest.log" >&2
+    exit 1
+  fi
   echo "OK: the planted leak is detected by $mode_name"
   # `|| true`: under `set -o pipefail` a `grep` with no match (or a `head` that closes
   # the pipe early) would make this line -- and so the script -- exit non-zero straight

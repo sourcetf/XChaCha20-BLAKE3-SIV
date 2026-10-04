@@ -8,6 +8,64 @@ green push to `main` — which are build artefacts of that job, not construction
 
 ## Unreleased
 
+### The audit and attack reviews, worked through in parallel: a reachable abort, a lock failure path, and residue the witness claimed to wipe
+
+This entry covers the two third-party reviews end to end: the line-by-line audit's remaining
+findings and the incremental attack report's 26. **No wire-format change**; the behavioural
+changes are the three below, each with the measurement that found it, and the rest is tests,
+gates and claims that could not fail.
+
+- **The `ultra` witness now wipes the copies it named but did not clear**, which is what the
+  attack report measured (`k_in` residue, unwiped `Output` nodes and `[u8; 4]` temporaries):
+  `Output` gained a `Drop` that wipes its CV and message block (covering the unnamed
+  `parent_output(..).chaining_value()` temporary), the CV stack reserves BLAKE3's maximum tree
+  depth up front so it can never reallocate out from under a wipe, and the streaming locals in
+  `ChunkState::update`/`Hasher::update`/`add_chunk_cv`/`finalize_xof` are wiped. In the two
+  hot loops the copies are *eliminated* instead of wiped — the key/nonce words and the
+  feed-forward words are read and written byte-wise, so no 4-byte key copy exists — because
+  wiping them measured ~30% of `ultra`'s large-message decryption; the residue-wipe pass as a
+  whole moved that configuration's 1 MiB decryption ratio from ~11x to ~14x over the default,
+  and `performance.md`/README are re-measured below.
+- **`tools/ctgrind.sh`'s suppression check now rejects `obj:`/`src:` lines and requires the
+  `fun:` value to *end* in the decision** (the `tests/decision_scope.rs` shape, one level up);
+  the first draft of that check rejected the real file twice — the mangled symbol carries a
+  `*` wildcard and the block's name line is not a valgrind kind — which its own negative
+  control caught before commit.
+- **`verify.sh`** now resolves its own path before `cd` (a relative `$0` broke `--help`),
+  refuses `--kani-only` together with `--deep`/`--all` (the contradiction silently skipped
+  stages 1-4), runs the timing target exactly once (`--skip timing_` in the suite runs; it
+  used to run four times, three of them alongside the rest of the suite), sweeps ctgrind over
+  all three configurations in strict mode, checks the *nightly* toolchain for `rust-src`
+  before TSAN, validates `FUZZ_SECONDS` (0 means "no limit" to libFuzzer), pins the fuzz
+  target directory it builds and reads (a foreign binary made the witness guard pass or fail
+  for the wrong reason), and sanity-checks the cross-executable parse for a partial list.
+- **Tests that could not fail, one by one**: `welch_t` returned 0.0 — the *passing* side — for
+  two perfectly constant classes with different means (a leak with no jitter), and the three
+  timing loops now serialise; the differential fixture's row/position/AAD floors became exact
+  counts (49/40/5871/16) so deleting rows fails; the large fixture replays the detached
+  in-place pair as well as the allocating one; `LockedKey`'s `Debug` check also rejects the
+  decimal spelling of the key byte; the locked tests pin the `munlock`-before-`DODUMP` order
+  and the `if ok(u)` gating; `decision_scope` pins the *return* of `plain & also` and the
+  `(first, second)` gate pair (both had mutations that passed every count); `encrypt`'s
+  witness cross-check, the `witness` module declaration and the "no `bool::from(witness::`"
+  spelling are pinned; `ultra`'s `scrub_stack` count is per entry point; `security.rs`'s
+  wrong-key property samples the flipped position and its allocation-order test covers all
+  three allocating entry points; `counter_range` and `construction_inventory` keep the
+  exact-count shape they gained earlier.
+- **`src/lib.rs`**: the crate doc's flavour/caveat counts, the `subtle`-plus-independent-fold
+  description, `SUBKEY_DOMAIN`'s counter note, `lock_range`'s page-granular advice,
+  `deny_debugging`'s 0/1/2 states, the stale "the default build passes the same `Choice`
+  twice", the `decrypt_bounded` doctest's stale `matches!` rationale, ChaCha20's feed-forward
+  addition no longer called Davies-Meyer, `transpose8x8`'s tautological doc, `nib`'s hex
+  helper made loud, and several tests pinned to `AuthenticationFailed` rather than `is_err()`.
+  `tests/README.md`'s control-flow counts (37/7), the `qemu -cpu Nehalem` claim that has no
+  runner anywhere, and the boundary lists are corrected too.
+- Also in this push: the earlier allocation fixes (the 2-64 KiB abort, the `ultra` in-place
+  wipe, `unlock_range`'s refused-`munlock` path), the fork/exec/Deref disclosures, the
+  random-fill bound and the MSRV `--skip timing`, and `SECURITY-ANALYSIS.md`'s "the key
+  search is `2^520`" wording (a *tag guess* is `2^520`; enumerating keys is `≈ 2^-264` over
+  `2^256`).
+
 ### An abort reachable from the 2–64 KiB window, and a lock failure path that un-dumped a locked page
 
 The incremental attack review (`XChaCha20-BLAKE3-SIV_增量攻击测试报告_8ae80ce`, the follow-up to the

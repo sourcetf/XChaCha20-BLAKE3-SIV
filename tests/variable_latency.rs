@@ -10,11 +10,16 @@
 //! about seventeen. So no tool in this repository detects that class, and the control
 //! has to be a list a human maintains.
 //!
-//! This test enumerates every `/` and `%` in the crate's non-test source and requires
-//! the set to match the table below exactly: a new one fails the test until someone
-//! writes down why it is not a secret-dependent latency, and a removed one fails too
-//! (so the table cannot rot). It says nothing about whether the listed operations are
-//! *actually* safe -- it makes them visible, which is the part that can be automated.
+//! This test enumerates every `/` and `%` in the always-compiled non-test source --
+//! `src/lib.rs` and `src/witness.rs` -- and requires the set to match the table below
+//! exactly: a new one fails the test until someone writes down why it is not a
+//! secret-dependent latency, and a removed one fails too (so the table cannot rot). It
+//! does not read `src/proofs.rs`, which is `#[cfg(kani)]` and compiled out of every run
+//! of this suite; its divisions are bounded-model-checking scaffolding. (An earlier
+//! header claimed "the crate's non-test source" while reading only `src/lib.rs`, and
+//! did not name `src/proofs.rs` as the exclusion.) It says nothing about whether the
+//! listed operations are *actually* safe -- it makes them visible, which is the part
+//! that can be automated.
 //!
 //! The same idea covers the crate's control flow, one section down: `CONTROL_FLOW`
 //! counts `if` / `while` / `for` / `loop` / `match` in the non-test source. ctgrind
@@ -189,10 +194,11 @@ fn strip_string_literals(code: &str) -> String {
 
 /// Every `/` or `%` in `line` that is code rather than a comment or a doc comment.
 fn has_division(line: &str) -> bool {
-    let code = line.split("//").next().unwrap_or("");
-    // String literals are not code: `b"/proc/self/status\0"` is a path, not a division,
-    // and allow-listing that line by hand would also hide a real `/` written on it.
-    let code = strip_string_literals(code);
+    // String literals are removed *first*: `b"/proc/self/status\0"` is a path, not a
+    // division, and a `//` inside a literal would otherwise cut the rest of the line at
+    // the comment marker and hide a real `/` written after it.
+    let code = strip_string_literals(line);
+    let code = code.split("//").next().unwrap_or("");
     let b: Vec<char> = code.chars().collect();
     for (i, c) in b.iter().enumerate() {
         if *c != '/' && *c != '%' {
@@ -214,12 +220,19 @@ fn has_division(line: &str) -> bool {
 
 #[test]
 fn variable_latency_operations_are_inventoried() {
-    let src = include_str!("../src/lib.rs");
-    let cut = src.find("mod tests {").expect("the test module must exist");
-    let body = &src[..cut];
-
-    let found: BTreeSet<String> = body
-        .lines()
+    // Both always-compiled source files, so a division added to the independent
+    // implementation is inventoried too (`src/proofs.rs` is `#[cfg(kani)]`; see the
+    // module header).
+    let sources = [
+        ("src/lib.rs", include_str!("../src/lib.rs")),
+        ("src/witness.rs", include_str!("../src/witness.rs")),
+    ];
+    let found: BTreeSet<String> = sources
+        .iter()
+        .flat_map(|(_, src)| {
+            let cut = src.find("mod tests {").unwrap_or(src.len());
+            src[..cut].lines()
+        })
         .filter(|l| has_division(l))
         .map(|l| l.trim().to_string())
         .collect();
@@ -262,19 +275,17 @@ fn is_impl_header(code: &str) -> bool {
 /// `impl Drop for Plaintext` is not a branch, so `impl` headers are skipped — see
 /// [`is_impl_header`] for why that test is not just `starts_with("impl ")`.
 fn count_keyword(line: &str, kw: &str) -> usize {
-    let code = line.split("//").next().unwrap_or("");
-    if is_impl_header(code) {
-        return 0;
-    }
-
-    // A `"..."` literal becomes nothing. This walks characters rather than
-    // replacing the literal in place: the substitute must contain no quote at all,
-    // or the search finds it again -- an empty literal `""` replaced by `""`
-    // loops forever, which is how this test hung the first time it ran.
-    let mut stripped = String::with_capacity(code.len());
+    // String literals are removed *before* the comment split, for the same reason as in
+    // `has_division`: a `"http://"` literal would otherwise truncate the line at the
+    // `//` inside it and hide any keyword after it. A `"..."` literal becomes nothing.
+    // This walks characters rather than replacing the literal in place: the substitute
+    // must contain no quote at all, or the search finds it again -- an empty literal
+    // `""` replaced by `""` loops forever, which is how this test hung the first time it
+    // ran.
+    let mut stripped = String::with_capacity(line.len());
     let mut in_literal = false;
     let mut escaped = false;
-    for c in code.chars() {
+    for c in line.chars() {
         if in_literal {
             if escaped {
                 escaped = false;
@@ -291,10 +302,14 @@ fn count_keyword(line: &str, kw: &str) -> usize {
             stripped.push(c);
         }
     }
+    let code = stripped.split("//").next().unwrap_or("");
+    if is_impl_header(code) {
+        return 0;
+    }
 
-    let bytes = stripped.as_bytes();
+    let bytes = code.as_bytes();
     let mut n = 0;
-    for (i, _) in stripped.match_indices(kw) {
+    for (i, _) in code.match_indices(kw) {
         let before = i
             .checked_sub(1)
             .is_none_or(|j| !(bytes[j].is_ascii_alphanumeric() || bytes[j] == b'_'));
@@ -319,10 +334,21 @@ fn control_flow_is_inventoried() {
     // `#[cfg(kani)]`, compiled out of every build this suite runs in, and its loops are
     // bounded-model-checking scaffolding rather than shipped code -- Kani's own harnesses
     // state what they must hold.
+    // Every keyword must have a row. The loop below only checks the rows the table
+    // carries, so deleting one (say `("match", 5)`) would silently stop counting that
+    // keyword while every remaining row still matches -- the division table is protected
+    // by its added/gone diff, this one needs the row list itself pinned.
+    const KEYWORDS: [&str; 5] = ["if", "while", "for", "loop", "match"];
     for (name, src, table) in [
         ("src/lib.rs", lib, CONTROL_FLOW),
         ("src/witness.rs", witness, WITNESS_CONTROL_FLOW),
     ] {
+        let keys: Vec<&str> = table.iter().map(|(kw, _)| *kw).collect();
+        assert_eq!(
+            keys, KEYWORDS,
+            "{name}'s control-flow table must carry exactly the {KEYWORDS:?} rows, in that \
+             order: a missing row is a keyword nothing counts"
+        );
         let cut = src.find("mod tests {").unwrap_or(src.len());
         let body = &src[..cut];
 

@@ -14,17 +14,19 @@
 #
 # Usage:
 #   ./check.sh                 provision, build, verify (fast stages only)
-#   ./check.sh --fast          skip all cross-target work
+#   ./check.sh --fast          skip all cross-target work (no cross targets are
+#                              installed; a --cross-exec request is dropped with a note)
 #   ./check.sh --cross-exec    also execute the aarch64/i686 suites under qemu,
 #                              plus big-endian powerpc64 via qemu-ppc64
 #   ./check.sh --kani          also run Kani bounded model checking (slow)
 #   ./check.sh --tools         also run the tool-level gates (fault campaign,
 #                              instruction sweeps, cache-profile differential,
-#                              planted-bug checks) -- what CI runs on every push
+#                              planted-bug checks) -- the tools CI's per-push job runs
 #   ./check.sh --all           every verification stage `verify.sh --all` has, which is
 #                              more than cross-exec plus Kani: ctgrind, cargo-deny,
 #                              fuzzing, TSAN and the tool-level gates too
-#   ./check.sh --no-provision  never touch the network or modify the toolchain
+#   ./check.sh --no-provision  skip provisioning (rustup targets, emulator); the
+#                              builds below may still fetch crates that are not cached
 #   ./check.sh --help
 #
 # Nothing here needs root: package downloads use `apt-get download` (which
@@ -32,7 +34,11 @@
 
 set -euo pipefail
 
-cd "$(dirname "$0")"
+# Resolve this script's own path before changing directory: `--help` prints the header
+# back out of this file, and a relative `$0` naming a directory stops resolving after
+# the `cd` (same defect and fix as `verify.sh`).
+SELF="$(cd "$(dirname "$0")" && pwd)/$(basename "$0")"
+cd "$(dirname "$SELF")"
 
 # rustup's toolchain lives here, and the emulator in ~/.local/bin.  Without the
 # former, a stale system rustc is picked up that has no cross targets and
@@ -51,7 +57,7 @@ FAST=0
 # verify.sh set, and the new `--tools` line was in the header alone. Printing the header
 # makes that impossible; the `#` is stripped and the block runs to the first blank line.
 usage() {
-  sed -n '2,/^$/p' "$0" | sed 's/^#\{1,\}//; s/^ //'
+  sed -n '2,/^$/p' "$SELF" | sed 's/^#\{1,\}//; s/^ //'
   echo
   echo "Stages:"
   echo "  1. provision   rustup targets, an aarch64 emulator, and a Kani check"
@@ -89,10 +95,6 @@ fi
 STAGE_NO=0
 T0_ALL=$SECONDS
 SUMMARY=()
-# A timestamp taken before any stage runs, so the summary can tell an artifact *this* run
-# produced apart from one an earlier run left behind.
-STAMP="$(mktemp)"
-trap 'rm -f "$STAMP"' EXIT
 
 note() { printf '%s\n' "$*"; }
 ok()   { printf '%s  ok%s  %s\n'  "$C_GREEN"  "$C_OFF" "$*"; }
@@ -218,6 +220,12 @@ if [ "$PROVISION" -eq 1 ]; then
   if ! command -v rustup >/dev/null; then
     skip "rustup not found; cross targets cannot be installed"
     record "provision: no rustup (cross targets unavailable)"
+  elif [ "$FAST" -eq 1 ]; then
+    # `--fast` is documented as "skip all cross-target work": installing five
+    # targets only for the cross stages (and the cross build below) to be skipped
+    # would contradict the flag and touch the network for nothing.
+    skip "rust cross targets (--fast)"
+    record "provision: cross targets skipped (--fast)"
   else
     # musl is what gets built and *executed* under qemu (aarch64 for the NEON
     # kernel, i686 for the 32-bit paths); gnu is type-checked only.  All are
@@ -229,12 +237,10 @@ if [ "$PROVISION" -eq 1 ]; then
         skip "target $t unavailable"
       fi
     done
-    if [ "$FAST" -eq 0 ]; then
-      if ensure_target riscv64gc-unknown-linux-musl; then
-        ok "target riscv64gc-unknown-linux-musl"
-      else
-        skip "target riscv64gc-unknown-linux-musl unavailable"
-      fi
+    if ensure_target riscv64gc-unknown-linux-musl; then
+      ok "target riscv64gc-unknown-linux-musl"
+    else
+      skip "target riscv64gc-unknown-linux-musl unavailable"
     fi
     record "provision: rust cross targets"
   fi
@@ -249,7 +255,9 @@ if [ "$PROVISION" -eq 1 ]; then
     skip "aarch64 emulator (--fast)"
   fi
 
-  # Kani is optional: without it only the proof stage is skipped.
+  # Kani is optional: without it the proof stage is skipped. A run that *asked* for
+  # it (--kani, or --all's complete set) fails rather than pretending it ran, so this
+  # check is a note about the default invocation, not a guarantee for every one.
   if command -v cargo-kani >/dev/null; then
     ok "cargo-kani $(cargo kani --version 2>/dev/null | head -1 || true)"
     record "provision: Kani available"
@@ -313,10 +321,11 @@ fi
 if [ "$FAST" -eq 1 ]; then
   FILTERED=()
   saw_all=0
+  dropped_cross=0
   for a in ${VERIFY_ARGS[@]+"${VERIFY_ARGS[@]}"}; do
     case "$a" in
       --all)          saw_all=1 ;;
-      --cross-exec|--aarch64-exec) ;; # dropped: contradicts --fast
+      --cross-exec|--aarch64-exec) dropped_cross=1 ;; # dropped: contradicts --fast
       *)              FILTERED+=("$a") ;;
     esac
   done
@@ -324,6 +333,11 @@ if [ "$FAST" -eq 1 ]; then
     FILTERED+=(--kani --miri --ctgrind --deny --fuzz --tsan --tools)
   fi
   VERIFY_ARGS=(${FILTERED[@]+"${FILTERED[@]}"})
+  # Say it rather than dropping it silently: a request that quietly stops being a
+  # request is the same family as a skip reported as a pass.
+  if [ "$dropped_cross" -eq 1 ]; then
+    skip "--cross-exec dropped: --fast asks for no cross-target work"
+  fi
 fi
 
 # Explicit if/else rather than `cmd && ok || fail`: the `||` form would run the
@@ -357,15 +371,31 @@ fi
 # The host rlib this run was supposed to produce. Derived from `CARGO_TARGET_DIR`, because
 # the builds above honour it: the hard-coded `target/...` pointed at a directory the build
 # may not have written to, where an *older* rlib from a previous run would satisfy the
-# assertion. It must also be newer than the run started, so a stale artifact cannot stand
-# in for one this run produced.
+# assertion.
+#
+# Freshness is measured against the inputs, not against the start of this run: cargo does
+# not touch an output whose unit is already fresh, so a second `check.sh` on unchanged
+# sources would fail a "newer than this run started" test even though the rlib is current
+# (the build above simply had nothing to do). "No input is newer than the rlib" is the
+# property that matters, and a foreign file planted at this path fails it.
 TARGET_DIR="${CARGO_TARGET_DIR:-target}"
 HOST_ARTIFACT="$TARGET_DIR/release/libxchacha20_blake3_siv.rlib"
-if [ -f "$HOST_ARTIFACT" ] && [ "$HOST_ARTIFACT" -nt "$STAMP" ]; then
+stale_input=""
+if [ -f "$HOST_ARTIFACT" ]; then
+  stale_input="$(find src Cargo.toml Cargo.lock -type f -newer "$HOST_ARTIFACT" -print -quit 2>/dev/null || true)"
+fi
+# ...and it has to *be* an rlib: an existence check alone accepted any file, including the
+# 46-byte text file an audit planted at this path.
+if [ -f "$HOST_ARTIFACT" ] && [ -z "$stale_input" ] \
+   && [ "$(head -c 8 "$HOST_ARTIFACT" 2>/dev/null)" = '!<arch>' ]; then
   printf 'artifact: %s\n' "$HOST_ARTIFACT"
 else
-  fail "expected host artifact missing or stale: $HOST_ARTIFACT (target dir: $TARGET_DIR)"
+  fail "expected host artifact missing, stale, or not an rlib: $HOST_ARTIFACT (target dir: $TARGET_DIR)"
   exit 1
 fi
 
-printf '\n%sall requested checks passed%s\n' "$C_GREEN" "$C_OFF"
+# Not an unconditional "all requested checks passed": a narrow run's verify.sh may exit 0
+# after recording skipped stages ("all requested checks passed, apart from N skipped").
+# Repeating the skips here would mean capturing verify.sh's output and losing its live
+# progress; pointing at that summary is honest and keeps the stream.
+printf '\n%sbuild and verification finished%s -- see verify.sh above for any skipped stage(s)\n' "$C_GREEN" "$C_OFF"

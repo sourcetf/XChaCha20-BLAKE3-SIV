@@ -165,22 +165,26 @@ proptest! {
         );
     }
 
-    /// A wrong key or a wrong nonce must be rejected.
+    /// A wrong key or a wrong nonce must be rejected. The flipped byte's *position* is
+    /// sampled, not fixed at index 0: an implementation that ignored `key[1..]` or
+    /// `nonce[1..]` passed while only the first byte was ever disturbed.
     #[test]
     fn prop_wrong_key_or_nonce_rejected(
         key in key_strategy(),
         nonce in nonce_strategy(),
         pt in bytes_strategy(64),
+        kpos in any::<prop::sample::Index>(),
+        npos in any::<prop::sample::Index>(),
         delta in 1u8..=255,
     ) {
         let (ct, tag) = encrypt(&key, &nonce, b"", &pt).unwrap();
 
         let mut k2 = key;
-        k2[0] ^= delta;
+        k2[kpos.index(k2.len())] ^= delta;
         prop_assert!(decrypt(&k2, &nonce, b"", &ct, &tag).is_err());
 
         let mut n2 = nonce;
-        n2[0] ^= delta;
+        n2[npos.index(n2.len())] ^= delta;
         prop_assert!(decrypt(&key, &n2, b"", &ct, &tag).is_err());
     }
 
@@ -573,9 +577,11 @@ fn decrypt_bounded_enforces_the_callers_limit() {
     let message = b"a message whose length is known to the test";
     let (ciphertext, tag) = encrypt(&key, &nonce, b"aad", message).unwrap();
 
-    // Under the limit: refused, and nothing is allocated first. (`matches!` rather
-    // than `assert_eq!`: `Plaintext` compares against byte slices, not against
-    // another `Plaintext`, deliberately — see its `PartialEq` impls.)
+    // Under the limit: refused, and nothing is allocated first. (`matches!` because the
+    // `Err` variant is the half this test is about; an earlier version of this comment
+    // said `Plaintext` could not be compared against another `Plaintext` -- that was true
+    // once, and `impl PartialEq<Plaintext> for Plaintext` plus `Debug` exist now, so
+    // `assert_eq!` on the `Result` would work too.)
     for max_len in [0, message.len() - 1] {
         assert!(
             matches!(
@@ -651,21 +657,42 @@ fn every_allocation_happens_before_any_derivation() {
         panic!("unbalanced braces in {name}");
     }
 
+    // All three allocating entry points: the allocation must exist (deleting it would
+    // make the ordering assertion below vacuous) and precede the first derivation.
     for name in ["encrypt", "decrypt", "decrypt_in_place_detached"] {
         let body = body(name);
-        let alloc = body
-            .find("alloc_zeroed(")
-            .unwrap_or_else(|| panic!("{name} has no allocation at all -- is it still there?"));
+        assert!(
+            body.contains("alloc_zeroed("),
+            "{name} has no allocation at all -- is it still there?"
+        );
+    }
+
+    // Every entry point, including the in-place encryptor that allocates nothing today:
+    // *each* allocation must precede the first derivation. Comparing only the first
+    // `alloc_zeroed(` with the first derivation was the hole -- the historical defect
+    // (an allocation added at its use site, after `derive_tag`) passed as long as the
+    // original early allocation stayed, and a new allocation in a function the list did
+    // not name was never looked at. A late allocation is the one whose `?` returns
+    // through live key material.
+    for name in [
+        "encrypt",
+        "encrypt_in_place_detached",
+        "decrypt",
+        "decrypt_in_place_detached",
+    ] {
+        let body = body(name);
         let derive = body
             .find("derive_material(")
             .unwrap_or_else(|| panic!("{name} derives no key material"));
-        assert!(
-            alloc < derive,
-            "{name} allocates after deriving key material: an `AllocationFailed` from \
-             that `?` returns through live key material without wiping it. Move the \
-             allocation above the first derivation (and say why in a comment, because \
-             it looks like it can go anywhere)."
-        );
+        for (alloc, _) in body.match_indices("alloc_zeroed(") {
+            assert!(
+                alloc < derive,
+                "{name} allocates at byte {alloc}, after deriving key material at byte \
+                 {derive}: an `AllocationFailed` from that `?` returns through live key \
+                 material without wiping it. Move the allocation above the first derivation \
+                 (and say why in a comment, because it looks like it can go anywhere)."
+            );
+        }
     }
 
     // And `ultra` adds its own buffers, which is how this came back: the witness writes

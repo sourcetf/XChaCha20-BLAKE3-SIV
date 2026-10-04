@@ -151,6 +151,11 @@ def main():
     features = None
     if "--features" in argv:
         i = argv.index("--features")
+        if i + 1 >= len(argv):
+            # A trailing `--features` used to raise IndexError out of main: a traceback
+            # (exit 1) rather than the usage error it is.
+            print("FAIL: --features needs a value, got it with nothing after it", file=sys.stderr)
+            sys.exit(1)
         features = argv[i + 1]
         del argv[i:i + 2]
     try:

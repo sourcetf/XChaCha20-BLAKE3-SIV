@@ -18,7 +18,17 @@ run_one() { # $1 = config name, $2.. = extra cargo args
   echo "=== $name pass $pass -> $dest ==="
   taskset -c 3 cargo bench --offline --bench compare "$@" -- \
     --warm-up-time 2 --measurement-time 4 > "$dest" 2>&1
-  echo "    done: $(grep -c 'time:' "$dest") time lines"
+  local times
+  times="$(grep -c 'time:' "$dest" || true)"
+  if [ "${times:-0}" -eq 0 ]; then
+    # An empty criterion run used to finish with "done: 0 time lines" and then an
+    # unconditional "ALL BENCH RUNS COMPLETE" -- an empty measurement set that
+    # bench_summarise.py would only discover later. Fail here instead.
+    echo "FAIL: $dest has no criterion 'time:' lines, so this pass measured nothing" >&2
+    tail -20 "$dest" >&2
+    exit 1
+  fi
+  echo "    done: $times time lines"
 }
 
 for pass in 1 2 3; do

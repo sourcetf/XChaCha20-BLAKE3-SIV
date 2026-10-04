@@ -6,9 +6,17 @@
 #   1. reference-implementation self-checks (python) and fixture freshness
 #   2. cargo fmt / clippy
 #   3. the unit + differential test suite
-#   4. cross-compilation for aarch64, i686 and riscv64
-#   5. Kani bounded model checking  (slow: minutes; the whole-permutation
-#      harnesses dominate)
+#   4. cross-compilation type-checks for aarch64 (gnu + musl) and riscv64
+#   5. cross-architecture execution under qemu (aarch64, i686, powerpc64;
+#      --cross-exec)
+#   6. Kani bounded model checking  (slow: minutes; the whole-permutation
+#      harnesses dominate; --kani)
+#   6b. Miri (slow: minutes; --miri)
+#   7. ctgrind constant-time check (--ctgrind)
+#   7b. ThreadSanitizer (--tsan)
+#   8. cargo-deny (--deny)
+#   9. fuzzing (--fuzz)
+#   10. the tool-level gates (--tools)
 #
 # Usage:
 #   ./verify.sh              # stages 1-4: the reference self-checks, fmt/clippy, the
@@ -33,7 +41,12 @@
 
 set -euo pipefail
 
-cd "$(dirname "$0")"
+# Resolve this script's own path *before* changing directory. `--help` reads the header
+# back out of this file, and a relative `$0` that names a directory (e.g.
+# `bash repo/verify.sh --help`) stops resolving once the `cd` below has happened --
+# measured: `sed: can't read repo/verify.sh`, exit 2, no help text.
+SELF="$(cd "$(dirname "$0")" && pwd)/$(basename "$0")"
+cd "$(dirname "$SELF")"
 
 # rustup's toolchain lives here; the system rustc may be a different (stale)
 # toolchain without the cross targets installed.
@@ -72,7 +85,7 @@ for arg in "$@"; do
     # only one copy to keep true. `--help` was not handled at all before, which made
     # `./verify.sh --help` an error rather than an answer.
     -h|--help)
-      sed -n '2,/^$/p' "$0" | sed 's/^#\{1,\}//; s/^ //'
+      sed -n '2,/^$/p' "$SELF" | sed 's/^#\{1,\}//; s/^ //'
       exit 0 ;;
     --deep|--all)
       # One set of switches with two names: `--all` used to set fewer of them than
@@ -83,6 +96,15 @@ for arg in "$@"; do
     *) echo "unknown option: $arg" >&2; exit 1 ;;
   esac
 done
+
+# `--kani-only` and `--deep`/`--all` contradict each other: one runs only Kani, the
+# other claims every stage. Left alone, the Kani-only branch skips stages 1-4 without
+# recording a skip, so `--deep --kani-only` could print "all requested checks passed"
+# over a run that never touched the test suite.
+if [ "$KANI_ONLY" -eq 1 ] && [ "$STRICT" -eq 1 ]; then
+  echo "conflicting options: --kani-only and --deep/--all cannot be combined" >&2
+  exit 1
+fi
 
 step() { echo; echo "=== $* ==="; }
 
@@ -152,14 +174,20 @@ if [ "$KANI_ONLY" -eq 0 ]; then
   fi
 
   step "3. test suite"
-  cargo test --release
+  # The timing screen is its own target (step 3c) and runs exactly once, there.
+  # `cargo test --release` runs every target -- including tests/timing.rs -- and so do
+  # the `rng` and `locked` runs, so its microsecond-scale measurements used to run
+  # four times, three of them in parallel with the rest of the suite (an interference
+  # source the screen's own header discusses). `--skip timing_` keeps it in 3c; no
+  # other test name contains `timing_`.
+  cargo test --release -- --skip timing_
   # `rng` gates the `random` module and its tests.
-  cargo test --release --features rng
+  cargo test --release --features rng -- --skip timing_
   # `locked` gates the mlock'd-key type and its in-crate integrity test. The audit
   # found no host-side entry for it (the cross-target job only runs `cargo check`
   # and qemu), so a machine where mlock is refused would never have said so here.
   # The test itself reports a skip to stderr when the platform refuses to lock.
-  cargo test --release --features locked
+  cargo test --release --features locked -- --skip timing_
 
   # The security tests are in `tests/security.rs` and run with the rest above,
   # but they are called out because one of them is a fuzz loop -- if it starts
@@ -236,7 +264,11 @@ if [ "$RUN_CROSS_EXEC" -eq 1 ]; then
     emulator="${pair##*:}"
     if ! QEMU="$(find_qemu "$emulator")"; then
       skip "$target execution" "no $emulator found"
-      echo "         Expected \$QEMU_${emulator^^}, \$HOME/.local/bin/$emulator, or"
+      # Same derivation `find_qemu` uses (`qemu-aarch64` -> `$QEMU_AARCH64`); the
+      # hint used to upper-case the whole name and print `$QEMU_QEMU-AARCH64`, a
+      # variable nothing reads.
+      hint_var="QEMU_$(printf '%s' "${emulator#qemu-}" | tr '[:lower:]-' '[:upper:]_')"
+      echo "         Expected \$$hint_var, \$HOME/.local/bin/$emulator, or"
       echo "         $emulator on \$PATH.  On Debian/Ubuntu this needs no root:"
       echo "           apt-get download qemu-user && dpkg-deb -x qemu-user_*.deb ~/.local"
       continue
@@ -320,6 +352,13 @@ if [ "$RUN_CROSS_EXEC" -eq 1 ]; then
             --features ultra,pure 2>&1 \
             | sed -n 's/^ *Executable .*(\(.*\))$/\1/p')"
     [ -n "$exes" ] || { echo "cargo reported no $target executables" >&2; exit 1; }
+    # The same two sanity greps CI's cross-exec step carries: a non-empty parse can
+    # still be a *partial* one, and a partial list would execute and count a subset of
+    # the built suite as if it were all of it.
+    printf '%s\n' "$exes" | grep -q 'xchacha20_blake3_siv-' \
+      || { echo "the Executable parse for $target found no library test binary -- the cargo output format may have changed" >&2; exit 1; }
+    printf '%s\n' "$exes" | grep -q 'differential_reference-' \
+      || { echo "the Executable parse for $target found no differential binary -- the cargo output format may have changed" >&2; exit 1; }
     ran=0
     for bin in $exes; do
       case "$(basename "$bin")" in timing-*|ctgrind-*) continue ;; esac
@@ -412,15 +451,34 @@ if [ "$RUN_CTGRIND" -eq 1 ]; then
     # handled, `tools/ctgrind.sh` answered "SKIPPED: valgrind not found" with exit 0
     # and this stage was counted as *run and passed* -- the same defect as the skip
     # handling above, one level down, and the reason every tool here now answers 3.
-    set +e
-    tools/ctgrind.sh
-    ctgrind_rc=$?
-    set -e
-    if [ "$ctgrind_rc" -eq 3 ]; then
-      skip "ctgrind" "tools/ctgrind.sh could not run (it needs valgrind; its output above says why)"
-    elif [ "$ctgrind_rc" -ne 0 ]; then
-      exit "$ctgrind_rc"
+    #
+    # `hardened` is the default, so the opt-out configuration is a different code
+    # path (the second gate compiled out) and `ultra` adds a second implementation
+    # on the key path. CI's ctgrind job runs all three; a `--deep`/`--all` run claims
+    # to leave nothing out, so it runs all three too. A narrow `--ctgrind` stays on
+    # the default configuration rather than tripling its cost.
+    ctgrind_configs=(default)
+    if [ "$STRICT" -eq 1 ]; then
+      ctgrind_configs=(default opt-out ultra)
     fi
+    for cfg in "${ctgrind_configs[@]}"; do
+      case "$cfg" in
+        default) ctgrind_args=() ;;
+        opt-out) ctgrind_args=(--no-default-features) ;;
+        ultra)   ctgrind_args=(--features ultra) ;;
+      esac
+      echo "--- ctgrind configuration: $cfg ---"
+      set +e
+      tools/ctgrind.sh ${ctgrind_args[@]+"${ctgrind_args[@]}"}
+      ctgrind_rc=$?
+      set -e
+      if [ "$ctgrind_rc" -eq 3 ]; then
+        skip "ctgrind" "tools/ctgrind.sh could not run in the $cfg configuration (it needs valgrind; its output above says why)"
+        break
+      elif [ "$ctgrind_rc" -ne 0 ]; then
+        exit "$ctgrind_rc"
+      fi
+    done
   else
     skip "ctgrind" "tools/ctgrind.sh missing"
   fi
@@ -447,7 +505,11 @@ if [ "$RUN_TSAN" -eq 1 ]; then
   # ("`-Zsanitizer=thread` in this crate is incompatible with `-Zsanitizer` being
   # unset in dependency `panic_unwind`"), so the run rebuilds std with
   # `-Zbuild-std`.
-  if cargo +nightly --version >/dev/null 2>&1 && rustup component list --installed 2>/dev/null | grep -q '^rust-src'; then
+  # The component is checked for the *nightly* toolchain, which is the one
+  # `-Zbuild-std` runs under: `rustup component list --installed` without
+  # `--toolchain` answers for the default toolchain, so a machine with rust-src
+  # only on stable would pass this guard and then fail the build.
+  if cargo +nightly --version >/dev/null 2>&1 && rustup component list --installed --toolchain nightly 2>/dev/null | grep -q '^rust-src'; then
     tools/tsan.sh
   else
     skip "ThreadSanitizer" "needs the nightly toolchain and rust-src (rustup component add rust-src)"
@@ -463,8 +525,29 @@ if [ "$RUN_FUZZ" -eq 1 ]; then
   # single-bit corruption, and the wipe-on-failure contract, so any failure here
   # is a real defect rather than a smoke test.
   FUZZ_SECONDS="${FUZZ_SECONDS:-120}"
+  # libFuzzer reads `-max_total_time=0` as "no time limit", and an odd 1 would make
+  # the second run's half 0; either turns these bounded runs unbounded. Validate.
+  case "$FUZZ_SECONDS" in
+    ''|*[!0-9]*) echo "FAILED: FUZZ_SECONDS must be a positive integer, got '$FUZZ_SECONDS'" >&2; exit 1 ;;
+    0) echo "FAILED: FUZZ_SECONDS=0 means no time limit to libFuzzer; give a positive number of seconds" >&2; exit 1 ;;
+  esac
   if cargo fuzz --version >/dev/null 2>&1 && cargo +nightly --version >/dev/null 2>&1; then
-    cargo +nightly fuzz run roundtrip -- -max_total_time="$FUZZ_SECONDS"
+    # One absolute target directory, passed explicitly to every cargo-fuzz command
+    # below. cargo-fuzz honours CARGO_TARGET_DIR when no --target-dir is given, and
+    # defaults to fuzz/target otherwise; the witness guard used to nm the hard-coded
+    # default path, so with CARGO_TARGET_DIR set it read a *foreign* binary -- one
+    # left by an earlier ultra build makes a dropped --features pass, and a missing
+    # one makes a good build fail.
+    if [ -n "${CARGO_TARGET_DIR:-}" ]; then
+      case "$CARGO_TARGET_DIR" in
+        /*) FUZZ_TARGET_DIR="$CARGO_TARGET_DIR" ;;
+        *)  FUZZ_TARGET_DIR="$PWD/$CARGO_TARGET_DIR" ;;
+      esac
+    else
+      FUZZ_TARGET_DIR="$PWD/fuzz/target"
+    fi
+    cargo +nightly fuzz run roundtrip --target-dir "$FUZZ_TARGET_DIR" \
+      -- -max_total_time="$FUZZ_SECONDS"
     # The same target with `ultra`, which is the only configuration that runs the second
     # implementation over the key: new code on the caller-controlled path, so the
     # "no panic, no out-of-bounds, every corruption rejected" assertions apply to it too.
@@ -479,16 +562,25 @@ if [ "$RUN_FUZZ" -eq 1 ]; then
     # *pipeline* fail even though the match was found. The first version of this guard
     # did exactly that and reported "the ultra feature did not apply" on a binary that
     # had sixteen witness symbols in it -- the same trap `tools/ctgrind.sh` documents.
-    fuzz_target_dir="fuzz/target/$(rustc +nightly -vV | sed -n 's/^host: //p')/release"
-    cargo +nightly fuzz build roundtrip --features xchacha20-blake3-siv/ultra
-    witness_symbols="$(nm -C "$fuzz_target_dir/roundtrip" 2>/dev/null | grep -c 'witness::' || true)"
+    fuzz_bin="$FUZZ_TARGET_DIR/$(rustc +nightly -vV | sed -n 's/^host: //p')/release/roundtrip"
+    cargo +nightly fuzz build roundtrip --target-dir "$FUZZ_TARGET_DIR" \
+      --features xchacha20-blake3-siv/ultra
+    # A missing nm or a build that wrote somewhere unexpected used to reach the same
+    # "the ultra feature did not apply" branch as a dropped feature; say which is which.
+    command -v nm >/dev/null 2>&1 \
+      || { echo "FAILED: nm (binutils) is not on PATH, so the fuzz witness guard cannot read $fuzz_bin" >&2; exit 1; }
+    [ -f "$fuzz_bin" ] \
+      || { echo "FAILED: cargo fuzz build produced no $fuzz_bin, so the witness guard has nothing to read" >&2; exit 1; }
+    witness_symbols="$(nm -C "$fuzz_bin" 2>/dev/null | grep -c 'witness::' || true)"
     if [ "${witness_symbols:-0}" -gt 0 ]; then
       echo "fuzz binary has $witness_symbols witness symbol(s): the ultra feature is on"
-      cargo +nightly fuzz run roundtrip --features xchacha20-blake3-siv/ultra \
-        -- -max_total_time="$((FUZZ_SECONDS / 2))"
+      fuzz_half=$((FUZZ_SECONDS / 2))
+      [ "$fuzz_half" -ge 1 ] || fuzz_half=1
+      cargo +nightly fuzz run roundtrip --target-dir "$FUZZ_TARGET_DIR" \
+        --features xchacha20-blake3-siv/ultra -- -max_total_time="$fuzz_half"
     else
-      echo "FAILED: no witness symbols in $fuzz_target_dir/roundtrip -- the ultra feature" >&2
-      echo "        did not apply, so this run would test the default configuration twice" >&2
+      echo "FAILED: no witness symbols in $fuzz_bin -- the ultra feature did not apply," >&2
+      echo "        so this run would test the default configuration twice" >&2
       exit 1
     fi
   else
@@ -499,12 +591,13 @@ fi
 
 if [ "$RUN_TOOLS" -eq 1 ]; then
   STAGE_KEY=tools
-  step "10. tool-level gates (what CI runs on every push)"
-  # Each of these answers 3 for "could not run" and non-zero for "found something",
-  # and the difference is the whole point of the convention `tools/gate_selftest.sh`
-  # checks: a tool that could not run is a *skipped stage* here, never absorbed into a
-  # green run. This stage is where that convention is actually exercised, which is why
-  # it exists -- the tools were all wired into CI and none of them into this script.
+  step "10. tool-level gates (the tools CI's per-push jobs run; the 4000-vector differential is wide-only there)"
+  # The tools that answer 3 for "could not run" are reported as skipped stages (the
+  # convention `tools/gate_selftest.sh` checks); the ones with no exit-3 path --
+  # `fi_check.sh`, `fi_instruction.sh`, `check_kani_cfg.sh` -- fail loudly when the
+  # toolchain is missing rather than exiting 0, which is what the gate self-test
+  # asserts for `fi_check.sh`. This stage is where the convention is exercised: the
+  # tools were all wired into CI before any of them were wired into this script.
   run_tool() {  # name, tool-path, args...
     local name="$1" tool="$2"; shift 2
     if [ ! -f "$tool" ]; then

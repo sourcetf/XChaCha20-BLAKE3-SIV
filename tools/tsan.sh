@@ -10,9 +10,10 @@
 #   note: `-Zsanitizer=thread` in this crate is incompatible with `-Zsanitizer`
 #         being unset in dependency `panic_unwind`
 #
-# Rebuilding std takes a couple of minutes and needs the `rust-src` component:
+# Rebuilding std takes a couple of minutes and needs the *nightly* toolchain's
+# rust-src component:
 #
-#   rustup component add rust-src
+#   rustup component add rust-src --toolchain nightly
 #
 # Two runs, in this order, because a clean result from a sanitizer that is not
 # actually in the binary looks identical to a clean result from one that is:
@@ -25,9 +26,23 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
-if ! rustup component list --installed 2>/dev/null | grep -q '^rust-src'; then
-  echo "FAIL: the rust-src component is required for -Zbuild-std; run:" >&2
-  echo "  rustup component add rust-src" >&2
+# The nightly toolchain and *its* rust-src are what `-Zbuild-std` runs under; a bare
+# `rustup component list --installed` answers for the default toolchain and used to
+# turn "rustup is not on PATH" into "rust-src is not installed" (and would pass on a
+# machine whose default toolchain has rust-src while nightly does not).
+if ! command -v rustup >/dev/null 2>&1; then
+  echo "FAIL: rustup is not on PATH, so the nightly toolchain and rust-src cannot be" >&2
+  echo "  checked; run this where rustup is available." >&2
+  exit 1
+fi
+if ! cargo +nightly --version >/dev/null 2>&1; then
+  echo "FAIL: the nightly toolchain is required for -Zbuild-std; run:" >&2
+  echo "  rustup toolchain install nightly" >&2
+  exit 1
+fi
+if ! rustup component list --installed --toolchain nightly 2>/dev/null | grep -q '^rust-src'; then
+  echo "FAIL: the nightly toolchain's rust-src component is required for -Zbuild-std; run:" >&2
+  echo "  rustup component add rust-src --toolchain nightly" >&2
   exit 1
 fi
 

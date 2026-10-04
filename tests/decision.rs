@@ -80,6 +80,19 @@ fn a_forged_tag_must_not_be_accepted() {
             );
         }
 
+        // A corrupted ciphertext under the valid tag, through the in-place entry too.
+        // The allocating path's flip above is not evidence for the in-place decision:
+        // the two are separate call sites, and "through both entry points" is the
+        // claim this test makes.
+        if !ct.is_empty() {
+            let mut forged_ct = ct.clone();
+            forged_ct[0] ^= 0x01;
+            assert!(
+                decrypt_in_place_detached(&KEY, &NONCE, AAD, &mut forged_ct, &detached).is_err(),
+                "corrupted ciphertext accepted in place at message length {pt_len}"
+            );
+        }
+
         let mut forged = detached;
         forged[TAG_LEN - 1] ^= 0x01;
         let mut buf = ct.clone();

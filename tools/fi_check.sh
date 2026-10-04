@@ -34,7 +34,10 @@ cd "$(dirname "$0")/.."
 export PATH="$HOME/.cargo/bin:$PATH"
 
 WORK="$(mktemp -d)"
-trap 'rm -rf "$WORK"' EXIT
+# Keep the logs on failure: every FAIL message below points at a file under $WORK,
+# and an unconditional cleanup deleted them in the same exit that printed the path
+# (an audit noted the pointer was dead on arrival). A successful run cleans up.
+trap 'rc=$?; if [ "$rc" -eq 0 ]; then rm -rf "$WORK"; else echo "fault-campaign logs kept in $WORK (exit $rc)" >&2; fi' EXIT
 
 # Every row (and every baseline) gets its OWN target directory, and the reason is a
 # defect this shared-directory version had: cargo calls a build Fresh by comparing the
@@ -269,12 +272,14 @@ PY
 # The *in-place* failure path's wipe, which is the one a test can observe: the
 # buffer is the caller's, so leaving the unverified plaintext in it is visible.
 #
-# Two wipes are on that path -- the decision wipes when it rejects, and the entry
-# point wipes again because a fault that skips the decision call never reached the
-# first one -- so the mutation removes both. Removing only the decision's would
-# leave a defect that is not a defect, and the row would read "expected fail, got
-# pass" (which is how the first version of this row failed, on a wipe no test could
-# see).
+# The wipes live in the *callers*, after each serial check (`zeroize_slice(buffer)`
+# in the two decrypt entry points); `accept_or_reject` itself does not wipe. An
+# earlier revision of this comment said the decision wiped on rejection, which was
+# the shape before the wipes moved to the call sites. A fault that skips the
+# decision call never reaches the earlier one, so this patch removes every
+# `zeroize_slice(buffer);` site; removing only one would leave a defect that is not
+# a defect, and the row would read "expected fail, got pass" (which is how the
+# first version of this row failed, on a wipe no test could see).
 #
 # The allocating path (`decrypt`) wipes its plaintext before dropping it, and that
 # one is *not* in this campaign because no test can see it: the memory is freed

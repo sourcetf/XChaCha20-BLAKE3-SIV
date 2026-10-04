@@ -2,16 +2,22 @@
 //!
 //! `XChaCha20Poly1305` is the natural reference point: same 24-byte nonce, same
 //! ChaCha20 core, and it is what a caller would otherwise reach for. The
-//! 12-byte-nonce `ChaCha20Poly1305` is included because it is what the c2sp.org
-//! SIV construction wraps, and `aead`'s in-place interface is used for both sides
-//! so neither pays for an API shape the other does not have.
+//! 12-byte-nonce `ChaCha20Poly1305` is included because the final encryption step
+//! of a c2sp.org SIV-like construction is a 12-byte-nonce ChaCha20 operation --
+//! the vendored `standard.txt`'s CCP-SIV MACs the *plaintext* with Poly1305 and
+//! then encrypts with `ChaCha20(encKey, 0, tag[16..28])` -- so this is the closest
+//! `aead` shape to that step, not the construction itself. `aead`'s in-place
+//! interface is used for both sides so neither pays for an API shape the other
+//! does not have.
 //!
-//! Run with `cargo bench --bench compare`. Numbers are host-specific and the
-//! *ratios* are the stable signal: this crate derives more key material per
-//! message and wipes it, which costs a fixed amount that dominates at 64 bytes
-//! and disappears by 16 KiB. Encrypt, decrypt and round-trip are all measured --
-//! the decrypt asymmetry (SIV decrypts before it can verify) only shows up in the
-//! second of those.
+//! Run with `cargo bench --bench compare`. Numbers are host-specific and
+//! hot-cache (neither side flushes between iterations); the *ratios* are the
+//! stable signal. This crate derives more key material per message and wipes it,
+//! and the default `hardened` build pays an extra fixed cost on decrypt, so the
+//! crate's per-message overhead dominates at 64 bytes and disappears by 16 KiB.
+//! Encrypt, decrypt and round-trip are all measured -- the decrypt asymmetry (SIV
+//! decrypts before it can verify) is clean in the decrypt group and diluted inside
+//! the round-trip group, whose second half calls the same in-place decrypt.
 use aead::{AeadInPlace, KeyInit};
 use chacha20poly1305::{ChaCha20Poly1305, XChaCha20Poly1305};
 use criterion::{criterion_group, criterion_main, BatchSize, BenchmarkId, Criterion, Throughput};
@@ -19,9 +25,11 @@ use xchacha20_blake3_siv::{
     decrypt, decrypt_in_place_detached, encrypt, encrypt_in_place_detached,
 };
 
-// Power-of-two sizes compare the dispatch paths cleanly; the odd ones keep the
-// *tails* visible, which is where a message that is not a multiple of the SIMD
-// width actually spends time (700 = 2x256 + 188, 5000 = 19x256 + 136).
+// Power-of-two sizes compare the dispatch paths cleanly; the in-between sizes keep
+// the *tails* visible, which is where a message that is not a multiple of the SIMD
+// stride actually spends time. That stride is 512 bytes on AVX2 and 256 on SSE2/NEON,
+// so both decompositions are shown: 700 = 1x512 + 188 = 2x256 + 188;
+// 5000 = 9x512 + 392 = 19x256 + 136.
 const SIZES: [usize; 9] = [64, 256, 700, 1024, 4096, 5000, 16384, 65536, 1048576];
 
 fn bench_encrypt(c: &mut Criterion) {
@@ -85,8 +93,12 @@ fn bench_encrypt(c: &mut Criterion) {
 ///
 /// SIV has to decrypt *before* it can verify — that is what makes the tag depend
 /// on the plaintext — so this crate pays a second full ChaCha20 pass plus the whole
-/// tag recomputation and a constant-time comparison. Poly1305 verifies a running
-/// MAC while it decrypts, so it pays neither. That asymmetry is the thing this
+/// tag recomputation and a constant-time comparison. `chacha20poly1305` 0.10.1
+/// does not interleave: `decrypt_in_place_detached` authenticates the *ciphertext*
+/// with Poly1305, verifies, and only then applies the keystream (its source still
+/// carries `TODO(tarcieri): interleave decryption with Poly1305`). It also walks
+/// the buffer twice, but its MAC pass needs no plaintext, it recomputes no tag,
+/// and it stops before decrypting on a bad tag. That asymmetry is the thing this
 /// group exists to measure; the encrypt group cannot show it.
 ///
 /// Each side is given a *valid* tag: `Poly1305`'s decrypt path checks the tag

@@ -15,7 +15,7 @@
 //! | a single corrupted decision *value* | two slots, two serial reject-first checks | `tests/decision.rs`, `tools/fi_check.sh` |
 //! | a single corrupted *instruction* | the second gate, and the fail-closed call site | `tools/fi_instruction.sh` (both models) |
 //! | `computed_tag` pinned / rewritten | an independent recomputation cross-checked against both values | `dual_mac_is_wired_into_both_decrypt_paths` |
-//! | key pages read out of swap or a core dump | `mlock` + `MADV_DONTDUMP` | `locked_key_is_actually_locked` |
+//! | key pages read out of swap or a core dump | `mlock` + `MADV_DONTDUMP` | `locked_key_is_actually_locked` (the lock); `tests/locked.rs` (`unlocking_restores_core_dump_inclusion`, `the_dump_advice_is_issued_on_the_right_range`) for the dump exclusion |
 //! | a nonce reused | SIV: the tag binds the message, so reuse degrades rather than fails | `src/lib.rs`: `test_message_swap_under_a_reused_nonce_is_rejected` |
 //! | remote memory exhaustion | a public bound, a pre-allocation policy check, fallible allocation | `tests/security.rs` |
 //!
@@ -130,11 +130,54 @@ fn scrub_stack_is_called_at_every_entry_point() {
     let src = include_str!("../src/lib.rs");
     let cut = src.find("mod tests {").expect("test module");
     let body = &src[..cut];
-    assert_eq!(
-        body.matches("scrub_stack();").count(),
-        6,
-        "all six scrub_stack call sites must remain"
-    );
+
+    /// The body of `needle`, brace-matched.
+    fn body_of<'a>(src: &'a str, needle: &str) -> &'a str {
+        let start = src.find(needle).unwrap_or_else(|| panic!("no {needle}"));
+        assert_eq!(
+            src.matches(needle).count(),
+            1,
+            "{needle} must appear exactly once in the non-test source"
+        );
+        let after = &src[start..];
+        let open = after.find('{').expect("body");
+        let mut depth = 0usize;
+        for (n, c) in after[open..].char_indices() {
+            match c {
+                '{' => depth += 1,
+                '}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return &after[..=open + n];
+                    }
+                }
+                _ => {}
+            }
+        }
+        panic!("unbalanced braces in {needle}");
+    }
+
+    // Per function, not a whole-file count: a total is unbound to position, so a call
+    // moved into a helper nobody calls would keep it at six. The expected sites are
+    // three in `encrypt` (the two witness-refusal returns and the success return), one
+    // in `encrypt_in_place_detached` (its only encrypt-side call -- the in-place path
+    // deliberately has no witness cross-check), and one in each decrypt entry point.
+    let mut total = 0;
+    for (name, expected) in [
+        ("pub fn encrypt(", 3),
+        ("pub fn encrypt_in_place_detached(", 1),
+        ("pub fn decrypt(", 1),
+        ("pub fn decrypt_in_place_detached(", 1),
+    ] {
+        let found = body_of(body, name).matches("scrub_stack();").count();
+        assert_eq!(
+            found, expected,
+            "{name} must contain {expected} `scrub_stack();` call sites, found {found}: a \
+             dropped one leaves key material in the region it exists to clear"
+        );
+        total += found;
+    }
+    assert_eq!(total, 6, "all six scrub_stack call sites must remain");
 }
 
 /// Which entry points the witness is actually called from — all of them except one.
@@ -280,13 +323,45 @@ fn locked_key_is_actually_locked() {
          syscall number or a no-op `lock_range` looks exactly like this."
     );
 
-    // The lock must be on the *live* key's page, not on an address the value was
-    // moved away from. `mlock` is address-based, and a `LockedKey` returned by
+    // And the key still works, so the locking did not corrupt or move it.
+    let (ct, tag) = encrypt(&key, &NONCE, b"aad", b"message").unwrap();
+    assert_eq!(
+        decrypt(&key, &NONCE, b"aad", &ct, &tag).unwrap(),
+        b"message"
+    );
+
+    // Dropping the key must unlock it. Measured *before* any manual `unlock_range`:
+    // the earlier version of this test reused the pre-unlock VmLck value here, so
+    // `released < held` was already implied by the live-page check below and would
+    // still hold even if `Drop` never called `unlock_range` at all.
+    let held = LockedKey::locked_bytes().expect("VmLck is readable on Linux");
+    drop(key);
+    let released = LockedKey::locked_bytes().expect("VmLck is readable on Linux");
+    assert!(
+        released < held,
+        "dropping a `LockedKey` must unlock it: VmLck stayed at {released} (held {held})"
+    );
+
+    // Separately, the lock must be on the *live* key's page, not on an address the
+    // value was moved away from. `mlock` is address-based, and a `LockedKey` returned by
     // value moves its 32 bytes -- so an earlier version locked a stack slot in
     // `new` and left the returned copy on an unlocked page, while VmLck (and the
     // assertion above) still looked right. Unlocking the live key's own page must
     // show up in the kernel's accounting; if it does not, the locked page is
     // somewhere else and the protection is not on the key.
+    let key = match LockedKey::new(&KEY) {
+        Ok(k) => k,
+        Err(e) => {
+            assert!(
+                allow_unlocked,
+                "the kernel refused the second lock (errno {}), so the live-page half of this \
+                 test cannot run on this host. Raise RLIMIT_MEMLOCK or grant CAP_IPC_LOCK, or \
+                 set XSIV_ALLOW_UNLOCKED=1 to record that this host knowingly runs unlocked.",
+                -e
+            );
+            return;
+        }
+    };
     let held = LockedKey::locked_bytes().expect("VmLck is readable on Linux");
     unlock_range(key.as_bytes().as_ptr(), 32);
     let after_unlocking_live = LockedKey::locked_bytes().expect("VmLck is readable on Linux");
@@ -296,20 +371,12 @@ fn locked_key_is_actually_locked() {
          so the page that was locked is not the page the key is on: the value was moved \
          after being locked. The key must be heap-allocated (`Box`) so its address is stable."
     );
-
-    // And the key still works, so the locking did not corrupt or move it.
+    // The live key still answers after its page was unlocked, so the address-level
+    // check did not pass by corrupting or moving it.
     let (ct, tag) = encrypt(&key, &NONCE, b"aad", b"message").unwrap();
     assert_eq!(
         decrypt(&key, &NONCE, b"aad", &ct, &tag).unwrap(),
         b"message"
-    );
-
-    let held = after;
-    drop(key);
-    let released = LockedKey::locked_bytes().expect("VmLck is readable on Linux");
-    assert!(
-        released < held,
-        "dropping a `LockedKey` must unlock it: VmLck stayed at {released}"
     );
 }
 

@@ -4,10 +4,16 @@
 //!
 //! `ctgrind` is an *approach*, not a tool: mark secret bytes as **undefined**
 //! (poisoned) in valgrind's shadow memory, run the code, and let memcheck report
-//! any conditional jump, memory index, or syscall argument that depends on them.
-//! That is a mechanical answer to "does this branch on secret data?" — stronger
-//! than reading the source, because it does not depend on the reader spotting
-//! every path.
+//! any conditional jump or syscall argument that depends on them.
+//! Secret-derived *memory indices* are not in that list, and this is measured
+//! rather than assumed: `secret_dependent_branch` below records that memcheck
+//! tolerates undefined values flowing into address arithmetic, so
+//! `TABLE[poisoned as usize]` is not reported. That half of the constant-time
+//! argument rests on the source inventory in `tests/variable_latency.rs` and on
+//! `tools/cache_profile.sh --trace`, not on this file. What remains is still a
+//! mechanical answer to "does this branch on secret data?" — stronger than
+//! reading the source, because it does not depend on the reader spotting every
+//! path.
 //!
 //! The `ctgrind` crate is not available in this environment, and neither is
 //! `ctgrind`'s C macro. But the machinery underneath is just a documented

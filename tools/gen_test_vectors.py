@@ -50,6 +50,11 @@ NONCE = bytes((i * 29 + 5) % 256 for i in range(24))
 #: plus empty and single-byte messages, and AADs larger, smaller and equal in
 #: size to the message -- the tag encodes both lengths, so their relative
 #: magnitude matters.
+#:
+#: (79/80/81, 1) are retained from v0.2, when the tag head was 80 bytes; that
+#: boundary is gone (the head is 48 bytes now), so they are extra nearby coverage
+#: rather than a boundary witness. They stay because the committed fixture holds
+#: their vectors; dropping them would mean regenerating tests/vectors_differential.txt.
 PAIRS = [
     (0, 0), (0, 1), (0, 15), (0, 16), (0, 17), (0, 64), (0, 257),
     (1, 0), (1, 15), (1, 16), (1, 255), (1, 256),

@@ -6,16 +6,17 @@
 //! Four properties, all of which must hold for *every* input:
 //!
 //!   1. **No panic, no out-of-bounds, no hang.** The input is arbitrary bytes,
-//!      interpreted as `(key, nonce, aad, plaintext)`; every field length is a
-//!      function of the fuzzer's input, so length handling is exercised at every
-//!      boundary.
+//!      interpreted as `(key, nonce, aad, plaintext)`; the AAD/plaintext split is a
+//!      function of the fuzzer's input, so those lengths are exercised widely,
+//!      while key, nonce and tag lengths are fixed by the API's array types.
 //!   2. **No plaintext without a valid tag.** When the round trip is corrupted by
 //!      a single flipped bit — in the ciphertext, the tag, or the AAD —
 //!      decryption must return an error and must not hand back the plaintext.
 //!      That is the property an implementation which compared a prefix, or which
 //!      returned plaintext before verifying, would violate. (This is now
 //!      unconditional: when the field `mode` selects is empty, the tag is corrupted
-//!      instead of the check being skipped.)
+//!      instead of the check being skipped. The corrupted position is drawn from two
+//!      input bytes, so it reaches the tail of fields longer than 86 bytes.)
 //!   3. **Arbitrary wire bytes neither panic nor authenticate wrongly.** A tag and
 //!      ciphertext taken straight from the fuzzer — not the output of `encrypt` —
 //!      are fed to `decrypt`. Either it rejects, or (with the `2^-520` probability a
@@ -46,6 +47,9 @@ fuzz_target!(|data: &[u8]| {
     }
 
     let mode = data[0];
+    // A second selector byte widens the tamper index below: `mode / 3` alone tops
+    // out at 85, so bytes past 85 of a long ciphertext or AAD were never corrupted.
+    let tweak = data[1] as usize;
     let mut rest = &data[1..];
 
     let key: [u8; KEY_LEN] = rest[..KEY_LEN].try_into().unwrap();
@@ -66,10 +70,11 @@ fuzz_target!(|data: &[u8]| {
         (&rest[1..1 + split.min(rest.len() - 1)], &rest[1 + split.min(rest.len() - 1)..])
     };
 
-    let (ct, tag) = match encrypt(&key, &nonce, aad, pt) {
-        Ok(v) => v,
-        Err(_) => return,
-    };
+    // `encrypt` can only fail on allocation failure or a length above `MAX_MSG_SIZE`,
+    // neither reachable at fuzz sizes. The silent `return` this replaces let a
+    // regression that made `encrypt` refuse a valid input turn all four properties
+    // vacuously green.
+    let (ct, tag) = encrypt(&key, &nonce, aad, pt).expect("encrypt refuses a valid input");
 
     // Property 1: the honest round trip must always succeed and match.
     let back = decrypt(&key, &nonce, aad, &ct, &tag).expect("round trip must verify");
@@ -84,7 +89,7 @@ fuzz_target!(|data: &[u8]| {
     let mut bad_aad = aad.to_vec();
     match mode % 3 {
         0 if !bad_ct.is_empty() => {
-            let i = (mode as usize / 3) % bad_ct.len();
+            let i = (tweak * 256 + mode as usize / 3) % bad_ct.len();
             bad_ct[i] ^= 1 << (mode % 8);
             assert!(
                 decrypt(&key, &nonce, aad, &bad_ct, &bad_tag).is_err(),
@@ -100,7 +105,7 @@ fuzz_target!(|data: &[u8]| {
             );
         }
         2 if !bad_aad.is_empty() => {
-            let i = (mode as usize / 3) % bad_aad.len();
+            let i = (tweak * 256 + mode as usize / 3) % bad_aad.len();
             bad_aad[i] ^= 1 << (mode % 8);
             assert!(
                 decrypt(&key, &nonce, &bad_aad, &ct, &tag).is_err(),

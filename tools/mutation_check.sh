@@ -65,6 +65,24 @@ PY
 
 run_ctgrind() {
   local dir="$1"
+  # Valgrind first, before the build: the driver's preflight already answers 3 when
+  # none is found, but one that exists and *cannot start* (a broken extracted copy,
+  # a missing VALGRIND_LIB) used to be read as "the mutation was not caught" -- the
+  # one classification this tool must not confuse, since it is about the detector,
+  # not the environment.
+  local vg
+  vg="$(find_valgrind)"
+  if [ -z "$vg" ]; then
+    echo "SKIPPED: no valgrind found (see tools/ctgrind.sh --setup)" >&2
+    return 3
+  fi
+  if [ -d "$HOME/valgrind/usr/libexec/valgrind" ]; then
+    export VALGRIND_LIB="${VALGRIND_LIB:-$HOME/valgrind/usr/libexec/valgrind}"
+  fi
+  if ! "$vg" --version >/dev/null 2>&1; then
+    echo "SKIPPED: $vg exists but cannot start (missing VALGRIND_LIB? see tools/ctgrind.sh --setup)" >&2
+    return 3
+  fi
   ( cd "$dir"
     local bin
     # Ask cargo for the executable rather than globbing the deps directory: `ls -t` takes
@@ -93,15 +111,6 @@ print(exes[-1] if exes else "")
     [ -n "$bin" ] || { echo "could not build the ctgrind binary"; return 2; }
     # The same classification the real check uses: a report inside this crate
     # means the leak was seen.
-    local vg
-    vg="$(find_valgrind)"
-    if [ -z "$vg" ]; then
-      echo "SKIPPED: no valgrind found (see tools/ctgrind.sh --setup)" >&2
-      return 3
-    fi
-    if [ -d "$HOME/valgrind/usr/libexec/valgrind" ]; then
-      export VALGRIND_LIB="$HOME/valgrind/usr/libexec/valgrind"
-    fi
     local out
     out="$("$vg" --quiet --suppressions=tests/ctgrind.supp "$bin" \
       --test-threads=1 encrypt_does_not_branch_on_secrets \
@@ -230,11 +239,15 @@ if [ "$want" = "all" ] || [ "$want" = "ctgrind" ]; then
     echo "    baseline or the mutation."
     skipped=$((skipped + 1))
   else
-    set +e
+    # `|| status=$?` rather than `set +e; check_one ...; status=$?; set -e`: `check_one`
+    # turns errexit back on inside itself (and the `set -e` there is shell-wide), so a
+    # failing `return` used to terminate the driver on the spot -- before the
+    # classification below and before the "failure comes first" summary at the end.
+    # The `||` list is an errexit-exempt context, so the verdict survives to be
+    # classified.
+    status=0
     check_one ctgrind mutate_ctgrind run_ctgrind \
-      "ct_eq -> == in both decrypt paths"
-    status=$?
-    set -e
+      "ct_eq -> == in both decrypt paths" || status=$?
     # `check_one` answers 1 for "not caught" and 3 for "could not run": the first is a
     # finding about the check, the second is a gap in it, and collapsing them into one
     # exit status is how a skipped run becomes a green one.
@@ -242,10 +255,8 @@ if [ "$want" = "all" ] || [ "$want" = "ctgrind" ]; then
   fi
 fi
 if [ "$want" = "all" ] || [ "$want" = "kat" ]; then
-  set +e
-  check_one kat mutate_kat run_kat "SUBKEY_DOMAIN XSIV -> XSIX"
-  status=$?
-  set -e
+  status=0
+  check_one kat mutate_kat run_kat "SUBKEY_DOMAIN XSIV -> XSIX" || status=$?
   if [ "$status" -eq 3 ]; then skipped=$((skipped + 1)); elif [ "$status" -ne 0 ]; then rc=1; fi
 fi
 # The failure comes first. This used to exit 3 whenever anything was skipped, which

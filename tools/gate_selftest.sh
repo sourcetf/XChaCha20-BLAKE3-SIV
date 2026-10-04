@@ -6,8 +6,8 @@
 # *run and passed* when the stage's tool had printed `SKIPPED: ...` and exited 0, so
 # `--deep` could report "all requested checks passed" without the constant-time check
 # having executed at all. The convention is now **exit 3** -- "could not run", distinct
-# from 0 (ran and passed), 1 (ran and failed) and 99 (a leak) -- and every caller maps
-# it to a skipped stage.
+# from 0 (ran and passed), 1 (ran and failed) and 99 (a leak) -- and `verify.sh` records
+# it as a skipped stage (a stage the caller named is failed instead of skipped).
 #
 # This is the control for that convention. It hides the tooling and looks at the exit
 # status, so a tool that regresses to `exit 0` fails *here*, not in a summary line

@@ -91,10 +91,12 @@ Three details are load-bearing rather than incidental:
    a `subkey` collision — a `2^128` birthday, the same order as the tag's own
    collision bound, not a 768-bit one. In `v0.2` the `K`-in-input step made such a
    collision harmless; here it is not, so a subkey collision yields one ciphertext
-   that opens under both keys. That is the *attacker-chosen* commitment game
-   (`SECURITY-ANALYSIS.md` §4.5, not priced); the *target* bound — a given
-   ciphertext, `2^-520` per candidate key — is unchanged
-   (`test_tag_binds_both_derived_keys`).
+   that opens under both keys. That is the *attacker-chosen* commitment game, and
+   `SECURITY-ANALYSIS.md` §4.5 prices two of its three routes at `2^128` — this
+   subkey-collision key route and a chosen-context route, both with the two openings
+   decrypting to the *same* plaintext — leaving only the different-message salamander
+   underived. The *target* bound — a given ciphertext, `2^-520` per candidate key — is
+   unchanged (`test_tag_binds_both_derived_keys`).
 
 3. **Both lengths are encoded, and every field is fixed width.** BLAKE3 is not
    vulnerable to length extension (its finalisation is flagged, unlike
@@ -240,7 +242,9 @@ literature's names next to the number and let the reader assume it covered them:
 **`2^128` bounds *collisions*, not *targets*.** The state shortcut above helps only when
 both sides of the collision are the adversary's to search. A tag that has to be hit as
 given — a forged tag, or a tag that must also validate under a *second* key — is a target
-in the 520-bit output, still a `2^-520` per-candidate probability (a `2^520` search). So forgery and commitment *against a
+in the 520-bit output: guessing the tag is a `2^520` search, while a second key has only
+`2^256` candidates to try, each succeeding with probability `2^-520`, so a full key-space
+enumeration succeeds with probability `≈ 2^-264`. So forgery and commitment *against a
 given* ciphertext are untouched by the correction. (The context row above is the one place the
 object to hit is neither 520-bit nor the key: moving a given `(C, T)` to a second *context* means
 reproducing the 256-bit inner digest `X`, so that target is `≈ 2^256` and no tag width reaches it.)
@@ -418,8 +422,9 @@ mutated the unobservable one and the campaign reported "expected fail, got pass"
 which is what a mutation nothing can catch looks like).
 
 Measured cost, on the host `performance.md` describes and re-measured for `v0.3`: the added
-work is four 65-byte constant-time comparisons on **decrypt**, so it is a fixed per-message
-cost that does not scale — **+25% at 64 B, +24% at 256 B, +23% at 1 KiB, +11% at 4 KiB, and
+work is the **second gate** — two more 65-byte constant-time comparisons plus an independently
+written eight-byte fold (so four 65-byte comparison passes in total on the default build,
+against the opt-out build's two) — a fixed per-message cost that does not scale — **+25% at 64 B, +24% at 256 B, +23% at 1 KiB, +11% at 4 KiB, and
 within the noise floor from 16 KiB up** (default over `--no-default-features`; `performance.md`'s
 latency and ratio tables are the source). Encryption pays nothing for it (flat to the noise
 floor at every size), so the in-place *round trip* shows a smaller, noisier fraction of the same
@@ -786,13 +791,15 @@ Two entry points, both runnable from a fresh checkout:
                             # test suite, and the cross-target type-checks
 ./verify.sh --cross-exec    # ...plus executing the aarch64/i686/ppc64 suites under qemu
 ./verify.sh --kani          # ...plus Kani bounded model checking (slow)
-./verify.sh --tools         # ...plus the tool-level gates CI runs on every push: the
-                            # 13-row fault campaign, both instruction sweeps, the
+./verify.sh --tools         # ...plus the tool-level gates: the fourteen-row fault
+                            # campaign, both instruction sweeps (quick mode), the
                             # cache-profile differential and its planted-leak control,
-                            # the planted-bug checks, and the Kani cfg check. (The
-                            # 4000-vector differential against the Python reference is
-                            # not an every-push gate: it runs in the scheduled `wide`
-                            # job.)
+                            # the planted-bug checks, the cargo-mutants campaign with
+                            # its committed-evidence gate, the Kani cfg check, the
+                            # 4000-vector differential against the Python reference
+                            # (the rotation CI defers to its scheduled `wide` job
+                            # rather than running on every push), and the advisory
+                            # stack-residue scan.
 ./verify.sh --deep          # every switch above; `--all` is the same set
 ```
 
@@ -921,7 +928,9 @@ configuration it is ahead of `XChaCha20Poly1305` on encryption from 256 B up (le
 1–4 KiB, where the noise floor is a tie) and ahead on decryption from 16 KiB up, the small
 sizes within the noise floor and 1 KiB behind (the fixed per-message cost dominates there).
 The two costs it prices are a fixed per-message cost on
-`hardened` decryption (two 65-byte constant-time comparisons; gone by 1 MiB) and a per-byte
+`hardened` decryption (the second gate's two 65-byte constant-time comparisons plus the
+independently written fold, over the opt-out build; a fixed cost, so its share is inside the
+measured noise floor from 16 KiB up) and a per-byte
 cost on `ultra` decryption, whose scalar witness is **2.5x at 64 B and 10.1x at 1 MiB**.
 
 Two structural properties constrain a caller, and both follow from the construction rather

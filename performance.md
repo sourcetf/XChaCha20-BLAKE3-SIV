@@ -48,7 +48,7 @@ smaller than that are the same number**, which is why most of the `hardened`-vs-
 pairs below read as ties and why this section does not quote a figure to three digits.
 
 `opt-out` is `--no-default-features` (one comparison), `hardened` is the default (two gates,
-independent recomputation, fail-closed, and both constant-time comparison *shapes*), `ultra` adds
+the second independently *shaped*, fail-closed, and both constant-time comparison *shapes*), `ultra` adds
 the witness cross-check and the `locked`/`rng`/`dual-mac` layers. All three produce **identical
 bytes** — the KATs and the differential fixture pin that in every configuration — so what the
 table below prices is exactly the defences.
@@ -94,11 +94,13 @@ Read both tables as: this crate pays more *per message* (three derived keys, a
 there is enough data to batch). Two costs are visible in the configuration
 comparison, and both are the price of a defence rather than an accident:
 
-* **`hardened`'s second gate is a fixed per-message cost on decrypt** — two 65-byte
-  constant-time comparisons (in two shapes), the volatile re-reads and the
-  fail-closed plumbing — so it shows at the small end (1.06 → 1.32 us at 64 B) and
-  is gone by 1 MiB (391 → 394 us, i.e. a tie inside the noise floor). Encryption
-  pays nothing for it: 0.95 → 0.94 us.
+* **`hardened`'s second gate is a fixed per-message cost on decrypt** — two more
+  65-byte constant-time comparisons plus an independently written eight-byte fold
+  (each gate runs `subtle`'s byte loop both ways round, so the default build makes
+  four 65-byte comparison passes and the opt-out build two), the volatile re-reads
+  and the fail-closed plumbing — so it shows at the small end (1.06 → 1.32 us at 64 B) and
+  its share is inside the noise floor by 1 MiB (391 → 394 us, i.e. a tie inside the
+  noise floor). Encryption pays nothing for it: 0.95 → 0.94 us.
 * **`ultra`'s witness is a per-byte cost on decrypt**, because it is a scalar
   re-implementation: **2.5x the default at 64 B, 3.6x at 1 KiB, 10.0x at 64 KiB,
   10.1x at 1 MiB** — which is why the round trip above ends near 0.23x. Its in-place
@@ -199,7 +201,9 @@ has to rediscover it:
   decision rather than an oversight. Hashing 16 MiB with a reused four-thread pool
   measured 3.7x against one thread (8 threads: 4.8x); at 1 MiB the same measurement
   gives 1.02-1.08x, because a single core already runs at ~8.9 GiB/s there and the
-  coordination costs what the parallelism buys. The crate does not do it: it would
+  coordination costs what the parallelism buys. (This one is a hand measurement on this
+  host, unlike the tables above: no committed script reproduces it, and it is recorded
+  because the decision it supports is a design call.) The crate does not do it: it would
   need `std`, a thread pool, and cores the caller may already be using. BLAKE3
   ships threaded hashing (`update_rayon`) as an opt-in feature for the same reason,
   and RustCrypto's ciphers are single-threaded. Parallelise across messages

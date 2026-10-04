@@ -1,6 +1,8 @@
 //! AEAD 性能基准：自定义 SIV 实现
 //!
 //! 运行: cargo run --release --example bench_aead
+//!
+//! 数字是热缓存下的上界（循环之间不刷缓存），绝对值随宿主变化，同机同轮比较才有意义。
 use std::time::Instant;
 use xchacha20_blake3_siv::{decrypt, encrypt};
 
@@ -8,13 +10,16 @@ fn mbps(bytes: usize, secs: f64) -> f64 {
     (bytes as f64 / (1024.0 * 1024.0)) / secs
 }
 
+/// Time `rounds` calls of `f`, after three warm-up calls.  The return value is
+/// passed through `black_box`: with it dropped, the optimizer could delete the
+/// whole call as dead work.
 fn run<T>(rounds: usize, mut f: impl FnMut() -> T) -> f64 {
     for _ in 0..3 {
-        f();
+        std::hint::black_box(f());
     }
     let start = Instant::now();
     for _ in 0..rounds {
-        f();
+        std::hint::black_box(f());
     }
     start.elapsed().as_secs_f64()
 }
@@ -41,13 +46,9 @@ fn main() {
         // 预计算密文用于解密基准
         let (ct, tag) = encrypt(&key, &nonce, aad, &pt).unwrap();
 
-        let enc_secs = run(rounds, || {
-            encrypt(&key, &nonce, aad, &pt).unwrap();
-        });
+        let enc_secs = run(rounds, || encrypt(&key, &nonce, aad, &pt).unwrap());
 
-        let dec_secs = run(rounds, || {
-            decrypt(&key, &nonce, aad, &ct, &tag).unwrap();
-        });
+        let dec_secs = run(rounds, || decrypt(&key, &nonce, aad, &ct, &tag).unwrap());
 
         println!(
             "{:>10} bytes\t{:>10.2}\t{:>10.2}",

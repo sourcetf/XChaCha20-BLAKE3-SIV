@@ -164,10 +164,17 @@ fn debug_prints_nothing_derived_from_the_key() {
     let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     let Some(key) = lock_or_skip() else { return };
     let shown = format!("{key:?}");
-    assert!(
-        !shown.contains("11") && !shown.contains("0x"),
-        "`Debug` leaked key-derived text: {shown}"
-    );
+    // The key is `[0x11; 32]`, so a leak can spell its bytes as `11` (hex, with or
+    // without a `0x` prefix) or as `17` (decimal). The earlier heuristic checked only
+    // `11`/`0x`, so an implementation that printed the decimal bytes alongside
+    // `REDACTED` passed it; the shipped `Debug` is the fixed string
+    // `LockedKey([REDACTED; 32], locked)`.
+    for leak in ["11", "17", "0x"] {
+        assert!(
+            !shown.contains(leak),
+            "`Debug` leaked key-derived text (`{leak}` appears): {shown}"
+        );
+    }
     assert!(shown.contains("REDACTED"), "unexpected `Debug`: {shown}");
 }
 
@@ -443,6 +450,37 @@ fn the_dump_advice_is_issued_on_the_right_range() {
         unlock[0].contains("syscall2(NR_MUNLOCK"),
         "unlock_range must still unlock; reverting the advice is an addition, not a \
          replacement"
+    );
+    // The *order* is documented (`munlock` first, then restore the advice, and only if
+    // the unlock succeeded), and presence-only checks cannot see it: reversing the two
+    // statements, or restoring the advice unconditionally, recreates the
+    // locked-and-dumpable window and the leaked `VmLck` charge that an audit reproduced
+    // under a `munlock`-refusing syscall filter.
+    let munlock = unlock[0]
+        .find("syscall2(NR_MUNLOCK")
+        .expect("unlock_range no longer unlocks");
+    let dodump = unlock[0]
+        .find("syscall3(NR_MADVISE, start, end - start, MADV_DODUMP)")
+        .expect("unlock_range no longer restores the advice");
+    assert!(
+        munlock < dodump,
+        "unlock_range must munlock before restoring MADV_DODUMP: the page stays \
+         non-dumpable until the lock is released"
+    );
+    assert!(
+        unlock[0].contains("if ok(u) {"),
+        "MADV_DODUMP must be restored only when the munlock succeeded: restoring it after \
+         a refused munlock leaves the page locked *and* dumpable, with the lock quota \
+         never returned"
+    );
+    // The mirror image in `lock_range`: a refused `MADV_DONTDUMP` must undo the mlock.
+    assert!(
+        lock[0].contains("if !ok(d) {")
+            && lock[0].contains("let _ = syscall2(NR_MUNLOCK, ptr as usize, len);")
+            && lock[0].contains("return Err(d);"),
+        "lock_range must roll back a successful mlock when MADV_DONTDUMP is refused, or \
+         the range stays locked while core dumps still include it\n{}",
+        lock[0]
     );
     for (name, body) in [("lock_range", &lock[0]), ("unlock_range", &unlock[0])] {
         assert!(

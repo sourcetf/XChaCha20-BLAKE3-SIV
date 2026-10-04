@@ -11,7 +11,9 @@
 //! so a vector with no AAD does not collapse under whitespace splitting.  Blank
 //! lines and `#` comments are skipped, and anything that is not a hex string of
 //! the right length aborts rather than being silently mangled: this is a
-//! verification tool, so a malformed vector must be loud.
+//! verification tool, so a malformed vector must be loud. The diagnostics name
+//! the offending field but never echo its bytes, so a malformed `key` or `msg`
+//! line cannot put key material or plaintext into stderr.
 //!
 //! ```text
 //! cargo run --release --example xsiv_stdin < vectors.txt > rust-side.txt
@@ -32,11 +34,14 @@ use std::io::{self, BufRead, Write};
 
 use xchacha20_blake3_siv::{decrypt, decrypt_in_place_detached, encrypt};
 
-fn from_hex(field: &str) -> Vec<u8> {
+fn from_hex(name: &str, field: &str) -> Vec<u8> {
     if field == "-" {
         return Vec::new();
     }
-    assert!(field.len() % 2 == 0, "odd-length hex field: {field}");
+    // `name` rather than the bytes: a malformed key or message line must not echo
+    // its contents into stderr, where they could be logged. The field index is in
+    // the name, so the offending field is still identified.
+    assert!(field.len() % 2 == 0, "{name}: odd-length hex field");
     // A leading sign is the one thing `from_str_radix` *accepts* that hex must not
     // (`+1` decodes to 0x01); everything else that is not a hex digit is rejected by
     // `from_str_radix` itself, loudly, through the `.expect` below.
@@ -50,7 +55,7 @@ fn from_hex(field: &str) -> Vec<u8> {
     // These two comparisons execute the same instructions whatever the first byte is.
     assert!(
         !field.starts_with('+') && !field.starts_with('-'),
-        "signed hex field: {field}"
+        "{name}: signed hex field"
     );
     (0..field.len())
         .step_by(2)
@@ -85,11 +90,15 @@ fn main() {
         }
 
         let fields: Vec<&str> = line.split_whitespace().collect();
-        assert_eq!(fields.len(), 4, "expected 4 fields: {line}");
-        let key = from_hex(fields[0]);
-        let nonce = from_hex(fields[1]);
-        let aad = from_hex(fields[2]);
-        let msg = from_hex(fields[3]);
+        assert_eq!(
+            fields.len(),
+            4,
+            "expected 4 whitespace-separated fields (key nonce aad msg)"
+        );
+        let key = from_hex("key", fields[0]);
+        let nonce = from_hex("nonce", fields[1]);
+        let aad = from_hex("aad", fields[2]);
+        let msg = from_hex("msg", fields[3]);
 
         let key: [u8; 32] = key
             .try_into()

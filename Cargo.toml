@@ -32,8 +32,12 @@ getrandom = { version = "0.4", optional = true, default-features = false }
 #
 # Portability is not lost, because BLAKE3's build script *falls back* to the Rust
 # backends when no compiler is available for the target (`support == NoCompiler`).
-# Verified: a build with `CC=/nonexistent` produces identical output, as does
-# `cargo check --target thumbv7em-none-eabihf` (bare metal).
+# Checked by hand, not by a committed entry point -- no script in this repository
+# runs either command. An audit re-ran `CC=/nonexistent` (builds, identical wire
+# output) and `cargo check --no-default-features --target thumbv7em-none-eabihf`
+# (passes; the way a `no_std` caller consumes the crate). The default-features
+# form of that `cargo check`, which this comment used to name, has no runner
+# outside the author's machine.
 #
 # Two cases still need `--features pure`, and both are in the scripts/CI:
 #

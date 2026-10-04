@@ -20,14 +20,20 @@
 #
 # The decision is now a function of its own, `#[inline(never)]`, shared by both
 # decrypt entry points, and it is the only suppressed thing in the crate. Its
-# whole body is the branch and the wipe, so the permission can be inspected:
+# whole body is the two gate branches and the constants they write into the
+# caller's outcome slots, so the permission can be inspected:
 #
-#     if bool::from(auth_ok) { Ok(()) } else { zeroize_slice(buffer); Err(..) }
+#     if bool::from(gate0) { *out0 = Ok(()) } else { *out0 = Err(..); return; }
+#     #[cfg(feature = "hardened")]
+#     if bool::from(gate1) { *out1 = Ok(()) } else { *out1 = Err(..) }
 #
-# The callers do not branch on the decision at all: it returns a `Result`, and
-# `?` tests a discriminant that each arm writes as a constant, so neither entry
-# point branches on secret-derived data. Two things *enforce* that instead of
-# asserting it:
+# The callers do not branch on the `Choice`: each arm of `accept_or_reject` writes
+# a *constant* discriminant into its slot, and the caller's serial
+# `if decision0.is_err()` checks test that slot, so memcheck sees no taint on the
+# branch. (An earlier revision of this comment/entry covered a version where the
+# function returned a `Result` for the caller to `?` and wiped the buffer itself;
+# the shape changed and `tests/decision_scope.rs` pins the two-slot one.) Two
+# things *enforce* that instead of asserting it:
 #
 #  * `tools/ctgrind.sh` plants a secret-dependent branch inside `decrypt` and
 #    inside `decrypt_in_place_detached` in a throwaway copy and requires that run
@@ -63,7 +69,7 @@
 # The one permitted branch: the SIV accept/reject decision
 # ─────────────────────────────────────────────────────────────────────────────
 #
-# `accept_or_reject` ends in `if bool::from(auth_ok)`, where `auth_ok` comes from
+# `accept_or_reject` ends in `if bool::from(gate0)`, where the gate comes from
 # the tag, which comes from the secret key. That branch depends on secret-derived
 # data and is unavoidable: SIV needs the plaintext before it can compute the tag,
 # so decrypt-then-verify is inherent to the mode (the crate documents this). The
@@ -72,9 +78,9 @@
 #
 # `accept_or_reject` is a *single* function body in every configuration: under
 # `hardened` the second gate sits inside it under `#[cfg(feature = "hardened")]`,
-# so the function contains two comparison branches and two `if decision.is_ok()`
-# branches, and under the opt-out build one of each — all of them inside this one
-# function, which is why the single entry below covers them. It is not two
+# so the function contains two `if bool::from(gate..)` branches, and under the
+# opt-out build one — all of them inside this one function, which is why the single
+# entry below covers them. It is not two
 # `#[cfg]`-selected *definitions* of the function; an earlier revision compiled it
 # that way and this comment described that, and the comment was not updated when
 # the shape changed. `tests/decision_scope.rs` pins the one-body shape.
