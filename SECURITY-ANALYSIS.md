@@ -971,7 +971,7 @@ wherever the distinction matters. All of them still carry at least 128 bits of m
 | Tag collision, same key, `q` queries | `q² / 2^257` (≈ `2^128` at the birthday point) |
 | Derived `(key, nonce)` collision over `q` queries | `q² / 2^257` — see below: the tag term dominates it, and the KDF's own birthday is over a 328-bit state (256-bit chain value plus the 72-bit tail block), not the 352-bit output |
 | A tag agreeing with a *given* tag (forgery, second open, commitment **against a given ciphertext**) | `2^-520` per candidate key; ×`q` for `q` targets |
-| Forgery (one decryption query) | `2^-520`, plus the tag-collision terms |
+| Forgery (one decryption query) | `2^-520`, plus the tag-collision terms. **Forgery *strength* is `min(2^256 key search, 2^520 tag guess) = 2^256`** — this row is the per-guess acceptance probability, not the strength; §8.1 writes the minimum out |
 | **Attacker-chosen commitment game** (CMT-1/CMT-3 as the literature writes them — the adversary *outputs* both keys, both messages and `(C,T)`) | **two of its three routes are priced at `2^128`, both with identical plaintexts**: the *key* route (a `subkey` collision gives equal `k_in`/`k_out`/`enc_seed`) and the *context* route (an inner-digest collision gives equal `T`, and the KDF takes `T` rather than the context, so equal keystreams too). Both completions are immediate. The **different-message** route — the salamander — is **not analysed**: it needs `KS₁ ≠ KS₂`, so two keys, and its object is the fixed point `T = tag(K₂, N, A, C ⊕ KS₂(T))` over the 520-bit tag space. See "The two commitment games" below |
 | Exhaustive key search | `2^256` |
 | Quantum: Grover on the key | `2^128` |
