@@ -957,6 +957,8 @@ tests/                      differential vectors and their replay
 tools/ref_impl.py           independent Python reference implementation
 tools/gen_test_vectors.py   fixture generator for the differential vectors
 tools/kani_shards.py        derives the CI proof shards from src/proofs.rs
+AUDIT-RESPONSE.md           the disposition of the four third-party audit reports:
+                            what was fixed (with commits) and what was not, and why
 SECURITY-ANALYSIS.md        the security argument: assumptions, reductions, bounds,
                             attack classes, and what would falsify each claim
 performance.md              benchmarks against RustCrypto's chacha20poly1305, the

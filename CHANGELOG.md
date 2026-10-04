@@ -8,6 +8,16 @@ green push to `main` — which are build artefacts of that job, not construction
 
 ## Unreleased
 
+### `AUDIT-RESPONSE.md`: the disposition of all four third-party reports
+
+The four reports (the 366-finding line-by-line audit, and the 26-, 58- and 26-finding
+incremental rounds) now have one document in the repository root that maps every finding class
+to its disposition: what was fixed and where (file, test, commit), and what was not changed and
+why — the fault model's single-fault boundary, the opt-out build's role as the campaign's
+control, dependency-internal behaviour, the API decisions that are kept, `fork`/`exec` lock
+semantics, debug-only residue, riscv64's verified-but-unwired execution, and the informational
+results that need no change. It also names what would settle the items left open.
+
 ### The scalar-only backend is executed now, and a debug-build residue measured
 
 The third-round review re-ran the items earlier rounds had left limited, and two of its
