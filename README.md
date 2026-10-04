@@ -159,8 +159,8 @@ before 1.0 would be a revision bump, not a silent one.
   scalar path by differential tests, and to *each other* by
   `test_all_accelerated_paths_agree_on_a_boundary_corpus`, whose expected digest
   was produced identically by AVX2, SSE2-only, NEON, scalar, and a big-endian
-  target. CI runs that test under qemu on aarch64 and i686, so one backend
-  drifting from the others fails there.
+  target. CI runs that test under qemu on aarch64, i686 and riscv64, so one
+  backend drifting from the others fails there.
 - **No hidden entropy** — `encrypt` is a deterministic function of
   `(key, nonce, aad, plaintext)`; nothing is drawn from a random source
   internally. That is what makes the known-answer vectors and the formal
@@ -789,7 +789,7 @@ Two entry points, both runnable from a fresh checkout:
 
 ./verify.sh                 # stages 1-4: the reference self-checks, fmt/clippy, the
                             # test suite, and the cross-target type-checks
-./verify.sh --cross-exec    # ...plus executing the aarch64/i686/ppc64 suites under qemu
+./verify.sh --cross-exec    # ...plus executing the aarch64/i686/ppc64/riscv64 suites under qemu
 ./verify.sh --kani          # ...plus Kani bounded model checking (slow)
 ./verify.sh --tools         # ...plus the tool-level gates: the fourteen-row fault
                             # campaign, both instruction sweeps (quick mode), the
@@ -848,13 +848,16 @@ works unprivileged, and the emulator is extracted into `~/.local/bin`.
   see a race at all: a deliberately racy `#[ignore]`d test must be reported before
   the clean run is allowed to mean anything. The suite also runs under
   AddressSanitizer.
-- **Cross-architecture execution** — three configurations are *executed* under
+- **Cross-architecture execution** — four configurations are *executed* under
   qemu, not merely type-checked. On x86 the aarch64 (NEON) backend is compiled
   out entirely, so `qemu-aarch64` is the only thing that ever runs it; `qemu-i386`
   is the only place the 32-bit code paths run, where `usize` is 32 bits and every
-  length calculation takes a different route; and `qemu-ppc64` is the only place
+  length calculation takes a different route; `qemu-ppc64` is the only place
   the code runs on a **big-endian** machine, where the `from_le_bytes`/
-  `to_le_bytes` conversions are no longer identity functions. `--aarch64-exec` is
+  `to_le_bytes` conversions are no longer identity functions; and `qemu-riscv64`
+  is a second 64-bit non-x86 target, running the scalar-only configuration.
+  (`qemu-riscv64`'s link needs its own recipe — a self-contained musl link with
+  one weak symbol forced; `.cargo/config.toml` has the account.) `--aarch64-exec` is
   still accepted as an alias of `--cross-exec`.
 - **Every accelerated path under Miri** — the SSE2 and scalar paths in a default
   build, the AVX2 kernel with `-C target-feature=+avx2` (Miri refuses a
