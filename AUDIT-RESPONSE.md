@@ -110,7 +110,7 @@ not about the current source.
 | `random::fill`'s "a sandbox that blocks `getrandom(2)`" | the `getrandom` crate falls back to `/dev/urandom` on `EPERM`/`ENOSYS` | the example now says both must be blocked |
 | `decrypt_bounded`'s `max_len` as a policy limit | it bounds the ciphertext (allocation), not the AAD or the work | documented |
 | `Cargo.toml`'s `i686-unknown-linux-musl` note | with no i686 C toolchain BLAKE3 falls back to Rust backends and the plain build works; nothing on i686 runs this crate's SIMD | corrected |
-| `.cargo/config.toml`'s "riscv64 linking does not work" | it links with an alias, a `self-contained` `-L`, and a non-PIE link; the suite then runs under `qemu-riscv64` | corrected, with the recipe and the one caveat in §2.7 (`6efac1f`) |
+| `.cargo/config.toml`'s "riscv64 linking does not work" | it links with an alias, `-C link-self-contained=yes`, a `self-contained` `-L`, and a non-PIE link; the suite then runs under `qemu-riscv64` — and the one test that still hung was a weak `libc::getrandom` symbol LLD resolves to the current PC, fixed by forcing the archive member (§2.7) | corrected (`6efac1f`), completed this round; riscv64 execution is now wired into `verify.sh --cross-exec` and the `cross-exec` job |
 | "Miri, which cannot execute C — hence `pure`" | `pure` is belt-and-braces on x86_64 (Miri's CPU-feature detection reports nothing, so the C kernels are never dispatched) | softened in `Cargo.toml` and `tests/README.md` (`63e27e7`) |
 | Kani cost figures (≈320 s per permutation, "well over 25 minutes") | on the current toolchain the real-permutation harness runs in 37 s and the whole 12-harness set in ~875 s | marked as history in `src/proofs.rs` (`63e27e7`), and the required flags (`-Z stubbing -Z unstable-options`) are spelled out in `tests/README.md` |
 | CI coverage percentages and counts (96.71% / 88 of 2181, 97.92% / 116 of 5573) | three runs of the same command gave 96.51 / 96.66 / 96.71% of lines and 97.71 / 97.92% of regions | the comment now quotes the floor and points at the job's output (`63e27e7`); the counts had already gone (`c907e47`) |
@@ -236,18 +236,31 @@ already said debug is not for real secrets (for `subtle`'s `debug_assert!`s); th
 too (`6efac1f`). No code change: an unoptimised build is not a deployment profile, and the
 guarantees are stated for release.
 
-### 2.7 riscv64 execution: possible, not yet wired, and why
+### 2.7 riscv64: executed now, and what the old "hang" actually was
 
-The link recipe is verified (alias + `self-contained` `-L` + non-PIE) and the suite passes under
-`qemu-riscv64` — 61/61 lib, 15/15 security, 9/9 locked, and every other target — **except one
-test**, `tests/ultra.rs::every_layer_answers_correctly_in_the_ultra_build`, which hangs in the
-emulator available here (three threads in `futex_wait_queue`; reproducible with that test alone,
-while the same sequence in a dependent test crate passes). Until that is understood, riscv64
-stays type-checked rather than executed, and `.cargo/config.toml` carries both the recipe and
-this caveat (`6efac1f`). The old claim that it could not be linked at all was wrong and is fixed.
-The third round independently reproduced the recipe and ran the *default-feature* suite through
-`qemu-riscv64` with every target green — consistent with the one hang being in the `ultra`
-build's own test rather than in the target.
+The link recipe is verified and the whole suite runs under `qemu-riscv64` — 61/61 lib, 15/15
+security, 10/10 locked, 8/8 ultra, 6/6 differential, 3/3 timing (383 s here) and every other
+target. The old note in `.cargo/config.toml` ("linking does not work … the scalar fallback is
+therefore not executed here") was wrong and was corrected in an earlier round; what this round
+found is that the one test that still seemed to hang was not an emulator interaction at all.
+
+`tests/ultra.rs::every_layer_answers_correctly_in_the_ultra_build` asks for OS entropy, and the
+`libc` crate declares musl's `getrandom` as a **weak** symbol. A weak undefined reference does not
+make the linker extract the archive member that defines it, so the symbol stays unresolved in the
+self-contained link. On riscv64, LLD materialises the *address* of an undefined weak symbol as the
+current program counter, and the `getrandom` crate passes that address as a function pointer — so
+the call jumps to itself. Measured: the executed instruction stream is a single
+`auipc ra, 0; jalr ra` pair (15.3M executions of one guest PC, which is why the thread looked
+stuck). Forcing the member in (`-C link-arg=--undefined=getrandom`) fixes it; aarch64's binary
+defines `getrandom` (something in that link references it strongly), which is why only riscv64
+showed the symptom, and why the third round's `--features pure` run did not: that configuration
+does not enable `rng`.
+
+riscv64 is now wired into `verify.sh`'s cross-execution stage and into the `cross-exec` CI job,
+with the complete recipe — unwinder alias, `-C link-self-contained=yes` (without it the link
+succeeds but produces entry point 0), the self-contained `-L`, a non-PIE link, and the forced
+`getrandom` member — in `.cargo/config.toml` and in both entry points. The scalar backend is the
+reference every other target's tests compare against; executing it was the point of the recipe.
 
 ### 2.8 Environment-dependent stages
 
@@ -339,13 +352,13 @@ record skips, not passes — and the reports' own measurements are the substitut
 * CI at the commit that carries this document: the `CI` workflow green; `Formal verification`
   and `Deep checks` green at the two commits before it and re-running for it (their results are
   visible on the commit page).
+* riscv64: the fourteen test binaries executed under `qemu-riscv64` (all green, `timing`
+  included), and the target now runs in `verify.sh --cross-exec` and the `cross-exec` job.
 
 ## 4. What would settle the items left open
 
 * **The different-message salamander** (`SECURITY-ANALYSIS.md` §5 row 17): a proof or a break of
   the `T = tag(K₂, N, A, C ⊕ KS₂(T))` completion. Nothing in these reports claims a cheaper
   route; the document does not claim `2^520` is optimal.
-* **The riscv64 hang** (§2.7): a multiarch debugger or a different emulator version would say
-  whether it is qemu's or the test's.
 * **A synchronous two-fault bench** (§2.2): the residual the README names is a hardware
   countermeasure question, not a software one.

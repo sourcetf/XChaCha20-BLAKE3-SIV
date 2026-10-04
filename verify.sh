@@ -7,8 +7,8 @@
 #   2. cargo fmt / clippy
 #   3. the unit + differential test suite
 #   4. cross-compilation type-checks for aarch64 (gnu + musl) and riscv64
-#   5. cross-architecture execution under qemu (aarch64, i686, powerpc64;
-#      --cross-exec)
+#   5. cross-architecture execution under qemu (aarch64, i686, powerpc64,
+#      riscv64; --cross-exec)
 #   6. Kani bounded model checking  (slow: minutes; the whole-permutation
 #      harnesses dominate; --kani)
 #   6b. Miri (slow: minutes; --miri)
@@ -24,8 +24,8 @@
 #   ./verify.sh --kani       # ...plus Kani
 #   ./verify.sh --kani-only  # just Kani (after a code change, to re-prove)
 #
-# Stage switches, all off by default: --cross-exec (aarch64, i686 and
-# powerpc64 big-endian, under qemu), --miri, --ctgrind, --deny, --fuzz,
+# Stage switches, all off by default: --cross-exec (aarch64, i686,
+# powerpc64 big-endian and riscv64, under qemu), --miri, --ctgrind, --deny, --fuzz,
 # --tsan, --tools (the tool-level gates: the fault campaign, the instruction
 # sweeps, the cache-profile differential, the planted-bug checks, the Kani cfg
 # check and the broad differential), --kani.
@@ -236,8 +236,8 @@ fi
 
 if [ "$RUN_CROSS_EXEC" -eq 1 ]; then
   STAGE_KEY=cross-exec
-  step "5. cross-architecture execution under qemu (aarch64 NEON, i686 32-bit, powerpc64 big-endian)"
-  # Two configurations that cannot be exercised natively here:
+  step "5. cross-architecture execution under qemu (aarch64 NEON, i686 32-bit, powerpc64 big-endian, riscv64 scalar)"
+  # The configurations that cannot be exercised natively here:
   #
   #   * aarch64 -- the only way the NEON kernel is ever *executed*.  On x86 it is
   #     compiled out entirely, so a type-check says nothing about whether it
@@ -250,14 +250,19 @@ if [ "$RUN_CROSS_EXEC" -eq 1 ]; then
   #     where the 32 `from_le_bytes`/`to_le_bytes` call sites in lib.rs have to do
   #     real work instead of being identity functions, and where a four-byte load
   #     is not the `u32` the code assumes.
+  #   * riscv64 -- the scalar-only configuration, on a 64-bit RISC-V target.  The
+  #     scalar path also runs natively (it is the reference every other backend's
+  #     tests compare against), so this adds less than the three above; it is here
+  #     because the target links and runs with the recipe below, and a target
+  #     that *can* be executed should not be documented as unexecutable.
   #
   # The Miri stage also cross-interprets s390x (64-bit big-endian) and so covers the
   # same byte-order question by *interpretation*, without an emulator; this executes
   # compiled big-endian machine code. Both are run, so neither claim rests on prose.
   #
-  # qemu-user closes both gaps for everything except throughput.
+  # qemu-user closes these gaps for everything except throughput.
   # `--aarch64-exec` is accepted as an alias of `--cross-exec`.
-  pair_list="aarch64-unknown-linux-musl:qemu-aarch64 i686-unknown-linux-musl:qemu-i386 powerpc64-unknown-linux-musl:qemu-ppc64"
+  pair_list="aarch64-unknown-linux-musl:qemu-aarch64 i686-unknown-linux-musl:qemu-i386 powerpc64-unknown-linux-musl:qemu-ppc64 riscv64gc-unknown-linux-musl:qemu-riscv64"
   total=0
   for pair in $pair_list; do
     target="${pair%%:*}"
@@ -287,21 +292,30 @@ if [ "$RUN_CROSS_EXEC" -eq 1 ]; then
       continue
     fi
 
-    # Big-endian needs no cross toolchain: powerpc64-unknown-linux-musl is tier-2,
-    # so `rustup target add` brings prebuilt std, and rust-std ships the
-    # self-contained crt objects *and* musl's libc, so rust-lld can link it.  Three
-    # details are needed, all of them found by making this work:
+    # The two self-contained-musl targets need no cross toolchain: ppc64 and
+    # riscv64 are tier-2 and tier-1, so `rustup target add` brings prebuilt std, and
+    # rust-std ships the self-contained crt objects *and* musl's libc, so rust-lld
+    # can link them.  The details differ per target, each found by making it work:
     #
     #   * `libgcc_s.a` -- rustc asks for the unwinder under that name, and rust-std
     #     ships the very same library as `libunwind.a`, so this stage makes an
     #     alias instead of demanding a toolchain;
     #   * `-C relocation-model=static` -- the shipped `libc.a` is non-PIC, so a PIE
-    #     link dies with "R_PPC64_ADDR64 ... recompile with -fPIC";
-    #   * `-L native=` -- a search path for that alias.
+    #     link dies (ppc64: "R_PPC64_ADDR64 ... recompile with -fPIC") or, on
+    #     riscv64, starts under qemu and then segfaults;
+    #   * `-L native=` -- a search path for that alias, and on riscv64 also the
+    #     `self-contained` directory itself, which is what resolves `-lc`;
+    #   * `-C link-self-contained=yes` on riscv64 -- without it the link still
+    #     succeeds but produces an entry point of 0 (a segfault before the first
+    #     syscall); and `-C link-arg=--undefined=getrandom`, because that symbol is
+    #     declared weak and would otherwise be left unresolved, which on riscv64
+    #     turns the getrandom call into a branch to itself (the "hang" this stage's
+    #     notes used to report).  `.cargo/config.toml` carries the full account.
     #
     # The flags are target-scoped so host crates (proc macros, build scripts) keep
     # the ordinary host linker.
     unset CARGO_TARGET_POWERPC64_UNKNOWN_LINUX_MUSL_LINKER CARGO_TARGET_POWERPC64_UNKNOWN_LINUX_MUSL_RUSTFLAGS
+    unset CARGO_TARGET_RISCV64GC_UNKNOWN_LINUX_MUSL_RUSTFLAGS
     case "$target" in
       powerpc64-unknown-linux-musl)
         sysroot="$(rustc --print sysroot)"
@@ -311,6 +325,13 @@ if [ "$RUN_CROSS_EXEC" -eq 1 ]; then
         ln -sf "$sysroot/lib/rustlib/$target/lib/self-contained/libunwind.a" "$alias_dir/libgcc_s.a"
         export CARGO_TARGET_POWERPC64_UNKNOWN_LINUX_MUSL_LINKER="$sysroot/lib/rustlib/$host/bin/rust-lld"
         export CARGO_TARGET_POWERPC64_UNKNOWN_LINUX_MUSL_RUSTFLAGS="-C linker-flavor=ld.lld -C link-self-contained=yes -C relocation-model=static -L native=$alias_dir"
+        ;;
+      riscv64gc-unknown-linux-musl)
+        sysroot="$(rustc --print sysroot)"
+        alias_dir="$HOME/.local/share/xsiv-cross"
+        mkdir -p "$alias_dir"
+        ln -sf "$sysroot/lib/rustlib/$target/lib/self-contained/libunwind.a" "$alias_dir/libgcc_s.a"
+        export CARGO_TARGET_RISCV64GC_UNKNOWN_LINUX_MUSL_RUSTFLAGS="-C linker-flavor=ld.lld -C link-self-contained=yes -C relocation-model=static -C link-arg=--undefined=getrandom -L native=$alias_dir -L native=$sysroot/lib/rustlib/$target/lib/self-contained"
         ;;
     esac
 

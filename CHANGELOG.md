@@ -8,6 +8,34 @@ green push to `main` — which are build artefacts of that job, not construction
 
 ## Unreleased
 
+### riscv64's one hanging test was a weak-symbol link artefact, and the target executes now
+
+The riscv64 cross-execution recipe had exactly one test that hung
+(`tests/ultra.rs::every_layer_answers_correctly_in_the_ultra_build`), and the note in
+`.cargo/config.toml` left it unexplained. It is now explained, fixed, and wired in. **No
+wire-format change.**
+
+- **The cause was a weak `libc::getrandom`, not the emulator.** The `libc` crate declares musl's
+  `getrandom` weak, and a weak undefined reference does not make the linker extract the archive
+  member that defines it — so the symbol is unresolved in the self-contained link. On riscv64,
+  LLD materialises the *address* of an undefined weak symbol as the current program counter, and
+  the `getrandom` crate passes that address as a function pointer: the call jumps to itself.
+  Measured: the executed instruction stream is one `auipc ra, 0; jalr ra` pair (15.3M executions
+  of a single guest PC). `-C link-arg=--undefined=getrandom` forces the member in and the test
+  passes in 0.02 s. aarch64's binary defines `getrandom`, which is why only riscv64 showed the
+  symptom — and why the third round's `--features pure` run did not: that configuration does not
+  enable `rng`.
+- **Two more recipe corrections.** `-C link-self-contained=yes` is *required*, not optional: the
+  old comment dismissed it, but without it the link succeeds and produces an entry point of `0`
+  (a segfault before the first syscall). The complete recipe — unwinder alias, self-contained
+  `-L`, non-PIE link, self-contained crt/libc, forced `getrandom` — is in `.cargo/config.toml`,
+  and the whole riscv64 suite passes under `qemu-riscv64`: lib 61/61, security 15/15, locked
+  10/10, ultra 8/8, differential 6/6, and timing 3/3 (383 s here).
+- **riscv64 is wired in.** `verify.sh --cross-exec` and the `cross-exec` CI job now build and run
+  it alongside aarch64, i686 and powerpc64; the job sets the flags in its build step. The scalar
+  backend is the reference every other backend's tests compare against, so executing it is the
+  point.
+
 ### The third round's items: a refusal path with a witness, and four corrections
 
 The third-round review's own summary is that most of its re-runs were negative; the five items

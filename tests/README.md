@@ -221,9 +221,10 @@ cargo deny --offline check
   one digest, and compares it with a constant. That constant was produced
   identically by every backend with a committed runner: x86_64 with AVX2
   (native), aarch64 under `qemu-aarch64` (NEON), i686 under `qemu-i386` (no SIMD
-  backend at all, pure scalar) and s390x big-endian interpreted by Miri, so it is
+  backend at all, pure scalar), riscv64 under `qemu-riscv64` (scalar-only, 64-bit
+  RISC-V) and s390x big-endian interpreted by Miri, so it is
   a cross-implementation equivalence check rather than a known-answer test. The
-  cross-execution CI job runs it on the aarch64 and i686 targets, and the Deep
+  cross-execution CI job runs it on the aarch64, i686 and riscv64 targets, and the Deep
   Miri job (and `verify.sh --miri`) runs the s390x cross-interpretation. A
   no-AVX2 x86_64 host (SSE2 only) was part of the original measurement but has
   no committed runner, so it is not counted as an entry point; the SSE2 loop is

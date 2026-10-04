@@ -288,8 +288,9 @@ jobs:
           - target: aarch64-unknown-linux-musl
             mode: check
           # riscv64 has no SIMD backend at all, so this is the only target that
-          # type-checks the scalar-only configuration. It can be checked but not
-          # linked by this toolchain -- see .cargo/config.toml.
+          # type-checks the scalar-only configuration. It is also linked and
+          # executed in the `cross-exec` job below (with the link flags that job
+          # sets), so this entry is the cheap half of the same coverage.
           - target: riscv64gc-unknown-linux-musl
             mode: check
     steps:
@@ -323,6 +324,11 @@ jobs:
             qemu: qemu-i386
           - target: powerpc64-unknown-linux-musl
             qemu: qemu-ppc64
+          # The scalar-only configuration, on 64-bit RISC-V.  It needs the extra
+          # link flags the build step sets below; `.cargo/config.toml` has the
+          # full account, including why the getrandom weak symbol is forced.
+          - target: riscv64gc-unknown-linux-musl
+            qemu: qemu-riscv64
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
@@ -348,23 +354,38 @@ jobs:
       # Rust backends need nothing. BLAKE3's backend is irrelevant to what this
       # job tests (the crate's own SIMD code), and the wire format is identical
       # either way -- the KATs and the equivalence corpus pin it.
-      # Big-endian needs no cross toolchain: rust-std ships the self-contained crt
-      # objects and musl's libc, so rust-lld can link it.  Three details: an alias
-      # for `libgcc_s.a` (the unwinder ships as `libunwind.a`), a non-PIE relocation
-      # model (the shipped `libc.a` is non-PIC), and a search path for the alias.
-      - name: extra setup for the big-endian target
-        if: matrix.target == 'powerpc64-unknown-linux-musl'
+      # ppc64 and riscv64 need no cross toolchain: rust-std ships the self-contained
+      # crt objects and musl's libc, so rust-lld can link them.  Each needs an alias
+      # for `libgcc_s.a` (the unwinder ships as `libunwind.a`) and a non-PIE
+      # relocation model (the shipped `libc.a` is non-PIC).  riscv64 additionally
+      # needs `-C link-self-contained=yes` -- without it the link still succeeds but
+      # produces an entry point of 0, a segfault before the first syscall -- and
+      # `--undefined=getrandom`, because that symbol is declared weak and would
+      # otherwise stay unresolved, which on riscv64 turns the getrandom call into a
+      # branch to itself.  `.cargo/config.toml` has the full account.
+      - name: extra setup for the self-contained-musl targets
+        if: matrix.target == 'powerpc64-unknown-linux-musl' || matrix.target == 'riscv64gc-unknown-linux-musl'
         run: |
           set -euo pipefail
           sysroot="$(rustc --print sysroot)"
           host="$(rustc -vV | sed -n 's/^host: //p')"
           alias_dir="$HOME/.local/share/xsiv-cross"
           mkdir -p "$alias_dir"
-          ln -sf "$sysroot/lib/rustlib/powerpc64-unknown-linux-musl/lib/self-contained/libunwind.a" "$alias_dir/libgcc_s.a"
-          {
-            echo "CARGO_TARGET_POWERPC64_UNKNOWN_LINUX_MUSL_LINKER=$sysroot/lib/rustlib/$host/bin/rust-lld"
-            echo "CARGO_TARGET_POWERPC64_UNKNOWN_LINUX_MUSL_RUSTFLAGS=-C linker-flavor=ld.lld -C link-self-contained=yes -C relocation-model=static -L native=$alias_dir"
-          } >> "$GITHUB_ENV"
+          case "${{ matrix.target }}" in
+            powerpc64-unknown-linux-musl)
+              ln -sf "$sysroot/lib/rustlib/powerpc64-unknown-linux-musl/lib/self-contained/libunwind.a" "$alias_dir/libgcc_s.a"
+              {
+                echo "CARGO_TARGET_POWERPC64_UNKNOWN_LINUX_MUSL_LINKER=$sysroot/lib/rustlib/$host/bin/rust-lld"
+                echo "CARGO_TARGET_POWERPC64_UNKNOWN_LINUX_MUSL_RUSTFLAGS=-C linker-flavor=ld.lld -C link-self-contained=yes -C relocation-model=static -L native=$alias_dir"
+              } >> "$GITHUB_ENV"
+              ;;
+            riscv64gc-unknown-linux-musl)
+              ln -sf "$sysroot/lib/rustlib/riscv64gc-unknown-linux-musl/lib/self-contained/libunwind.a" "$alias_dir/libgcc_s.a"
+              {
+                echo "CARGO_TARGET_RISCV64GC_UNKNOWN_LINUX_MUSL_RUSTFLAGS=-C linker-flavor=ld.lld -C link-self-contained=yes -C relocation-model=static -C link-arg=--undefined=getrandom -L native=$alias_dir -L native=$sysroot/lib/rustlib/riscv64gc-unknown-linux-musl/lib/self-contained"
+              } >> "$GITHUB_ENV"
+              ;;
+          esac
       # The list of binaries this build produced is captured, not guessed: `deps/` also
       # holds artifacts from earlier feature configurations (`Swatinem/rust-cache` restores
       # `target/`), and running those executes stale code. Measured locally: three such
@@ -817,7 +838,8 @@ jobs:
 
           Gated by CI on this commit: formatting and lints clean, the full test
           suite green in release and debug, three cross-targets type-checked, the
-          aarch64 (NEON) and i686 (32-bit) suites executed under qemu, and the
+          aarch64 (NEON), i686 (32-bit), powerpc64 (big-endian) and riscv64
+          (scalar-only) suites executed under qemu, and the
           differential fixture
           re-checked against the independent reference implementation.
 

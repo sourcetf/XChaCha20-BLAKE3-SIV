@@ -27,11 +27,16 @@ linker = "rust-lld"
 # correctness reference every other backend is held to.  It also has no
 # `has_avx2()`-style runtime detection, so the dispatch is compile-time only.
 #
-# Linking works, with three details — an earlier revision of this comment said it
+# Linking works, with four details — an earlier revision of this comment said it
 # did not, and that was wrong (an audit linked it and ran the suite):
 #
 #   * an alias `libgcc_s.a` -> the shipped `libunwind.a`, the same trick the
 #     ppc64 path uses (rustc asks for the unwinder under the other name);
+#   * `-C link-self-contained=yes`, which is what actually pulls the shipped crt
+#     objects and libc in.  (The old comment dismissed it; the `-L` below is
+#     necessary but *not* sufficient: without this flag the link still succeeds
+#     and produces a binary whose entry point is 0, which segfaults before its
+#     first syscall.  Measured both ways.)
 #   * `-L native=<sysroot>/lib/rustlib/riscv64gc-unknown-linux-musl/lib/self-contained/`,
 #     which is what resolves `-lc` — the failure in the old comment was the
 #     unwinder, not libc;
@@ -39,23 +44,28 @@ linker = "rust-lld"
 #     static-PIE link starts and then segfaults under qemu-user (measured both
 #     ways; the non-PIE binary runs).
 #
-# With those, all test binaries link and the suite runs under `qemu-riscv64` —
-# measured here, with `--features ultra,pure`: the lib suite 61/61 in 0.7 s,
-# `security` 15/15 in 5.3 s, `locked` 9/9, `differential_reference` 6/6,
-# `decision`, `counter_range`, `construction_inventory`, `mac_commitment`,
-# `threads`, `variable_latency` — **except one test**:
-# `tests/ultra.rs::every_layer_answers_correctly_in_the_ultra_build` hangs under the
-# emulator available here (`qemu-riscv64` 10.2.1 on WSL2: three threads blocked in
-# `futex_wait_queue`, and it reproduces with just that test selected).  The same
-# sequence compiled into a *dependent* test crate passes, as does the rest of that
-# binary with the test skipped, so this looks like an emulator interaction rather
-# than a defect in the crate — but it is not understood, and until it is, riscv64 is
-# **not** wired into the cross-execution step: the target stays type-checked (stage 4
-# of `verify.sh`, and the `cross` job), and the recipe above is here so that the
-# execution can be added the moment the hang is explained.
+# With those, all fourteen test binaries link and the whole suite runs under
+# `qemu-riscv64`, including `tests/ultra.rs` (8/8, the one that used to hang) and
+# `timing` (3/3, 383 s here).  One more flag is required because of a weak-symbol
+# interaction, and it is the reason the earlier revision of this comment reported a
+# hang instead:
+#
+#   * `-C link-arg=--undefined=getrandom`.  The `libc` crate declares musl's
+#     `getrandom` **weak**, and a weak undefined reference does not make the
+#     linker extract the archive member that defines it — so the symbol stays
+#     undefined in the self-contained link.  On riscv64, LLD materialises the
+#     *address* of an undefined weak symbol as the current program counter, and
+#     the `getrandom` crate passes that address as a function pointer: the call
+#     jumps to itself.  Measured: the executed instruction stream is a single
+#     `auipc ra, 0; jalr ra` pair (15.3M executions of one guest PC), which is
+#     what `tests/ultra.rs::every_layer_answers_correctly_in_the_ultra_build`
+#     hangs in after it asks for OS entropy.  Forcing the member in fixes it; no
+#     other target is affected (aarch64's binary defines `getrandom` — something
+#     in that link already references it strongly — so only riscv64 showed this).
 #
 # The scalar path is not a separate implementation of the cipher — it is what every
 # other target's tests compare against (`scalar_keystream` in the test module) — but
-# being the reference is exactly why executing it would be worth having.
+# being the reference is exactly why executing it is worth having: stage 5 of
+# `verify.sh` (`--cross-exec`) and the `cross-exec` CI job run this recipe.
 [target.riscv64gc-unknown-linux-musl]
 linker = "rust-lld"
