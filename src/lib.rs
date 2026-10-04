@@ -213,7 +213,13 @@
 //!    for release mode.  `verify.sh` therefore runs `cargo test --release`, and
 //!    a debug build should be treated as development-only, not as something to
 //!    handle real secrets.  This is a property of the dependency, not of any
-//!    code in this crate.
+//!    code in this crate — but an audit measured a second, larger reason: an
+//!    opt-level-0 build spills whole secrets to dead stack frames (up to six
+//!    complete copies of `k_out`, five of `enc_seed`, on the decrypt path and the
+//!    64-byte encrypt path, where the release profile shows none of that), and a
+//!    leaked `enc_seed` plus the public tag reconstructs the per-message key
+//!    material.  Release builds are the profile every guarantee in this document
+//!    is about; debug is for development.
 //!
 //! Secret material is wiped with `write_volatile` through the internal
 //! `zeroize_array`/`zeroize_slice` helpers, which the compiler cannot elide.

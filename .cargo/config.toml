@@ -27,23 +27,35 @@ linker = "rust-lld"
 # correctness reference every other backend is held to.  It also has no
 # `has_avx2()`-style runtime detection, so the dispatch is compile-time only.
 #
-# NOTE: `cargo check` works for this target, but **linking does not** with the
-# toolchain used here.  A minimal `fn main(){}` fails identically:
+# Linking works, with three details — an earlier revision of this comment said it
+# did not, and that was wrong (an audit linked it and ran the suite):
 #
-#     rust-lld: error: unable to find library -lc
+#   * an alias `libgcc_s.a` -> the shipped `libunwind.a`, the same trick the
+#     ppc64 path uses (rustc asks for the unwinder under the other name);
+#   * `-L native=<sysroot>/lib/rustlib/riscv64gc-unknown-linux-musl/lib/self-contained/`,
+#     which is what resolves `-lc` — the failure in the old comment was the
+#     unwinder, not libc;
+#   * `-C relocation-model=static`: the shipped `libc.a` is non-PIC, and a
+#     static-PIE link starts and then segfaults under qemu-user (measured both
+#     ways; the non-PIE binary runs).
 #
-# even though `libc.a` and the crt objects are present in
-# `lib/rustlib/riscv64gc-unknown-linux-musl/lib/self-contained/`, and neither
-# `-Clink-self-contained=yes` nor an explicit `-L` to that directory resolves it.
-# The aarch64 musl target links fine with the same `rust-lld` invocation, so
-# this is a limitation of the toolchain's riscv64 support, not of this project.
+# With those, all test binaries link and the suite runs under `qemu-riscv64` —
+# measured here, with `--features ultra,pure`: the lib suite 61/61 in 0.7 s,
+# `security` 15/15 in 5.3 s, `locked` 9/9, `differential_reference` 6/6,
+# `decision`, `counter_range`, `construction_inventory`, `mac_commitment`,
+# `threads`, `variable_latency` — **except one test**:
+# `tests/ultra.rs::every_layer_answers_correctly_in_the_ultra_build` hangs under the
+# emulator available here (`qemu-riscv64` 10.2.1 on WSL2: three threads blocked in
+# `futex_wait_queue`, and it reproduces with just that test selected).  The same
+# sequence compiled into a *dependent* test crate passes, as does the rest of that
+# binary with the test skipped, so this looks like an emulator interaction rather
+# than a defect in the crate — but it is not understood, and until it is, riscv64 is
+# **not** wired into the cross-execution step: the target stays type-checked (stage 4
+# of `verify.sh`, and the `cross` job), and the recipe above is here so that the
+# execution can be added the moment the hang is explained.
 #
-# Consequence, stated plainly: riscv64 gets type-checking only.  The scalar
-# fallback is therefore *not* executed here — but note that the scalar path is
-# not a separate implementation of the cipher: it is what every other target's
-# tests compare against (`scalar_keystream` in the test module), and under
-# `-Clink-self-contained`-free x86_64 it is exercised on every `cargo test`.
-# The `linker` key is kept so the failure mode is a link error rather than a
-# confusing "no linker found".
+# The scalar path is not a separate implementation of the cipher — it is what every
+# other target's tests compare against (`scalar_keystream` in the test module) — but
+# being the reference is exactly why executing it would be worth having.
 [target.riscv64gc-unknown-linux-musl]
 linker = "rust-lld"

@@ -8,6 +8,38 @@ green push to `main` — which are build artefacts of that job, not construction
 
 ## Unreleased
 
+### The scalar-only backend is executed now, and a debug-build residue measured
+
+The third-round review re-ran the items earlier rounds had left limited, and two of its
+findings changed something here. **No wire-format change.**
+
+- **`.cargo/config.toml` said riscv64 could not be linked; that was wrong.** The old note
+  ("rust-lld: unable to find library -lc … neither `-Clink-self-contained=yes` nor an explicit
+  `-L` resolves it") concluded that riscv64 gets type-checking only. An audit linked it — an
+  alias `libgcc_s.a` → `libunwind.a`, an explicit `-L` to the target's `self-contained`
+  directory (that, not the unwinder, is what resolves `-lc`), and a **non-PIE** link (the
+  shipped `libc.a` is non-PIC; a static-PIE binary starts and then segfaults under qemu-user)
+  — and ran the suite. Re-verified here: the lib suite 61/61, `security` 15/15, `locked` 9/9
+  and every other integration target passes under `qemu-riscv64`, so the scalar-only backend
+  *does* execute. The config comment now carries the recipe, and one caveat: one test
+  (`tests/ultra.rs::every_layer_answers_correctly_in_the_ultra_build`) hangs under the
+  emulator available here (three threads in `futex_wait_queue`, reproducible with that test
+  alone, while the same sequence in a dependent test crate passes), so riscv64 execution is
+  **not** wired into `verify.sh --cross-exec` or CI until that is understood — the comment
+  says so, and the target keeps its type-check stage.
+- **The release-only caveat now says what a debug build actually leaks.** An opt-level-0
+  build spills whole secrets to dead stack frames — up to six complete copies of `k_out` and
+  five of `enc_seed` on the decrypt and small-message paths, where the shipping profile shows
+  none of that; a leaked `enc_seed` plus the public tag reconstructs the per-message key
+  material. The crate docs already said debug builds are development-only (for `subtle`'s
+  `debug_assert!` reasons); they now say this too.
+- **The opt-out build's single comparison, quantified.** A fault that NOPs the accumulator
+  instruction inside the 65-byte comparison loop accepts **100% of forgeries** on
+  `--no-default-features` (legitimate inputs still accepted), while `hardened` and `ultra`
+  fail closed on the same patch. That is the documented boundary — the opt-out build is the
+  control, its single comparison shape is why, and this is what "not defended" means in
+  numbers — and the README's row now carries it.
+
 ### `ultra`'s cost table re-measured: 12.4x on 1 MiB decryption, not 10.1x
 
 The three-pass campaign behind `performance.md`'s "what the `ultra` layer costs" table was
