@@ -8,6 +8,18 @@ green push to `main` — which are build artefacts of that job, not construction
 
 ## Unreleased
 
+### `Key` and `LockedKey` compare in constant time now, instead of through `Deref`
+
+The attack review's API-consistency item, fixed rather than documented: `Plaintext` has had
+constant-time `PartialEq` impls since an auditor hit the `as_slice() == as_slice()` fallback
+trap, while `Key` and `LockedKey` had none — so `key_a == key_b` compiled anyway, by coercing
+both sides through `Deref` to `[u8; 32]` and short-circuiting on the first differing byte.
+Both types now implement `PartialEq` (and the by-reference spelling) through
+`subtle::ConstantTimeEq`; `LockedKey`'s goes through `as_bytes`, so the page's integrity
+check still runs and a corrupted page still fails stop. The `Deref` warning that used to
+explain the trap now explains `key.clone()` only, and two tests pin the impls by name
+(`PartialEq::eq`) so removing one is a compile error rather than a silent fallback.
+
 ### The coverage job ran the timing screen instrumented, and called the result a leak
 
 `Deep checks` went red on the commit before this one, and the failing step was the line-floor

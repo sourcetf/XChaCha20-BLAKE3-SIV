@@ -759,20 +759,38 @@ impl Key {
     }
 }
 
+/// Two keys compare in **constant time**, for the same reason [`Plaintext`]'s comparisons
+/// do: `==` is the spelling a caller reaches for, and the alternative -- letting `Deref`
+/// coerce both sides to `[u8; 32]` -- is a short-circuiting array comparison. An audit
+/// pointed out the inconsistency between the two types; this is the fix, not a warning
+/// about it. (A length mismatch is impossible here: both sides are `[u8; 32]`.)
+impl PartialEq for Key {
+    #[inline]
+    fn eq(&self, other: &Key) -> bool {
+        bool::from(self.0.ct_eq(&other.0))
+    }
+}
+
+/// The by-reference spelling (`key == &other`), as for [`Plaintext`].
+impl PartialEq<&Key> for Key {
+    #[inline]
+    fn eq(&self, other: &&Key) -> bool {
+        bool::from(self.0.ct_eq(&other.0))
+    }
+}
+
 /// # Why `Deref` is worth a warning
 ///
-/// It makes `key.as_slice()`-style borrowing ergonomic, and it also means two things
-/// compile that a reader may not expect:
+/// It makes `key.as_slice()`-style borrowing ergonomic, and it also means one thing
+/// compiles that a reader may not expect:
 ///
 /// * `key.clone()` is `[u8; 32]::clone(&*key)` -- a **plain array copy** that does not go
 ///   through `Key` again, so the copy is not wiped on drop. An audit pointed this out;
 ///   `Key` deliberately does not implement `Clone`, and the deref target does. Copy
 ///   deliberately, with [`Key::from_bytes`], if the copy is meant to be a `Key`.
-/// * `key_a == key_b` compares the *arrays* (`Deref` coercion), which short-circuits on
-///   the first differing byte and does not use `subtle`. That is a comparison of two
-///   secrets the caller already holds, not of a secret against an attacker's guess, so it
-///   is not the timing problem `ConstantTimeEq` exists for -- but a caller comparing a
-///   guess against a key should not reach for `==` here.
+/// * (`==` is *not* on this list: the `PartialEq` impl above means `key_a == key_b` uses
+///   `subtle`, not the deref target's short-circuiting array comparison. An earlier
+///   revision of this comment warned about `==` because that impl did not exist.)
 impl core::ops::Deref for Key {
     type Target = [u8; KEY_LEN];
     #[inline]
@@ -1718,6 +1736,24 @@ pub mod locked {
         type Target = [u8; crate::KEY_LEN];
         fn deref(&self) -> &[u8; crate::KEY_LEN] {
             LockedKey::as_bytes(self)
+        }
+    }
+
+    /// Two locked keys compare in **constant time**, as [`crate::Key`]'s do.
+    ///
+    /// Both sides go through [`LockedKey::as_bytes`], so the page's integrity check runs on
+    /// each -- a corrupted page panics here exactly as it does on any other read, which is
+    /// the type's fail-stop contract rather than an exception to it.
+    impl PartialEq for LockedKey {
+        fn eq(&self, other: &LockedKey) -> bool {
+            bool::from(self.as_bytes().ct_eq(other.as_bytes()))
+        }
+    }
+
+    /// The by-reference spelling (`key == &other`).
+    impl PartialEq<&LockedKey> for LockedKey {
+        fn eq(&self, other: &&LockedKey) -> bool {
+            bool::from(self.as_bytes().ct_eq(other.as_bytes()))
         }
     }
 
@@ -4845,6 +4881,75 @@ mod tests {
     // A `PartialEq<&Plaintext>` impl exists for the same reason the `&[u8]` ones do, and
     // the `&same` assertion below is what exercises it; clippy's `op_ref` would rewrite it
     // to the owned form and drop the coverage.
+    /// Keys compare in constant time, through the impl rather than through `Deref`.
+    ///
+    /// Without the impl, `key_a == key_b` compiles anyway (both sides coerce to
+    /// `[u8; 32]`) and short-circuits — the trap an audit pointed at, and the same one
+    /// `Plaintext`'s `PartialEq` impls exist to close. This pins the impls' *presence*
+    /// (the calls below would still compile but be the wrong ones if the impls were
+    /// removed... they would not: see the note) and their semantics.
+    // `a == &b` is deliberate: the by-reference spelling is part of what the impls
+    // provide, and clippy's `op_ref` would rewrite it to the owned form and drop that
+    // coverage. (Same allow, same reason, as `test_plaintext_eq_semantics` below.)
+    #[allow(clippy::op_ref)]
+    #[test]
+    fn test_key_eq_semantics() {
+        let a = Key::from_bytes([0x5Au8; 32]);
+        let b = Key::from_bytes([0x5Au8; 32]);
+        let mut c_bytes = [0x5Au8; 32];
+        c_bytes[31] ^= 1; // differs in the last byte
+        let c = Key::from_bytes(c_bytes);
+
+        assert!(a == b, "equal keys must compare equal");
+        assert!(a == &b, "the by-reference spelling must work too");
+        assert!(a != c, "keys differing in the last byte must differ");
+        assert!(!(a == c));
+
+        // The impl, not `Deref`: name it explicitly so removing it is a compile error here
+        // rather than a silent fallback to the array comparison.
+        assert!(PartialEq::eq(&a, &b));
+        assert!(!PartialEq::eq(&a, &c));
+    }
+
+    /// The same, for `locked`: comparison goes through `as_bytes`, so it is constant-time
+    /// and a corrupted page still fails stop (rather than being compared as bytes).
+    #[allow(clippy::op_ref)] // as above: `a == &b` is under test
+    #[cfg(feature = "locked")]
+    #[test]
+    fn test_locked_key_eq_semantics() {
+        let key = [0x5Au8; 32];
+        let a = match crate::locked::LockedKey::new(&key) {
+            Ok(k) => k,
+            Err(e) => {
+                refuse_skip(e);
+                return;
+            }
+        };
+        let b = match crate::locked::LockedKey::new(&key) {
+            Ok(k) => k,
+            Err(e) => {
+                refuse_skip(e);
+                return;
+            }
+        };
+        let mut other = [0x5Au8; 32];
+        other[0] ^= 1;
+        let c = match crate::locked::LockedKey::new(&other) {
+            Ok(k) => k,
+            Err(e) => {
+                refuse_skip(e);
+                return;
+            }
+        };
+        assert!(
+            a == b,
+            "two locked keys with the same bytes must compare equal"
+        );
+        assert!(a == &b, "the by-reference spelling must work too");
+        assert!(a != c, "locked keys with different bytes must differ");
+        assert!(PartialEq::eq(&a, &b) && !PartialEq::eq(&a, &c));
+    }
+
     #[allow(clippy::op_ref)]
     #[test]
     fn test_plaintext_eq_semantics() {
