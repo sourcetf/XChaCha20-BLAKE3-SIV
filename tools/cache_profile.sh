@@ -19,6 +19,14 @@
 #                     script planted exactly that leak and the counts called it
 #                     identical, correctly and uselessly.)
 #
+#                     The mode also runs the *same* input a second time and requires those
+#                     two traces to be identical before it compares two keys: this is a
+#                     comparison of addresses, so an environment that cannot hold a layout
+#                     (measured on a GitHub runner: one-byte stack loads 107 bytes apart
+#                     between runs) would otherwise report layout noise as a leak. When the
+#                     determinism control fails the mode answers "could not run" (exit 3),
+#                     which the callers map to a skipped stage.
+#
 #                     This mode was broken from the day it was written and reported
 #                     "SKIPPED: valgrind here cannot start the lackey tool" instead:
 #                     lackey's memtrace lines carry a leading space (` S <addr>,<size>`
@@ -122,7 +130,14 @@ if [ "${1:-}" = "--trace" ]; then
   for phase in enc roundtrip; do
     extra=()
     [ "$phase" = roundtrip ] && extra=(--roundtrip)
-    for side in zero ones; do
+    # `zero2` is the *same input as `zero`*, run a second time: the determinism control.
+    # This mode compares addresses, so it needs the two runs to have the same layout, and
+    # on a GitHub runner they do not -- measured there, the first differing lines were
+    # one-byte stack loads 107 bytes apart (`L 1ffeffdfed,1` vs `L 1ffeffe058,1`), which
+    # is layout noise, not key dependence. Without this control the mode reports that
+    # noise as a leak; with it, an environment that cannot hold a layout still says
+    # "could not conclude" (exit 3) instead of "FAIL".
+    for side in zero ones zero2; do
       # ASLR off: the comparison is over addresses, so the same code has to be at the
       # same addresses in both runs. That requirement is this mode's main caveat -- it
       # needs a controlled layout, which is not a statement about a hostile process.
@@ -139,9 +154,11 @@ if [ "${1:-}" = "--trace" ]; then
       # (digit vs letter in `from_str_radix`), so including `I` lines would compare the
       # harness's parser rather than the library's memory accesses. The access trace is
       # the thing this mode exists to compare.
+      input="$side"
+      [ "$side" = zero2 ] && input=zero
       setarch --addr-no-randomize "$VALGRIND" --tool=lackey --trace-mem=yes \
         "$TARGET_DIR/release/examples/xsiv_stdin" ${extra[@]+"${extra[@]}"} \
-        < "$work/t-$side.txt" 2>&1 \
+        < "$work/t-$input.txt" 2>&1 \
         | grep -E "^[[:space:]]*[LSM] " > "$work/$phase-$side.trace" || true
     done
     # A trace that carries no load/store lines is not a trace -- keep this guard even
@@ -156,12 +173,27 @@ if [ "${1:-}" = "--trace" ]; then
       echo "         start the lackey tool (see the comment above)." >&2
       exit 3
     fi
+    # The determinism control first: two runs of the *same* input must have identical
+    # traces, or this environment cannot hold an address layout and no verdict is
+    # available from this mode. (A real leak cannot make two identical runs differ.)
+    if ! cmp -s "$work/$phase-zero.trace" "$work/$phase-zero2.trace"; then
+      echo "SKIPPED: the $phase address layout is not reproducible here -- two runs of the" >&2
+      echo "         same input differ, so this mode cannot separate layout noise from a" >&2
+      echo "         leak. First differences:" >&2
+      # Captured rather than piped into `head`: the pipeline dies of SIGPIPE once head
+      # has its six lines, and with `set -o pipefail` that ended this script with 141
+      # instead of reaching the `exit 3` below (measured while testing this branch).
+      first_diffs="$(diff "$work/$phase-zero.trace" "$work/$phase-zero2.trace" 2>/dev/null | head -6 || true)"
+      printf '%s\n' "$first_diffs" >&2
+      exit 3
+    fi
     if cmp -s "$work/$phase-zero.trace" "$work/$phase-ones.trace"; then
       echo "PASS: identical $phase address traces for two different keys"
       echo "      ($(wc -l < "$work/$phase-zero.trace") memory accesses compared)"
     else
       echo "FAIL: the $phase address trace depends on the values of a secret" >&2
-      diff "$work/$phase-zero.trace" "$work/$phase-ones.trace" | head -10 >&2
+      first_diffs="$(diff "$work/$phase-zero.trace" "$work/$phase-ones.trace" 2>/dev/null | head -10 || true)"
+      printf '%s\n' "$first_diffs" >&2
       exit 1
     fi
   done

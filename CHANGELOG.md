@@ -34,6 +34,16 @@ rather than an argument, in the default and `ultra` configurations. (The mode's 
 unchanged and still real: it needs a controlled address layout — `setarch
 --addr-no-randomize` — so it is a statement about this code, not about a hostile process.)
 
+**And the first CI run of the fixed mode failed, which was the useful part.** On a GitHub
+runner the two traces differ from line 17386 on — one-byte stack loads 107 bytes apart
+(`L 1ffeffdfed,1` vs `L 1ffeffe058,1`), layout noise rather than key dependence. The mode now
+runs the **same input twice** as a determinism control before it compares two keys: if that
+control fails, the environment cannot hold a layout and the answer is "could not run"
+(exit 3, a skipped stage in the job) instead of a false leak. A real leak cannot make two
+identical runs differ, so the control cannot mask one. (While testing the control: piping
+`diff` into `head` died of SIGPIPE and ended the script with 141 instead of 3 — the same trap
+this repository's scripts document elsewhere, fixed by capturing the diff first.)
+
 ### `Key` and `LockedKey` compare in constant time now, instead of through `Deref`
 
 The attack review's API-consistency item, fixed rather than documented: `Plaintext` has had
