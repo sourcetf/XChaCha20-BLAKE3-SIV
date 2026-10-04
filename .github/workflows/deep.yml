@@ -258,7 +258,7 @@ jobs:
             "$@" || rc=$?
             case "$rc" in
               0) : ;;
-              3) echo "SKIPPED: $* could not run (exit 3; needs valgrind's lackey tool)" ;;
+              3) echo "SKIPPED: $* could not run (exit 3 -- either valgrind's lackey tool is unavailable, or the mode's determinism control found this environment cannot hold an address layout; the script's own SKIPPED line above says which)" ;;
               *) echo "FAILED: $* (exit $rc)" >&2; exit "$rc" ;;
             esac
           }

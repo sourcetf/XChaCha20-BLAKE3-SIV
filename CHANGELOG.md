@@ -53,7 +53,12 @@ rather than an argument, in the default and `ultra` configurations. (The mode's 
 unchanged and still real: it needs a controlled address layout — `setarch
 --addr-no-randomize` — so it is a statement about this code, not about a hostile process.)
 
-**And the first CI run of the fixed mode failed, which was the useful part.** On a GitHub
+**On CI the control does its job**: the first run of the fixed mode failed, and the next one
+with the control reports `SKIPPED: the enc address layout is not reproducible here -- two runs
+of the same input differ`, which the job maps to a skipped step (the counts mode and its
+self-test still pass there). So the mode's evidence is a quiet-host measurement — where it
+passes with ~170k/~275k identical accesses — and a runner honestly says it cannot conclude.
+The first CI run of the fixed mode failed, which was the useful part. On a GitHub
 runner the two traces differ from line 17386 on — one-byte stack loads 107 bytes apart
 (`L 1ffeffdfed,1` vs `L 1ffeffe058,1`), layout noise rather than key dependence. The mode now
 runs the **same input twice** as a determinism control before it compares two keys: if that
