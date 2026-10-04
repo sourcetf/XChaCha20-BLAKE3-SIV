@@ -227,7 +227,9 @@ fn resolution_ns(a: &[f64], b: &[f64]) -> f64 {
 /// last-byte mismatch is tens of nanoseconds here; the resolution the screen
 /// achieves is the same order — measured between ~8 and ~57 ns/op depending on host
 /// and load (the test prints the current value; this file's own last release run:
-/// 24 ns/op for this test). A tens-of-ns effect is therefore *at* the floor, not
+/// 24 ns/op for this test), and ~4.6x coarser under `ultra` (168 vs 36 ns/op in an
+/// audit's side-by-side), which is the configuration where the screen is least
+/// sensitive. A tens-of-ns effect is therefore *at* the floor, not
 /// comfortably inside it: the screen catches gross regressions (an early exit
 /// skipping hundreds of nanoseconds, or a per-byte difference), while the mechanical
 /// evidence for the comparison itself is ctgrind.

@@ -509,16 +509,16 @@ jobs:
     # not editable that way: it falls when code is added that nothing runs, which is
     # the change worth stopping.
     #
-    # 95 is deliberately loose against the measured 96.71% of *lines* and 97.92% of
-    # *regions*. (The missed/total counts this comment used to give alongside those
-    # percentages did not reproduce them, so they are gone; the gate is the 95 floor,
-    # and the percentages come from the coverage job's own output.) -- this command, `--all-features`,
-    # on the development host, re-measured 2026-10-03 after the two-level tag change.
-    # `--fail-under-lines` compares against the line figure. The totals move when
-    # `cargo-llvm-cov` changes what it counts -- an earlier revision of this comment
-    # quoted 97.89% (113/5353) and before that 97.46% (1458/1496) from a much older
-    # tool -- which is why the claim is a percentage against this command rather than
-    # a line count that has to be edited whenever the tool is upgraded.
+    # 95 is deliberately loose against what this command measures -- 96.5-96.7% of
+    # *lines* across the tool versions tried, and ~97.7% of *regions*. No exact figure
+    # is quoted here on purpose: two audits and this repository's own runs each got a
+    # different one from the same source (96.51%, 96.66%, 96.71%; regions 97.71% vs
+    # 97.92%), because the totals move when `cargo-llvm-cov` changes what it counts --
+    # an earlier revision of this comment quoted 97.89% (113/5353), before that
+    # 97.46% (1458/1496), and the counts it paired with a later percentage did not
+    # reproduce it either. The gate is the 95 floor; the measured figure is printed by
+    # the coverage job, which is where a reader should take it from.
+    # `--fail-under-lines` compares against the line figure.
     # It is not there to be
     # approached; it is there so that dropping a whole path -- a feature combination
     # that stops being tested, a module that loses its tests -- fails here instead of
