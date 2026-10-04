@@ -40,9 +40,15 @@ getrandom = { version = "0.4", optional = true, default-features = false }
 #   * cross-compiling to a target BLAKE3 has C kernels for (x86_64, aarch64)
 #     *without* a cross C toolchain -- the build script fails rather than falling
 #     back there, because a compiler for the *host* is found and the target's
-#     kernels are then attempted. That is the `aarch64-unknown-linux-musl` /
-#     `i686-unknown-linux-musl` builds used to execute the crate's own SIMD code
-#     under qemu, where BLAKE3's backend makes no difference to what is tested;
+#     kernels are then attempted. That is the `aarch64-unknown-linux-musl` build
+#     used to execute the crate's own SIMD code under qemu, where BLAKE3's backend
+#     makes no difference to what is tested. (An audit checked the
+#     `i686-unknown-linux-musl` case this comment used to name: with no i686/musl C
+#     compiler installed, BLAKE3's build script *does* fall back to its Rust
+#     backends and the plain build succeeds, so the `features pure` the scripts pass
+#     for i686 is belt-and-braces rather than necessary. And nothing on i686 runs
+#     *this crate's* SIMD -- its kernels are gated on x86_64/aarch64 -- so the qemu
+#     run there exercises the 32-bit scalar paths, which is what it is for.)
 #   * Miri, which cannot execute C or the CPU-feature detection.
 #
 # Either way the wire format is identical -- the KATs, the differential fixture

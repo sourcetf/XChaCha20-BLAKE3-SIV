@@ -107,12 +107,27 @@ const ALLOWED: &[(&str, &str)] = &[
 /// **constant-time comparison** of the page's stored tag against a recomputed one. Its outcome
 /// is a property of the *page* — whether the hardware corrupted it — and not of any key, nonce,
 /// AAD or message, which is the same publicness argument as the decision itself.
+///
+/// `if` 35 -> 36 and `match` 5 -> 7 when the allocation-failure paths changed: `derive_tag`
+/// tries its contiguous buffer with `try_reserve_exact` and falls back to the three-part hash
+/// when the allocator refuses (one `if`), and `decrypt_in_place_detached` matches each of
+/// `ultra`'s two allocations so the failure arm can zeroize the caller's buffer before
+/// returning `Err(AllocationFailed)` (two `match`es). Every one of the three branches tests
+/// **whether the allocator could satisfy a request this call just made** — a public fact about
+/// the process's memory, never key, nonce, AAD or message content — the same class as
+/// `random::fill`'s errno branch above.
+///
+/// `if` 36 -> 37 when `unlock_range` stopped restoring `MADV_DODUMP` on a refused `munlock`:
+/// the new branch is the **return value of the `munlock` syscall**, the same public class as
+/// the errno branches above (and the reason it exists: restoring the advice after a refused
+/// unlock left a page locked *and* dumpable, which an audit reproduced under a syscall
+/// filter).
 const CONTROL_FLOW: &[(&str, usize)] = &[
-    ("if", 35),
+    ("if", 37),
     ("while", 10),
     ("for", 26),
     ("loop", 0),
-    ("match", 5),
+    ("match", 7),
 ];
 
 /// The same table for `src/witness.rs`, the `ultra` build's independent second

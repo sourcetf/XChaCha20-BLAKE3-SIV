@@ -674,11 +674,12 @@ fn every_allocation_happens_before_any_derivation() {
     let in_place = body("decrypt_in_place_detached");
     for buffer in ["witness_ciphertext", "witness_plaintext"] {
         let site = in_place
-            .find(&format!("let mut {buffer} = alloc_zeroed("))
+            .find(&format!("let mut {buffer} = match alloc_zeroed("))
             .unwrap_or_else(|| {
                 panic!(
-                    "`ultra`'s {buffer} is no longer a fallible allocation -- an \
-                     infallible one aborts the process on refusal, which is worse"
+                    "`ultra`'s {buffer} is no longer a `match` on a fallible allocation: an \
+                     infallible one aborts the process on refusal (worse), and a plain `?` \
+                     returns without the wipe the doc promises"
                 )
             });
         assert!(
@@ -686,4 +687,14 @@ fn every_allocation_happens_before_any_derivation() {
             "`ultra`'s {buffer} is allocated after the derivations"
         );
     }
+    // The failure arm of each match must wipe the caller's buffer before returning: the
+    // doc says "on failure the buffer is zeroized", and an audit measured the `?` version
+    // returning `Err(AllocationFailed)` with the caller's ciphertext still in place.
+    assert_eq!(
+        in_place
+            .matches("zeroize_slice(buffer);\n            return Err(e);")
+            .count(),
+        2,
+        "both `ultra` allocation failures must zeroize the caller's buffer before returning"
+    );
 }

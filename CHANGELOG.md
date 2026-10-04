@@ -8,6 +8,58 @@ green push to `main` — which are build artefacts of that job, not construction
 
 ## Unreleased
 
+### An abort reachable from the 2–64 KiB window, and a lock failure path that un-dumped a locked page
+
+The incremental attack review (`XChaCha20-BLAKE3-SIV_增量攻击测试报告_8ae80ce`, the follow-up to the
+line-by-line audit) found two real defects in the boundary between this crate and the
+allocator/kernel, both reproduced here before the fix, plus a set of documentation claims that
+measurement contradicted. **No wire-format change.**
+
+- **`derive_tag`'s contiguous buffer aborted the process on refusal.** The 2 KiB..64 KiB
+  window (on `48 + aad + msg`) used `Vec::with_capacity`, which aborts rather than returning,
+  and an *unauthenticated* ~2 KiB input reaches it (SIV computes the tag before verifying).
+  The README promises the opposite for both allocating entry points ("a refusal is
+  `Error::AllocationFailed`, not a process `abort`"), and the abort also skipped every wipe on
+  the way out — the review's core dumps held the recovered plaintext and `k_in`/`k_out`/
+  `enc_seed`. The arm now uses `try_reserve_exact` and falls back to the three-part hash
+  (which needs no buffer and hashes the same bytes), so a refusal costs speed for that call
+  and nothing else. Measured A/B with a global allocator that refuses anything above 60 000
+  bytes: the old shape dies with `memory allocation of 60051 bytes failed` and SIGABRT (exit
+  134), the new one completes a legitimate 60 KiB round trip against a tag produced by the
+  fast path — the two shapes agree end to end — and rejects a forgery with the buffer
+  zeroized.
+- **`decrypt_in_place_detached` returned `Err(AllocationFailed)` without zeroizing the
+  caller's buffer**, contradicting its own "on failure the buffer is zeroized" and the
+  README's version of it, on `ultra`'s two witness allocations. Both failure arms now
+  zeroize the buffer before returning. Measured with the same refusing allocator: `Err
+  (AllocationFailed)` and the buffer all-zero (it was untouched before).
+- **`unlock_range` restored `MADV_DODUMP` even when `munlock` was refused**, so under a
+  syscall filter that allows `mlock`/`madvise` and denies `munlock` (the review's seccomp
+  experiment) a page could be left *locked and dumpable* — the state the doc claimed "never
+  exists" — with the `VmLck` charge never returned. The advice is now restored only when the
+  unlock succeeded, so a refused unlock leaks a dump exclusion instead of a key.
+- **Claims corrected where measurement contradicted them**: "no copy of the MAC key survives
+  the call" (the review measured the 32 bytes of `k_in` in dead stack frames on the default
+  build above ~950-byte inputs, from the `blake3` dependency's by-value temporaries; `ultra`'s
+  `scrub_stack` covers them); `random::fill`'s "a sandbox that blocks `getrandom(2)`" example
+  (the `getrandom` crate falls back to `/dev/urandom` on `EPERM`/`ENOSYS`, so blocking the
+  syscall alone is not enough on glibc); `decrypt_bounded`'s bound ("on the ciphertext only —
+  it does not bound the AAD, and `max_len` bounds the allocation, not the work");
+  `Cargo.toml`'s `i686-unknown-linux-musl` note (with no i686 C toolchain BLAKE3 falls back
+  to its Rust backends and the plain build succeeds, so `features pure` is belt-and-braces
+  there, and nothing on i686 runs this crate's SIMD — its kernels are x86_64/aarch64).
+- **The two source inventories caught the code changes and were updated deliberately**:
+  `tests/construction_inventory.rs` (`blake3_keyed_multi(` 4 -> 5 call sites for the same
+  three uses; §4.10 now says so) and `tests/variable_latency.rs` (`if` 36 -> 37, `match`
+  5 -> 7: the new branches test the allocator's and the `munlock` syscall's return values,
+  which are public facts about the process, never key/nonce/AAD/message content). Both are
+  exactly the tripwires they exist to be.
+- Also on this push: the whole-buffer `random::fill` assertion is a count again (~6e-6
+  false-failure bound) instead of demanding zero sentinel matches, which failed ~22% of the
+  time on a correct fill and turned two CI jobs red; and the MSRV job now runs
+  `-- --skip timing` like the blocking matrix, because the statistical timing screen is
+  advisory by measurement and was gating a job whose subject is the minimum toolchain.
+
 ### A second `2^128` commitment route, and harnesses that could not fail
 
 A line-by-line audit of `8ae80ce` (the revision the review above was cut from) found four

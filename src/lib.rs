@@ -74,11 +74,12 @@
 //!   [`decrypt_in_place_detached`], for protocols that keep the tag separate or
 //!   want to avoid a second allocation.  They do not allocate the message buffer,
 //!   but they are **not allocation-free**, and an earlier revision of this line
-//!   said they were: `derive_tag` builds one contiguous buffer with
-//!   `Vec::with_capacity` (infallible — a refusal aborts) when the AAD + message
-//!   total lands in `TAG_CONCAT_MIN..=TAG_CONCAT_LIMIT` (2 KiB..64 KiB), and under
-//!   `ultra` `decrypt_in_place_detached` allocates two witness buffers fallibly, so
-//!   it can return [`Error::AllocationFailed`].  See the type docs for both.
+//!   said they were: `derive_tag` tries one contiguous buffer when the AAD +
+//!   message total lands in `TAG_CONCAT_MIN..=TAG_CONCAT_LIMIT` (2 KiB..64 KiB),
+//!   falling back to the three-part hash if the allocator refuses, and under
+//!   `ultra` `decrypt_in_place_detached` allocates two witness buffers fallibly,
+//!   so it can return [`Error::AllocationFailed`].  No allocation in this crate
+//!   aborts the process on refusal.  See the type docs for both.
 //!
 //! Key properties:
 //!
@@ -871,9 +872,13 @@ pub mod random {
     /// Fill `dest` with bytes from the operating system's CSPRNG.
     ///
     /// Returns an error if the OS entropy source is unavailable.  That can
-    /// genuinely happen — early boot, a sandbox that blocks `getrandom(2)`, a
-    /// failed `RDRAND` on `no_std` — which is why this returns a `Result`
-    /// instead of panicking.
+    /// genuinely happen — early boot, a sandbox that blocks `getrandom(2)` **and**
+    /// `/dev/urandom` (the `getrandom` crate falls back to the file when the
+    /// syscall returns `EPERM`/`ENOSYS`, so blocking only the syscall is not enough
+    /// on a glibc host), a failed `RDRAND` on `no_std` — which is why this returns
+    /// a `Result` instead of panicking. (An audit demonstrated the fallback: a
+    /// `getrandom`-denying preload still filled the buffer from `/dev/urandom`, and
+    /// only denying the file too produced the error.)
     ///
     /// **On error `dest` is zeroed**, rather than left as `getrandom` left it: that
     /// crate makes no promise about the buffer when it fails, so an error can leave a
@@ -1126,13 +1131,18 @@ pub mod locked {
         ///
         /// The order is `munlock` first, then `MADV_DODUMP`, and that is deliberate: the
         /// page stays non-dumpable until the lock is released, so the window in which a page
-        /// is locked *and* dumpable never exists. The window that would matter more — a page
+        /// is locked *and* dumpable never exists **while `munlock` succeeds**. If the kernel
+        /// refuses the unlock, the advice is *not* restored — the range stays excluded from
+        /// dumps and the lock quota stays charged, because a leaked dump exclusion is
+        /// recoverable and a leaked key is not. The window that would matter more — a page
         /// holding a live key becoming dumpable — is closed earlier still, by
         /// `LockedKey::drop` wiping before it unlocks.
         ///
-        /// A failure from either syscall is ignored, as in `lock_range`: there is nothing
-        /// useful a caller could do about it, and the caller is about to free or reuse the
-        /// range anyway.
+        /// A failure from `munlock` is otherwise ignored, as in `lock_range`: there is
+        /// nothing useful a caller could do about it, and the caller is about to free or
+        /// reuse the range anyway. (An audit measured what "ignored" used to mean here: the
+        /// unlock was refused, the `MADV_DODUMP` went through regardless, and the page was
+        /// left locked *and* dumpable with the `VmLck` charge never returned.)
         ///
         /// # It owns the range, and clears a `VM_DONTDUMP` it did not set
         ///
@@ -1159,8 +1169,18 @@ pub mod locked {
             // covering it, which cannot leave the mapping (mappings begin and end on a page
             // boundary).
             unsafe {
-                let _ = syscall2(NR_MUNLOCK, ptr as usize, len);
-                let _ = syscall3(NR_MADVISE, start, end - start, MADV_DODUMP);
+                let u = syscall2(NR_MUNLOCK, ptr as usize, len);
+                if ok(u) {
+                    let _ = syscall3(NR_MADVISE, start, end - start, MADV_DODUMP);
+                }
+                // If `munlock` was refused (say, a syscall filter that allows `mlock` and
+                // `madvise` but denies `munlock`), the advice is deliberately **not**
+                // restored: the pages stay excluded from core dumps and the `VmLck` quota
+                // stays charged, because a leaked dump exclusion is recoverable and a leaked
+                // key is not. An audit reproduced the previous shape under such a filter --
+                // it restored the advice anyway, leaving a page that was still locked and now
+                // dumpable, and the claim below ("the window in which a page is locked *and*
+                // dumpable never exists") was false there.
             }
         }
 
@@ -1974,9 +1994,15 @@ fn blake3_keyed_multi(key: &[u8; 32], parts: &[&[u8]], out: &mut [u8]) {
     // `<Hasher as Zeroize>::zeroize` at 15% of all instructions in a 64-byte round
     // trip (four calls: tag and key derivation, each encrypting and decrypting),
     // because BLAKE3 wipes its whole CV stack rather than the part a one-chunk
-    // input touched. It stays. The guarantee is that no copy of the MAC key
-    // survives the call, and only the dependency can say which of its own state
-    // that covers.
+    // input touched. It stays. What it guarantees is this crate's own copies: every
+    // named buffer holding key material in this file is wiped, and the dependency's
+    // state is wiped by the two calls below. What it cannot reach are the
+    // dependency's *by-value* temporaries (the `Hasher::new_keyed` return, a
+    // `ChunkState` built from the key on the multi-chunk path), and an audit measured
+    // exactly that: the 32 bytes of `k_in` left in the caller thread's dead stack
+    // frames on the default build for inputs above ~950 bytes, until `scrub_stack`
+    // (which `ultra` runs) covers them. An earlier revision of this comment called it
+    // "no copy of the MAC key survives the call" without that qualification.
     reader.zeroize();
     hasher.zeroize();
 }
@@ -2088,18 +2114,30 @@ fn derive_tag(
         .and_then(|t| t.checked_add(msg.len()))
         .filter(|t| (TAG_CONCAT_MIN..=TAG_CONCAT_LIMIT).contains(t));
     match window {
-        // The one infallible allocation outside the entry points, and it is bounded by
-        // construction: this arm is only taken for a total within
-        // `TAG_CONCAT_MIN..=TAG_CONCAT_LIMIT`, so `total <= 65_536` whatever the input
-        // length is. A refusal here would mean the process has no memory left at all,
-        // which is why it is not threaded through `derive_tag`'s array return type.
+        // The contiguous buffer is a performance choice, so a refusal falls back to the
+        // three-part call instead of aborting. `Vec::with_capacity` aborts on refusal,
+        // and an earlier revision used it here with the justification "a refusal would
+        // mean the process has no memory left at all" -- an audit measured that this is
+        // false: with a budget just above the caller's own buffers, an unauthenticated
+        // ~2 KiB input reaches this arm and the process dies with SIGABRT (core dump
+        // included), which contradicts the entry points' contract that an allocator
+        // refusal is `Error::AllocationFailed` rather than an abort, and skips every
+        // wipe on the way out. The two shapes hash the same bytes
+        // (`test_both_tag_call_shapes_hash_the_same_bytes`), so a refusal costs speed
+        // for that call and changes nothing else. The arm is bounded by construction:
+        // `total <= TAG_CONCAT_LIMIT` whatever the input length is.
         Some(total) => {
-            let mut cat = Vec::with_capacity(total);
-            cat.extend_from_slice(&head);
-            cat.extend_from_slice(aad);
-            cat.extend_from_slice(msg);
-            blake3_keyed_multi(k_in, &[&cat], &mut inner);
-            zeroize_slice(&mut cat);
+            let mut cat = Vec::new();
+            if cat.try_reserve_exact(total).is_ok() {
+                // Cannot reallocate: `total` bytes are already reserved.
+                cat.extend_from_slice(&head);
+                cat.extend_from_slice(aad);
+                cat.extend_from_slice(msg);
+                blake3_keyed_multi(k_in, &[&cat], &mut inner);
+                zeroize_slice(&mut cat);
+            } else {
+                blake3_keyed_multi(k_in, &[&head, aad, msg], &mut inner);
+            }
         }
         None => blake3_keyed_multi(k_in, &[&head, aad, msg], &mut inner),
     }
@@ -2697,7 +2735,10 @@ pub fn decrypt(
 /// limit of its own, applied before the bytes are trusted.
 ///
 /// The bound is on the ciphertext, which is the size of the plaintext, so the two
-/// are the same number for the caller's purposes.
+/// are the same number for the caller's purposes. It does **not** bound the AAD:
+/// an over-long AAD is refused only by the format limit ([`MAX_MSG_SIZE`]), so a
+/// service that reads the AAD off the wire has to cap it separately — `max_len`
+/// bounds the allocation, not the total work.
 ///
 /// ```
 /// # use xchacha20_blake3_siv::{decrypt_bounded, encrypt, Error};
@@ -2741,9 +2782,10 @@ pub fn decrypt_bounded(
 ///
 /// The plaintext buffer is the caller's, but this is not allocation-free: under
 /// `ultra` the independent witness needs two buffers of its own, allocated
-/// fallibly, so the call can return [`Error::AllocationFailed`]; and
-/// `derive_tag`'s concatenated fast path performs one bounded, infallible
-/// `Vec::with_capacity` (see the crate docs' note on the detached entry points).
+/// fallibly, so the call can return [`Error::AllocationFailed`] — and on that
+/// path the buffer is zeroized, as promised above. `derive_tag`'s concatenated
+/// fast path makes one bounded allocation too, but a refusal there degrades to
+/// the three-part hash rather than failing or aborting.
 pub fn decrypt_in_place_detached(
     key: &[u8; 32],
     nonce: &[u8; NONCE_LEN],
@@ -2762,10 +2804,29 @@ pub fn decrypt_in_place_detached(
     // `?` here must not return through live key material. It did, while these two were
     // allocated where they are used -- the same defect `encrypt` was fixed for, reintroduced by
     // adding an allocation after the derivations.
+    // On a refusal the documented contract is that the buffer is zeroized ("On failure
+    // the buffer is zeroized, so unverified plaintext is never left in place" above),
+    // and an audit measured this path returning `Err(AllocationFailed)` with the
+    // caller's ciphertext still in place. There is no plaintext yet -- these allocations
+    // precede the derivation and the XOR -- but a caller may be relying on the wipe to
+    // clear what *it* put in the buffer, and a later revision that moved the allocations
+    // after the decryption would turn the violated promise into real plaintext residue.
     #[cfg(feature = "ultra")]
-    let mut witness_ciphertext = alloc_zeroed(buffer.len())?;
+    let mut witness_ciphertext = match alloc_zeroed(buffer.len()) {
+        Ok(v) => v,
+        Err(e) => {
+            zeroize_slice(buffer);
+            return Err(e);
+        }
+    };
     #[cfg(feature = "ultra")]
-    let mut witness_plaintext = alloc_zeroed(buffer.len())?;
+    let mut witness_plaintext = match alloc_zeroed(buffer.len()) {
+        Ok(v) => v,
+        Err(e) => {
+            zeroize_slice(buffer);
+            return Err(e);
+        }
+    };
 
     let mut k_in = [0u8; 32];
     let mut k_out = [0u8; 32];

@@ -1135,6 +1135,14 @@ argued separately below; the sentence here is scoped to the construction because
 | U4 | `blake3_keyed_xof` | `enc_seed = U2′[0:32]` | `"XSIV-ENC" ‖ T` | `enc_key`, `enc_nonce` | U5 |
 | U5 | `chacha20_keystream` | `enc_key` | `enc_nonce`, counters 0… | keystream | XOR with `M` |
 
+A *use* is not a call site, and the inventory test counts the latter because that is the
+stronger signal: U3a appears as three call sites (the contiguous shape, the three-part shape
+and the fallback taken when the allocator refuses the contiguous buffer), all hashing the same
+bytes — the shapes are pinned to each other by `test_both_tag_call_shapes_hash_the_same_bytes`
+— while U3b and `blake3_keyed_xof`'s single site are one each. The count in
+`tests/construction_inventory.rs` therefore moves when a *site* moves, and §4.10's argument
+below is about the uses.
+
 **The values that cross.** `subkey` (U1→U2/U2′), `k_in ‖ k_out` (U2→{U3a,U3b}) and `enc_seed`
 (U2′→U4), `X` (U3a→U3b), `T` (U3b→U4, and U3b→the wire), and the pair `enc_key`, `enc_nonce`
 (U4→U5). Nothing else is passed between the calls, and that is a statement about the code which

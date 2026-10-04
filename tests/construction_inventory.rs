@@ -30,8 +30,9 @@ use xchacha20_blake3_siv::{DOM_ENC, DOM_PRE, DOM_TAG, SUBKEY_DOMAIN};
 /// * `chacha20_keystream_raw` — U2, the two key-material blocks (counters 0 and 1): the
 ///   tag keys and the encryption seed;
 /// * `blake3_keyed_multi` — U3a (the inner tag hash), U3b (the outer tag hash) and U4
-///   (the per-message key, through `blake3_keyed_xof`); the tag has the two concatenation
-///   shapes for the inner hash, hence the extra call site;
+///   (the per-message key, through `blake3_keyed_xof`); U3a has one call site per
+///   concatenation shape *plus* the refusal fallback (all three hash the same bytes), which
+///   is why this name has five sites for three uses;
 /// * `chacha20_keystream` and `chacha20_apply` — U5, the data keystream, in the allocating
 ///   and in-place entry points;
 /// * `blake3::Hasher::new` (unkeyed) — *not* a construction use: the hash behind `locked`'s
@@ -47,7 +48,7 @@ const PRIMITIVE_CALLS: &[(&str, usize)] = &[
     ("hchacha20(", 1),
     ("chacha20_keystream_raw(", 2),
     ("blake3_keyed_xof(", 1),
-    ("blake3_keyed_multi(", 4),
+    ("blake3_keyed_multi(", 5),
     ("chacha20_keystream(", 2),
     ("chacha20_apply(", 4),
     ("blake3::Hasher::new(", 1),
