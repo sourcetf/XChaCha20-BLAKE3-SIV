@@ -267,6 +267,31 @@ fn a_refused_lock_is_reported_and_returns_the_allowance() {
     let baseline = LockedKey::locked_bytes().expect("VmLck is readable on Linux");
     let fds_before = fd_count();
 
+    if limit_bytes == 0 {
+        // The other shape of the refusal, and the one the audit measured by setting the
+        // limit to zero itself: a zero allowance must come back as an error, with nothing
+        // charged and no descriptor taken. It is asserted whenever a host runs with one
+        // (some hardened containers do), rather than skipped.
+        assert!(
+            LockedKey::new(&KEY).is_err(),
+            "RLIMIT_MEMLOCK is zero and `LockedKey::new` still returned a key, so a refused \
+             lock is not reported"
+        );
+        assert_eq!(
+            LockedKey::locked_bytes().expect("VmLck is readable on Linux"),
+            baseline,
+            "a refused lock charged VmLck"
+        );
+        if let (Some(before), Some(after)) = (fds_before, fd_count()) {
+            assert_eq!(after, before, "a refused lock leaked a file descriptor");
+        }
+        eprintln!(
+            "note: RLIMIT_MEMLOCK is zero on this host, so the EPERM shape of the refusal \
+             was asserted rather than the ENOMEM one"
+        );
+        return;
+    }
+
     // What one key charges, measured rather than assumed: it is the kernel's page size
     // (`VmLck` counts bytes), and this crate locks one page per key.
     let per_key = {
@@ -296,8 +321,8 @@ fn a_refused_lock_is_reported_and_returns_the_allowance() {
     // making the test itself an OOM risk: beyond it, the refusal is out of reach and the
     // run says so rather than holding hundreds of megabytes.
     const MAX_KEYS: u64 = 32_768;
-    let cap = (limit_bytes / per_key + 8).min(MAX_KEYS);
-    for _ in 0..cap {
+    let allowance_cap = limit_bytes / per_key + 8;
+    for _ in 0..allowance_cap.min(MAX_KEYS) {
         match LockedKey::new(&KEY) {
             Ok(key) => held.push(key),
             Err(e) => {
@@ -307,16 +332,20 @@ fn a_refused_lock_is_reported_and_returns_the_allowance() {
         }
     }
     let Some(errno) = refusal else {
-        // No refusal after the cap. That is a skip when the allowance really is bigger than
-        // this test will consume -- but not when it is spent: then the next call has to
-        // refuse, and a call that succeeds is a refusal that is not being reported.
-        let charged_now = LockedKey::locked_bytes().expect("VmLck is readable on Linux");
-        assert!(
-            charged_now.saturating_sub(baseline) + per_key <= limit_bytes,
-            "the allowance is spent ({} bytes charged against a {limit_bytes} byte limit) \
-             and yet `LockedKey::new` kept succeeding, so a refused lock is not reported",
-            charged_now.saturating_sub(baseline),
-        );
+        // No refusal within a count the allowance cannot hold *if* the loop was bounded by
+        // the allowance; then a call that keeps succeeding is a refusal that is not being
+        // reported. When `MAX_KEYS` is the smaller bound the refusal is simply out of
+        // reach, and this is a skip either way.
+        if allowance_cap <= MAX_KEYS {
+            let charged_now = LockedKey::locked_bytes().expect("VmLck is readable on Linux");
+            assert!(
+                charged_now.saturating_sub(baseline) + per_key <= limit_bytes,
+                "the allowance is spent ({} bytes charged against a {limit_bytes} byte \
+                 limit) and yet `LockedKey::new` kept succeeding, so a refused lock is not \
+                 reported",
+                charged_now.saturating_sub(baseline),
+            );
+        }
         eprintln!(
             "SKIPPED: {} keys ({} bytes charged each) were locked with no refusal, so the \
              allowance here is not exhaustible the way this test assumes",
