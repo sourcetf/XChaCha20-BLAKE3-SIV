@@ -99,13 +99,43 @@ fi
 case "$JOBS" in (*[!0-9]*|"") echo "FAIL: --jobs wants a number, got '$JOBS'" >&2; exit 1 ;; esac
 [ "$JOBS" -ge 1 ] || { echo "FAIL: --jobs wants a positive number" >&2; exit 1; }
 
+# The test executable cargo just built, taken from its own JSON stream rather than from a
+# glob over the deps directory. The glob version (`ls -t …/decision-* | head -1`) picked the
+# *newest* match, which is the binary just built only as long as every scan builds a
+# different configuration in order -- an ordering, not an invariant, and one this driver
+# depends on silently. Asking cargo removes the guess. (Same fix as `tools/ctgrind.sh`,
+# where the glob picked up a planted binary and made the second run of the tool fail on
+# unchanged source.)
+cargo_decision_executable() {  # reads cargo's `--message-format=json` stream on stdin
+  python3 -c '
+import json, sys
+exes = []
+for line in sys.stdin:
+    if not line.startswith("{"):
+        continue
+    try:
+        m = json.loads(line)
+    except ValueError:
+        continue
+    if m.get("reason") != "compiler-artifact" or not m.get("executable"):
+        continue
+    if (m.get("target") or {}).get("name") == "decision":
+        exes.append(m["executable"])
+print(exes[-1] if exes else "")
+'
+}
+
 scan() {  # label, features
   local label="$1" features="$2"
-  cargo test --release --test decision --no-run \
-    --config 'profile.release.strip=false' $features > /dev/null 2>&1
   local bin
-  bin="$(ls -t "$CARGO_TARGET_DIR"/release/deps/decision-* 2>/dev/null | grep -v '\.d$' | head -1 || true)"
-  [ -n "$bin" ] || { echo "FAIL: no decision binary" >&2; exit 1; }
+  # shellcheck disable=SC2086
+  bin="$(cargo test --release --test decision --no-run \
+           --config 'profile.release.strip=false' --message-format=json $features 2>/dev/null \
+         | cargo_decision_executable)"
+  [ -n "$bin" ] || {
+    echo "FAIL: no decision binary (cargo reported no executable for it)" >&2
+    exit 1
+  }
 
   local shard pids=()
   for shard in $(seq 0 $((JOBS - 1))); do

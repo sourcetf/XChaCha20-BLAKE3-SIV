@@ -66,12 +66,30 @@ PY
 run_ctgrind() {
   local dir="$1"
   ( cd "$dir"
-    CARGO_TARGET_DIR="$dir/target-ctgrind" \
-      RUSTFLAGS="-C target-feature=+crt-static -C strip=none" \
-      cargo test --release --target x86_64-unknown-linux-gnu --test ctgrind --no-run \
-        --no-default-features >/dev/null 2>&1
     local bin
-    bin="$(ls -t "$dir"/target-ctgrind/x86_64-unknown-linux-gnu/release/deps/ctgrind-* 2>/dev/null | grep -vE '\.(d|o)$' | head -1 || true)"
+    # Ask cargo for the executable rather than globbing the deps directory: `ls -t` takes
+    # the newest match, which is the binary just built only by an ordering this script
+    # would be relying on silently. (Same fix as `tools/ctgrind.sh`, where a glob picked up
+    # the self-test's planted binary.)
+    bin="$(CARGO_TARGET_DIR="$dir/target-ctgrind" \
+             RUSTFLAGS="-C target-feature=+crt-static -C strip=none" \
+             cargo test --release --target x86_64-unknown-linux-gnu --test ctgrind --no-run \
+               --no-default-features --message-format=json 2>/dev/null \
+           | python3 -c '
+import json, sys
+exes = []
+for line in sys.stdin:
+    if not line.startswith("{"):
+        continue
+    try:
+        m = json.loads(line)
+    except ValueError:
+        continue
+    if m.get("reason") == "compiler-artifact" and m.get("executable") \
+       and (m.get("target") or {}).get("name") == "ctgrind":
+        exes.append(m["executable"])
+print(exes[-1] if exes else "")
+')"
     [ -n "$bin" ] || { echo "could not build the ctgrind binary"; return 2; }
     # The same classification the real check uses: a report inside this crate
     # means the leak was seen.
