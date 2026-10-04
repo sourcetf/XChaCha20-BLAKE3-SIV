@@ -152,6 +152,21 @@ beyond (the witness runs only on the allocating `encrypt`, which is why the
 allocating round trip is worse than the in-place one), while decrypt — which always
 cross-checks — grows with the message because the witness is byte-serial.
 
+**How far these ratios move between builds.** Every number in this file is one host's, one
+compiler's and one harness's. A third-party audit re-measured the layered configurations with
+its own probe (process CPU time, five interleaved rounds, its own machine and its own harness)
+and got the same *directions* at larger magnitudes: `dual-mac` against the default at 1 KiB came
+out at 1.69x on in-place decryption and 1.81x allocating, where the README's layer row states
++30% at 64 B and +40% at 1 KiB on this host; `ultra`'s allocating decryption at 1 KiB at 4.62x,
+where the table above says 3.96x; and `dual-mac`'s fixed encrypt-side cost at +43–44% (64 B),
++40–42% (1 KiB) and +3–5% (16 KiB), which is the `scrub_stack` row's ~0.5–1 µs per call seen as
+a percentage. The audit does not attribute the difference to either side's figures, and the
+*shape* each mechanism predicts is what the layer rows actually claim — a fixed per-call cost is
+largest at the small end and gone by 16 KiB, the second tag pass grows with the message, the
+witness is per byte — so read the constants here as one build's and the mechanisms as the claim.
+Refreshing the constants for a given deployment means re-running `tools/bench_3pass.sh` on that
+host; nothing here is a portable constant.
+
 Two structural properties bound what a caller can do with that latency, and both
 follow from the construction rather than from this implementation:
 

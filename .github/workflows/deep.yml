@@ -519,6 +519,10 @@ jobs:
     # reproduce it either. The gate is the 95 floor; the measured figure is printed by
     # the coverage job, which is where a reader should take it from.
     # `--fail-under-lines` compares against the line figure.
+    # The `report`-side *function* column carries llvm-cov's own
+    # "N functions have mismatched data" warning, so a function count quoted from it
+    # only means what it says alongside that caveat -- one more reason not to put a
+    # second figure in this comment.
     # It is not there to be
     # approached; it is there so that dropping a whole path -- a feature combination
     # that stops being tested, a module that loses its tests -- fails here instead of

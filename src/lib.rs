@@ -509,6 +509,17 @@ pub const fn stack_requirement_bytes() -> usize {
 /// behalf, and a request the kernel *accepts* can still be OOM-killed when the
 /// buffer is written to. Decryption never returns a partial result, so a
 /// length-bounded call cannot leak a prefix.
+///
+/// The OOM half was measured under a cgroup v2 limit, and its shape is worth
+/// knowing because no `Result` reaches the caller: `memory.max` is enforced on
+/// *newly charged pages*, so a request that needs fresh pages is `SIGKILL`ed (rc
+/// 137, no `Err`, nothing on stderr, no abort) at a limit where the same call on a
+/// length that needs no new pages completes, and a small request served from
+/// already-charged heap returns normally even at that limit. The failure is
+/// therefore a property of allocation *state* as much as of size, and an admission
+/// check on the request size — this crate's [`MAX_MSG_SIZE`], or the caller's own
+/// limit through [`decrypt_bounded`] — is the only place it can be turned into a
+/// reportable error.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum Error {
@@ -934,11 +945,22 @@ pub mod random {
     /// Returns an error if the OS entropy source is unavailable.  That can
     /// genuinely happen — early boot, a sandbox that blocks `getrandom(2)` **and**
     /// `/dev/urandom` (the `getrandom` crate falls back to the file when the
-    /// syscall returns `EPERM`/`ENOSYS`, so blocking only the syscall is not enough
-    /// on a glibc host), a failed `RDRAND` on `no_std` — which is why this returns
-    /// a `Result` instead of panicking. (An audit demonstrated the fallback: a
-    /// `getrandom`-denying preload still filled the buffer from `/dev/urandom`, and
-    /// only denying the file too produced the error.)
+    /// syscall returns `EPERM`/`ENOSYS` — which errors it treats as "not available"
+    /// is that crate's policy, and any other error it returns as it is — so blocking
+    /// only the syscall is not enough on a glibc host), a failed `RDRAND` on
+    /// `no_std` — which is why this returns a `Result` instead of panicking. (An
+    /// audit demonstrated the fallback: a `getrandom`-denying preload still filled
+    /// the buffer from `/dev/urandom`, and only denying the file too produced the
+    /// error.)
+    ///
+    /// Closing the fallback with a syscall filter takes more than one rule, and
+    /// which one depends on the libc: opening `/dev/urandom` is `openat(2)` under
+    /// glibc but `open(2)` in a static musl binary, so a sandbox that names only one
+    /// of them still leaves the other libc a way through — and a caller that reaches
+    /// for `openat2(2)` needs that named as well. An audit measured both builds,
+    /// under a seccomp filter that returned `EPERM`: with `getrandom` and `openat`
+    /// denied the musl binary was still filled, with `getrandom` and `open` denied
+    /// the glibc one was, and only a policy naming all three stopped both.
     ///
     /// **On error `dest` is zeroed**, rather than left as `getrandom` left it: that
     /// crate makes no promise about the buffer when it fails, so an error can leave a
@@ -2122,7 +2144,17 @@ fn blake3_keyed_multi(key: &[u8; 32], parts: &[&[u8]], out: &mut [u8]) {
     // the profile: with this crate's release profile (LTO on) it is the full 32 bytes,
     // with LTO off a 16-24 byte prefix, and the deepest frames move with the
     // overflow-checks setting -- so "no copy survives" is false in a way codegen
-    // chooses, and `tools/stack_residue.sh` only searches for the master key. An
+    // chooses, and `tools/stack_residue.sh` only searches for the master key. Two
+    // further probes of the same region say how far the variation goes: in the `pure`
+    // build (Rust ChaCha backend) `k_in` appears as an 8-16 byte prefix on encryption
+    // and a full 32 bytes on decryption, with `k_out` at a 16-byte half; and the
+    // release/no-default decrypt paths leave 8-12 bytes of `enc_nonce`, which an
+    // 8-byte-anchored scan cannot see at all. No single configuration left both a
+    // whole `k_in` and a whole `k_out` in reach -- the two configurations that come
+    // closest split them (release keeps `k_in` whole, `k_out` short; debug keeps
+    // `k_out` whole, `k_in` not at all) -- so an offline forgery still needs a
+    // second source, but "which secret, how long, how many copies" is a property of
+    // the build rather than of the construction. An
     // earlier revision of this comment said "no copy of the MAC key survives the call"
     // without any of that.
     reader.zeroize();

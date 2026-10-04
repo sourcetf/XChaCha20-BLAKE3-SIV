@@ -193,6 +193,188 @@ fn dropping_releases_the_lock() {
     );
 }
 
+/// Open file descriptors, from `/proc/self/fd`. `None` if the directory cannot be read.
+fn fd_count() -> Option<usize> {
+    std::fs::read_dir("/proc/self/fd").ok().map(|d| d.count())
+}
+
+/// The soft `RLIMIT_MEMLOCK` in **bytes**, from `/proc/self/limits`, or `None` when the file
+/// cannot be read or the limit is `unlimited`.
+///
+/// The units are read off the line rather than assumed. This kernel prints `bytes` there
+/// while `ulimit -l` answers in kB, and the first version of the test below took the number
+/// for kB: that made the cap it computes 1024 times too large, and a mutant that swallowed
+/// the refusal held a million pages before the OOM killer ended the run instead of failing
+/// the test.
+fn memlock_limit_bytes() -> Option<u64> {
+    let text = std::fs::read_to_string("/proc/self/limits").ok()?;
+    let line = text
+        .lines()
+        .find(|line| line.starts_with("Max locked memory"))?;
+    let mut fields = line.split_whitespace();
+    fields.next()?; // "Max"
+    fields.next()?; // "locked"
+    fields.next()?; // "memory"
+    let soft = fields.next()?;
+    let _hard = fields.next()?;
+    let unit = fields.next()?;
+    let value: u64 = soft.parse().ok()?; // "unlimited" does not parse
+    match unit {
+        "bytes" => Some(value),
+        "kilobytes" => value.checked_mul(1024),
+        _ => None,
+    }
+}
+
+/// A refused lock must be **reported**, and it must not consume the allowance.
+///
+/// The tests above only ever *skip* when the kernel refuses (`lock_or_skip`), so the failure
+/// arm of `LockedKey::new` had no witness: an implementation that returned `Ok` holding an
+/// unlocked page, or that freed the page without returning its charge, would have been
+/// reported as "not applicable on this host". An audit named exactly that gap. The allowance
+/// is exhausted here through the public API — one page per key, which is what `LockedKey`
+/// allocates — so the refusal is the kernel's own (`ENOMEM` over `RLIMIT_MEMLOCK`; a zero
+/// soft limit answers `EPERM` instead, which is the other shape of the same check).
+///
+/// The assertions are the accounting, because that is what a refusal can silently get
+/// wrong: every held key charged exactly one page, a refused call charged nothing, and
+/// dropping the holders returns `VmLck` to exactly where it started — after which the
+/// call that just failed succeeds again with nothing else held.
+///
+/// What it cannot see is a leaked *unlocked* page: a failure path that dropped the mapping
+/// on the floor would leave it resident but uncharged, which `VmLck` and the fd count cannot
+/// distinguish from the allocator reusing the memory. (The shipped failure path frees the
+/// page through its `Drop`, and this test's charge accounting is what would notice a
+/// version that kept the lock instead.)
+#[test]
+fn a_refused_lock_is_reported_and_returns_the_allowance() {
+    let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+
+    if !SUPPORTED {
+        eprintln!("SKIPPED: memory locking is unsupported on this target/architecture");
+        return;
+    }
+    // The soft limit in bytes. `None` covers "unlimited" (nothing to exhaust) and
+    // "unreadable" — guessing a number and looping to it would be worse.
+    let Some(limit_bytes) = memlock_limit_bytes() else {
+        eprintln!(
+            "SKIPPED: RLIMIT_MEMLOCK is unlimited (or /proc/self/limits is unreadable), so \
+             this test cannot exhaust it to reach the refusal path"
+        );
+        return;
+    };
+
+    let baseline = LockedKey::locked_bytes().expect("VmLck is readable on Linux");
+    let fds_before = fd_count();
+
+    // What one key charges, measured rather than assumed: it is the kernel's page size
+    // (`VmLck` counts bytes), and this crate locks one page per key.
+    let per_key = {
+        let Ok(probe) = LockedKey::new(&KEY) else {
+            eprintln!(
+                "SKIPPED: a single lock already fails (baseline {baseline} bytes against a \
+                 {limit_bytes} byte allowance), so there is no headroom to exhaust here"
+            );
+            return;
+        };
+        let with_one = LockedKey::locked_bytes().expect("VmLck is readable on Linux");
+        drop(probe);
+        with_one.saturating_sub(baseline)
+    };
+    assert!(
+        per_key > 0,
+        "locking one key did not move VmLck, so this test cannot tell a charged page from \
+         an uncharged one"
+    );
+
+    let mut held: Vec<LockedKey> = Vec::new();
+    let mut refusal: Option<isize> = None;
+    // The allowance cannot hold more than `limit_bytes` worth of pages; the slack covers a
+    // baseline charge that `VmLck` does not report. (On this host the limit is 64 MiB and a
+    // page is 4 KiB, so the loop holds 16384 keys and the 16385th call is the one that
+    // refuses.) The absolute ceiling keeps a host with a *very* large allowance from
+    // making the test itself an OOM risk: beyond it, the refusal is out of reach and the
+    // run says so rather than holding hundreds of megabytes.
+    const MAX_KEYS: u64 = 32_768;
+    let cap = (limit_bytes / per_key + 8).min(MAX_KEYS);
+    for _ in 0..cap {
+        match LockedKey::new(&KEY) {
+            Ok(key) => held.push(key),
+            Err(e) => {
+                refusal = Some(e);
+                break;
+            }
+        }
+    }
+    let Some(errno) = refusal else {
+        // No refusal after the cap. That is a skip when the allowance really is bigger than
+        // this test will consume -- but not when it is spent: then the next call has to
+        // refuse, and a call that succeeds is a refusal that is not being reported.
+        let charged_now = LockedKey::locked_bytes().expect("VmLck is readable on Linux");
+        assert!(
+            charged_now.saturating_sub(baseline) + per_key <= limit_bytes,
+            "the allowance is spent ({} bytes charged against a {limit_bytes} byte limit) \
+             and yet `LockedKey::new` kept succeeding, so a refused lock is not reported",
+            charged_now.saturating_sub(baseline),
+        );
+        eprintln!(
+            "SKIPPED: {} keys ({} bytes charged each) were locked with no refusal, so the \
+             allowance here is not exhaustible the way this test assumes",
+            held.len(),
+            per_key
+        );
+        return;
+    };
+    assert!(
+        matches!(errno, -1 | -11 | -12),
+        "a refused lock must come back as a negative errno -- EPERM (-1) at a zero limit, \
+         ENOMEM (-12) once the allowance is spent, EAGAIN (-11) on kernels that answer the \
+         charge that way -- not {errno}"
+    );
+
+    let charged = LockedKey::locked_bytes().expect("VmLck is readable on Linux");
+    assert_eq!(
+        charged,
+        baseline + per_key * held.len() as u64,
+        "each held key must charge exactly one page: {} keys charge {} bytes each, but \
+         VmLck moved by {} bytes against a baseline of {} bytes",
+        held.len(),
+        per_key,
+        charged.saturating_sub(baseline),
+        baseline
+    );
+    // The refused call must not have taken anything: with the allowance spent, the next
+    // calls have to refuse too.
+    for _ in 0..3 {
+        assert!(
+            LockedKey::new(&KEY).is_err(),
+            "the allowance grew after a refusal, so a refused call did not return what it \
+             had taken"
+        );
+    }
+
+    drop(held);
+    let released = LockedKey::locked_bytes().expect("VmLck is readable on Linux");
+    assert_eq!(
+        released, baseline,
+        "a dropped key's charge stayed in VmLck ({baseline} -> {released} kB)"
+    );
+    // The allowance is *usable* again: with nothing else held, the call that just failed
+    // succeeds, which is the property a caller depends on.
+    let fresh = LockedKey::new(&KEY).expect("the allowance was not returned after the refusals");
+    drop(fresh);
+    assert_eq!(
+        LockedKey::locked_bytes().expect("VmLck is readable on Linux"),
+        baseline
+    );
+    if let (Some(before), Some(after)) = (fds_before, fd_count()) {
+        assert_eq!(
+            after, before,
+            "the refusal path leaked a file descriptor ({before} -> {after})"
+        );
+    }
+}
+
 /// Unlocking must also **undo the core-dump exclusion**.
 ///
 /// This is the test that was missing, and its absence let a documented behaviour not exist:

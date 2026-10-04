@@ -8,6 +8,53 @@ green push to `main` — which are build artefacts of that job, not construction
 
 ## Unreleased
 
+### The third round's items: a refusal path with a witness, and four corrections
+
+The third-round review's own summary is that most of its re-runs were negative; five of its 26
+findings changed something here. **No wire-format change.**
+
+- **`LockedKey::new`'s refusal path has a witness now.** The audit noted that
+  `tests/locked.rs` and `tests/ultra.rs` only *skip* when the kernel refuses a lock, so the
+  failure arm had no test: an implementation that returned `Ok` holding an unlocked page, or
+  that kept the charge while reporting an error, would have read as "not applicable on this
+  host". `tests/locked.rs` now exhausts `RLIMIT_MEMLOCK` through the public API — one page per
+  key, the limit read *with its unit* off `/proc/self/limits` (this kernel prints bytes there
+  while `ulimit -l` answers in kB; taking the number for kB made the loop a million-key OOM in
+  the first version) — and asserts the refusal is reported as a negative errno and that the
+  accounting is returned: one page charged per holder, nothing charged by the refused call,
+  `VmLck` back to its baseline once the holders drop, the call that just failed succeeding again
+  with nothing held, and no descriptor leaked. Mutant-checked: a `lock_range` whose error is
+  ignored fails it with "the allowance is spent … and yet `LockedKey::new` kept succeeding"
+  (0.6 s, holding 64 MiB for its window on this host).
+- **A seccomp policy that means to close the entropy fallback has to name three syscalls.** The
+  third round measured through real BPF filters that `getrandom`'s fallback to `/dev/urandom`
+  opens the file with `openat(2)` under glibc and `open(2)` under static musl, that only
+  `EPERM`/`ENOSYS` trigger the fallback at all (`EACCES`/`EIO` are returned as they are), and
+  that the zeroed buffer on failure is this crate's `fill_from` rather than the dependency's
+  doing. `random::fill`'s docs now say all three, `openat2(2)` included.
+- **The cgroup OOM shape is documented.** Under a cgroup v2 `memory.max`, the failure of the
+  2–64 KiB window's allocation is a `SIGKILL` — no `Err`, no abort, nothing on stderr — and it
+  tracks *newly charged* pages, so a small request the allocator serves from charged heap
+  returns normally at the same limit. `decrypt`'s `# Allocation` section now carries the
+  measurement and the conclusion the audit drew from it: admission control on the request size
+  is the only place this becomes a reportable error.
+- **`--trace`'s last prediction is disproved by measurement.** The third round predicted
+  `tools/cache_profile.sh --trace` would still FAIL on a pristine tree even with the filter
+  fixed, because the example's hex parsing branches on characters (it measured +5,544
+  instruction lines between a `00…` and an `ff…` key). Both halves were already handled — the
+  guard is value-independent since the previous round, and instruction fetches are excluded from
+  an *address* comparison on purpose — and re-measured here both modes PASS on a pristine tree
+  (131,292 accesses enc, 179,611 round trip; 13 counters identical).
+- **Two figures are now ranges with their spread written down.** `performance.md` records that
+  an independent build measured `dual-mac` at 1.69–1.81x where this repository's rows state
+  +30–40%, and `ultra`'s 1 KiB allocating decryption at 4.62x against 3.96x here, and states the
+  rule the layer rows actually claim: the direction each mechanism predicts is the claim, the
+  constants are one host's. `deep.yml` adds one line that llvm-cov's *function* column carries
+  its own "functions have mismatched data" warning. The residue comment in
+  `blake3_keyed_multi` gains the third round's shapes (the `pure` backend's 16-byte `k_out`
+  half, the release/no-default decrypt paths' 8–12 bytes of `enc_nonce`) and the finding that no
+  configuration probed left both a whole `k_in` and a whole `k_out` within reach.
+
 ### `AUDIT-RESPONSE.md`: the disposition of all four third-party reports
 
 The four reports (the 366-finding line-by-line audit, and the 26-, 58- and 26-finding
