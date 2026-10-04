@@ -19,6 +19,15 @@
 #                     script planted exactly that leak and the counts called it
 #                     identical, correctly and uselessly.)
 #
+#                     This mode was broken from the day it was written and reported
+#                     "SKIPPED: valgrind here cannot start the lackey tool" instead:
+#                     lackey's memtrace lines carry a leading space (` S <addr>,<size>`
+#                     for a store), so the `^[ILSM] ` filter matched instruction lines
+#                     only and the load/store count was always zero. Fixed, it compares
+#                     ~170k accesses (enc) and ~275k (round trip) and passes on this
+#                     tree; `tools/cache_profile.sh --selftest --trace` still has to
+#                     catch its planted leak first, which it does.
+#
 # Both modes are compared against `examples/xsiv_stdin.rs`, which takes key, nonce,
 # AAD and message from stdin, so the two sides differ in the value of a secret and
 # in nothing else.
@@ -117,19 +126,31 @@ if [ "${1:-}" = "--trace" ]; then
       # ASLR off: the comparison is over addresses, so the same code has to be at the
       # same addresses in both runs. That requirement is this mode's main caveat -- it
       # needs a controlled layout, which is not a statement about a hostile process.
+      # Lackey's memtrace format is `I  <addr>,<size>` for instruction fetches and
+      # ` S <addr>,<size>` / ` L ...` / ` M ...` -- **with a leading space** -- for
+      # stores, loads and modifies. The first version of this filter was `^[ILSM] `,
+      # which matched only the `I` lines; the load/store count below then found nothing
+      # and the mode reported "valgrind here cannot start the lackey tool" for years.
+      # (An audit ran lackey by hand, saw 109,673 L/S/M lines in the same call shape,
+      # and pointed at the filter.)
+      #
+      # Only L/S/M are kept: instruction fetches are the harness's own code, and the
+      # example's hex parsing legitimately branches on the *characters* of its input
+      # (digit vs letter in `from_str_radix`), so including `I` lines would compare the
+      # harness's parser rather than the library's memory accesses. The access trace is
+      # the thing this mode exists to compare.
       setarch --addr-no-randomize "$VALGRIND" --tool=lackey --trace-mem=yes \
         "$TARGET_DIR/release/examples/xsiv_stdin" ${extra[@]+"${extra[@]}"} \
         < "$work/t-$side.txt" 2>&1 \
-        | grep -E "^[ILSM] " > "$work/$phase-$side.trace" || true
+        | grep -E "^[[:space:]]*[LSM] " > "$work/$phase-$side.trace" || true
     done
-    # A trace that carries no load/store lines is not a trace. This valgrind, extracted
-    # from a package rather than installed, cannot start external tools at all: it looks
-    # for them under the prefix it was built with, and `VALGRIND_LIB` only redirects the
-    # core. The first version of this mode filtered on `^[ILSM] ` and compared the
-    # *error message* that came back instead -- two runs of identical text, reported as
-    # "identical address traces". Exit 3 means "could not run", which the self-test
+    # A trace that carries no load/store lines is not a trace -- keep this guard even
+    # though the filter is now right, because a valgrind that cannot start lackey (an
+    # extracted copy looks for its tools under the prefix it was built with, and
+    # `VALGRIND_LIB` only redirects the core) would otherwise compare two empty files
+    # and call them identical. Exit 3 means "could not run", which the self-test
     # treats as its own failure rather than as a detection.
-    loads="$(grep -c '^[LSM] ' "$work/$phase-zero.trace" || true)"
+    loads="$(grep -c '^[[:space:]]*[LSM] ' "$work/$phase-zero.trace" || true)"
     if [ "${loads:-0}" -eq 0 ]; then
       echo "SKIPPED: no load/store lines in the $phase trace -- valgrind here cannot" >&2
       echo "         start the lackey tool (see the comment above)." >&2

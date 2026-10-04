@@ -8,6 +8,32 @@ green push to `main` — which are build artefacts of that job, not construction
 
 ## Unreleased
 
+### `cache_profile.sh --trace` ran for the first time: lackey's lines start with a space
+
+The address-trace mode — the one technique in this repository that can see a
+secret-dependent *index* into a cache-resident table, which no counter can — had never
+executed. Its filter was `^[ILSM] `, and valgrind's lackey prints ` S <addr>,<size>` /
+` L …` / ` M …` **with a leading space** (instruction lines are unindented), so it kept only
+the `I` lines, the load/store count below it then found zero, and the mode answered
+`SKIPPED: valgrind here cannot start the lackey tool` — a wrong diagnosis of a filter bug,
+with a comment explaining that the extracted valgrind cannot start external tools at all.
+An audit ran lackey by hand, saw 109,673 load/store lines in the same call shape, and pointed
+at the filter. The filter now keeps `L`/`S`/`M` (instruction fetches excluded on purpose:
+the example's own hex parsing branches on the *characters* of its input, so including them
+would compare the harness's parser rather than the library's accesses), and the mode works:
+
+* `--trace 8`, default: **170,874** accesses identical for two different keys (encrypt), and
+  **274,664** for the round trip;
+* `XSIV_FEATURES=ultra --trace 8`: **372,519** and **987,842**, identical — the witness's
+  access pattern is key-independent too;
+* `--selftest --trace`: the planted secret-indexed table leak is detected, which is the
+  control that says the comparison can fail.
+
+So the "no secret-dependent index" half of the constant-time argument is now a measurement
+rather than an argument, in the default and `ultra` configurations. (The mode's caveat is
+unchanged and still real: it needs a controlled address layout — `setarch
+--addr-no-randomize` — so it is a statement about this code, not about a hostile process.)
+
 ### `Key` and `LockedKey` compare in constant time now, instead of through `Deref`
 
 The attack review's API-consistency item, fixed rather than documented: `Plaintext` has had
