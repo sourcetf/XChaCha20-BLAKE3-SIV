@@ -10,7 +10,7 @@ names a file, a test, a command, or a commit, and "responded" never means "ignor
 | 1 | `逐行验证审计报告` (line-by-line audit) | 179 | 366 (41 marked DEFECT; 高 12 / 中 47 / 低 165 / 信息 31 / 未标注 112) | the DEFECT-class and 高/中 items are fixed (indexed in §1); the notes and informational items are answered in §2 |
 | 2 | `增量攻击测试报告` (incremental) | 27 | 26 (0 高, 2 中, 14 低, 9 信息, 2 unlabeled) | both 中 fixed (§1.D); 低 fixed or answered |
 | 3 | `增量攻击测试报告·完整版` (complete) | 32 | 58 (0 高, 3 中, 13 低, 25 信息, 18 unlabeled) | the three 中 fixed (§1.D); the rest fixed or answered |
-| 4 | `增量攻击测试报告·第三轮` (third round) | 16 | 26 (0 高, 1 中, 4 低, 10 信息, 11 unlabeled) | two 低 fixed (§1.C); the 中 is the documented opt-out boundary (§2.2); the rest answered |
+| 4 | `增量攻击测试报告·第三轮` (third round) | 16 | 26 (0 高, 1 中, 4 低, 10 信息, 11 unlabeled) | two 低 fixed (§1.C); the 中 is the documented opt-out boundary (§2.2); the refusal-path test it found missing was added (§1.B); the rest answered |
 
 Everything below is against the tree that carries this file. The commits that make up the
 response, in order, are:
@@ -38,6 +38,7 @@ a488b36  Give the trace mode a determinism control, after its first CI run faile
 77b18ac  Correct the constant-tag row: the byte-level probe is profile-dependent
 f9a5d3d  Re-measure the ultra cost table after the witness's residue-wipe pass
 ea56caf, 956c816, 6efac1f  trace-step message, changelog order, riscv64/debug/opt-out notes
+eca9ff3  Give the lock refusal path a witness, and four third-round corrections
 ```
 
 `CHANGELOG.md`'s `Unreleased` sections are the detailed record of each of these; this document
@@ -58,6 +59,7 @@ not about the current source.
 | `tools/ctgrind.sh`'s and `tools/tsan.sh`'s PASS did not check that the named tests ran at all — a zero-match filter makes libtest print `ok. 0 passed` and exit 0 | both now require the run to show the named tests (`test result: ok. 4 passed` / the test's own line) | `c907e47`, `a778ee9` |
 | `tools/cache_profile.sh`'s self-test's planted binary went into the caller's target dir; its counts-mode verdict depended on the example harness's value-dependent hex guard (so it failed on a pristine tree) | the plant is private, the self-test uses a private target dir, and the example's hex check is value-independent (two comparisons instead of a per-byte scan) | `4e52680`, and the analysis in `CHANGELOG` ("Gate defects…") |
 | `tools/cache_profile.sh --trace` had **never run**: lackey prints ` S <addr>,<size>` with a leading space, so the `^[ILSM] ` filter kept only instruction lines, the load/store count was zero, and the mode answered "valgrind here cannot start the lackey tool" for years | filter fixed to `L`/`S`/`M` (instruction fetches excluded on purpose), plus a **determinism control**: the same input is run twice and those traces must match before keys are compared | `13caa0e`, `a488b36`; runs now: 170,874 / 274,664 identical accesses (default), 372,519 / 987,842 (`ultra`); `--selftest --trace` catches its planted leak; on a CI runner the control correctly reports "layout is not reproducible" and the step skips |
+| The same mode's verdict also depended on the example's value-dependent hex guard, so the third round predicted it would still fail on a pristine tree "even with the filter fixed" (+5,544 instruction lines measured between a `00…` and an `ff…` key, from `from_str_radix`'s letter branch) | the guard is gone (it is now two comparisons, value-independent) *and* instruction lines are excluded from the comparison by construction — that mode compares memory accesses, which is what it exists for | re-measured on this tree: `--trace` and counts both PASS on a pristine tree (131,292 accesses enc / 179,611 round trip; 13 counters identical) |
 | `tools/fi_instruction.sh`'s full `--bits` sweep aborted 3/3 (ETXTBSY on the restore reopen; `UnicodeDecodeError` on a crashed binary's non-UTF-8 output) | the reopen retries a transient `ETXTBSY`; the run captures bytes and decodes with `errors="replace"` | `c907e47`; full `--bits` and `--nop` sweeps now complete and gate correctly |
 | The sweep's published "total" undercounted by one per shard file with entries (no trailing newline, `cat … \| grep -c .` merged adjacent files: 4 printed as 3, 15 as 7) | files always end with a newline; the documented residuals re-measured | `c907e47`; the auditor's own independent fix reproduced the same correction |
 | `check.sh`'s final-artefact check hardcoded `target/release/…` (ignored `CARGO_TARGET_DIR`, accepted any file) | the path is derived from `CARGO_TARGET_DIR` and the file must be newer than a stamp taken at start | `a778ee9` |
@@ -87,6 +89,7 @@ not about the current source.
 | `random::fill`'s test asserted "some byte changed" (a one-byte fill passed); the AAD/message coverage test claimed "any bit" while flipping bit 0 of every byte; `locked`'s in-crate test returned silently when the kernel refused to lock | the first requires every byte to be overwritten (with a documented ~6e-6 false-failure bound), the second rotates the flipped bit, the third fails on a runtime refusal unless `XSIV_ALLOW_UNLOCKED=1` | `fa48744`, `4e52680` |
 | `tests/differential_reference.rs`'s large fixture replayed only the allocating pair; the scan caps' line references drifted; the fixture's boundary was described as "64 KiB / 65 537" (the switch is on `48 + aad + msg`) | the in-place pair is replayed too, the caps are described by test name, and the boundary is stated as 65488/65489 | `4e52680`, `8dcc09e` |
 | The instruction-level fault campaign's totals were the only published numbers and the "decision-scoped" count was mixed with them | the comparable (decision-scoped) count is what the tool gates on, and the README says why the raw totals are not comparable across configurations | `8dcc09e`, `c907e47` |
+| The `locked` refusal path had no witness: every test skipped when the kernel refused (`lock_or_skip`), so an implementation returning `Ok` with an unlocked page, or keeping the lock while reporting an error, would have been reported as "not applicable on this host" (third round) | `tests/locked.rs` exhausts `RLIMIT_MEMLOCK` through the public API (one page per key, the limit read with its unit off `/proc/self/limits`), then asserts the refusal is *reported* and the accounting returned: each holder charged exactly one page, a refused call charged nothing, `VmLck` returns to its baseline, the call that failed succeeds again with nothing held, and no descriptor leaked. Mutant-checked: a `lock_range` whose error is ignored fails the test with "the allowance is spent … and yet `LockedKey::new` kept succeeding" | the commit that closes the third round; runs in 0.6 s, holding 64 MiB for its window on this host |
 
 ### 1.C Claims that measurement contradicted
 
@@ -173,6 +176,16 @@ No code change: adding a third independent comparison would raise the single-fau
 at a per-message cost, and the honest record of what the layers buy is already the table's
 subject.
 
+The third round adds one more fault of that class, on the *wipe* rather than the decision:
+patching the two `zeroize_slice(buffer)` sites on `decrypt_in_place_detached`'s rejection path
+leaves the caller's buffer holding 64 bytes of unverified plaintext, while every return value
+and every assertion in the campaign's A1–A6 looks exactly as before — only the runtime replay
+check (their `ipassert`, this repository's `tests/security.rs` replay) notices. That is what the
+sites are for, and a single-fault model cannot require two independent wipes to both survive;
+what the finding does show is that the *source-scanning* assertion
+(`every_allocation_happens_before_any_derivation`) passes under a binary patch, because it reads
+`src/lib.rs` — which is why the runtime replay exists alongside it.
+
 ### 2.3 Dependency-internal behaviour
 
 * **`blake3`'s XOF temporaries / `Hasher::zeroize` coverage** (reports 1 and 2): the crate's own
@@ -181,7 +194,13 @@ subject.
   `src/witness.rs`. There is no in-crate fix short of not using the dependency.
 * **`getrandom`'s `/dev/urandom` fallback**: documented (the example now says both the syscall
   and the file must be blocked); the fallback is still an OS CSPRNG, so there is no security
-  defect.
+  defect. The third round measured the details through real seccomp filters and they are now in
+  `random::fill`'s docs: only `EPERM`/`ENOSYS` trigger the fallback (`EACCES`/`EIO` are returned
+  as they are — that crate's policy, not this crate's), the file is opened with `openat(2)` under
+  glibc and `open(2)` under static musl, so a filter that means to close the fallback has to name
+  both (plus `openat2(2)` for a caller that uses it), and the all-zero buffer on failure is this
+  crate's `fill_from`, not the dependency's doing (measured: calling the dependency directly
+  leaves the caller's bytes untouched).
 * The `blake3` C-kernel backend is never dispatched under Miri, which is why `pure` is
   belt-and-braces (§1.C).
 
@@ -225,6 +244,9 @@ emulator available here (three threads in `futex_wait_queue`; reproducible with 
 while the same sequence in a dependent test crate passes). Until that is understood, riscv64
 stays type-checked rather than executed, and `.cargo/config.toml` carries both the recipe and
 this caveat (`6efac1f`). The old claim that it could not be linked at all was wrong and is fixed.
+The third round independently reproduced the recipe and ran the *default-feature* suite through
+`qemu-riscv64` with every target green — consistent with the one hang being in the `ultra`
+build's own test rather than in the target.
 
 ### 2.8 Environment-dependent stages
 
@@ -253,6 +275,31 @@ record skips, not passes — and the reports' own measurements are the substitut
 * CPU/resource notes: per-byte cost is not monotonic in length (BLAKE3's tree), unauthenticated
   decrypt pays the full cost (SIV computes the tag over the plaintext), `decrypt_bounded`'s
   bound is on the ciphertext — all inherent, and now stated.
+* The third round's cgroup measurement (a 64 KiB input is `SIGKILL`ed at a `memory.max` where a
+  65537-byte, zero-allocation input completes; a small request served from charged heap returns
+  normally) is a deployment property of `memory.max`'s page-granular accounting, not something a
+  `Result` can carry — the crate cannot be told about the kill. It is now written into
+  `decrypt`'s `# Allocation` section, with the recommendation the audit itself gives: admission
+  control on the request size (`MAX_MSG_SIZE`, or `decrypt_bounded`'s `max_len`) is where this
+  becomes a reportable error.
+* Build-to-build timing spreads: the third round's own harness put `dual-mac` at 1.69–1.81x
+  where this repository's states +30–40%, and `ultra`'s 1 KiB allocating decrypt at 4.62x where
+  the table says 3.96x, without attributing the gap to either side. `performance.md` now carries
+  the numbers and the rule: the *direction* each mechanism predicts is the claim (a fixed
+  per-call scrub is largest at the small end, the second tag pass grows with the message, the
+  witness is per byte); the constants are one host's. Its `LockedKey::new`-to-drop figure
+  (26.6 µs) is not in tension with the README's "~7 µs per range" — the latter is `mlock` +
+  `unlock` alone, and the former is the whole lifecycle.
+* Coverage columns: the `report`-side *function* count comes with llvm-cov's
+  "N functions have mismatched data" warning, so `deep.yml` now says in one line that it is
+  only meaningful alongside that caveat; the region/lines disagreement was already handled by
+  quoting no exact figure there (§1.C).
+* Residue shapes (third round): the set of secrets and their lengths left in dead frames varies
+  by profile, feature and backend — `pure` leaves a 16-byte `k_out` half, the release/no-default
+  decrypt paths leave 8–12 bytes of `enc_nonce` that an 8-byte-anchored scan cannot see at all.
+  `blake3_keyed_multi`'s comment now says this, and that no configuration probed left *both* a
+  whole `k_in` and a whole `k_out` in reach (release keeps `k_in` whole and `k_out` short, debug
+  the reverse), so the offline-forgery consequence is unchanged.
 * The `2^520` / `2^256` / `2^128` family: after §1.C's corrections the documents' statements match
   the derivations (target `2^-520` per candidate key; key-space enumeration `≈ 2^-264`;
   key-commitment and context routes `2^128` with identical plaintexts; different-message
@@ -271,7 +318,10 @@ record skips, not passes — and the reports' own measurements are the substitut
 * Gates: `tools/gate_selftest.sh`, `tools/ctgrind.sh` (all three configurations),
   `tools/fi_check.sh` (14/14 rows), `tools/fi_instruction.sh` (full `--bits` and `--nop`),
   `tools/check_kani_cfg.sh`, `tools/stack_residue.sh`, `tools/broad_differential.py`,
-  `tools/cache_profile.sh` (counts, trace, and both self-tests).
+  `tools/cache_profile.sh` (counts, trace, and both self-tests — re-run on a pristine tree for
+  the third round's prediction, both modes PASS).
+* Third-round additions: the `locked` refusal-path test (passes in 0.6 s; a mutant that ignores
+  `lock_range`'s error fails it), `cargo fmt --check` and clippy clean with the new test.
 * Kani: the tag shard and the concrete-comparison harness verified on CI.
 * CI at the commit that carries this document: the `CI` workflow green; `Formal verification`
   and `Deep checks` green at the two commits before it and re-running for it (their results are
