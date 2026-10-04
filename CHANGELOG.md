@@ -10,8 +10,8 @@ green push to `main` — which are build artefacts of that job, not construction
 
 ### The third round's items: a refusal path with a witness, and four corrections
 
-The third-round review's own summary is that most of its re-runs were negative; five of its 26
-findings changed something here. **No wire-format change.**
+The third-round review's own summary is that most of its re-runs were negative; the five items
+below are the ones that changed something here. **No wire-format change.**
 
 - **`LockedKey::new`'s refusal path has a witness now.** The audit noted that
   `tests/locked.rs` and `tests/ultra.rs` only *skip* when the kernel refuses a lock, so the
@@ -44,7 +44,8 @@ findings changed something here. **No wire-format change.**
   instruction lines between a `00…` and an `ff…` key). Both halves were already handled — the
   guard is value-independent since the previous round, and instruction fetches are excluded from
   an *address* comparison on purpose — and re-measured here both modes PASS on a pristine tree
-  (131,292 accesses enc, 179,611 round trip; 13 counters identical).
+  (131,292 accesses enc, 179,611 round trip with the script's 4-vector default; 13 counters
+  identical).
 - **Two figures are now ranges with their spread written down.** `performance.md` records that
   an independent build measured `dual-mac` at 1.69–1.81x where this repository's rows state
   +30–40%, and `ultra`'s 1 KiB allocating decryption at 4.62x against 3.96x here, and states the
