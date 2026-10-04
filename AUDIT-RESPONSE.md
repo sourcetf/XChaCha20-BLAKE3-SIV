@@ -10,7 +10,7 @@ names a file, a test, a command, or a commit, and "responded" never means "ignor
 | 1 | `逐行验证审计报告` (line-by-line audit) | 179 | 366 (41 marked DEFECT; 高 12 / 中 47 / 低 165 / 信息 31 / 未标注 112) | the DEFECT-class and 高/中 items are fixed (indexed in §1); the notes and informational items are answered in §2 |
 | 2 | `增量攻击测试报告` (incremental) | 27 | 26 (0 高, 2 中, 14 低, 9 信息, 2 unlabeled) | both 中 fixed (§1.D); 低 fixed or answered |
 | 3 | `增量攻击测试报告·完整版` (complete) | 32 | 58 (0 高, 3 中, 13 低, 25 信息, 18 unlabeled) | the three 中 fixed (§1.D); the rest fixed or answered |
-| 4 | `增量攻击测试报告·第三轮` (third round) | 16 | 26 (0 高, 1 中, 4 低, 10 信息, 11 unlabeled) | two 低 fixed (§1.C); the 中 is the documented opt-out boundary (§2.2); the refusal-path test it found missing was added (§1.B); the rest answered |
+| 4 | `增量攻击测试报告·第三轮` (third round, rebuilt with its Miri unit) | 18 | 32 (0 高, 1 中, 5 低, 14 信息, 12 unlabeled) | two 低 fixed (§1.C); the 中 is the documented opt-out boundary (§2.2); the refusal-path test it found missing was added (§1.B); the Miri unit's four findings are tool/environment facts (§2.9); the rest answered |
 
 Everything below is against the tree that carries this file. The commits that make up the
 response, in order, are:
@@ -299,7 +299,14 @@ record skips, not passes — and the reports' own measurements are the substitut
   starves the rest; `-Zmiri-report-progress`'s interval is basic blocks, not seconds) is a
   property of the tool and of how it is invoked, not of the crate — and it is why this
   repository's Miri stage is run per test target and per test, which is what gives each test
-  its own verdict instead of one whole-target verdict.
+  its own verdict instead of one whole-target verdict. The third round's long-cap per-test
+  rerun bears that out and is worth recording as evidence *for* the crate: with 40-minute and
+  2-hour caps, `differential_reference` finished **6/6** (every-position 2231 s,
+  large-vectors 4680 s) and `security` **14/15** — all PASS, zero UB — and the one test it
+  could not finish is `security::fuzz_decrypt_never_panics_and_never_returns_plaintext`
+  (20 000 rounds; 3.75G basic blocks in 2 h without ending). That test is not in this
+  repository's Miri filters either, for the same reason (`tests/README.md` says the CI runs are
+  narrow filters, not whole targets), and it runs normally under a compiled `cargo test`.
 * Residue shapes (third round): the set of secrets and their lengths left in dead frames varies
   by profile, feature and backend — `pure` leaves a 16-byte `k_out` half, the release/no-default
   decrypt paths leave 8–12 bytes of `enc_nonce` that an 8-byte-anchored scan cannot see at all.
