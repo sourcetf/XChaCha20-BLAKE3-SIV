@@ -364,7 +364,7 @@ jobs:
     # A job that runs past its `timeout-minutes` reads as `cancelled`, not as `failure`,
     # so each heavy sweep is wrapped in its own `timeout <secs>`: a hung sweep is then
     # SIGTERM'd and the step exits 124, a failure. The job budget is deliberately larger
-    # than the sum of those per-step caps (20 + 30 + 15 + 40 min) plus checkout/install,
+    # than the sum of those per-step caps (40 + 30 + 15 + 40 min) plus checkout/install,
     # so the job-level limit is headroom rather than the thing that fires.
     # The bit-flip sweep is eight times its `nop` sibling *and* sweeps three
     # configurations, one of which (`ultra`) has the largest swept region -- measured at
@@ -402,7 +402,14 @@ jobs:
       - name: fault-injection campaign
         # `timeout` so an overrun exits 124 (a failure) instead of letting the job hit
         # its own limit, which GitHub reports as `cancelled`.
-        run: timeout 1200 ./tools/fi_check.sh
+        #
+        # 2400, not 1200: each row (and each clean baseline) now builds in its own target
+        # directory, because a shared one makes a row's freshness depend on the order of
+        # `cp` and `cargo` and let a row run the previous row's binary -- it did, and the
+        # first `expect=fail` row reported "expected fail, got pass" on unmutated source.
+        # That trades one shared build for seventeen private ones, so the cap has to move
+        # with it; the job budget below is the headroom.
+        run: timeout 2400 ./tools/fi_check.sh
 
       # Every mutant of the decision must be caught, by the two suites that witness
       # it: `tests/decision.rs` for the accept/reject outcome and `tests/security.rs`
