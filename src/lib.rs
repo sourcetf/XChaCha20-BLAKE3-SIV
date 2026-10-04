@@ -712,6 +712,12 @@ impl Key {
     ///
     /// The value is copied into the returned `Key`, which wipes its copy on drop.
     /// The array passed in is untouched and remains the caller's responsibility.
+    ///
+    /// Being a `const fn`, this can also build a `static KEY: Key = …`; a `static` never
+    /// runs `Drop`, so such a key is never wiped and its bytes are embedded in the
+    /// executable's data segment (an audit compiled exactly that probe and found the 32
+    /// literal bytes in the binary). Use per-process key material — a `static` is only
+    /// appropriate for a test vector.
     #[inline]
     pub const fn from_bytes(bytes: [u8; KEY_LEN]) -> Self {
         Key(bytes)
