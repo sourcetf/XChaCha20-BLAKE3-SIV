@@ -4917,6 +4917,16 @@ mod tests {
     #[cfg(feature = "locked")]
     #[test]
     fn test_locked_key_eq_semantics() {
+        // As in `a_corrupted_locked_page_is_detected_on_use`: on a target where the locking
+        // syscalls are not wired (`SUPPORTED == false`, e.g. i686 under qemu) `LockedKey::new`
+        // returns ENOSYS, and that is a documented platform limit, not a failure — while a
+        // *runtime* refusal on a supported target stays a failure unless the host says
+        // otherwise. (The first version of this test called `refuse_skip` for both cases and
+        // turned the i686 and powerpc64 qemu jobs red.)
+        if !crate::locked::SUPPORTED {
+            std::eprintln!("SKIPPED: memory locking is unsupported on this target/architecture");
+            return;
+        }
         let key = [0x5Au8; 32];
         let a = match crate::locked::LockedKey::new(&key) {
             Ok(k) => k,
