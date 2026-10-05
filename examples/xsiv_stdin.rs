@@ -57,9 +57,23 @@ fn from_hex(name: &str, field: &str) -> Vec<u8> {
         !field.starts_with('+') && !field.starts_with('-'),
         "{name}: signed hex field"
     );
-    (0..field.len())
-        .step_by(2)
-        .map(|i| u8::from_str_radix(&field[i..i + 2], 16).expect("hex field"))
+    // Chunked over the *bytes* rather than `&field[i..i + 2]`: slicing a `&str` by byte
+    // index panics when the pair straddles a character boundary, and the panic message
+    // quotes the offending character — which put a byte of the caller's field into stderr,
+    // the one thing the contract above forbids (an audit measured it with a non-ASCII
+    // field: `end byte index 2 is not a char boundary; it is inside 'é'`). `from_utf8` on
+    // each two-byte chunk is what rejects a non-ASCII pair, and — like the two comparisons
+    // above — it keeps '0' and 'f' on the same path, which the counts differential needs.
+    field
+        .as_bytes()
+        .chunks(2)
+        .map(|pair| {
+            // The field's *name*, never its bytes: this is the panic the doc comment above
+            // promises will not leak the line's contents.
+            let pair =
+                core::str::from_utf8(pair).unwrap_or_else(|_| panic!("{name}: non-hex field"));
+            u8::from_str_radix(pair, 16).unwrap_or_else(|_| panic!("{name}: non-hex field"))
+        })
         .collect()
 }
 
@@ -110,13 +124,16 @@ fn main() {
         let (ct, tag) = encrypt(&key, &nonce, &aad, &msg).expect("encrypt");
         if roundtrip {
             let pt = decrypt(&key, &nonce, &aad, &ct, &tag).expect("decrypt");
-            assert_eq!(pt, msg, "round trip differs from the message");
+            // `assert!` rather than `assert_eq!`: the latter prints both operands on failure,
+            // and `msg` is the caller's plaintext (this file's contract is that no field's
+            // bytes reach stderr).
+            assert!(pt == msg, "round trip differs from the message");
             // The in-place entry point has its own copy of the decision wiring, so it
             // is a separate path to profile rather than a duplicate of the one above.
             let mut buf = ct.clone();
             decrypt_in_place_detached(&key, &nonce, &aad, &mut buf, &tag)
                 .expect("in-place decrypt");
-            assert_eq!(buf, msg, "in-place round trip differs from the message");
+            assert!(buf == msg, "in-place round trip differs from the message");
         }
         // `-` for an empty ciphertext, matching the input convention: an empty
         // field would collapse under whitespace splitting.

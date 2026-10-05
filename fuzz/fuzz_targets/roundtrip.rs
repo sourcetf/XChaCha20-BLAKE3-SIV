@@ -58,16 +58,17 @@ fuzz_target!(|data: &[u8]| {
     rest = &rest[NONCE_LEN..];
 
     // Split the remainder into AAD and plaintext at a fuzzer-chosen point, so
-    // both are usually non-empty and their relative sizes vary freely.
-    let split = if rest.is_empty() {
-        0
-    } else {
-        (rest[0] as usize) % (rest.len() + 1)
-    };
-    let (aad, pt) = if rest.is_empty() {
+    // both are usually non-empty and their relative sizes vary freely. The selector is
+    // drawn from *two* bytes: with one, `split <= 255` and no input could produce an AAD
+    // longer than 255 bytes, so those lengths were unreachable while the header claimed
+    // they were exercised widely (an audit decoded the corpus and found the cap).
+    let (aad, pt) = if rest.len() < 2 {
         (&rest[..0], &rest[..0])
     } else {
-        (&rest[1..1 + split.min(rest.len() - 1)], &rest[1 + split.min(rest.len() - 1)..])
+        let sel = rest[0] as usize | ((rest[1] as usize) << 8);
+        let body = &rest[2..];
+        let split = sel % (body.len() + 1);
+        (&body[..split], &body[split..])
     };
 
     // `encrypt` can only fail on allocation failure or a length above `MAX_MSG_SIZE`,
@@ -97,7 +98,7 @@ fuzz_target!(|data: &[u8]| {
             );
         }
         1 => {
-            let i = (mode as usize / 3) % TAG_LEN;
+            let i = (tweak * 256 + mode as usize / 3) % TAG_LEN;
             bad_tag[i] ^= 1 << (mode % 8);
             assert!(
                 decrypt(&key, &nonce, aad, &ct, &bad_tag).is_err(),
@@ -113,7 +114,7 @@ fuzz_target!(|data: &[u8]| {
             );
         }
         _ => {
-            let i = (mode as usize / 3) % TAG_LEN;
+            let i = (tweak * 256 + mode as usize / 3) % TAG_LEN;
             bad_tag[i] ^= 1 << (mode % 8);
             assert!(
                 decrypt(&key, &nonce, aad, &ct, &bad_tag).is_err(),

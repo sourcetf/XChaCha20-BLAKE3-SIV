@@ -102,8 +102,11 @@ fn timing_guard() -> std::sync::MutexGuard<'static, ()> {
 //      branch is the final accept/reject, and every secret is wiped before it.
 //
 // These tests are a screen for gross regressions — e.g. someone replacing
-// `ct_eq` with `==`, whose early exit is a difference of *hundreds* of ns on a
-// 65-byte tag and would be visible even here.
+// `ct_eq` with `==`, whose early exit is a difference of *tens* of ns on a
+// 65-byte tag, which is the same order as this screen's resolution (the tag test
+// below says so and prints the figure): the effect sits *at* the floor rather
+// than comfortably inside it. An earlier revision of this comment claimed
+// "hundreds of ns ... visible even here", which the tag test's own doc contradicts.
 
 /// Operations per timed sample: enough that the clock's own cost is a small
 /// fraction of a sample, which at tens of nanoseconds per call is already true.
@@ -306,8 +309,11 @@ fn timing_does_not_depend_on_key_contents() {
     let t_enc = welch_t(&a, &b);
     let r_enc = resolution_ns(&a, &b);
 
-    // And a valid vs invalid decrypt of the same length, which an attacker can
-    // actually drive.
+    // And the same decrypt under two different keys. Both classes reject (the tag
+    // passed is not the one either ciphertext was made with), so this measures
+    // reject-vs-reject across key *contents*, which is the quantity this screen is
+    // for: the earlier comment here called it "valid vs invalid", which it is not —
+    // neither class is accepted, and an audit noticed the mismatch.
     let (a, b) = sample_pair(
         &mut || {
             let _ =

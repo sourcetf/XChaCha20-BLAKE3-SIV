@@ -1005,7 +1005,7 @@ pub mod random {
     }
 }
 
-// ── Locked memory (the `ultra` feature) ───────────────────────────────
+// ── Locked memory (the `locked` feature; `ultra` includes it) ───────────────────────────────
 //
 // The volatile-store wipe above reaches the bytes this process owns *now*. It does not
 // reach a page the kernel already wrote out to swap, or that a core dump is about to
@@ -1021,7 +1021,7 @@ pub mod random {
 // Availability: Linux only. On any other target the functions are no-ops that report
 // "not locked", so a caller can decide what to do about it (and the default build never
 // calls them).
-/// Locking keys out of swap and core dumps (the `ultra` feature).
+/// Locking keys out of swap and core dumps (the `locked` feature; `ultra` includes it).
 ///
 /// The volatile-store wipe this crate uses everywhere reaches the bytes the process owns
 /// *now*; it cannot reach a page the kernel already wrote to swap, or one a core dump is
@@ -1605,7 +1605,7 @@ pub mod locked {
     /// `LockedKey::new` fails when the OS refuses (`ENOMEM` from `RLIMIT_MEMLOCK` is the
     /// usual one), rather than silently leaving the key unprotected: the whole point is
     /// that the caller knows which of the two states it is in.
-    /// The key lives behind a `Box` so its address is **stable**.
+    /// The key lives in a page of its own so its address is **stable**.
     ///
     /// This is not an optimisation, it is what makes the lock mean anything.
     /// `mlock` is address-based: it locks the pages covering the address it is
@@ -1978,7 +1978,8 @@ unsafe fn zeroize_raw(ptr: *mut u8, len: usize) {
     core::sync::atomic::compiler_fence(core::sync::atomic::Ordering::SeqCst);
 }
 
-/// Overwrite the stack region the key derivations just used (the `ultra` layer).
+/// Overwrite the stack region the key derivations just used (the `dual-mac` layer;
+/// `ultra` includes it).
 ///
 /// Every named local in this crate is wiped, and `tools/stack_residue.sh` confirms
 /// that the master key never survives in the call-chain stack region.  What *does*

@@ -225,7 +225,7 @@ fn differential_every_position_is_authenticated() {
     let f = parse_fixture();
     // Count what was actually swept. The row filter below is a size cap, and a
     // regenerated fixture whose sizes all exceeded it would make this test scan
-    // zero positions and pass vacuously; the floor at the end forbids that.
+    // zero positions and pass vacuously; the exact count at the end forbids that.
     //
     // The cap is a cost bound, not a boundary: each swept byte costs one full
     // decryption, so the 300-byte rows are ~600 positions each, while a 1 MiB row
@@ -278,9 +278,13 @@ fn differential_every_position_is_authenticated() {
 #[test]
 fn differential_every_aad_bit_is_authenticated() {
     let f = parse_fixture();
-    // As above: a floor, so a fixture with no small-AAD rows cannot make this vacuous.
+    // As above: an exact count, so a fixture with no small-AAD rows cannot make this vacuous.
     // The 130 cap is the same cost bound as the message sweep's 300: the AAD sweep is
-    // O(aad_len) per row, and the fixture's non-empty AADs go up to 130.
+    // O(aad_len) per row, and the fixture's non-empty AADs go up to 300 -- the largest
+    // *below* this cap is 65, so seven of the twenty-six non-empty rows are outside it.
+    // (This said "go up to 130", which was never true of the fixture; an audit parsed
+    // it.) The sweep is a cost bound, not a coverage claim: every row is still checked
+    // by the whole-fixture test above.
     let mut swept_rows = 0usize;
     for (msg_len, aad_len, ct, tag) in &f.rows {
         if *aad_len > 130 {
@@ -300,7 +304,8 @@ fn differential_every_aad_bit_is_authenticated() {
         }
     }
     // Exact, as above: 16 non-empty AAD rows below the cap (the fixture's non-empty AADs
-    // top out at 130). A floor of 5 would survive eleven rows being dropped from the
+    // top out at 300, largest below the cap 65). A floor of 5 would survive eleven rows being
+    // dropped from the
     // sweep.
     assert_eq!(
         swept_rows, 16,

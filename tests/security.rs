@@ -5,9 +5,11 @@
 //! for `security-*` on that assumption.)
 //!
 //! These cover the classes of defect that a fixed known-answer vector cannot:
-//! statements quantified over *all* inputs (property tests), statements about
-//! *time* (a dudect-style test), and statements about *arbitrary bytes* (a fuzz
-//! loop). The KATs pin the construction; these pin its security properties.
+//! statements quantified over *all* inputs (property tests) and statements
+//! about *arbitrary bytes* (a fuzz loop). The KATs pin the construction; these
+//! pin its security properties. (An audit caught the second paragraph still
+//! listing "statements about *time*" after the first paragraph had been corrected
+//! to say the timing screen lives elsewhere.)
 //!
 //! Tooling note: `cargo-fuzz`/libFuzzer and `ctgrind` are wired up (see
 //! `.github/workflows/deep.yml` and `tools/ctgrind.sh`), but the fuzz loop here

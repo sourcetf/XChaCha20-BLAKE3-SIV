@@ -907,11 +907,12 @@ This does not make the scheme interoperable with anything — it is *not* a stan
 
 `A ‖ M` alone is ambiguous: `("ab","c")` and `("a","bc")` concatenate identically. The two
 `⟨len⟩₆₄` fields remove it, and because every field in the head is fixed width
-(`8 + 32 + 24 + 8 + 8`), the whole encoding is injective — this is A4, and it is discharged
+(`8 + 24 + 8 + 8` — the domain, the nonce, and the two lengths; the key is not in
+the encoding), the whole encoding is injective — this is A4, and it is discharged
 here rather than assumed:
 
-* the head is a fixed 80-byte layout, so its boundaries do not depend on the data;
-* `K`, `N` are fixed width; `|A|`, `|M|` are fixed width;
+* the head is a fixed 48-byte layout, so its boundaries do not depend on the data;
+* `N` is fixed width; `|A|`, `|M|` are fixed width;
 * given the encoding, `|A|` and `|M|` are read off at fixed offsets, so `A` and `M` split
   uniquely;
 * hence two different quadruples cannot produce the same byte string. ∎
@@ -1085,8 +1086,9 @@ scan of every keystream call site (`tests/counter_range.rs`), and a Kani harness
 ### 4.7 Tag truncation
 
 An earlier revision consumed only the first 28 tag bytes in the key derivation, so the last
-four bytes of the tag could not affect the ciphertext — the commitment was nominally 520
-bits and actually 224. `derive_enc` now takes the whole tag, `test_every_tag_byte_reaches_the_ciphertext`
+four bytes of the tag could not affect the ciphertext — the commitment was nominally 256
+bits and actually 224 (that revision's tag was 32 bytes; the 65-byte tag arrived with `v0.2`,
+and the truncated derivation went with it). `derive_enc` now takes the whole tag, `test_every_tag_byte_reaches_the_ciphertext`
 checks all 65 positions, and a Kani harness proves every byte is consumed. The same class of
 bug in the *tag* input is caught by `test_tag_covers_every_aad_and_message_byte` and by the
 Kani layout harnesses.

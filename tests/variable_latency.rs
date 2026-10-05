@@ -25,7 +25,8 @@
 //! counts `if` / `while` / `for` / `loop` / `match` in the non-test source. ctgrind
 //! is the *evidence* that no branch depends on secret content -- it reports those
 //! mechanically -- so that table is not evidence; it is a tripwire so a branch added
-//! or removed anywhere in the crate cannot pass unnoticed while the prose in
+//! or removed anywhere in the crate *as one of those keywords* cannot pass unnoticed
+//! while the prose in
 //! `README.md` and `SECURITY.md` still claims the old count.
 use std::collections::BTreeSet;
 
@@ -128,6 +129,12 @@ const ALLOWED: &[(&str, &str)] = &[
 /// the errno branches above (and the reason it exists: restoring the advice after a refused
 /// unlock left a page locked *and* dumpable, which an audit reproduced under a syscall
 /// filter).
+///
+/// `if` 37 -> 38 when `decrypt_in_place_detached` started wiping the caller's buffer on a
+/// *length* error too: the new branch is `check_lengths`'s `Err`, a public fact about the
+/// buffer and AAD lengths, and it exists so the documented "on failure the buffer is
+/// zeroized" is unconditional (an audit found the length arm returning without the wipe
+/// every other failure path performed).
 const CONTROL_FLOW: &[(&str, usize)] = &[
     ("if", 38),
     ("while", 10),
@@ -221,9 +228,11 @@ fn has_division(line: &str) -> bool {
 
 #[test]
 fn variable_latency_operations_are_inventoried() {
-    // Both always-compiled source files, so a division added to the independent
-    // implementation is inventoried too (`src/proofs.rs` is `#[cfg(kani)]`; see the
-    // module header).
+    // Both files the crate compiles in its widest configuration, so a division added
+    // to the independent implementation is inventoried too. (`src/proofs.rs` is
+    // `#[cfg(kani)]` and is not scanned; `src/witness.rs` is `#[cfg(feature =
+    // "ultra")]` — an audit caught this comment calling both files "always-compiled"
+    // when one of them is gated.)
     let sources = [
         ("src/lib.rs", include_str!("../src/lib.rs")),
         ("src/witness.rs", include_str!("../src/witness.rs")),

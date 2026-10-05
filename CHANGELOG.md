@@ -8,7 +8,57 @@ green push to `main` — which are build artefacts of that job, not construction
 
 ## Unreleased
 
-### Four audits and a fix round: a fault row that ran no tests, an abort in `ultra`, and nine smaller defects
+### A second adversarial pass: two evidence gaps closed, one example leak, and a batch of stale claims
+
+Ten more read-only audits (SIMD vs scalar; entropy and `random`; length arithmetic on 32-bit;
+`locked` and its syscalls; the differential fixtures; benches and examples; the build matrix;
+the constant-time evidence; the fuzz target; and the docs, claim by claim). Two of them found
+evidence that was weaker than it read, one found a way for the example to print a caller's
+byte, and the rest are claims that no longer matched the tree. **No wire-format change.**
+
+- **`the_key_itself_is_locked` could not fail on the bug it exists for.** It consulted the
+  per-mapping `Locked:` value only to short-circuit *success*: a `Some(0)` — exactly the
+  signature of a lock applied to some other address — was treated as "no information" and the
+  test fell through to the process-wide `VmLck` delta, which *any* lock in the process
+  satisfies. An audit proved it by making `LockedKey::new` lock a decoy stack buffer: the test
+  passed. It now asserts on a `Some(0)` from a channel that demonstrably reports locks (a probe
+  range locked by the test itself decides that, so `qemu-user`, which reports nothing per
+  mapping, still takes the fallback). Re-run against the same decoy mutant: it fails.
+- **The `subtle` comparison test was outside what `tools/ctgrind.sh` can see.** `ct_eq` is
+  inlined into the *test* crate, so a report from it is attributed to `subtle`/`ctgrind` and not
+  to `xchacha20_blake3_siv` — and the script counts only reports whose stack names this crate,
+  so such a report was filed as noise and the run printed PASS. The test now measures the
+  comparison with valgrind's own `COUNT_ERRORS` (the technique its negative control already
+  uses) and fails on any delta. Verified against a planted branch on a poisoned byte: the
+  assertion fires with its own message.
+- **`examples/xsiv_stdin.rs` could put a caller's byte into stderr**, which its own doc comment
+  promises it cannot: `&field[i..i + 2]` panics on a character boundary and the panic quotes the
+  character (measured with a non-ASCII field). The hex decoder now works over bytes, so a
+  non-ASCII field reports `msg: non-hex field` and nothing else, and the two round-trip
+  assertions use `assert!` rather than `assert_eq!` so a failure cannot print the plaintext.
+- **The fuzz target could not produce an AAD longer than 255 bytes** — its split selector was
+  one input byte — while its header claimed those lengths were exercised widely (an audit
+  decoded the committed corpus: max AAD 255). The selector is now two bytes, and both tag-tamper
+  arms use the two-byte index the header already claimed.
+- **Stale claims, each verified against the tree:** `SECURITY-ANALYSIS.md` §4.4 described the
+  tag head as the pre-`v0.3` 80-byte layout (`8 + 32 + 24 + 8 + 8`, with the key in it) where it
+  is 48 (`8 + 24 + 8 + 8`); §4.7 called the truncated-derivation revision's commitment "nominally
+  520 bits" when that revision's tag was 32 bytes (256 bits); the README's `rng` example
+  `?`-ed `encrypt` into a `random::Error` (they do not convert — the example did not compile);
+  `tests/README.md` still called `hardened` something other than the default and listed the
+  timing screen under `--test security`; `tests/security.rs` listed a timing test among its own
+  contents two paragraphs after saying the screen lives elsewhere; `tests/timing.rs` described a
+  "valid vs invalid" decrypt pair in which *both* classes reject, and its header put a `ct_eq` →
+  `==` regression at "hundreds of ns ... visible even here" where the same file's tag test says
+  tens of ns, at the screen's floor; `tests/variable_latency.rs` called `src/witness.rs`
+  "always-compiled" (it is `#[cfg(feature = "ultra")]`) and its tripwire claim covered only
+  keyword-written branches; `tests/differential_reference.rs` said the fixture's AADs "go up to
+  130" (they go to 300; the largest below its 130 cap is 65) and still called its exact counts
+  "floors"; `src/lib.rs` attributed the `locked` module to "the `ultra` feature" and
+  `scrub_stack` to "the `ultra` layer" (each is its own feature, which `ultra` merely includes),
+  and said `LockedKey`'s key "lives behind a `Box`" (it lives in a page of its own).
+
+: a fault row that ran no tests, an abort in `ultra`, and nine smaller defects
 
 A fresh adversarial pass over the tree — four independent read-only audits (core construction
 and API; witness and Kani; tools and workflows; tests and doc claims), every candidate then

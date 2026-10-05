@@ -770,7 +770,9 @@ use xchacha20_blake3_siv::{encrypt, random};
 
 let key = random::generate_key()?;      // 256-bit
 let nonce = random::generate_nonce()?;  // 192-bit
-let (ct, tag) = encrypt(&key, &nonce, b"aad", b"message")?;
+// `encrypt` has its own error type, so it is unwrapped rather than `?`-ed here:
+// `random::Error` is `getrandom::Error`, and the two do not convert.
+let (ct, tag) = encrypt(&key, &nonce, b"aad", b"message").unwrap();
 # Ok::<(), random::Error>(())
 ```
 

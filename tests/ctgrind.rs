@@ -410,7 +410,16 @@ fn constant_time_eq_does_not_branch_on_operands() {
 
     poison(a.as_ptr(), a.len());
     poison(b.as_ptr(), b.len());
+    // The comparison is measured with valgrind's own error counter rather than by looking
+    // for a report in the run's output: `subtle`'s `ct_eq` is inlined into *this* test crate,
+    // so a report from it is attributed to `subtle`/`ctgrind` and not to
+    // `xchacha20_blake3_siv` — and `tools/ctgrind.sh` counts only reports whose stack names
+    // this crate, which means such a report would be filed as noise and the run would print
+    // PASS. An audit found that hole; this counter closes it inside the test, the same way
+    // `deliberate_leak_is_detected` proves itself.
+    let before = count_errors();
     let choice = a.ct_eq(&b);
+    let after = count_errors();
     // The decision is output, not input; it may legitimately branch.
     unpoison(
         &choice as *const _ as *const u8,
@@ -419,6 +428,13 @@ fn constant_time_eq_does_not_branch_on_operands() {
     unpoison(a.as_ptr(), a.len());
     unpoison(b.as_ptr(), b.len());
 
+    assert_eq!(
+        after,
+        before,
+        "`subtle::ConstantTimeEq` produced {} memcheck error(s), so the comparison the tag \
+         gate rests on is not constant-time",
+        after - before
+    );
     assert!(!bool::from(choice));
 }
 

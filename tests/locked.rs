@@ -125,12 +125,25 @@ fn the_key_itself_is_locked() {
 
     // Strongest evidence, where the environment reports it: the mapping that *contains
     // the key* is marked locked. `qemu-user` populates `VmLck` but leaves smaps'
-    // per-mapping `Locked:` at zero, so this cannot be the only criterion — it would
-    // make the cross-executed targets red for an environment limitation.
+    // per-mapping `Locked:` at zero, so a zero there is only evidence when the channel is
+    // known to work — which is what `smaps_reports_locks` probes.
+    //
+    // Without that distinction this test could not fail on the bug it exists for: an audit
+    // mutated `LockedKey::new` to lock a decoy stack buffer and leave the key's page
+    // unlocked, and `Some(0)` for the key's mapping was treated as "no information" while
+    // the process-wide `VmLck` delta below was satisfied by the decoy's lock. The test
+    // passed. Now a zero from a channel that demonstrably reports locks is a failure.
     if let Some(kb) = locked_kb_at(ptr) {
         if kb > 0 {
             return;
         }
+        assert!(
+            !smaps_reports_locks(),
+            "the mapping containing the key ({ptr:#x}) reports `Locked: 0` while this \
+             environment does report per-mapping locks (a probe range locked here shows \
+             one), so the key's own page is not locked — locking any *other* address \
+             satisfies the `VmLck` fallback below, which is how this test was blind"
+        );
     }
 
     // Fallback, and still not vacuous: the kernel's own accounting must have risen when
@@ -143,6 +156,26 @@ fn the_key_itself_is_locked() {
          accounting shows a lock ({before} -> {after} kB): the bytes the caller uses are \
          not the bytes that were locked"
     );
+}
+
+/// Whether `/proc/self/smaps` reports per-mapping `Locked:` for a range this process
+/// locked. `qemu-user` keeps the guest's mappings in its own bookkeeping and leaves the
+/// field at zero, so "the key's mapping says 0" is only evidence of a missing lock in an
+/// environment where a *known*-locked range says otherwise. Measured on this host: a
+/// successful `mlock` through `lock_range` shows up in `Locked:`; under `qemu-aarch64` it
+/// does not.
+fn smaps_reports_locks() -> bool {
+    let probe = vec![0u8; 4096];
+    let ptr = probe.as_ptr() as usize;
+    match xchacha20_blake3_siv::locked::lock_range(probe.as_ptr(), probe.len()) {
+        Ok(()) => {
+            let reported = locked_kb_at(ptr).unwrap_or(0) > 0;
+            xchacha20_blake3_siv::locked::unlock_range(probe.as_ptr(), probe.len());
+            reported
+        }
+        // Nothing can be locked here at all; `lock_or_skip` has already dealt with that.
+        Err(_) => false,
+    }
 }
 
 /// Being boxed and locked must not change what the key does.
@@ -435,7 +468,7 @@ fn unlocking_restores_core_dump_inclusion() {
     // need not be page-aligned. It is deliberately not a `LockedKey`, because that type
     // frees its page on drop and this test wants to read the mapping's flags after
     // unlocking.
-    let mut buf = vec![0u8; 4096];
+    let buf = vec![0u8; 4096];
     let ptr = buf.as_ptr() as usize;
 
     let Some(before) = flags_at(ptr) else {
@@ -507,10 +540,10 @@ fn unlocking_restores_core_dump_inclusion() {
         "the range is still locked after `unlock_range`: {unlocked}"
     );
 
-    // Keep the buffer alive to the end, so neither `flags_at` read could have been of a
-    // freed mapping that happened to be re-mapped.
-    buf[0] = 1;
-    assert_eq!(buf[0], 1);
+    // `buf` stays alive to the end of this function, so neither `flags_at` read could have
+    // been of a freed mapping that happened to be re-mapped. (This spot used to hold
+    // `buf[0] = 1; assert_eq!(buf[0], 1);` — an assertion that could not fail, and that did
+    // not keep anything alive: the binding's scope does. An audit noticed.)
 }
 
 /// The text of the shipped source, so the assertions below are about what a user compiles
