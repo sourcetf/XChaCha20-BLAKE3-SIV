@@ -11,7 +11,7 @@ cd "$(dirname "$0")/.."
 OUT="${OUT:-bench-out}"
 mkdir -p "$OUT"
 
-run_one() { # $1 = config name, $2.. = extra cargo args
+run_one() { # $1 = config name, $2 = pass, $3.. = extra cargo args
   local name="$1"; shift
   local pass="$1"; shift
   local dest="$OUT/$name-pass$pass.txt"

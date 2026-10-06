@@ -45,9 +45,12 @@ linker = "rust-lld"
 #     ways; the non-PIE binary runs).
 #
 # With those, all fourteen test binaries link, and twelve of them run under
-# `qemu-riscv64` (plus `timing`, 3/3 in 383 s here).  `ctgrind` is the one
-# exclusion, for the same reason it is excluded on every cross target: it shells
-# out to valgrind, which cannot run under qemu.  The executed set includes
+# `qemu-riscv64` in the loops below, which skip `timing-*` and `ctgrind-*`.
+# `timing` does run when it is asked for by hand (3/3 in 383 s here) — the loop
+# skips it only because an emulated clock cannot resolve the differences it
+# measures — while `ctgrind` is the one binary that *cannot* run, for the same
+# reason it is excluded on every cross target: it shells out to valgrind, which
+# cannot run under qemu.  The executed set includes
 # `tests/ultra.rs` (8/8, the one that used to hang) and `tests/locked.rs`
 # (10/10, skipping the locking cases as unsupported on this architecture).  One
 # more flag is required because of a weak-symbol interaction, and it is the reason

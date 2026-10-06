@@ -27,7 +27,9 @@
 #
 # Usage:  tools/fi_check.sh
 # Exit codes: 0 = every row behaved as stated; 1 = a row did not, or a patch could
-# not be applied (which means this file, not the code, needs looking at).
+# not be applied (which means this file, not the code, needs looking at); 3 = a row
+# could not *run* because the build failed for an environmental reason (out of disk,
+# or a build the kernel killed), which verify.sh records as a skipped stage.
 set -euo pipefail
 
 cd "$(dirname "$0")/.."

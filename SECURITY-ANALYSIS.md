@@ -872,8 +872,9 @@ not by counter.
 * The reason it is worth writing down at all is that it is the only place in the
   construction where a separation rests on a probability rather than on a structural
   disjointness. `src/lib.rs`'s `the_key_material_block_is_not_the_message_keystream` computes
-  both keystreams for a spread of inputs and requires them to differ, so the collapse (make
-  `derive_enc` ignore the tag, or give the two call sites the same nonce) is a test failure.
+  both keystreams for a spread of inputs and requires them to differ, so the collapse (point the
+  message keystream at `subkey` with the derivation's nonce, or otherwise give the two call sites
+  the same key and nonce) is a test failure.
 * The structural remedy — start the message at a counter the derivation does not use (now
   counter 2, since `v0.3`'s derivation burns 0 and 1) — is **not available**: it changes every
   ciphertext, and the wire format is frozen (see `CHANGELOG.md`). It is recorded here as the one
@@ -1031,7 +1032,7 @@ construction's commitment in that case rests on the design argument above rather
 computed probability.* §5 row 17 records this as an open obligation, which is where a reader
 looking for "what would settle it" should go.
 
-**Four consequences, stated plainly.**
+**Five consequences, stated plainly.**
 
 * **The width is load-bearing for commitment — through the target, not the birthday.** With a
   65-byte tag, a candidate key that is not the real one opens a given ciphertext with probability

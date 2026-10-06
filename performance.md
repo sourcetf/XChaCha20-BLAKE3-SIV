@@ -17,12 +17,14 @@ other does not have. Release profile as shipped (`lto`, `codegen-units = 1`), AM
 Ryzen 9 7945HX under WSL2, **15 bytes** of AAD (`b"associated data"`, the benchmark's
 single constant), and both sides on their native SIMD backends (BLAKE3's
 C/assembly kernels, Poly1305's AVX2 four-block path). The 12-byte-nonce
-`ChaCha20Poly1305` is measured too and tracks `XChaCha20Poly1305` closely — re-measured
-2026-10-03 over the same three passes and all nine sizes, the median cell differs by **1.6%** and the
-worst by 6.1% (1 KiB decryption) — so it is not tabulated.
+`ChaCha20Poly1305` is measured too and tracks `XChaCha20Poly1305` closely — the two
+differ by only a few percent per cell — so it is not tabulated. That exact delta is
+host- and build-dependent and is not quoted here; it was read from the run artefacts
+`tools/bench_3pass.sh` writes, which are not committed.
 
-**All figures in this file were re-measured on 2026-10-03 for revision `v0.3`** (the two-level
-tag), by `tools/bench_3pass.sh`, which runs exactly the protocol below and writes the raw
+**All figures in this file were re-measured for revision `v0.3`** (the two-level
+tag) — the main campaign on 2026-10-03, the `ultra` figures the next day (see the note
+below) — by `tools/bench_3pass.sh`, which runs exactly the protocol below and writes the raw
 criterion output per configuration per pass; `tools/bench_summarise.py` turns that into the
 tables. `v0.3`'s extra keyed-BLAKE3 call and extra ChaCha20 derivation block are a **fixed
 per-message cost**, so the change shows at the small sizes and is inside the noise floor from
@@ -31,8 +33,8 @@ per-message cost**, so the change shows at the small sizes and is inside the noi
 ## The three configurations, measured
 
 **Three `cargo bench` runs per configuration**, each pinned to one core (`taskset -c 3`), with
-the configuration order rotated between passes (`default, opt-out, ultra` then `ultra, opt-out,
-default` then `opt-out, ultra, default`) so no configuration is always measured first or last;
+the configuration order rotated between passes (`hardened, opt-out, ultra` then `ultra, opt-out,
+hardened` then `opt-out, ultra, hardened`) so no configuration is always measured first or last;
 the reported figure per cell is the **median of the three passes**. Criterion's median of 100
 samples per pass, `--warm-up-time 2 --measurement-time 4`, sizes 64 B to 1 MiB, shipped release
 profile. The benchmark also runs 700 B and 5000 B — the two non-power-of-two sizes that keep the
@@ -106,8 +108,9 @@ comparison, and both are the price of a defence rather than an accident:
 
 * **`hardened`'s second gate is a fixed per-message cost on decrypt** — two more
   65-byte constant-time comparisons plus an independently written eight-byte fold
-  (each gate runs `subtle`'s byte loop both ways round, so the default build makes
-  four 65-byte comparison passes and the opt-out build two), the volatile re-reads
+  (the two gates run `subtle`'s byte loop both ways round — four 65-byte comparison
+  passes on the default build, against the opt-out build's single pass — plus the
+  fold), the volatile re-reads
   and the fail-closed plumbing — so it shows at the small end (1.06 → 1.32 us at 64 B) and
   its share is inside the noise floor by 1 MiB (391 → 394 us, i.e. a tie inside the
   noise floor). Encryption pays nothing for it: 0.95 → 0.94 us.
@@ -115,9 +118,10 @@ comparison, and both are the price of a defence rather than an accident:
   re-implementation: **2.7x the default at 64 B, 4.0x at 1 KiB, 11.0x at 64 KiB,
   12.4x at 1 MiB** (re-measured after the residue-wipe pass; the small sizes are at
   or inside the campaign's own noise floor, the large ones are not) — which is why the
-  round trip above ends near 0.19x. Its in-place *encryption* is untouched (0.92-1.05x
-  at every size) because that path carries no witness; the allocating `encrypt`, which
-  does, lands at 7.1x the default on the round trip at 1 MiB. If a deployment wants the fault model and not
+  round trip above ends near 0.23x. Its in-place *encryption* carries no witness, so the
+  witness adds nothing there: the encrypt column is a tie from 16 KiB up (0.92-1.05x) and
+  its small-size excess (1.28-1.50x) is the other `ultra` layers; the allocating
+  `encrypt`, which does carry the witness, lands at 7.1x the default on the round trip at 1 MiB. If a deployment wants the fault model and not
   the cost, `hardened,dual-mac` — `ultra`'s two fault-model layers, without the witness
   and without the `locked`/`rng` layers — is the configuration to measure against; the
   table's `opt-out` and `hardened` columns bracket it, since `dual-mac` costs one extra
@@ -132,8 +136,9 @@ is at its best and BLAKE3 has little to batch. **Decryption at 64–256 bytes is
 the noise floor either way** (0.89x, 0.88x), and the small-message decrypt gap is what
 the `hardened` decision and the fixed `v0.3` cost add.
 
-**What the `ultra` layer costs, relative to the default configuration** — the same
-three passes, so the noise floor above applies: a ratio within ~7% of 1.00 is a tie.
+**What the `ultra` layer costs, relative to the default configuration** — from the
+`ultra` campaign noted above, whose own noise floor is larger (median spread 12.7%), so
+a ratio within ~13% of 1.00 is a tie.
 This is the table the layer and fault rows cite, because a ratio against the
 *reference* (above) and a ratio against the *default* are different quantities:
 

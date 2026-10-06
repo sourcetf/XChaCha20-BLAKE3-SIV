@@ -29,6 +29,19 @@
 //! comes from running the binary under valgrind, which `verify.sh --ctgrind`
 //! does.
 //!
+//! # The valgrind run must be a **release** build
+//!
+//! `subtle`'s `Choice` runs invariant checks in debug builds — a `debug_assert!`
+//! inside `From<u8> for Choice` (and `From<Choice> for bool`) on the byte it
+//! wraps. Those asserts *branch on that byte*, so a debug build under valgrind
+//! reports a conditional jump on the poisoned operands of every comparison and
+//! every `bool::from`, which is the harness's own taint and not a leak in this
+//! crate: measured, `constant_time_eq_does_not_branch_on_operands` fails here
+//! with 66 memcheck errors under a debug build and passes under
+//! `cargo test --release`. The crate documents the same property ("The guarantees
+//! hold in release builds", `src/lib.rs`), and `tools/ctgrind.sh` builds release
+//! for exactly this reason — run this file by hand only with `--release`.
+//!
 //! # Why there is a test that is *supposed* to fail
 //!
 //! `deliberate_leak_is_detected` branches on a poisoned byte on purpose. Under

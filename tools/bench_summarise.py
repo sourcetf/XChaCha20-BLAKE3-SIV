@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Summarise the three-pass benchmark campaign into performance.md's tables.
 
-Reads `/home/dev123/.audit/bench/<config>-pass<N>.txt` (raw `cargo bench --bench compare`
-output) and prints:
+Reads `$BENCH_DIR/<config>-pass<N>.txt` (raw `cargo bench --bench compare` output); the
+default is `bench-out`, the directory `tools/bench_3pass.sh` writes to. It prints:
   * throughput ratio against `xchacha20-poly1305`, per config, per size, for encrypt,
     decrypt and the round trip (the 7 tabulated sizes);
   * latency in microseconds at 64 B / 16 KiB / 1 MiB for the three configs and the

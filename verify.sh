@@ -209,8 +209,8 @@ if [ "$KANI_ONLY" -eq 0 ]; then
   # target, which is what step 5 executes.  `.cargo/config.toml` selects
   # rust-lld so no cross C toolchain is required.
   # `ultra` is in the feature list alongside `pure` so the witness is type-checked for
-  # these targets too; stage 5 below *executes* it on three of them. (`pure` is what makes
-  # BLAKE3's C kernels unnecessary here; see stage 5.)
+  # these targets too; stage 5 below *executes* it on all four of its own targets.
+  # (`pure` is what makes BLAKE3's C kernels unnecessary here; see stage 5.)
   if rustup target list --installed 2>/dev/null | grep -q aarch64-unknown-linux-gnu; then
     cargo check --target aarch64-unknown-linux-gnu --all-targets --features ultra,pure
   else
@@ -614,9 +614,10 @@ if [ "$RUN_TOOLS" -eq 1 ]; then
   STAGE_KEY=tools
   step "10. tool-level gates (the tools CI's per-push jobs run; the 4000-vector differential is wide-only there)"
   # The tools that answer 3 for "could not run" are reported as skipped stages (the
-  # convention `tools/gate_selftest.sh` checks); the ones with no exit-3 path --
-  # `fi_check.sh`, `fi_instruction.sh`, `check_kani_cfg.sh` -- fail loudly when the
-  # toolchain is missing rather than exiting 0, which is what the gate self-test
+  # convention `tools/gate_selftest.sh` checks). `fi_check.sh` answers 3 only for an
+  # environmental build failure and 1 for a patch it cannot apply; `fi_instruction.sh`
+  # and `check_kani_cfg.sh` have no exit-3 path at all, and all three fail loudly when
+  # the toolchain is missing rather than exiting 0 -- which is what the gate self-test
   # asserts for `fi_check.sh`. This stage is where the convention is exercised: the
   # tools were all wired into CI before any of them were wired into this script.
   run_tool() {  # name, tool-path, args...
@@ -779,7 +780,7 @@ fi
 # Each hint is printed only for the step that was actually skipped.
 if [ "$RUN_KANI" -eq 0 ] || [ "$RUN_CROSS_EXEC" -eq 0 ] || [ "$RUN_MIRI" -eq 0 ] \
    || [ "$RUN_CTGRIND" -eq 0 ] || [ "$RUN_DENY" -eq 0 ] || [ "$RUN_FUZZ" -eq 0 ] \
-   || [ "$RUN_TOOLS" -eq 0 ]; then
+   || [ "$RUN_TOOLS" -eq 0 ] || [ "$RUN_TSAN" -eq 0 ]; then
   echo
   if [ "$RUN_KANI" -eq 0 ]; then
     echo "(Kani skipped; pass --kani to include it.)"

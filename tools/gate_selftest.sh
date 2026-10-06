@@ -17,7 +17,8 @@
 # hidden too, for the extracted-copy path they check first.
 #
 # Usage:  tools/gate_selftest.sh
-# Exit codes: 0 every gate honours the convention; 1 one of them does not.
+# Exit codes: 0 every gate honours the convention; 1 one of them does not; 3 the
+# recursion guard refused to run (XSIV_IN_GATE_SELFTEST was already set).
 set -euo pipefail
 
 # Hard recursion guard. This file runs `verify.sh`, and `verify.sh` runs this file; the
@@ -150,9 +151,10 @@ else
   echo "  ok: verify.sh fails (exit $vs_rc) when a stage it was asked for is skipped"
 fi
 
-# 2. A campaign that cannot run must not report itself complete. `tools/fi_check.sh` has no
-#    exit-3 path (it either runs or fails), so the invariant here is "non-zero, and not the
-#    completion line", with a `cargo` that fails.
+# 2. A campaign that cannot run must not report itself complete. `tools/fi_check.sh` answers
+#    3 only for an *environmental* build failure (out of disk, or a build the kernel killed);
+#    a `cargo` that simply fails makes it exit 1, so the invariant here is "non-zero, and not
+#    the completion line", with a `cargo` that fails.
 HOME_FAIL="$(make_fake_home 1)"
 set +e
 fi_out="$(HOME="$HOME_FAIL" PATH="$HOME_FAIL/.cargo/bin:/usr/bin:/bin" \
@@ -175,6 +177,6 @@ if [ "$fail" -ne 0 ]; then
   echo "gate contract: FAILED" >&2
   exit 1
 fi
-echo "gate contract: the three tools that can answer 'could not run' use exit 3 under"
+echo "gate contract: the three tools checked here use exit 3 under"
 echo "               hidden tooling; verify.sh fails when a stage it was asked for is"
 echo "               skipped; and a campaign that cannot run does not report completion."

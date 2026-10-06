@@ -75,8 +75,10 @@ use crate::{DOM_ENC, DOM_PRE, DOM_TAG, NONCE_LEN, SUBKEY_DOMAIN, TAG_LEN};
 ///     reason; the caller (`src/lib.rs`) wipes its own copies of the tags, and `scrub_stack`
 ///     remains the cover for the return slots themselves.
 ///   * **Short-lived 4-byte copies inside the BLAKE3 code**: the `[u8; 4]` built from the key
-///     in `Hasher::new_keyed`, the one built from a message word in `words_from_le_bytes`, and
-///     the per-word output copies in `hchacha20`. The sentence that used to stand here said
+///     in `Hasher::new_keyed`, the ones `block`/`hchacha20` build from the key and nonce as
+///     they unpack them into state words, the one built from a message word in
+///     `words_from_le_bytes`, and the per-word output copies in `hchacha20`. The sentence that
+///     used to stand here said
 ///     these were wiped; nothing names them, so they are not. They are left rather than paid
 ///     for with a volatile store per word — four bytes of a 32-byte key is not a key, and
 ///     `tools/stack_residue.sh` searches for the whole value — and `scrub_stack` covers the
@@ -118,12 +120,12 @@ const CHACHA_CONST: [u32; 4] = [0x61707865, 0x3320646e, 0x79622d32, 0x6b206574];
 fn block(key: &[u8; 32], counter: u32, nonce: &[u8; 12]) -> [u8; 64] {
     let mut s = [0u32; 16];
     s[0..4].copy_from_slice(&CHACHA_CONST);
-    // The key and nonce words are assembled field by field rather than through a
-    // `[u8; 4]` temporary: a 4-byte copy of key bytes is a thing a wipe can name, and in
-    // a loop over the whole message (one block per 64 bytes) wiping each one measured
-    // ~30% of `ultra`'s large-message decryption. Reading the bytes straight into the
-    // `u32` leaves no such copy to wipe; `s`/`v`, which do hold the key words, are wiped
-    // below.
+    // The key and nonce words are assembled field by field rather than into a *named*
+    // `[u8; 4]` temporary: a named 4-byte copy of key bytes is a thing a wipe can reach, and
+    // in a loop over the whole message (one block per 64 bytes) wiping each one measured
+    // ~30% of `ultra`'s large-message decryption. The unnamed `[u8; 4]` that `from_le_bytes`
+    // still builds is one of the short-lived copies the module header lists as left;
+    // `s`/`v`, which do hold the key words, are wiped below.
     for i in 0..8 {
         s[4 + i] = u32::from_le_bytes([key[i * 4], key[i * 4 + 1], key[i * 4 + 2], key[i * 4 + 3]]);
     }
@@ -210,7 +212,7 @@ fn keystream_xor(key: &[u8; 32], counter: u32, nonce: &[u8; 12], input: &[u8], o
 fn hchacha20(key: &[u8; 32], nonce: &[u8; 16]) -> [u8; 32] {
     let mut s = [0u32; 16];
     s[0..4].copy_from_slice(&CHACHA_CONST);
-    // As in `block`: field by field, so no 4-byte key copy exists to wipe.
+    // As in `block`: field by field, so no *named* 4-byte key copy exists to wipe.
     for i in 0..8 {
         s[4 + i] = u32::from_le_bytes([key[i * 4], key[i * 4 + 1], key[i * 4 + 2], key[i * 4 + 3]]);
     }
@@ -666,9 +668,10 @@ fn keyed_xof(key: &[u8; 32], parts: &[&[u8]], out: &mut [u8]) {
         h.update(p);
     }
     h.finalize_xof(out);
-    // Wipe before the hasher's `Vec` and chunk state are released: the chaining values are
-    // key-derived, and leaving them is both a hygiene gap and what made memcheck report a
-    // conditional jump inside glibc's `free`.
+    // Wipe before the hasher's chunk state is released: the chaining values are key-derived,
+    // and leaving them is a hygiene gap. (The `Vec` that used to hold them is gone — the CV
+    // stack is a fixed array now — and with it the `free` that memcheck used to report a
+    // conditional jump inside.)
     h.wipe_state();
 }
 
@@ -925,6 +928,66 @@ mod tests {
                     compare(&data, &mut mine, &mut theirs, base - delta);
                 }
             }
+        }
+    }
+
+    /// The cross-checks above feed the primitives **constant-byte** keys and nonces
+    /// (`[0x11; 32]`, `[0x37; 32]`, `[0x5A; 24]`, …). With every byte equal, permuting
+    /// the words during unpacking leaves the assembled words identical, so those tests
+    /// cannot see the order at all. The end-to-end cross-check in `src/lib.rs` *is*
+    /// sensitive to it in `block` and `Hasher::new_keyed`, because their inputs are the
+    /// derived subkey and `k_in`/`k_out` — not constant-byte. But `hchacha20` is fed the
+    /// **master key** and the **nonce prefix**, both constant here, so a permuted
+    /// `hchacha20` word order passes every existing test: verified by permuting its key
+    /// words, which left all six of the others green and only this one red. This runs
+    /// the comparisons on distinct bytes, so the unpacking order in every one of the
+    /// three sites is actually exercised.
+    #[test]
+    fn matches_the_crate_on_distinct_key_and_nonce_bytes() {
+        let key: [u8; 32] = core::array::from_fn(|i| (i as u8).wrapping_mul(7).wrapping_add(3));
+        let nonce: [u8; NONCE_LEN] =
+            core::array::from_fn(|i| (i as u8).wrapping_mul(11).wrapping_add(5));
+
+        // The two primitives, whose word unpacking the constant-byte tests cannot check.
+        let n12: [u8; 12] = core::array::from_fn(|i| (i as u8).wrapping_mul(5).wrapping_add(1));
+        let n16: [u8; 16] = core::array::from_fn(|i| (i as u8).wrapping_mul(3).wrapping_add(2));
+        for ctr in [0u32, 1, 7, 0x1234_5678, u32::MAX] {
+            assert_eq!(
+                block(&key, ctr, &n12),
+                crate::chacha20_block(&key, ctr, &n12),
+                "distinct-byte ChaCha20 block disagrees at counter {ctr}"
+            );
+        }
+        assert_eq!(hchacha20(&key, &n16), crate::hchacha20(&key, &n16));
+
+        // The keyed hash, whose key is unpacked into the initial chaining value.
+        for len in [0usize, 1, 63, 64, 65, 1024, 1025, 4096] {
+            let data: Vec<u8> = (0..len).map(|i| (i % 253) as u8).collect();
+            let mut mine = [0u8; 65];
+            let mut theirs = [0u8; 65];
+            keyed_xof(&key, &[&data], &mut mine);
+            crate::blake3_keyed_xof(&key, &data, &mut theirs);
+            assert_eq!(
+                mine, theirs,
+                "distinct-byte keyed XOF disagrees at length {len}"
+            );
+        }
+
+        // And the whole construction, so the derivation (which unpacks the key through
+        // `hchacha20` and the subkey nonce) is covered end to end, not just the pieces.
+        for len in [0usize, 1, 64, 65, 1024, 1025, 4096] {
+            let pt: Vec<u8> = (0..len).map(|i| (i % 251) as u8).collect();
+            let aad: Vec<u8> = (0..17).map(|i| (i % 241) as u8).collect();
+            let (ct, tag) = crate::encrypt(&key, &nonce, &aad, &pt).unwrap();
+            assert_eq!(
+                encrypt_tag(&key, &nonce, &aad, &pt),
+                tag,
+                "distinct-byte witness tag disagrees at length {len}"
+            );
+            let mut w_pt = alloc::vec![0u8; ct.len()];
+            let w_tag = decrypt(&key, &nonce, &aad, &ct, &tag, &mut w_pt);
+            assert_eq!(w_pt, pt, "distinct-byte witness plaintext at length {len}");
+            assert_eq!(w_tag, tag, "distinct-byte witness tag at length {len}");
         }
     }
 }

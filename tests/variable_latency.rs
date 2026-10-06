@@ -10,16 +10,17 @@
 //! about seventeen. So no tool in this repository detects that class, and the control
 //! has to be a list a human maintains.
 //!
-//! This test enumerates every `/` and `%` in the always-compiled non-test source --
-//! `src/lib.rs` and `src/witness.rs` -- and requires the set to match the table below
-//! exactly: a new one fails the test until someone writes down why it is not a
-//! secret-dependent latency, and a removed one fails too (so the table cannot rot). It
-//! does not read `src/proofs.rs`, which is `#[cfg(kani)]` and compiled out of every run
-//! of this suite; its divisions are bounded-model-checking scaffolding. (An earlier
-//! header claimed "the crate's non-test source" while reading only `src/lib.rs`, and
-//! did not name `src/proofs.rs` as the exclusion.) It says nothing about whether the
-//! listed operations are *actually* safe -- it makes them visible, which is the part
-//! that can be automated.
+//! This test enumerates every `/` and `%` in the non-test source the crate compiles --
+//! `src/lib.rs` always, and `src/witness.rs` under `ultra` -- and requires the set to
+//! match the table below exactly: a new one fails the test until someone writes down why
+//! it is not a secret-dependent latency, and a removed one fails too (so the table cannot
+//! rot). It does not read `src/proofs.rs`, which is `#[cfg(kani)]` and compiled out of
+//! every run of this suite; its divisions are bounded-model-checking scaffolding. (An
+//! earlier header claimed "the crate's non-test source" while reading only `src/lib.rs`,
+//! and did not name `src/proofs.rs` as the exclusion; a later one called both scanned
+//! files "always-compiled" when `src/witness.rs` is gated on `ultra`.) It says nothing
+//! about whether the listed operations are *actually* safe -- it makes them visible, which
+//! is the part that can be automated.
 //!
 //! The same idea covers the crate's control flow, one section down: `CONTROL_FLOW`
 //! counts `if` / `while` / `for` / `loop` / `match` in the non-test source. ctgrind

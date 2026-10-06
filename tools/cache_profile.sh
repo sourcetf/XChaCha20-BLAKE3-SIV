@@ -45,8 +45,10 @@
 #                     lackey's memtrace lines carry a leading space (` S <addr>,<size>`
 #                     for a store), so the `^[ILSM] ` filter matched instruction lines
 #                     only and the load/store count was always zero. Fixed, it compares
-#                     ~69k accesses (enc) and ~117k (round trip) and passes on this
-#                     tree; `tools/cache_profile.sh --selftest --trace` still has to
+#                     ~197k accesses (enc) and ~361k (round trip) at its default of 12
+#                     vectors and passes on this tree (the count scales with the vector
+#                     count: ~69k/~117k at `--trace 4`, ~123k/~227k at `--trace 8`);
+#                     `tools/cache_profile.sh --selftest --trace` still has to
 #                     catch its planted leak first, which it does.
 #
 # Both modes are compared against `examples/xsiv_stdin.rs`, which takes key, nonce,

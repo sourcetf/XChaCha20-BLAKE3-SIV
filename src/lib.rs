@@ -1578,7 +1578,7 @@ pub mod locked {
     /// `==`, is closed: this type has its own constant-time `PartialEq`, so `==` no longer
     /// falls through to a short-circuiting array comparison.)
     ///
-    /// `ultra`'s answer to the part of the wipe story a volatile store cannot reach:
+    /// `locked`'s answer to the part of the wipe story a volatile store cannot reach:
     /// while this value is alive its pages cannot be swapped out, and a core dump will
     /// not contain them. It does **not** cover a debugger attached to the process, a
     /// hypervisor reading guest memory, or cold-boot remanence — see the README's
@@ -1614,7 +1614,7 @@ pub mod locked {
     /// typically into the caller's frame or a return slot, so the lock was left
     /// on the callee's dead stack slot while the live copy sat unprotected on an
     /// unlocked page. The struct looked locked (`locked_bytes()` went up, the
-    /// test passed) and was not. Heap-allocating first means the `Box` can be
+    /// test passed) and was not. Heap-allocating first means the `Page` can be
     /// moved as much as it likes without the key ever changing address.
     pub struct LockedKey(Page);
 
@@ -2648,7 +2648,7 @@ fn ct_eq_independent(a: &[u8; TAG_LEN], b: &[u8; TAG_LEN]) -> subtle::Choice {
 //    two functions to a mutation campaign that does not evaluate `cfg`
 //    (`cargo mutants`), and the one that is not compiled in a given run reads as an
 //    uncaught mutant. One body means every mutatable line is compiled in the
-//    `hardened` build, which is a superset of the default one.
+//    `ultra` build the campaign uses, which is a superset of the default one.
 //
 // The default is `hardened`, so in the default build both gates are live and the caller
 // passes two *different* recomputations (`gates.0`, `gates.1`) — the second gate branch

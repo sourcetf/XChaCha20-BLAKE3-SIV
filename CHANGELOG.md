@@ -8,6 +8,86 @@ green push to `main` — which are build artefacts of that job, not construction
 
 ## Unreleased
 
+### An eighth round: a word order no test could see, and a batch of stale figures
+
+An eighth audit round (twelve read-only audits run in parallel — one per file group, three on
+the crypto and proof code, and a report-only cross-file verifier) found one coverage gap in
+the witness and a batch of stale claims. **No wire-format change**, and no defect in the
+crypto logic: the deepest pass over `src/lib.rs` (length and bounds arithmetic, every error
+path and its wipe, the accept/reject decision, all feature combinations, every `unsafe`
+block, the `locked` page handling) found nothing, and each of the 13 Kani harnesses was
+re-checked for vacuity and re-verified SUCCESSFUL.
+
+- **`src/witness.rs`'s `hchacha20` unpacked the key and nonce into state words in an order
+  no test could see.** The code is correct, but every test that reaches it feeds
+  constant-byte inputs (`key = [0x42; 32]`, `nonce = [0x5A; 16]`), and with all bytes equal
+  any word permutation yields the identical state. An audit permuted the unpacking
+  (`s[4 + i]` → `s[4 + (7 - i)]`) and **all six existing witness tests stayed green**,
+  including the end-to-end agreement test; the same mutation in `block` *is* caught, because
+  `block`'s inputs are the derived subkey rather than the master key. Added
+  `matches_the_crate_on_distinct_key_and_nonce_bytes`, which cross-checks `block`,
+  `hchacha20`, `keyed_xof` and the whole construction against the crate on distinct-byte
+  key/nonce inputs — it fails under the mutation and passes on the correct code.
+- **`tools/cache_profile.sh`'s header quoted the `--trace 4` counts as the mode's own**
+  (`~69k`/`~117k`) while the mode's default is **12** vectors (which CI passes explicitly);
+  `tests/README.md` and the entry above still quoted the **pre-loader-trim** figures
+  (`~170k`/`~275k`). Re-measured on this tree: **196,920 / 360,644** at the default of 12
+  vectors, 68,904 / 117,295 at 4 and 123,453 / 227,387 at 8 — the last two matching the
+  figures the CHANGELOG already carried to within the drift the example's `from_hex` change
+  introduces. All four places now agree, and the header records that the count scales with
+  the vector count.
+- **`README.md`'s `(§§)` note quoted the `hardened` build's bit-flip residual as `1, 0`
+  where the sweep measures `5, 0`** (the `1` is the *nop* model's count, one row above in the
+  same table). The note now reads `5, 0`, and the sentence that explained the figure as
+  `ultra`-only was reworded, since both configurations measure 5.
+- **`AUDIT-RESPONSE.md` attributed the `ls -t … | head -1` binary-glob defect to
+  `verify.sh`**, which never globbed — it parses cargo's `Executable …` lines. The tool whose
+  lookups were `ls -t "$DEPS_DIR/"ctgrind-* | head -1` is `tools/ctgrind.sh`; the fix in
+  `e0e1950` also covers the two tools the row already named.
+- **`verify.sh`'s skipped-stage hint block could never print the ThreadSanitizer hint.** The
+  outer guard listed every optional stage except `RUN_TSAN`, so a run that skipped *only*
+  TSAN printed no hint at all, contradicting the block's own comment that each hint is
+  printed for the stage that was actually skipped.
+- **`performance.md`'s `ChaCha20Poly1305`-vs-`XChaCha20Poly1305` figures were
+  unreproducible** — a prior audit measured ~2.7–3.2 % median against the file's 1.6 %/6.1 %,
+  and no committed artefact produces them (`tools/bench_summarise.py` has no code path for
+  that comparison, and the raw per-pass output is gitignored). The precise percentages are
+  gone, replaced by the qualitative statement plus a note that the delta is host- and
+  build-dependent and not quoted here. The same pass corrected the `ultra`-cost table's
+  method line (it cites the `ultra` campaign's 12.7 % noise floor, not the 6.8 % one above
+  it), the rotation order in the protocol description (`hardened`, not the stale `default`),
+  a round-trip ratio that contradicted the table below it (0.19x → 0.23x), and the blanket
+  "all figures re-measured on 2026-10-03" (the `ultra` figures came the next day).
+- **`SECURITY-ANALYSIS.md`**: §4.5's "Four consequences" headed five bullets, and §4.1
+  named a collapse ("make `derive_enc` ignore the tag") that the test it cites does *not*
+  catch — the two keystreams are keyed differently to begin with, so the refactor the test
+  actually catches is pointing the message keystream at `subkey` with the derivation's
+  nonce, which is what `src/lib.rs`'s own comment says.
+- **A batch of smaller stale claims**, each confirmed against the code: `src/lib.rs`'s
+  one-body comment called the mutation campaign's build `hardened` (the campaign runs
+  `--features ultra`, and `hardened` *is* the default, so "a superset of the default" was
+  self-contradictory); `README.md`'s shortened-loop row said *every* gate compares through
+  two differently written comparisons (only the second gate does — the first is two `subtle`
+  loops of one shape, which is the whole reason the fold was made unconditional); a
+  `performance.md` line said the opt-out build makes *two* 65-byte comparison passes (it
+  makes one); `CHANGELOG.md` called the third audit round 26 findings (it is 32);
+  `verify.sh` listed `fi_check.sh` among "the tools with no exit-3 path" (it has had one
+  since the out-of-disk guard); `.cargo/config.toml`'s riscv64 note said "twelve run …
+  `ctgrind` is the one exclusion" (the loop also skips `timing`, which is excluded because
+  an emulated clock cannot resolve what it measures, not because it cannot run);
+  `README.md` and `tests/README.md` listed three qemu targets where CI runs four (ppc64 was
+  missing); `src/witness.rs`'s module header omitted two of the sites that build an unnamed
+  4-byte key copy while two inline comments claimed no such copy exists at all, and a third
+  still referred to the `Vec` the `CvStack` change removed; `tools/bench_3pass.sh`'s
+  `run_one` comment mislabelled its arguments (`$2` is the pass, not a cargo arg);
+  `tools/bench_summarise.py`'s docstring named a default path the code does not use;
+  `tools/fi_check.sh`'s and `tools/gate_selftest.sh`'s "Exit codes" lists omitted the `3`
+  those scripts answer; `tools/gate_selftest.sh` claimed `fi_check.sh` "has no exit-3 path";
+  and `tests/ctgrind.rs` never said why its valgrind run must be a **release** build
+  (`subtle`'s `Choice` carries a `debug_assert!` that branches on the operand, so a debug
+  build under valgrind reports 66 memcheck errors from the harness's own taint — now
+  measured and written down).
+
 ### `cache_profile --trace` was comparing the dynamic loader, not the client
 
 A seventh audit round (five read-only audits run in parallel: the tooling campaign, the
@@ -270,7 +350,7 @@ below are the ones that changed something here. **No wire-format change.**
 
 ### `AUDIT-RESPONSE.md`: the disposition of all four third-party reports
 
-The four reports (the 366-finding line-by-line audit, and the 26-, 58- and 26-finding
+The four reports (the 366-finding line-by-line audit, and the 26-, 58- and 32-finding
 incremental rounds) now have one document in the repository root that maps every finding class
 to its disposition: what was fixed and where (file, test, commit), and what was not changed and
 why — the fault model's single-fault boundary, the opt-out build's role as the campaign's
@@ -343,8 +423,8 @@ at the filter. The filter now keeps `L`/`S`/`M` (instruction fetches excluded on
 the example's own hex parsing branches on the *characters* of its input, so including them
 would compare the harness's parser rather than the library's accesses), and the mode works:
 
-* `--trace 8`, default: **123,543** accesses identical for two different keys (encrypt), and
-  **227,381** for the round trip;
+* `--trace 8` (the mode's default is 12 vectors, which CI passes explicitly): **123,543**
+  accesses identical for two different keys (encrypt), and **227,381** for the round trip;
 * `XSIV_FEATURES=ultra --trace 8`: **324,283** and **937,082**, identical — the witness's
   access pattern is key-independent too;
 
@@ -368,8 +448,8 @@ control fails, the environment cannot hold a layout and the answer is "could not
 identical runs differ, so the control cannot mask one. On the next CI run the control fired —
 the job prints `SKIPPED: the enc address layout is not reproducible here -- two runs of the
 same input differ` and the step is skipped, while the counts mode and its self-test still pass
-there. So the mode's evidence is a quiet-host measurement (it passes there with ~170k/~275k
-identical accesses) and a runner honestly says it cannot conclude. (While testing the control: piping
+there. So the mode's evidence is a quiet-host measurement (it passes there with ~197k/~361k
+identical accesses at the default vector count) and a runner honestly says it cannot conclude. (While testing the control: piping
 `diff` into `head` died of SIGPIPE and ended the script with 141 instead of 3 — the same trap
 this repository's scripts document elsewhere, fixed by capturing the diff first.)
 
