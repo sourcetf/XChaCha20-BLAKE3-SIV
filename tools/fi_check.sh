@@ -132,7 +132,20 @@ run_row() {
   # distinction *is* the row, and an audit turned `branch-forced` green by replacing the
   # semantic patch with a `compile_error!`, since any non-zero `cargo test` exit was read
   # as detection.
+  #
+  # A build that fails for an *environmental* reason is a third outcome, not a row failure:
+  # measured, a full tmpfs (`No space left on device`, and the SIGBUS it produces inside
+  # `rust-lld`) makes a row report "the mutated tree does not build", which reads as "this
+  # file needs looking at" when the disk is what needs looking at. The two cases are told
+  # apart by what the log says, and the environmental one is exit 3 ("could not run") -- the
+  # convention the rest of this repository uses for a stage that did not happen, which
+  # `verify.sh` records as a skipped stage instead of a failure.
   if ! ( cd "$dir" && CARGO_TARGET_DIR="$dir/target" cargo test --no-run "${args[@]}" ) > "$WORK/$name.build.log" 2>&1; then
+    if grep -qE 'No space left on device|error: could not write|ENOSPC|fatal signal 7|SIGBUS' "$WORK/$name.build.log"; then
+      printf 'SKIPPED %-19s the build ran out of disk or was killed by the kernel, so this\n' "$name" >&2
+      printf '                        row did not run -- see %s\n' "$LOG_KEEP/$name.build.log" >&2
+      exit 3
+    fi
     printf 'FAIL %-22s the mutated tree does not build, so the detector never ran\n' "$name" >&2
     printf '                        -- see %s\n' "$LOG_KEEP/$name.build.log" >&2
     tail -20 "$WORK/$name.build.log" >&2
@@ -142,6 +155,16 @@ run_row() {
   # ...and an `expect=fail` row additionally needs the detector to be capable of passing
   # on an unmutated tree, or it would "detect" a pre-existing failure.
   if [ "$expect" = "fail" ] && ! baseline_passes "$features" "$target"; then
+    # Same distinction as the build guard above: a baseline that could not run (a full
+    # disk, a build killed by the kernel) is "could not run", not "the detector is broken
+    # on unmutated source". Measured: with /tmp at 100% a baseline `cargo test` died in 3.5
+    # seconds with an empty log and this branch reported the row as a vacuous-pass risk.
+    if grep -qE 'No space left on device|error: could not write|ENOSPC|fatal signal 7|SIGBUS' \
+        "$WORK/baseline.log" 2>/dev/null; then
+      printf 'SKIPPED %-19s the baseline build ran out of disk or was killed, so this row\n' "$name" >&2
+      printf '                        did not run -- see %s\n' "$LOG_KEEP/baseline.log" >&2
+      exit 3
+    fi
     printf 'FAIL %-22s the detector already fails on an UNMUTATED tree, so this row\n' "$name" >&2
     printf '                        would pass vacuously -- see %s\n' "$LOG_KEEP/baseline.log" >&2
     exit 1
