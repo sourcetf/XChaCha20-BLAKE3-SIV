@@ -368,7 +368,9 @@ something — it must *fail* when the second gate is replaced by a copy of the f
 | Availability (any single glitch causes a rejection or a crash) | not defended, by anything |
 
 A bounded mutation run over the decision (`cargo mutants -f src/lib.rs -F
-'decrypt|accept_or_reject' --features ultra -- --test decision --test security`, in CI)
+'decrypt|accept_or_reject' -E 'replace & with \|' --features ultra -- --test decision --test
+security`, in CI -- the `-E` is not optional: without it the ten `&`→`|` mutants that the
+paragraph below describes as equivalent are reported MISSED, and the run exits 2)
 tests the other half of that: every mutant of the decision and of its caller-visible
 limits must be caught, by the decision detector and by the security suite. The `&` → `|`
 mutants in the two-comparison expression are excluded as **equivalent under fault-free

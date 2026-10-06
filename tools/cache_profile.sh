@@ -22,17 +22,30 @@
 #                     The mode also runs the *same* input a second time and requires those
 #                     two traces to be identical before it compares two keys: this is a
 #                     comparison of addresses, so an environment that cannot hold a layout
-#                     (measured on a GitHub runner: one-byte stack loads 107 bytes apart
-#                     between runs) would otherwise report layout noise as a leak. When the
-#                     determinism control fails the mode answers "could not run" (exit 3),
-#                     which the callers map to a skipped stage.
+#                     would otherwise report layout noise as a leak. When the determinism
+#                     control fails the mode answers "could not run" (exit 3), which the
+#                     callers map to a skipped stage.
+#
+#                     The comparison starts at the *client's* first instruction fetch, not
+#                     at the first line of the trace, and that is load-bearing on this host:
+#                     its loader walks a string on the initial stack and, when the layout
+#                     puts the string's terminator against the AT_RANDOM block, indexes a
+#                     class table with the run's random byte -- a load whose address is
+#                     different every run, thousands of lines before the example executes an
+#                     instruction. With the loader included, the determinism control trips on
+#                     every run here (correctly, for the wrong subject: the noise is not this
+#                     crate's). ASLR is already off under `setarch --addr-no-randomize`, so
+#                     the client's text is the lowest-mapped executable and its first fetch
+#                     is the minimum `I` address in the trace. An audit disassembled the
+#                     loader, mapped the differing addresses into `ld.so`'s text, and
+#                     reproduced the effect with a C client that does not link this crate.
 #
 #                     This mode was broken from the day it was written and reported
 #                     "SKIPPED: valgrind here cannot start the lackey tool" instead:
 #                     lackey's memtrace lines carry a leading space (` S <addr>,<size>`
 #                     for a store), so the `^[ILSM] ` filter matched instruction lines
 #                     only and the load/store count was always zero. Fixed, it compares
-#                     ~170k accesses (enc) and ~275k (round trip) and passes on this
+#                     ~69k accesses (enc) and ~117k (round trip) and passes on this
 #                     tree; `tools/cache_profile.sh --selftest --trace` still has to
 #                     catch its planted leak first, which it does.
 #
@@ -165,15 +178,40 @@ if [ "${1:-}" = "--trace" ]; then
       set +e
       setarch --addr-no-randomize "$VALGRIND" --tool=lackey --trace-mem=yes \
         "$TARGET_DIR/release/examples/xsiv_stdin" ${extra[@]+"${extra[@]}"} \
-        < "$work/t-$input.txt" 2>&1 \
-        | grep -E "^[[:space:]]*[LSM] " > "$work/$phase-$side.trace"
-      rc=${PIPESTATUS[0]}
+        < "$work/t-$input.txt" > "$work/$phase-$side.raw" 2>&1
+      rc=$?
       set -e
       if [ "$rc" -ne 0 ]; then
         echo "SKIPPED: the $phase/$side lackey run exited $rc (valgrind forwards the" >&2
         echo "         client's status), so there is no trace verdict to report." >&2
         exit 3
       fi
+      # Keep only the *client's* instructions and accesses, from its first instruction
+      # fetch onward. Without this the comparison includes the dynamic loader's own
+      # startup, and measured on this host that is not reproducible run to run: glibc's
+      # loader walks a string on the initial stack and, when the layout puts the
+      # string's terminator against the AT_RANDOM block, reads one byte past it and
+      # indexes a 256-byte class table with that random byte — a load whose *address*
+      # then depends on the run, thousands of trace lines before the example executes
+      # one instruction. The determinism control below caught it (correctly: the mode
+      # cannot compare addresses in an environment that does not hold a layout) but the
+      # finding is about the loader, not about this crate, and no ASLR setting removes
+      # it. `setarch --addr-no-randomize` turns ASLR off, so the client's text is the
+      # lowest-mapped executable region and its first fetch is the minimum `I` address;
+      # everything at or after that line is the client's own trace. (An audit
+      # disassembled the loader, mapped the differing addresses to `ld.so`'s text, and
+      # reproduced it with a C client that does not link this crate.)
+      first_i="$(awk '/^I  /{ a = $2; sub(/,.*/, "", a); if (m == "" || a < m) m = a } END { print m }' \
+        "$work/$phase-$side.raw")"
+      if [ -z "$first_i" ]; then
+        echo "SKIPPED: the $phase/$side trace has no instruction fetches, so the client's" >&2
+        echo "         own accesses cannot be separated from the loader's." >&2
+        exit 3
+      fi
+      first_line="$(grep -n -m1 -F "I  $first_i," "$work/$phase-$side.raw" | cut -d: -f1)"
+      sed -n "${first_line:-1},\$p" "$work/$phase-$side.raw" \
+        | grep -E "^[[:space:]]*[LSM] " > "$work/$phase-$side.trace"
+      rm -f "$work/$phase-$side.raw"
     done
     # A trace that carries no load/store lines is not a trace -- keep this guard even
     # though the filter is now right, because a valgrind that cannot start lackey (an

@@ -8,6 +8,61 @@ green push to `main` — which are build artefacts of that job, not construction
 
 ## Unreleased
 
+### `cache_profile --trace` was comparing the dynamic loader, not the client
+
+A seventh audit round (five read-only audits run in parallel: the tooling campaign, the
+fault-injection campaign, the cross-target campaign, an adversarial review of the new diff,
+and a diagnosis of a `--trace` failure) found one more real defect and one more weak
+evidence path. **No wire-format change.**
+
+- **`tools/cache_profile.sh --trace` counted accesses the dynamic loader made before the
+  example executed a single instruction.** The mode's determinism control (run the same
+  input twice; the two address traces must match) was tripping on every run on this host,
+  and the first difference was always two one-byte stack loads ~6200 lines into the trace.
+  The cause is glibc's loader: it walks a string on the initial stack and, when the layout
+  puts that string's terminator against the `AT_RANDOM` block, reads one byte past it and
+  indexes a 256-byte class table with *the run's random byte*. So the differing address is a
+  function of `AT_RANDOM`, the load is in `ld.so`'s text (`0x0409ba80`; the example's own
+  first fetch is ~233,000 trace lines later), and no ASLR setting removes it — an audit
+  reproduced it with a C client that does not link this crate, which is what rules out the
+  example change that landed just before as the cause. The comparison now starts at the
+  client's first instruction fetch (the minimum `I` address in the trace, which under
+  `setarch --addr-no-randomize` is the client's entry point). Measured: the mode now passes
+  **three runs out of three** where it previously failed every time, the two-key comparison
+  covers 68,938 / 117,281 accesses at `--trace 4` and 123,543 / 227,381 at `--trace 8`
+  (324,283 / 937,082 under `ultra`), and `--selftest --trace` still catches its planted leak.
+  The published counts moved with the fix (they used to include the loader's), which is the
+  entry below.
+- **`tests/locked.rs`'s new per-mapping check silently degraded under a tight memlock
+  allowance.** The check that closes the decoy-lock hole (previous entry) probes whether
+  `smaps` reports locks by locking a 4 KiB `Vec` — but a heap allocation is page-aligned
+  only by luck, so a buffer starting at an odd offset spans *two* pages, costs two pages of
+  `RLIMIT_MEMLOCK`, and fails with ENOMEM under a small allowance while the key's own
+  page-aligned lock succeeded. The probe then answered "this channel is unreliable" and the
+  test fell back to the process-wide counter that a wrong-address lock satisfies: an audit
+  measured the test passing a decoy-lock mutant at `ulimit -l 12`. The probe now takes a
+  page-aligned 4 KiB slice inside an over-allocated buffer, so it costs exactly what a
+  `LockedKey` costs; re-run against the same mutant, the test fails at 8, 12, 16 and 32 kB.
+
+### Documentation claims that measurement corrected (the same round)
+
+- **The README's quoted `cargo mutants` command could not reproduce its own result.** It
+  omitted the `-E 'replace & with \|'` exclusion that the paragraph beneath it describes;
+  run literally it reports 27 mutants with the ten `&`→`|` mutants MISSED and exits 2. The
+  command in the text now carries the exclusion CI uses.
+- **A CHANGELOG entry quoted that same `-E` pattern with an unescaped `|`** (`-E 'replace &
+  with |'`), which cargo-mutants compiles as a regex whose second alternative is empty — it
+  matches *every* mutant name, so the command tests nothing and exits 0. Escaped.
+- **`tools/fi_instruction.sh --nop` does not exist** (three documents cited a "full `--bits`
+  and `--nop` sweep"); `nop` is the default model, selected by passing no model flag. The
+  references now say "the default (`nop`) model".
+- **`tests/differential_reference.rs`'s AAD cap comment** said "seven of the twenty-six
+  non-empty rows are outside" the 130-byte cap. Ten rows are outside it; seven is the count
+  of *distinct* lengths (191, 192, 193, 255, 256, 257, 300). Corrected with the distinction
+  written out, since the sentence exists to be checkable.
+- **The counts in the `--trace` entry above** were re-measured after the loader trim, and
+  the older figures are recorded there rather than deleted.
+
 ### A second adversarial pass: two evidence gaps closed, one example leak, and a batch of stale claims
 
 Ten more read-only audits (SIMD vs scalar; entropy and `random`; length arithmetic on 32-bit;
@@ -288,10 +343,14 @@ at the filter. The filter now keeps `L`/`S`/`M` (instruction fetches excluded on
 the example's own hex parsing branches on the *characters* of its input, so including them
 would compare the harness's parser rather than the library's accesses), and the mode works:
 
-* `--trace 8`, default: **170,874** accesses identical for two different keys (encrypt), and
-  **274,664** for the round trip;
-* `XSIV_FEATURES=ultra --trace 8`: **372,519** and **987,842**, identical — the witness's
+* `--trace 8`, default: **123,543** accesses identical for two different keys (encrypt), and
+  **227,381** for the round trip;
+* `XSIV_FEATURES=ultra --trace 8`: **324,283** and **937,082**, identical — the witness's
   access pattern is key-independent too;
+
+(Those four figures were 170,874 / 274,664 / 372,519 / 987,842 before the mode stopped
+counting the dynamic loader's own startup accesses — see the entry on the client-prefix
+trim below. The counts are the client's now, which is what the comparison is about.)
 * `--selftest --trace`: the planted secret-indexed table leak is detected, which is the
   control that says the comparison can fail.
 
@@ -358,7 +417,7 @@ Both are fixed here and re-measured; the rest is documentation the new measureme
   `run()` captured with `text=True`. The reopen now retries a transient `ETXTBSY` (and still
   raises if it persists), and `run()` captures bytes and decodes with `errors="replace"` — the
   verdict looks for one ASCII needle, so a replaced byte cannot change it. Re-run here: the full
-  `--bits` and `--nop` sweeps both complete and gate correctly (decision-scoped zero in
+  the `--bits` sweep and the default (`nop`) sweep both complete and gate correctly (decision-scoped zero in
   `hardened` and `ultra`, non-zero in the opt-out control).
 - **The sweep's "total" undercounted by one per shard file with entries.** The accepted-offset
   files were written with `"\n".join(...)` (no trailing newline) and aggregated with
@@ -859,8 +918,7 @@ construction with none.
     worst 6.1% at 1 KiB decryption (was 8.4%).
 - **`mutants.out/` now describes the current source.** The committed evidence predated `v0.3`
   (its diffs still contained `mac_key` and the pre-change `decrypt` body). Re-ran the campaign
-  (`cargo mutants --features ultra -f src/lib.rs -F 'decrypt|accept_or_reject' -E 'replace & with
-  |' -- --test decision --test security`): **17 mutants, 15 caught, 2 unviable**, the same
+  (`cargo mutants --features ultra -f src/lib.rs -F 'decrypt|accept_or_reject' -E 'replace & with \|' -- --test decision --test security`): **17 mutants, 15 caught, 2 unviable**, the same
   outcome vector as before, so the change did not alter the mutation result — but the recorded
   diffs now carry the current function bodies and line numbers, and
   `tools/mutation_evidence.py` reports the committed directory describes the fresh run.

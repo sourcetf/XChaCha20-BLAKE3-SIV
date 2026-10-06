@@ -281,7 +281,10 @@ fn differential_every_aad_bit_is_authenticated() {
     // As above: an exact count, so a fixture with no small-AAD rows cannot make this vacuous.
     // The 130 cap is the same cost bound as the message sweep's 300: the AAD sweep is
     // O(aad_len) per row, and the fixture's non-empty AADs go up to 300 -- the largest
-    // *below* this cap is 65, so seven of the twenty-six non-empty rows are outside it.
+    // *below* this cap is 65, so **ten** of the twenty-six non-empty rows are outside it
+    // (seven *distinct lengths*: 191, 192, 193, 255, 256, 257, 300 -- the first version of
+    // this sentence said "seven ... rows", which is the distinct-length count, not the row
+    // count).
     // (This said "go up to 130", which was never true of the fixture; an audit parsed
     // it.) The sweep is a cost bound, not a coverage claim: every row is still checked
     // by the whole-fixture test above.

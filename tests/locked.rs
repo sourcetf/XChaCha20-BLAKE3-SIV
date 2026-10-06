@@ -164,8 +164,24 @@ fn the_key_itself_is_locked() {
 /// environment where a *known*-locked range says otherwise. Measured on this host: a
 /// successful `mlock` through `lock_range` shows up in `Locked:`; under `qemu-aarch64` it
 /// does not.
+///
+/// The probe range is **page-aligned inside an over-allocated buffer**, because
+/// `lock_range` expands a misaligned range to whole pages: a heap allocation is page-aligned
+/// only by luck, so a `Vec<u8>` of one page starting at offset 0x10 spans *two* pages and
+/// costs two pages of `RLIMIT_MEMLOCK` — under a tight allowance it then fails with ENOMEM
+/// while the key's own (page-aligned) lock succeeded, and this function would answer "the
+/// channel is unreliable" when it is only out of allowance. An audit measured exactly that
+/// at `ulimit -l 12`, where the strong check this probe guards silently degraded to the
+/// process-wide fallback. Aligning here makes the probe cost what a `LockedKey` costs.
 fn smaps_reports_locks() -> bool {
-    let probe = vec![0u8; 4096];
+    let mut backing = vec![0u8; 8192];
+    let base = backing.as_mut_ptr() as usize;
+    let aligned = (base + 4095) & !4095;
+    // SAFETY: `aligned` is `base + k` for some `k` in `0..=4095` (the mask rounds up to the
+    // next page boundary at most one page away), and the allocation is two pages, so
+    // `aligned + 4096 <= base + 8192` — the slice is inside the live allocation. The bytes
+    // are initialised and nothing else aliases them.
+    let probe = unsafe { core::slice::from_raw_parts_mut(aligned as *mut u8, 4096) };
     let ptr = probe.as_ptr() as usize;
     match xchacha20_blake3_siv::locked::lock_range(probe.as_ptr(), probe.len()) {
         Ok(()) => {
