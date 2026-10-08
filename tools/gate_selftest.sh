@@ -69,6 +69,24 @@ make_fake_home() {  # <cargo exit status>
   printf '%s\n' "$home"
 }
 
+# A throwaway `HOME` whose `cargo` *succeeds* while reporting that no test ran.
+#
+# This is check 3's stub, and it exists because a failing `cargo` (the one above)
+# never reaches `tools/fi_check.sh`'s `assert_tests_ran` guard: the campaign stops
+# at the build. A stub that succeeds and prints the `0 passed` line a name filter
+# that matched nothing produces is what makes that guard observable from here.
+make_zero_test_home() {
+  local home="$WORK/home-zero-tests"
+  mkdir -p "$home/.cargo/bin"
+  cat > "$home/.cargo/bin/cargo" <<'STUB'
+#!/bin/sh
+printf '%s\n' 'test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s'
+exit 0
+STUB
+  chmod +x "$home/.cargo/bin/cargo"
+  printf '%s\n' "$home"
+}
+
 hidden_run() {  # prints output, returns the tool's status
   local out rc
   set +e
@@ -172,6 +190,47 @@ else
   echo "  ok: tools/fi_check.sh -> exit $fi_rc with a failing cargo (no silent skip)"
 fi
 
+# 3. The zero-tests guard *inside* the campaign must fire. An audit deleted both
+#    `assert_tests_ran` call sites from `tools/fi_check.sh` and this file stayed
+#    green: check 2 above cannot see it, because a failing `cargo` stops the
+#    campaign at the build and the guard is never reached. Here every cargo
+#    invocation succeeds and prints the `test result: ok. 0 passed; ...` line a
+#    name filter that matched nothing produces, so the guard is the only thing
+#    between that log and a `pass` verdict. The campaign must fail *without judging
+#    a row*: an `  OK` or `  FAIL <row> expected ...` line means a zero-test log was
+#    read as a verdict, which is the vacuous pass the guard exists to stop.
+#    (Behavioural, not a text check: it pins "the campaign refuses zero-test
+#    evidence", so a rewrite that keeps the refusal keeps this green. With the
+#    row-path guard present the baseline call site is never reached under this
+#    stub, so it is not separately exercised.)
+HOME_ZERO="$(make_zero_test_home)"
+set +e
+zero_out="$(HOME="$HOME_ZERO" PATH="$HOME_ZERO/.cargo/bin:/usr/bin:/bin" \
+            timeout 300 bash tools/fi_check.sh 2>&1)"
+zero_rc=$?
+set -e
+if [ "$zero_rc" -eq 0 ] || [ "$zero_rc" -eq 124 ] \
+   || printf '%s\n' "$zero_out" | grep -q 'campaign complete'; then
+  echo "FAIL: tools/fi_check.sh reported success (exit $zero_rc) with a cargo that" >&2
+  echo "      succeeds but runs no tests. A row judged on such a log proves nothing." >&2
+  printf '%s\n' "$zero_out" | tail -5 | sed 's/^/      | /' >&2
+  fail=1
+elif [ "$zero_rc" -ne 1 ]; then
+  echo "FAIL: tools/fi_check.sh exited $zero_rc on a zero-test log; a campaign that" >&2
+  echo "      refuses such a log fails with 1 (0 would be a silent pass, 3 a silent" >&2
+  echo "      skip), so this is not the guard firing." >&2
+  printf '%s\n' "$zero_out" | tail -5 | sed 's/^/      | /' >&2
+  fail=1
+elif printf '%s\n' "$zero_out" | grep -qE '^  (OK|FAIL) '; then
+  echo "FAIL: tools/fi_check.sh judged a row (exit $zero_rc) from a log in which" >&2
+  echo "      zero tests ran. The guard (assert_tests_ran) is what refuses such a" >&2
+  echo "      log, so this is what deleting it looks like from here." >&2
+  printf '%s\n' "$zero_out" | grep -E '^  (OK|FAIL) ' | head -3 | sed 's/^/      | /' >&2
+  fail=1
+else
+  echo "  ok: tools/fi_check.sh -> exit $zero_rc on a zero-test log, before any row verdict"
+fi
+
 echo
 if [ "$fail" -ne 0 ]; then
   echo "gate contract: FAILED" >&2
@@ -179,4 +238,5 @@ if [ "$fail" -ne 0 ]; then
 fi
 echo "gate contract: the three tools checked here use exit 3 under"
 echo "               hidden tooling; verify.sh fails when a stage it was asked for is"
-echo "               skipped; and a campaign that cannot run does not report completion."
+echo "               skipped; a campaign that cannot run does not report completion;"
+echo "               and a campaign whose cargo runs no tests does not judge a row."

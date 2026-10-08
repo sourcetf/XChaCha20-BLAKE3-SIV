@@ -80,15 +80,31 @@ jobs:
       # `-Zmiri-strict-provenance` turns int-to-pointer casts into errors, which
       # is what actually checks the raw-pointer arithmetic in `zeroize_slice` /
       # `zeroize_array` (and the tag-buffer wipe in `Plaintext::drop`).
+      #
+      # A filter that matches nothing makes libtest print "test result: ok. 0 passed;
+      # ... N filtered out" and *exit 0*, so a renamed or `#[cfg]`-ed-out test would
+      # leave a Miri step green while Miri interpreted nothing. The count in the
+      # summary line is the only thing that says the filters matched, so every filtered
+      # Miri run below requires at least one test per filter (`verify.sh --miri`
+      # carries the same guard).
       - name: miri on the unsafe paths
         run: |
+          set -euo pipefail
+          work="${RUNNER_TEMP:-${TMPDIR:-/tmp}}"
           MIRIFLAGS="-Zmiri-disable-isolation -Zmiri-strict-provenance" \
             cargo +nightly miri test --release --features pure --lib -- \
               test_zeroize_covers_unaligned_prefix \
               test_x86_simd_kernels_match_scalar \
               test_simd_xor_matches_scalar_and_raw \
               test_empty_inputs \
-              test_detached_matches_attached
+              test_detached_matches_attached 2>&1 | tee "$work/miri-unsafe.log"
+          count="$(grep -E 'test result:' "$work/miri-unsafe.log" | tail -1 \
+            | sed -n 's/.* \([0-9][0-9]*\) passed.*/\1/p' || true)"
+          if [ -z "$count" ] || [ "$count" -lt 5 ]; then
+            echo "::error::the Miri filter matched ${count:-0} test(s); expected at least 5, so this step checked nothing"
+            exit 1
+          fi
+          echo "Miri interpreted $count tests"
 
       # The same tests under Miri's *other* aliasing model. Stacked Borrows
       # (the default) and Tree Borrows disagree about some programs, so passing
@@ -96,13 +112,23 @@ jobs:
       # the kind that sits in the gap (raw pointers derived from a `&mut`).
       - name: miri, tree borrows
         run: |
+          set -euo pipefail
+          work="${RUNNER_TEMP:-${TMPDIR:-/tmp}}"
           MIRIFLAGS="-Zmiri-disable-isolation -Zmiri-strict-provenance -Zmiri-tree-borrows" \
             cargo +nightly miri test --release --features pure --lib -- \
               test_zeroize_covers_unaligned_prefix \
               test_x86_simd_kernels_match_scalar \
               test_simd_xor_matches_scalar_and_raw \
               test_empty_inputs \
-              test_detached_matches_attached
+              test_detached_matches_attached 2>&1 | tee "$work/miri-tree-borrows.log"
+          # Same count guard as the step above: five filters, one test each.
+          count="$(grep -E 'test result:' "$work/miri-tree-borrows.log" | tail -1 \
+            | sed -n 's/.* \([0-9][0-9]*\) passed.*/\1/p' || true)"
+          if [ -z "$count" ] || [ "$count" -lt 5 ]; then
+            echo "::error::the Miri filter matched ${count:-0} test(s); expected at least 5, so this step checked nothing"
+            exit 1
+          fi
+          echo "Miri interpreted $count tests"
 
       # `detect_avx2` reports the *compiled* feature set under Miri (it cannot run
       # CPUID there), so the default run above takes the SSE2 path and this one
@@ -111,24 +137,44 @@ jobs:
       # whose feature is not enabled, so enabling it is what makes this legal.
       - name: miri, avx2 kernel
         run: |
+          set -euo pipefail
+          work="${RUNNER_TEMP:-${TMPDIR:-/tmp}}"
           MIRIFLAGS="-Zmiri-disable-isolation -Zmiri-strict-provenance" \
             RUSTFLAGS="-C target-feature=+avx2" \
             cargo +nightly miri test --release --features pure --lib -- \
               test_x86_simd_kernels_match_scalar \
               test_simd_xor_matches_scalar_and_raw \
-              test_simd_matches_scalar_all_lengths
+              test_simd_matches_scalar_all_lengths 2>&1 | tee "$work/miri-avx2.log"
+          # Same count guard: three filters, one test each.
+          count="$(grep -E 'test result:' "$work/miri-avx2.log" | tail -1 \
+            | sed -n 's/.* \([0-9][0-9]*\) passed.*/\1/p' || true)"
+          if [ -z "$count" ] || [ "$count" -lt 3 ]; then
+            echo "::error::the Miri filter matched ${count:-0} test(s); expected at least 3, so this step checked nothing"
+            exit 1
+          fi
+          echo "Miri interpreted $count tests"
 
       # The NEON kernel only exists on aarch64, and this is the only way Miri can
       # reach it: cross-interpretation. `miri setup` builds that sysroot from
       # rust-src, so no `rustup target add` is needed.
       - name: miri, neon kernel (aarch64)
         run: |
+          set -euo pipefail
+          work="${RUNNER_TEMP:-${TMPDIR:-/tmp}}"
           cargo +nightly miri setup --target aarch64-unknown-linux-gnu >/dev/null
           MIRIFLAGS="-Zmiri-disable-isolation -Zmiri-strict-provenance" \
             cargo +nightly miri test --release --features pure --target aarch64-unknown-linux-gnu --lib -- \
               test_aarch64_neon_kernel_matches_scalar \
               test_simd_xor_matches_scalar_and_raw \
-              test_zeroize_covers_unaligned_prefix
+              test_zeroize_covers_unaligned_prefix 2>&1 | tee "$work/miri-neon.log"
+          # Same count guard: three filters, one test each.
+          count="$(grep -E 'test result:' "$work/miri-neon.log" | tail -1 \
+            | sed -n 's/.* \([0-9][0-9]*\) passed.*/\1/p' || true)"
+          if [ -z "$count" ] || [ "$count" -lt 3 ]; then
+            echo "::error::the Miri filter matched ${count:-0} test(s); expected at least 3, so this step checked nothing"
+            exit 1
+          fi
+          echo "Miri interpreted $count tests"
 
       # Big-endian, by interpretation: s390x is 64-bit BE, so this is the one run
       # where the `from_le_bytes`/`to_le_bytes` sites and the SIMD byte order are
@@ -141,10 +187,20 @@ jobs:
       # ~5 minutes on a development host.
       - name: miri, big-endian (s390x)
         run: |
+          set -euo pipefail
+          work="${RUNNER_TEMP:-${TMPDIR:-/tmp}}"
           cargo +nightly miri setup --target s390x-unknown-linux-gnu >/dev/null
           MIRIFLAGS="-Zmiri-disable-isolation -Zmiri-strict-provenance" \
             cargo +nightly miri test --release --features pure --target s390x-unknown-linux-gnu --lib -- \
-              test_all_accelerated_paths_agree_on_a_boundary_corpus
+              test_all_accelerated_paths_agree_on_a_boundary_corpus 2>&1 | tee "$work/miri-s390x.log"
+          # Same count guard: one filter, one test.
+          count="$(grep -E 'test result:' "$work/miri-s390x.log" | tail -1 \
+            | sed -n 's/.* \([0-9][0-9]*\) passed.*/\1/p' || true)"
+          if [ -z "$count" ] || [ "$count" -lt 1 ]; then
+            echo "::error::the Miri filter matched ${count:-0} test(s); expected at least 1, so this step checked nothing"
+            exit 1
+          fi
+          echo "Miri interpreted $count tests"
 
   tsan:
     name: ThreadSanitizer (concurrency)
@@ -392,11 +448,12 @@ jobs:
       # The fault-injection counterpart: a campaign of fourteen rows written down as
       # source changes, each with the build it applies to, the test that acts as its
       # detector, and the outcome that is expected. Three of the rows are the
-      # interesting ones: one skipped branch accepts a forgery on the default build
-      # (which is what makes the fault model real), one skipped gate or one corrupted
-      # gate *value* does not on the `hardened` build, and replacing the computed tag
-      # outright is accepted by both -- pinned there so a change in that known limit
-      # is noticed rather than rediscovered.
+      # interesting ones: one skipped branch accepts a forgery on the opt-out
+      # (`--no-default-features`) build, which is what makes the fault model real; one
+      # skipped gate or one corrupted gate *value* does not on the `hardened` build
+      # (the default), and replacing the computed tag outright is accepted by both --
+      # pinned there so a change in that known limit is noticed rather than
+      # rediscovered.
       - uses: taiki-e/install-action@83ac0ad63c0167e6f06796fab0fce28db1bf3db0 # v2
         with:
           tool: cargo-mutants

@@ -164,8 +164,11 @@ fn zeroize_slice_clears_unaligned_window() {
 // `zeroize_array` ~29 s). Those figures are now pessimistic by roughly an order of
 // magnitude: with Kani 0.68.0 / CBMC 6.11.0 the one harness that runs the real
 // permutation (`hchacha20_matches_draft_vector`, 20 rounds, real inputs) finishes in
-// **37 s**, and the whole shard set (13 harnesses) runs in ~875 s with the slowest single
-// harness at ~460 s (an audit measured the suite; the 37 s was re-measured here). The
+// **roughly 33-61 s depending on host and flags** — 37 s re-measured on this machine,
+// 33.2 s on the auditor's host, and 1:01 on the CI runner with `--extra-pointer-checks`
+// (the figure `tools/kani_shards.py` records for the same shard) — so none of those is
+// exact for another host. The whole shard set (13 harnesses) runs in ~875 s with the
+// slowest single harness at ~460 s (an audit measured the suite). The
 // *design* is unchanged — the permutation and the wipe are still stubbed where the
 // property does not need them, because symbolic-key harnesses over the real rounds
 // still do not terminate — but the numbers above are history, not current costs.
@@ -347,7 +350,8 @@ fn hchacha20_matches_draft_vector() {
 // Cost, then and now: the original note here put a single concrete
 // `chacha20_block` at ~320 s because the tool bit-blasts the whole 20-round
 // permutation plus its unrolled loops — measured again with Kani 0.68.0 / CBMC
-// 6.11.0, the one harness that runs the real rounds takes **37 s** and the whole
+// 6.11.0, the one harness that runs the real rounds takes **roughly 33-61 s depending
+// on host and flags** (the range in the design note above) and the whole
 // 13-harness set ~875 s.  The structural point stands: an end-to-end
 // `encrypt`/`decrypt` harness invokes HChaCha20 (20 rounds), the subkey block, the
 // tag block, the encryption-key block and then the keystream — five permutations —

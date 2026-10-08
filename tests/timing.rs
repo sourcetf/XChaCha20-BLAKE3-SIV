@@ -14,7 +14,7 @@
 //! measurement floor of 60 ns/op — under a floor that coarse, over a run that
 //! long, scheduler drift on a shared runner is indistinguishable from a signal.
 //! The *same* test passes on that runner and on this machine in release, which is
-//! where it runs: both release jobs in CI, and any local `cargo test --release`.
+//! where it runs: any local `cargo test --release`, and CI's advisory job below.
 //!
 //! In a debug build these tests would be measuring the absence of the optimizer,
 //! not the constant-time behaviour of the code — so here they compile to nothing
@@ -22,9 +22,9 @@
 //! code that `clippy -D warnings` would reject).
 #![cfg(not(debug_assertions))]
 //!
-//! Two measurements explain why this file is *advisory* in CI: the assertion is
-//! `t < 10`, and a hosted VM produces systematic bias between two classes whose
-//! work is identical --
+//! Two measurements explain why the two leak *screens* here are advisory in CI,
+//! while the calibration test is gated: the assertion is `t < 10`, and a hosted VM
+//! produces systematic bias between two classes whose work is identical --
 //!
 //! ```text
 //! CI release job, no possible cause:  encrypt t = 10.96  (resolution 5.72 ns/op)
@@ -32,12 +32,14 @@
 //! a real order artefact, this harness:                 t = 35.6
 //! ```
 //!
-//! so 10 sits inside the noise and only 3x below a genuine effect. There is no
-//! threshold there that is both sensitive and stable, so CI runs these tests in a
-//! separate job that is allowed to fail (visible in the checks list), while the
-//! strict run is `./verify.sh --deep` on a quiet machine, where they report
-//! `t < 0.4`. The threshold itself is unchanged: the same test must still pass on
-//! hardware that can support the measurement. The three loops in this file are
+//! so 10 sits inside the noise and only 3x below the t = 35.6 order artefact above.
+//! There is no threshold there that is both sensitive and stable, so CI runs the
+//! two leak screens in a separate job that is allowed to fail (visible in the
+//! checks list, but it does not gate the build); the calibration test alone is
+//! blocking, in the `timing-instrument` job. The strict run of all three is
+//! `./verify.sh --deep` on a quiet machine, where they report `t < 0.4`. The
+//! threshold itself is unchanged: the same test must still pass on hardware that
+//! can support the measurement. The three loops in this file are
 //! serialised against each other (`TIMING_LOCK` below), because libtest runs them in
 //! parallel by default and that CPU contention would land in the numbers the tests
 //! attribute to the code.
@@ -182,10 +184,10 @@ fn sample_one(f: &mut impl FnMut()) -> f64 {
 /// This is not a detail. Measuring A then B in every sample makes any
 /// within-pair drift — frequency scaling, cache or branch-predictor state —
 /// systematically favour one side. The first version of this test did exactly
-/// that, and CI (whose clock is precise enough to resolve it: 2.8 ns/op against
-/// 3 us on the development host) reported t = 35.6 for two inputs whose work
-/// cannot differ, which is the signature of an order artefact rather than a
-/// leak. Randomising the order makes the artefact cancel.
+/// that, and CI reported t = 35.6 for two inputs whose work cannot differ. That is
+/// a systematic one-sided drift — bias, not a resolution question — and it is the
+/// signature of an order artefact rather than a leak. Randomising the order makes
+/// the artefact cancel.
 fn sample_pair(a: &mut impl FnMut(), b: &mut impl FnMut()) -> (Vec<f64>, Vec<f64>) {
     for _ in 0..OPS_PER_SAMPLE {
         a();

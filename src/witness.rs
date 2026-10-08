@@ -121,11 +121,13 @@ fn block(key: &[u8; 32], counter: u32, nonce: &[u8; 12]) -> [u8; 64] {
     let mut s = [0u32; 16];
     s[0..4].copy_from_slice(&CHACHA_CONST);
     // The key and nonce words are assembled field by field rather than into a *named*
-    // `[u8; 4]` temporary: a named 4-byte copy of key bytes is a thing a wipe can reach, and
-    // in a loop over the whole message (one block per 64 bytes) wiping each one measured
-    // ~30% of `ultra`'s large-message decryption. The unnamed `[u8; 4]` that `from_le_bytes`
-    // still builds is one of the short-lived copies the module header lists as left;
-    // `s`/`v`, which do hold the key words, are wiped below.
+    // `[u8; 4]` temporary: a named 4-byte copy of key bytes is a thing a wipe can reach, so
+    // leaving one here would need a wipe in a loop over the whole message (one block per
+    // 64 bytes). No cost figure is quoted for that wipe: it is not reproducible from this
+    // repository — the named temporary this replaced was never wiped in any revision, so
+    // the saving is unmeasured here. The unnamed `[u8; 4]` that `from_le_bytes` still
+    // builds is one of the short-lived copies the module header lists as left; `s`/`v`,
+    // which do hold the key words, are wiped below.
     for i in 0..8 {
         s[4 + i] = u32::from_le_bytes([key[i * 4], key[i * 4 + 1], key[i * 4 + 2], key[i * 4 + 3]]);
     }
@@ -155,8 +157,7 @@ fn block(key: &[u8; 32], counter: u32, nonce: &[u8; 12]) -> [u8; 64] {
 
     let mut out = [0u8; 64];
     // Byte-wise, so the keystream word never exists as a named 4-byte temporary: that
-    // shape would need a wipe, and the per-word wipe was the other half of the measured
-    // cost above.
+    // shape would need a wipe, on the same per-block path as the key unpacking above.
     for i in 0..16 {
         let x = v[i].wrapping_add(s[i]);
         out[i * 4] = x as u8;
@@ -936,10 +937,22 @@ mod tests {
     /// the words during unpacking leaves the assembled words identical, so those tests
     /// cannot see the order at all. The end-to-end cross-check in `src/lib.rs` *is*
     /// sensitive to it in `block` and `Hasher::new_keyed`, because their inputs are the
-    /// derived subkey and `k_in`/`k_out` — not constant-byte. But `hchacha20` is fed the
-    /// **master key** and the **nonce prefix**, both constant here, so a permuted
-    /// `hchacha20` word order passes every existing test: verified by permuting its key
-    /// words, which left all six of the others green and only this one red. This runs
+    /// derived subkey and `k_in`/`k_out` — not constant-byte. That also reaches
+    /// `hchacha20` whenever a composite test uses a non-constant key, so a permuted
+    /// `hchacha20` word order does *not* pass every existing test. Permuting its key
+    /// words (`s[4 + i]` → `s[4 + (7 - i)]`) leaves the four other tests in this module
+    /// green — none of them feeds `hchacha20` distinct bytes — but under the same
+    /// mutation `cargo test --release --features ultra --lib` reports 55 passed /
+    /// 8 failed. Seven of the eight are composite tests (the three
+    /// `test_xchacha20_blake3_siv_kat_*` cases, `test_avalanche_single_bit_flip`,
+    /// `test_all_accelerated_paths_agree_on_a_boundary_corpus`,
+    /// `test_random_helpers_produce_usable_output`, `test_tag_binds_both_derived_keys`)
+    /// that see it as `AuthenticationFailed` from the `ultra` encrypt/decrypt
+    /// cross-check rather than as a named site;
+    /// `tests/ultra.rs::every_layer_answers_correctly_in_the_ultra_build` fails the same
+    /// way. What this test adds is the unit-level witness of the unpacking: the failure
+    /// lands on the `hchacha20` comparison itself, with both values, so the word order
+    /// is named where it lives instead of surfacing as "the witness disagrees". It runs
     /// the comparisons on distinct bytes, so the unpacking order in every one of the
     /// three sites is actually exercised.
     #[test]

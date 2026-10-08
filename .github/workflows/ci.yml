@@ -848,10 +848,11 @@ jobs:
 
           > **Wire format.** This construction is bespoke and not byte-compatible
           > with anything else: a two-level keyed-BLAKE3 65-byte tag over the
-          > XChaCha20 nonce extension. It has already changed twice (v0.1 used
-          > Poly1305 with a 32-byte tag; v0.3 made the tag two-level), so treat the
-          > format as unstable until 1.0. See
-          > README.md for the construction and its security level.
+          > XChaCha20 nonce extension. The format changed twice on the way here
+          > (v0.1 used Poly1305 with a 32-byte tag; v0.3 made the tag two-level) and
+          > revision \`v0.3\` is now frozen: it will not change without an explicit
+          > revision bump, not silently. The crate itself is pre-1.0, so its Rust API
+          > may still move. See README.md for the construction and its security level.
           EOF
 
           gh release create "$tag" \

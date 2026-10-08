@@ -2,10 +2,14 @@
 """Compare a fresh `cargo mutants` run against the committed evidence.
 
 `mutants.out/` is committed on purpose (see `tests/README.md`): it is the record of the
-run the CI mutation step performs, and the claim is that it describes the *current*
-source. Nothing enforced that claim — the directory was refreshed when someone
-remembered, and it is exactly the kind of file whose staleness is invisible: it still
-parses, still says "0 missed", and still names functions that exist.
+run the CI mutation step performs, and what this script — and therefore the CI step —
+enforces is that its mutant -> outcome mapping still describes the *current* source.
+It does **not** enforce that the recorded line and column numbers still point into the
+current file: those are the coordinates of the revision the run was made against, and
+they go stale as the source moves above a mutant. Only a fresh campaign re-syncs them.
+The staleness that is otherwise invisible is in the mapping — a committed directory
+still parses, still says "0 missed", and still names functions that exist, while the
+decision it describes has changed shape.
 
 This script is the enforcement. It compares two evidence directories — the committed one
 and the one the current run just produced — on the only fields that carry meaning:
@@ -16,7 +20,9 @@ and the one the current run just produced — on the only fields that carry mean
 and deliberately not on the fields that move every run: line and column numbers,
 durations, timestamps, host paths, log file names. Line numbers in particular shift
 whenever a line is added anywhere above a mutant, so comparing them would fail on every
-unrelated edit and the gate would be deleted within a week.
+unrelated edit and the gate would be deleted within a week. The consequence is stated
+rather than hidden: the committed directory's coordinates are the run's, not HEAD's,
+and a reader following them lands in the wrong place.
 
 Usage:
     tools/mutation_evidence.py COMMITTED_DIR FRESH_DIR
@@ -165,8 +171,8 @@ def main():
     if not fresh and not committed:
         print(
             "FAIL: both evidence directories are empty, so there is nothing to compare; "
-            "'the committed evidence describes this run' would be true of any two empty "
-            "sets. Expected at least one mutant on each side.",
+            "'the committed evidence's mapping matches this run' would be true of any two "
+            "empty sets. Expected at least one mutant on each side.",
             file=sys.stderr,
         )
         sys.exit(EXIT_COULD_NOT_RUN)
@@ -177,9 +183,10 @@ def main():
         for line in problems:
             print(line, file=sys.stderr)
         print(
-            "\n  `mutants.out/` is committed evidence that must describe the current\n"
-            "  source (tests/README.md). Refresh it by running the same command the CI\n"
-            "  mutation step runs, from the repository root, and committing the result:\n"
+            "\n  `mutants.out/` is committed evidence, and its mutant -> outcome mapping\n"
+            "  must match this fresh run (tests/README.md). Refresh it by running\n"
+            "  the same command the CI mutation step runs, from the repository root, and\n"
+            "  committing the result:\n"
             "\n"
             "    cargo mutants --features ultra -f src/lib.rs \\\n"
             "      -F 'decrypt|accept_or_reject' -E 'replace & with \\|' \\\n"
@@ -188,7 +195,7 @@ def main():
         )
         return 1
 
-    print("PASS: the committed evidence describes this run")
+    print("PASS: the committed evidence's mutant -> outcome mapping matches this run")
     return 0
 
 

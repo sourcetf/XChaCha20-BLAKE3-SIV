@@ -8,6 +8,95 @@ green push to `main` — which are build artefacts of that job, not construction
 
 ## Unreleased
 
+### The acceptance report's 28 findings: two tests a comment could satisfy, a stage that could not fail, and drifted claims
+
+A third-party **acceptance** report on `b418e17` (28 findings) found **no high or medium security
+defect and nothing in the implementation**. Its two "medium" items are documentation/evidence
+consistency, its three "medium-low" items are tests whose assertions a comment can satisfy and a
+verification stage that can pass while checking nothing, and the rest are comment/count drift.
+All of them are disposed of here; the report's own severities are used as the headings.
+
+**Test strength — the two 中低 holes, each reproduced by injection into a copy and then fixed with
+the same comment-stripping scanner `tests/decision_scope.rs` and `tests/counter_range.rs` already
+use:**
+
+- **`tests/ultra.rs`'s `scrub_stack` count could be satisfied by a comment.** `body_of` sliced the
+  raw `include_str!` text, so replacing the real call at `src/lib.rs:2495` with
+  `// scrub_stack(); (planted)` left `scrub_stack_is_called_at_every_entry_point` green — and
+  `scrub_stack` has no behavioural signature, so that count is its only existence witness. Every
+  source-shape assertion in the file now reads a comment-stripped, string-blanked view (five
+  tests; the one that asserts on *documentation prose* deliberately still reads the raw text, and
+  says why). The injection now fails with `must contain 3 scrub_stack(); call sites, found 2`.
+- **`tests/locked.rs`'s text-presence assertions likewise** (`unlock[0].contains("if ok(u) {")`
+  and its five siblings, plus `brace_blocks`). Making the `munlock`-failure path restore
+  `MADV_DODUMP` unconditionally — the exact regression those assertions exist to catch — left
+  `the_dump_advice_is_issued_on_the_right_range` green. Now it fails, with the same scanner.
+- **The refusal-lock test no longer skips silently.** On a host whose `RLIMIT_MEMLOCK` is large
+  enough (or that holds `CAP_IPC_LOCK`) the allowance could not be exhausted, so the test printed
+  `SKIPPED` and returned — and under libtest's captured stderr that `ok` is indistinguishable from
+  a test that really exercised the refusal path. An unexercised refusal path is now a **failure**,
+  with `XSIV_ALLOW_UNEXERCISED_REFUSAL=1` as the explicit opt-out for a host that genuinely cannot
+  exercise it (`tests/README.md` documents it).
+
+**A stage that could not fail (中低): `verify.sh`'s Miri stage had no "tests actually ran" guard.**
+libtest prints `test result: ok. 0 passed; … N filtered out` and **exits 0** when a filter matches
+nothing, so a renamed or `#[cfg]`-ed-out test would have turned the whole UB stage into a pass that
+checked no code. Every Miri run now goes through a wrapper that reads the summary line and requires
+at least the number of filters named (`tools/ctgrind.sh`, `tools/tsan.sh` and `tools/fi_check.sh`
+each already carried an equivalent); the same guard was added to the five filtered Miri steps in
+`deep.yml`. `tools/gate_selftest.sh` gained a third check that runs the fault campaign under a
+`cargo` stub which *succeeds* and reports zero tests, so deleting `fi_check.sh`'s own guard now
+fails the self-test — the auditor had shown that deleting it was invisible.
+
+**The two "medium" documentation/evidence items:**
+
+- **The README's performance summary contradicted `performance.md`'s own table.** It said the
+  default build is "ahead of `XChaCha20Poly1305` on encryption from 256 B up (level at 1–4 KiB,
+  where the noise floor is a tie)"; the table's `hardened enc` row is 1.25x / 1.16x / **0.87x** /
+  1.02x / 1.25x at 64 B–16 KiB, and `performance.md` itself says the build "is the slower of the
+  two around 1 KiB". 1 KiB is 13 % behind, well outside the stated 6.8 % median floor. The summary
+  now reads ahead at 64–256 B, behind at 1 KiB, level at 4 KiB, ahead from 16 KiB up, and gives
+  decryption's crossover as 16 KiB.
+- **`mutants.out/` does not describe HEAD, while `tests/README.md` claimed the match was
+  enforced.** The recorded coordinates are the run's (`mutants.out/diff`'s hunk headers and
+  `unviable.txt` match the `a2a046d` tree; `accept_or_reject` has since moved +231 lines), and
+  `tools/mutation_evidence.py` deliberately keys on `(function, genre, replacement, occurrence)`
+  and never reads line/column — so the enforced invariant is the **mutant→outcome mapping**, not
+  the coordinates. Regenerating the evidence would mean re-running the campaign, and rewriting the
+  line numbers by hand would fabricate outcomes for sites that were never mutated, so the **claim**
+  was corrected instead, in `tests/README.md` and in the tool's own docstring and messages: the
+  mapping is what is checked, an external reader following a recorded line number lands in the
+  wrong place, and only a fresh campaign re-syncs the coordinates.
+
+**Everything else (低/信息), each verified against the code before the wording moved:** the README
+and `performance.md` said the `hardened` layer adds "two more 65-byte comparisons" where it adds
+**three** (the default build runs four subtle-loop passes to the opt-out build's one, plus the
+fold) — both files now say three; `README.md` claimed `kat_regression_lock`'s values come "from a
+fixture no in-crate change can edit" when they are inlined literals from the same generator (the
+claim is now the weaker, accurate one `tests/README.md` already carried); `src/lib.rs`'s qemu note
+named two targets where CI runs four; `deep.yml`'s fault-campaign comment called the opt-out row
+"the default build"; `tests/timing.rs` said the screen runs in "both release jobs in CI" when every
+matrix branch passes `-- --skip timing` (only the advisory job and the `timing-instrument`
+calibration job run it — and the header now says plainly which of the three is blocking); the
+release note in `ci.yml` said "treat the format as unstable until 1.0" while `README.md` and
+`SECURITY.md` say revision `v0.3` is frozen — the note now distinguishes the frozen *wire format*
+from the pre-1.0 *Rust API*; `derive_tag`'s doc claimed the input is never concatenated when the
+window path deliberately does use one exact-sized, wiped buffer; `accept_or_reject`'s comment said
+only `--no-default-features` passes one `Choice` to both gates when `encrypt`'s `ultra` branch does
+too; one node said the 65-byte fold costs "tens of nanoseconds" where every other file says 1.4 ns;
+the window comment presented `2000..=65488` as the message range when it is the empty-AAD case of
+`48 + |A| + |M| ∈ [2048, 65536]`; the `Key`/`LockedKey` comments warned that `==` would silently
+fall through to a short-circuiting array comparison, when without the hand-written `PartialEq` it
+does not compile at all (only an explicit `*a == *b` or `as_bytes()` reaches that comparison); and
+`src/witness.rs`'s new test no longer claims a permuted `hchacha20` order "passes every existing
+test" (measured: it fails 8 of 63 lib tests and `tests/ultra.rs`, seven of them surfacing as
+`AuthenticationFailed` from the `ultra` cross-check rather than as a named site — what the new test
+adds is that the failure lands on the unpacking itself), while the "~30 % wipe cost" it also quoted
+is gone: `git log -S` shows the named temporary it referred to was never wiped in any revision, so
+the saving is unmeasured here. `tools/kani_shards.py`'s single 1:01 figure and `src/proofs.rs`'s
+37 s now agree as a host-dependent range (33–61 s), and `tools/mutation_evidence.py`'s and
+`tools/kani_shards.py`'s own wording moved with the claims they support.
+
 ### The key-commitment target bound is the 256-bit `subkey`, not the 520-bit tag
 
 A further audit pass — the third-party report's still-open item `F-C5b`, confirmed here against
@@ -26,12 +115,23 @@ number is key-search level, the same tier the context row was corrected to.
   tag-hit route, which the `subkey` route dominates. The decision the number was attached to
   survives — a second key is out of reach — but it is not a `2^-264` event, and **the tag width
   does not set it**, which is precisely what the context row already said about the same kind of
-  256-bit intermediate. Corrected in `README.md` (the properties list, both commitment rows, the
-  "two games" section, the "`2^128` bounds *collisions*, not *targets*" section and the `2^260`
-  post-mortem), `SECURITY-ANALYSIS.md` (Thm 2's commitment bullet, §4.5's first and second
-  consequences, §4.10's target-game bullet and its preamble, §5 rows 3 and 17, §5.1, §8.1's cost
-  table and quantum row, §9's falsifier 4, the reference list, and the "strongest true sentence"
-  paragraph) and `AUDIT-RESPONSE.md`.
+  256-bit intermediate. Corrected in `README.md` (the properties list, the key-commitment row,
+  the "two games" section, the "`2^128` bounds *collisions*, not *targets*" section and the
+  `2^260` post-mortem), `SECURITY-ANALYSIS.md` (Thm 2's commitment bullet, §4.5's preamble, first
+  and second consequences and its target-game bullet, §5 rows 3 and 17, §5.1's cost table,
+  §5.2's falsifier 4, §8.1's falsification row and quantum row, the reference list, and the
+  "strongest true sentence" paragraph), **`src/lib.rs`'s crate docs, [`TAG_LEN`]'s docs,
+  `derive_tag`'s docs and two test comments** (the same claim sat in the crate's public
+  documentation, where the first sweep — markdown only — missed it) and `AUDIT-RESPONSE.md`.
+- **Two smaller errors in the same material, found by the verification pass that checked the
+  correction above.** The *context* route was described as usable with "a second AAD **or
+  nonce**" in three places (`README.md`, `SECURITY-ANALYSIS.md` §5 row 17 and §5.1's context
+  row): it cannot be, because changing the nonce moves `k_in` and `k_out` as well, so the two
+  inner digests would be taken under different keys and the `2^128` birthday argument does not
+  reach them — the route needs the nonce held fixed, i.e. a second AAD. And §8.1's target row
+  said a matching `subkey` "almost surely belongs to a key *other* than the real one": a `subkey`
+  has no unique preimage, so the real key is one of them and a sweep expects one more, making a
+  match a *different* key about half the time. Neither changes an exponent.
 - **What the width buys is narrower than the documents claimed.** It keeps the direct tag-hit
   route (`2^-|T|` per candidate key) from becoming the binding object, which happens below 256
   bits: a 32-byte tag would sit exactly at that level — raising the expected second-key count from

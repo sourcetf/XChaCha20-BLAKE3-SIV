@@ -275,6 +275,19 @@ fn memlock_limit_bytes() -> Option<u64> {
     }
 }
 
+/// Whether this host has recorded, with `XSIV_ALLOW_UNEXERCISED_REFUSAL=1`, that
+/// `a_refused_lock_is_reported_and_returns_the_allowance` may return without reaching the
+/// refusal path.
+///
+/// That test exists for the one arm of `LockedKey::new` no other test can reach, and libtest
+/// prints `ok` for a returned test whether or not it got there. A host whose allowance is too
+/// large to exhaust (or is unlimited) cannot reach the arm, so returning vacuously is a
+/// failure unless the operator says otherwise — the same convention `XSIV_ALLOW_UNLOCKED`
+/// uses for a host that cannot lock at all.
+fn allow_unexercised_refusal() -> bool {
+    std::env::var("XSIV_ALLOW_UNEXERCISED_REFUSAL").is_ok()
+}
+
 /// A refused lock must be **reported**, and it must not consume the allowance.
 ///
 /// The tests above only ever *skip* when the kernel refuses (`lock_or_skip`), so the failure
@@ -295,6 +308,13 @@ fn memlock_limit_bytes() -> Option<u64> {
 /// distinguish from the allocator reusing the memory. (The shipped failure path frees the
 /// page through its `Drop`, and this test's charge accounting is what would notice a
 /// version that kept the lock instead.)
+///
+/// A host whose allowance is **too large to exhaust** — unlimited, or more than the
+/// `MAX_KEYS` ceiling below is willing to lock — cannot reach the refusal, and returning
+/// early there says `ok` in libtest's summary exactly like a test that exercised it. That
+/// was another audit finding, so it is now a *failure* unless
+/// `XSIV_ALLOW_UNEXERCISED_REFUSAL=1` records that this host knowingly leaves the refusal
+/// path untested.
 #[test]
 fn a_refused_lock_is_reported_and_returns_the_allowance() {
     let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
@@ -306,9 +326,20 @@ fn a_refused_lock_is_reported_and_returns_the_allowance() {
     // The soft limit in bytes. `None` covers "unlimited" (nothing to exhaust) and
     // "unreadable" — guessing a number and looping to it would be worse.
     let Some(limit_bytes) = memlock_limit_bytes() else {
+        // "Unlimited" is the largest allowance of all, and an unreadable file has the same
+        // consequence: the failure arm cannot be reached, so the test would assert nothing
+        // about it. Loud by default, with the same recorded escape hatch as below.
+        assert!(
+            allow_unexercised_refusal(),
+            "RLIMIT_MEMLOCK is unlimited (or /proc/self/limits is unreadable), so the \
+             refusal path of `LockedKey::new` cannot be reached here and this test would \
+             return vacuously. Set XSIV_ALLOW_UNEXERCISED_REFUSAL=1 to record that this \
+             host knowingly leaves the refusal path untested"
+        );
         eprintln!(
-            "SKIPPED: RLIMIT_MEMLOCK is unlimited (or /proc/self/limits is unreadable), so \
-             this test cannot exhaust it to reach the refusal path"
+            "SKIPPED (allowed by XSIV_ALLOW_UNEXERCISED_REFUSAL=1): RLIMIT_MEMLOCK is \
+             unlimited (or /proc/self/limits is unreadable), so this test cannot exhaust \
+             it to reach the refusal path"
         );
         return;
     };
@@ -383,8 +414,7 @@ fn a_refused_lock_is_reported_and_returns_the_allowance() {
     let Some(errno) = refusal else {
         // No refusal within a count the allowance cannot hold *if* the loop was bounded by
         // the allowance; then a call that keeps succeeding is a refusal that is not being
-        // reported. When `MAX_KEYS` is the smaller bound the refusal is simply out of
-        // reach, and this is a skip either way.
+        // reported. When `MAX_KEYS` is the smaller bound the refusal is simply out of reach.
         if allowance_cap <= MAX_KEYS {
             let charged_now = LockedKey::locked_bytes().expect("VmLck is readable on Linux");
             assert!(
@@ -395,9 +425,25 @@ fn a_refused_lock_is_reported_and_returns_the_allowance() {
                 charged_now.saturating_sub(baseline),
             );
         }
+        // Out of reach is not a pass: libtest prints `ok` for a returned test whether or not
+        // it reached the failure arm it exists for, and an audit named this return as the one
+        // silently-vacuous outcome in this file (the other is the unlimited-limit branch
+        // above). So it is a failure unless the operator records that this host accepts the
+        // gap.
+        assert!(
+            allow_unexercised_refusal(),
+            "the refusal path was not exercised: {} keys ({per_key} bytes charged each) were \
+             locked and the allowance ({limit_bytes} bytes) was still not exhausted, so the \
+             failure arm of `LockedKey::new` went untested and this test is vacuous on this \
+             host. Bound RLIMIT_MEMLOCK so the allowance is exhaustible, or set \
+             XSIV_ALLOW_UNEXERCISED_REFUSAL=1 to record that this host knowingly leaves the \
+             refusal path untested",
+            held.len()
+        );
         eprintln!(
-            "SKIPPED: {} keys ({} bytes charged each) were locked with no refusal, so the \
-             allowance here is not exhaustible the way this test assumes",
+            "SKIPPED (allowed by XSIV_ALLOW_UNEXERCISED_REFUSAL=1): {} keys ({} bytes \
+             charged each) were locked with no refusal, so the allowance here is not \
+             exhaustible the way this test assumes",
             held.len(),
             per_key
         );
@@ -566,14 +612,107 @@ fn unlocking_restores_core_dump_inclusion() {
 /// rather than about a copy that can drift.
 const LIB: &str = include_str!("../src/lib.rs");
 
-/// Every brace-matched block in `LIB` that starts at `needle`, `needle` included.
+/// `LIB` with comments removed and string-literal contents blanked, cut at `mod tests {`.
+///
+/// Every source-shape assertion below runs on this rather than on the raw file. The raw text
+/// made each `contains` satisfiable without the code: an audit replaced the guarded
+/// `MADV_DODUMP` restore in `unlock_range` with an *unconditional* one, wrote the removed
+/// condition out as a comment, and `the_dump_advice_is_issued_on_the_right_range` stayed
+/// green — the exact regression that test exists to catch. `libtest` cannot share items
+/// between test binaries, so the scanner is copied from `tests/decision_scope.rs` and
+/// `tests/counter_range.rs` rather than imported.
+fn non_test_source() -> String {
+    let cut = LIB.find("mod tests {").expect("the test module must exist");
+    strip_comments(&LIB[..cut])
+}
+
+/// See [`non_test_source`]: comments and string-literal contents are removed, with newlines
+/// kept so line positions stay comparable.
+///
+/// A small state machine rather than `find("//")`, because a `//` inside a string literal
+/// used to cut the rest of the line out of the scan, and a `/* … */` block was scanned as
+/// code. Literal contents are dropped (the quotes remain, so a literal becomes `""`), so a
+/// *string* carrying the text cannot stand in for a statement either.
+fn strip_comments(text: &str) -> String {
+    #[derive(PartialEq)]
+    enum Mode {
+        Code,
+        Line,
+        Block,
+        Str,
+    }
+    let b = text.as_bytes();
+    let mut out = String::with_capacity(text.len());
+    let mut mode = Mode::Code;
+    let mut i = 0usize;
+    while i < b.len() {
+        let c = b[i];
+        match mode {
+            Mode::Code => {
+                if c == b'/' && b.get(i + 1) == Some(&b'/') {
+                    mode = Mode::Line;
+                    i += 2;
+                } else if c == b'/' && b.get(i + 1) == Some(&b'*') {
+                    mode = Mode::Block;
+                    i += 2;
+                } else if c == b'"' {
+                    // Keep the opening quote; the contents are dropped in `Mode::Str`
+                    // and the closing quote is kept there.
+                    out.push('"');
+                    mode = Mode::Str;
+                    i += 1;
+                } else {
+                    out.push(c as char);
+                    i += 1;
+                }
+            }
+            Mode::Line => {
+                if c == b'\n' {
+                    out.push('\n');
+                    mode = Mode::Code;
+                }
+                i += 1;
+            }
+            Mode::Block => {
+                if c == b'*' && b.get(i + 1) == Some(&b'/') {
+                    mode = Mode::Code;
+                    i += 2;
+                } else {
+                    if c == b'\n' {
+                        out.push('\n'); // keep line numbers aligned
+                    }
+                    i += 1;
+                }
+            }
+            Mode::Str => {
+                if c == b'\\' {
+                    i += 2; // skip the escaped byte (including `\"`)
+                } else if c == b'"' {
+                    out.push('"');
+                    mode = Mode::Code;
+                    i += 1;
+                } else {
+                    // Drop the contents so no byte inside a literal is scanned.
+                    i += 1;
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Every brace-matched block in the non-test source that starts at `needle`, `needle`
+/// included.
 ///
 /// The same helper `tests/decision_scope.rs` uses; it is duplicated rather than shared
 /// because a test binary cannot import another test binary's items, and a third file
 /// existing only to hold it would be a file to keep in `tests/README.md` for four lines.
+/// It reads [`non_test_source`], so a block ending in a comment that contains `{` or a `}`
+/// cannot unbalance the brace walk, and a needle mentioned in prose is not a definition.
 fn brace_blocks(needle: &str) -> Vec<String> {
+    let text = non_test_source();
     let mut out = Vec::new();
-    let mut rest = LIB;
+    let mut rest = text.as_str();
     while let Some(i) = rest.find(needle) {
         let after = &rest[i..];
         let open = after.find('{').expect("block without a body");
@@ -614,8 +753,11 @@ fn the_integrity_tag_is_wiped_in_both_callers() {
     // frame, which no caller can reach, and `tools/stack_residue.sh` measured exactly that as
     // an 8-byte residue in the `locked` case. Writing through the caller's slice is what
     // leaves a single copy for the caller to wipe.
+    // Comments stripped: a signature mentioned in prose is not a signature, and the wipe
+    // this test exists for is a statement.
+    let code = non_test_source();
     assert!(
-        LIB.contains("fn integrity_tag(key: &[u8], out: &mut [u8; KEY_TAG_LEN])"),
+        code.contains("fn integrity_tag(key: &[u8], out: &mut [u8; KEY_TAG_LEN])"),
         "integrity_tag no longer writes through a caller slice, so it keeps its own copy of \
          a hash of the key in a frame no wipe reaches"
     );
@@ -669,12 +811,16 @@ fn the_integrity_tag_is_wiped_in_both_callers() {
 ///   address with `EINVAL`. The third shipped defect.
 #[test]
 fn the_dump_advice_is_issued_on_the_right_range() {
+    // Comments stripped: each assertion here pins a *statement*, and the injection an audit
+    // used (an unconditional `MADV_DODUMP` restore with the removed condition left as prose)
+    // was exactly a statement turned into a comment. The raw text would accept it.
+    let code = non_test_source();
     assert!(
-        LIB.contains("const MADV_DONTDUMP: usize = 16;"),
+        code.contains("const MADV_DONTDUMP: usize = 16;"),
         "MADV_DONTDUMP must be 16 (asm-generic/mman-common.h)"
     );
     assert!(
-        LIB.contains("const MADV_DODUMP: usize = 17;"),
+        code.contains("const MADV_DODUMP: usize = 17;"),
         "MADV_DODUMP must be 17 (asm-generic/mman-common.h)"
     );
 

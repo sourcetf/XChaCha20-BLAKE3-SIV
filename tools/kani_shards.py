@@ -50,9 +50,13 @@ PROOFS = os.path.join(ROOT, "src", "proofs.rs")
 # on, which CI passes: the flag was never what this shard could not afford.
 SHARDS = [
     # The only harness that executes the full 20-round permutation, so it is the
-    # one whose cost cannot be argued away by stubbing. Measured here: 1:01 with a
-    # 1.3 GB peak, pointer checks on. Sequential because it is the single most
-    # expensive harness in the suite, while the others are small enough to pair up.
+    # one whose cost cannot be argued away by stubbing. Its cost is host- and
+    # toolchain-dependent -- 1:01 with a 1.3 GB peak (pointer checks on) is the
+    # measurement recorded here, while `src/proofs.rs`'s design note re-measures
+    # 37 s with Kani 0.68.0 / CBMC 6.11.0 and an audit host measured 33 s -- so
+    # treat it as roughly half a minute to a minute. Sequential because it is the
+    # single most expensive harness in the suite, while the others are small
+    # enough to pair up.
     ("permutation", ["hchacha20_"], 1),
     # The MAC and the tag: what the keyed hash is fed, and what it returns.
     ("tag", ["tag_", "every_tag_byte", "derive_enc_", "every_aad_"], 2),

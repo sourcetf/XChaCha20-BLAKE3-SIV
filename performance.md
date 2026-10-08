@@ -106,7 +106,7 @@ Read both tables as: this crate pays more *per message* (three derived keys, a
 there is enough data to batch). Two costs are visible in the configuration
 comparison, and both are the price of a defence rather than an accident:
 
-* **`hardened`'s second gate is a fixed per-message cost on decrypt** — two more
+* **`hardened`'s second gate is a fixed per-message cost on decrypt** — three more
   65-byte constant-time comparisons plus an independently written eight-byte fold
   (the two gates run `subtle`'s byte loop both ways round — four 65-byte comparison
   passes on the default build, against the opt-out build's single pass — plus the
@@ -125,8 +125,9 @@ comparison, and both are the price of a defence rather than an accident:
   the cost, `hardened,dual-mac` — `ultra`'s two fault-model layers, without the witness
   and without the `locked`/`rng` layers — is the configuration to measure against; the
   table's `opt-out` and `hardened` columns bracket it, since `dual-mac` costs one extra
-  tag pass. (`ultra` minus *only* the witness is `hardened,dual-mac,locked,rng`, the
-  configuration the "what the `ultra` layer costs" table below measures.)
+  tag pass. (`ultra` minus *only* the witness is `hardened,dual-mac,locked,rng`; the
+  "what the `ultra` layer costs" table below prices `ultra` — that configuration plus
+  the witness — against the default.)
 
 Latency is not throughput divided by size, because the fixed per-message cost
 dominates at the small end: at 64 bytes the default build is about as fast as the

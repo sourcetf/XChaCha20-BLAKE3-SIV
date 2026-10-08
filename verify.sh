@@ -413,18 +413,57 @@ if [ "$RUN_MIRI" -eq 1 ]; then
       test_empty_inputs
       test_detached_matches_attached
     )
+    # A filter that matches nothing makes libtest print "test result: ok. 0 passed;
+    # ... N filtered out" and *exit 0* -- and Miri then interprets nothing. Renaming
+    # or `#[cfg]`-ing-out one of the names below would turn this whole UB stage into a
+    # pass that checked no code; the count in the summary line is the only thing that
+    # says the filter matched, so every run below goes through this wrapper and must
+    # report at least the number of tests its filter list names. The same guard
+    # `tools/ctgrind.sh`, `tools/tsan.sh` and `tools/fi_check.sh` each carry; this
+    # stage was the one without it.
+    #
+    # `tee` instead of capturing the output in a variable: Miri is slow and verbose,
+    # so the output is streamed and only the summary is read back from the log.
+    # `set -o pipefail` (top of file) makes a non-zero `cargo miri` exit fail the
+    # pipeline, which the `if !` below sees -- without pipefail, `tee` exiting 0
+    # would hide it. The summary is matched as a substring rather than with `^`
+    # because CI sets `CARGO_TERM_COLOR=always` and libtest then wraps the `ok` in
+    # colour codes ("test result: <green>ok<reset>. 5 passed"); the prefix and the
+    # count are unpainted either way.
+    miri_log="$(mktemp)"
+    trap 'rm -f "$miri_log"' EXIT
+    miri_run() {  # <expected tests> <description> <command...>
+      local want="$1" what="$2"; shift 2
+      if ! "$@" 2>&1 | tee "$miri_log"; then
+        echo "FAIL: the Miri run for $what exited non-zero" >&2
+        exit 1
+      fi
+      local count
+      count="$(grep -E 'test result:' "$miri_log" | tail -1 \
+        | sed -n 's/.* \([0-9][0-9]*\) passed.*/\1/p' || true)"
+      if [ -z "$count" ] || [ "$count" -lt "$want" ]; then
+        echo "FAIL: the Miri run for $what reported ${count:-no} passed test(s)," >&2
+        echo "      expected at least $want: a renamed or moved test makes the" >&2
+        echo "      filter match nothing and this run check no code (libtest exits 0)." >&2
+        exit 1
+      fi
+    }
     # `-Zmiri-strict-provenance` is what actually exercises the raw-pointer
     # arithmetic in the zeroization helpers and the tag-buffer wipe; the Tree
     # Borrows pass is a second opinion, because the two aliasing models do not
     # accept the same programs.
-    MIRIFLAGS="-Zmiri-disable-isolation -Zmiri-strict-provenance" \
+    # One test per filter, so the expected count is the number of filters.
+    miri_run "${#MIRI_TESTS[@]}" "the five unsafe-path tests (stacked borrows)" \
+      env MIRIFLAGS="-Zmiri-disable-isolation -Zmiri-strict-provenance" \
       cargo +nightly miri test --release --features pure --lib -- "${MIRI_TESTS[@]}"
-    MIRIFLAGS="-Zmiri-disable-isolation -Zmiri-strict-provenance -Zmiri-tree-borrows" \
+    miri_run "${#MIRI_TESTS[@]}" "the five unsafe-path tests (tree borrows)" \
+      env MIRIFLAGS="-Zmiri-disable-isolation -Zmiri-strict-provenance -Zmiri-tree-borrows" \
       cargo +nightly miri test --release --features pure --lib -- "${MIRI_TESTS[@]}"
 
     echo
     echo "--- Miri, AVX2 kernel (x86_64) ---"
-    MIRIFLAGS="-Zmiri-disable-isolation -Zmiri-strict-provenance" \
+    miri_run 3 "the three AVX2-kernel tests" \
+      env MIRIFLAGS="-Zmiri-disable-isolation -Zmiri-strict-provenance" \
       RUSTFLAGS="-C target-feature=+avx2" \
       cargo +nightly miri test --release --features pure --lib -- \
         test_x86_simd_kernels_match_scalar \
@@ -434,7 +473,8 @@ if [ "$RUN_MIRI" -eq 1 ]; then
     echo
     echo "--- Miri, NEON kernel (aarch64, cross-interpreted) ---"
     cargo +nightly miri setup --target aarch64-unknown-linux-gnu >/dev/null
-    MIRIFLAGS="-Zmiri-disable-isolation -Zmiri-strict-provenance" \
+    miri_run 3 "the three aarch64-kernel tests" \
+      env MIRIFLAGS="-Zmiri-disable-isolation -Zmiri-strict-provenance" \
       cargo +nightly miri test --release --features pure --target aarch64-unknown-linux-gnu --lib -- \
         test_aarch64_neon_kernel_matches_scalar \
         test_simd_xor_matches_scalar_and_raw \
@@ -449,7 +489,8 @@ if [ "$RUN_MIRI" -eq 1 ]; then
     echo
     echo "--- Miri, big-endian (s390x, cross-interpreted) ---"
     cargo +nightly miri setup --target s390x-unknown-linux-gnu >/dev/null
-    MIRIFLAGS="-Zmiri-disable-isolation -Zmiri-strict-provenance" \
+    miri_run 1 "the big-endian boundary-corpus test" \
+      env MIRIFLAGS="-Zmiri-disable-isolation -Zmiri-strict-provenance" \
       cargo +nightly miri test --release --features pure --target s390x-unknown-linux-gnu --lib -- \
         test_all_accelerated_paths_agree_on_a_boundary_corpus
   else

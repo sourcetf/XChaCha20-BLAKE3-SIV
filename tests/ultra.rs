@@ -57,6 +57,102 @@ const _: () = {
 const KEY: [u8; 32] = [0x11u8; 32];
 const NONCE: [u8; 24] = [0x22u8; 24];
 
+/// The shipped text of `src/lib.rs`, so the assertions below are about what a user
+/// compiles rather than about a copy that can drift.
+const LIB: &str = include_str!("../src/lib.rs");
+
+/// `LIB` with comments removed and string-literal contents blanked, cut at `mod tests {`.
+///
+/// Every source-shape assertion in this file runs on this rather than on the raw file.
+/// `include_str!` text makes a `matches`/`contains` satisfiable without the code: replace a
+/// real statement with a comment carrying the same words and the count is unchanged. An
+/// audit demonstrated exactly that for `scrub_stack();` — replaced by
+/// `// scrub_stack(); (planted)` at `src/lib.rs:2495`,
+/// `scrub_stack_is_called_at_every_entry_point` stayed green — and `scrub_stack` has no
+/// behavioural signature, so that count is its only existence witness. The scanner is the
+/// one `tests/decision_scope.rs` and `tests/counter_range.rs` use; it is copied rather than
+/// shared because a test binary cannot import another test binary's items.
+fn non_test_source() -> String {
+    let cut = LIB.find("mod tests {").expect("the test module must exist");
+    strip_comments(&LIB[..cut])
+}
+
+/// See [`non_test_source`]: comments and string-literal contents are removed, with newlines
+/// kept so line positions stay comparable.
+///
+/// A small state machine rather than `find("//")`, because a `//` inside a string literal
+/// used to cut the rest of the line out of the scan — which hid a real call site from a
+/// count — and a `/* … */` block was scanned as code. Literal contents are dropped (the
+/// quotes remain, so a literal becomes `""`), so a *string* carrying the text cannot stand
+/// in for a statement either; a bare `"…"` is not an occurrence of a call.
+fn strip_comments(text: &str) -> String {
+    #[derive(PartialEq)]
+    enum Mode {
+        Code,
+        Line,
+        Block,
+        Str,
+    }
+    let b = text.as_bytes();
+    let mut out = String::with_capacity(text.len());
+    let mut mode = Mode::Code;
+    let mut i = 0usize;
+    while i < b.len() {
+        let c = b[i];
+        match mode {
+            Mode::Code => {
+                if c == b'/' && b.get(i + 1) == Some(&b'/') {
+                    mode = Mode::Line;
+                    i += 2;
+                } else if c == b'/' && b.get(i + 1) == Some(&b'*') {
+                    mode = Mode::Block;
+                    i += 2;
+                } else if c == b'"' {
+                    // Keep the opening quote; the contents are dropped in `Mode::Str`
+                    // and the closing quote is kept there.
+                    out.push('"');
+                    mode = Mode::Str;
+                    i += 1;
+                } else {
+                    out.push(c as char);
+                    i += 1;
+                }
+            }
+            Mode::Line => {
+                if c == b'\n' {
+                    out.push('\n');
+                    mode = Mode::Code;
+                }
+                i += 1;
+            }
+            Mode::Block => {
+                if c == b'*' && b.get(i + 1) == Some(&b'/') {
+                    mode = Mode::Code;
+                    i += 2;
+                } else {
+                    if c == b'\n' {
+                        out.push('\n'); // keep line numbers aligned
+                    }
+                    i += 1;
+                }
+            }
+            Mode::Str => {
+                if c == b'\\' {
+                    i += 2; // skip the escaped byte (including `\"`)
+                } else if c == b'"' {
+                    out.push('"');
+                    mode = Mode::Code;
+                    i += 1;
+                } else {
+                    // Drop the contents so no byte inside a literal is scanned.
+                    i += 1;
+                }
+            }
+        }
+    }
+    out
+}
+
 /// The independent recomputation every decrypt performs under `ultra`.
 ///
 /// Two properties, and the second is the reason it exists: it must agree with the stored
@@ -65,9 +161,9 @@ const NONCE: [u8; 24] = [0x22u8; 24];
 /// two values and are satisfied together.
 #[test]
 fn dual_mac_is_wired_into_both_decrypt_paths() {
-    let src = include_str!("../src/lib.rs");
-    let cut = src.find("mod tests {").expect("test module");
-    let body = &src[..cut];
+    // Comments stripped: each count below is an existence witness for a call, and a comment
+    // (or a string literal) carrying the same text must not be able to stand in for it.
+    let body = non_test_source();
 
     // `let mut`, because the result is wiped below like every other secret-derived copy.
     assert_eq!(
@@ -127,9 +223,9 @@ fn dual_mac_is_wired_into_both_decrypt_paths() {
 /// (`encrypt`, `encrypt_in_place_detached`), and the two decrypt entry points.
 #[test]
 fn scrub_stack_is_called_at_every_entry_point() {
-    let src = include_str!("../src/lib.rs");
-    let cut = src.find("mod tests {").expect("test module");
-    let body = &src[..cut];
+    // Comments stripped, so the injection that kept this test green — replacing a real call
+    // with `// scrub_stack(); (planted)` — now reads as a *missing* call site.
+    let body = non_test_source();
 
     /// The body of `needle`, brace-matched.
     fn body_of<'a>(src: &'a str, needle: &str) -> &'a str {
@@ -169,7 +265,7 @@ fn scrub_stack_is_called_at_every_entry_point() {
         ("pub fn decrypt(", 1),
         ("pub fn decrypt_in_place_detached(", 1),
     ] {
-        let found = body_of(body, name).matches("scrub_stack();").count();
+        let found = body_of(&body, name).matches("scrub_stack();").count();
         assert_eq!(
             found, expected,
             "{name} must contain {expected} `scrub_stack();` call sites, found {found}: a \
@@ -197,9 +293,11 @@ fn scrub_stack_is_called_at_every_entry_point() {
 /// the three covered entry points means a defence disappeared from a path the README promises.
 #[test]
 fn the_witness_is_called_from_exactly_these_entry_points() {
-    let src = include_str!("../src/lib.rs");
-    let cut = src.find("mod tests {").expect("test module");
-    let body = &src[..cut];
+    // Comments stripped: the positive half of this test used to be satisfiable by *prose* —
+    // the doc comment on `decrypt` names `witness::decrypt`, so deleting the real call left
+    // the assertion true. That is the same guard-satisfied-by-a-comment shape the audit
+    // demonstrated on `scrub_stack`.
+    let body = non_test_source();
 
     /// The body of `needle`, brace-matched; panics if it is not found exactly once.
     fn body_of<'a>(src: &'a str, needle: &str) -> &'a str {
@@ -233,16 +331,9 @@ fn the_witness_is_called_from_exactly_these_entry_points() {
         "pub fn decrypt_in_place_detached(",
         "pub fn encrypt(",
     ] {
-        // Strip `//` comments before looking for the call. Without this the check is
-        // satisfied by *prose*: the doc comment on `decrypt` names `witness::decrypt`, so
-        // deleting the real call would have left the assertion true — the
-        // guard-satisfied-by-a-comment shape. (`the_witness_shares_only_the_specification_
-        // with_the_crate` in this file strips comments for the same reason.)
-        let b: String = body_of(body, entry)
-            .lines()
-            .map(|l| l.split("//").next().unwrap_or(""))
-            .collect::<Vec<_>>()
-            .join("\n");
+        // `body_of` reads the already comment-free `non_test_source`, so the doc comment on
+        // `decrypt` that names `witness::decrypt` cannot stand in for the call.
+        let b = body_of(&body, entry);
         // `decrypt_bounded` delegates to `decrypt`, so it carries no witness call of its own
         // and must not: a second one would mean the tag is computed twice on that path.
         if entry == "pub fn decrypt_bounded(" {
@@ -258,7 +349,7 @@ fn the_witness_is_called_from_exactly_these_entry_points() {
         );
     }
 
-    let in_place_encrypt = body_of(body, "pub fn encrypt_in_place_detached(");
+    let in_place_encrypt = body_of(&body, "pub fn encrypt_in_place_detached(");
     assert!(
         !in_place_encrypt.contains("witness::"),
         "if the in-place encrypt gains a witness cross-check, then it costs a full scalar \
@@ -389,6 +480,11 @@ fn locked_key_is_actually_locked() {
 /// the feature on will read it.
 #[test]
 fn documents_what_it_cannot_defend_against() {
+    // Deliberately raw, and the one assertion in this file not routed through
+    // `non_test_source`: its subject *is* prose. Stripping comments from `lib` would remove
+    // every doc comment this test looks for and leave a README check alone, i.e. it would
+    // destroy the evidence rather than harden the check. The other assertions strip
+    // comments because there the words must be a statement.
     let readme = include_str!("../README.md");
     let lib = include_str!("../src/lib.rs");
 
@@ -502,15 +598,10 @@ fn the_decision_still_answers_correctly_with_every_layer_on() {
 fn the_witness_shares_only_the_specification_with_the_crate() {
     let src = include_str!("../src/witness.rs");
     let cut = src.find("mod tests {").expect("the witness test module");
-    // Comments stripped, so a mention in prose neither trips the check nor hides a use.
-    let code: String = src[..cut]
-        .lines()
-        .map(|l| match l.find("//") {
-            Some(i) => &l[..i],
-            None => l,
-        })
-        .collect::<Vec<_>>()
-        .join("\n");
+    // Comments stripped by the same scanner as `non_test_source`, so a mention in prose
+    // neither trips the check nor hides a use, and a `//` inside a string literal cannot
+    // cut a line short.
+    let code = strip_comments(&src[..cut]);
 
     // The one permitted import: the specification's constants.
     let allowed = "use crate::{DOM_ENC, DOM_PRE, DOM_TAG, NONCE_LEN, SUBKEY_DOMAIN, TAG_LEN};";

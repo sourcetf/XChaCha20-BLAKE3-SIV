@@ -121,8 +121,10 @@ in the same terms):
 **The byte format is frozen at revision v0.3.** It will not change without a
 revision bump, a `CHANGELOG` entry and the known-answer vectors updated in the same
 commit — and that is mechanical rather than a promise: `kat_regression_lock`
-re-asserts the published bytes from a fixture no in-crate change can edit, and both
-differential fixtures replay against the independent reference implementation.
+re-asserts the published bytes from a second copy of `tools/ref_impl.py`'s output,
+inlined in the test — it catches an in-crate expectation edited to match, and its
+independence ends there — while both differential fixtures replay against the
+independent reference implementation.
 
 Frozen does not mean finished, or standard: the format is this project's own, it is
 **not interoperable with anything**, and until this crate reaches 1.0 it is `0.x`,
@@ -241,10 +243,12 @@ target row, applied that number to a game whose object is a 256-bit `subkey` rat
   * the **key** route: a `subkey` collision at `2^128` gives two keys whose derived material, tag
     and keystream all coincide — **key commitment, broken at `2^128`** — and the two keys decrypt
     the one `(C, T)` to the *same* plaintext;
-  * the **context** route: two *chosen* contexts under one key (a second AAD or nonce) whose
-    inner digests collide at `2^128` give the same tag, and the KDF's input is the tag rather
-    than the context, so the keystream is the same too — one `(C, T)`, two contexts, one
-    plaintext, no fixed point to solve. (This is CMT-3's context half; earlier revisions here
+  * the **context** route: two *chosen* contexts under one key **and one nonce** — a second
+    AAD — whose inner digests collide at `2^128` give the same tag, and the KDF's input is the
+    tag rather than the context, so the keystream is the same too — one `(C, T)`, two contexts,
+    one plaintext, no fixed point to solve. (The nonce has to be held fixed: changing it moves
+    `k_in` and `k_out` as well, so the two digests would be taken under different keys and the
+    birthday argument does not reach them. This is CMT-3's context half; earlier revisions here
     and in §4.5 priced only the key route and called *all* of the remainder a fixed point, which
     is true of the different-message case alone.)
   * the **salamander** route — two *different* messages — is the one not derived: it needs
@@ -445,7 +449,7 @@ mutated the unobservable one and the campaign reported "expected fail, got pass"
 which is what a mutation nothing can catch looks like).
 
 Measured cost, on the host `performance.md` describes and re-measured for `v0.3`: the added
-work is the **second gate** — two more 65-byte constant-time comparisons plus an independently
+work is the **second gate** — three more 65-byte constant-time comparisons plus an independently
 written eight-byte fold (so four 65-byte comparison passes in total on the default build,
 against the opt-out build's one) — a fixed per-message cost that does not scale — **+25% at 64 B, +24% at 256 B, +23% at 1 KiB, +11% at 4 KiB, and
 within the noise floor from 16 KiB up** (default over `--no-default-features`; `performance.md`'s
@@ -955,9 +959,10 @@ configurations, the measured noise floor, and the cost of each defence — are i
 the security argument. The short version, so a reader need not open it: this crate pays
 **more per message** (three derived keys, a 65-byte tag, and wiping all of it) and **less
 per byte** (BLAKE3 beats Poly1305 once there is data to batch), so in the default
-configuration it is ahead of `XChaCha20Poly1305` on encryption from 256 B up (level at
-1–4 KiB, where the noise floor is a tie) and ahead on decryption from 16 KiB up, the small
-sizes within the noise floor and 1 KiB behind (the fixed per-message cost dominates there).
+configuration it is ahead of `XChaCha20Poly1305` on encryption at 64–256 B, behind at
+1 KiB (0.87x, outside the measured noise floor), level at 4 KiB and ahead from 16 KiB
+up, and on decryption it is behind or within the noise floor up to 4 KiB (0.70x at
+1 KiB, where the fixed per-message cost dominates) and ahead from 16 KiB up.
 The two costs it prices are a fixed per-message cost on
 `hardened` decryption (the second gate's two 65-byte constant-time comparisons plus the
 independently written fold, over the opt-out build; a fixed cost, so its share is inside the

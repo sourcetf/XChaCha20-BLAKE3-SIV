@@ -53,7 +53,8 @@
 //!   **key-commitment** half of the *attacker-chosen* game; the different-message
 //!   (salamander) half needs `KS₁ ≠ KS₂` and so is the fixed point
 //!   `SECURITY-ANALYSIS.md` §4.5 records as unanalysed.  The *target* bound — a given
-//!   ciphertext, `2^-520` per candidate key — is unchanged either way.)
+//!   ciphertext, `≈ 2^-256` per candidate key, the 256-bit `subkey` preimage — is
+//!   unchanged either way.)
 //! * **Both lengths are encoded and every field is fixed width.**  BLAKE3 is not
 //!   vulnerable to length extension (its finalisation is flagged, unlike
 //!   Merkle–Damgård constructions), but `A || M` alone would be ambiguous:
@@ -76,7 +77,8 @@
 //!   but they are **not allocation-free**, and an earlier revision of this line
 //!   said they were: `derive_tag` tries one contiguous buffer when
 //!   `48 + aad.len() + msg.len()` lands in `TAG_CONCAT_MIN..=TAG_CONCAT_LIMIT`
-//!   (2 KiB..64 KiB — so in message lengths, 2000..=65488 for a 48-byte head),
+//!   (2 KiB..64 KiB; with an empty AAD that is message lengths 2000..=65488, and
+//!   every AAD byte moves both ends down by one),
 //!   falling back to the three-part hash if the allocator refuses, and under
 //!   `ultra` `decrypt_in_place_detached` allocates two witness buffers fallibly,
 //!   so it can return [`Error::AllocationFailed`].  The message-sized buffers are
@@ -89,9 +91,11 @@
 //!
 //! - 520-bit tag (65 bytes), committing **against a given ciphertext** (the *target*
 //!   game; the literature's CMT-1/CMT-3 are *attacker-chosen* and are a different game
-//!   this crate does not put a number on): an attacker must hit the tag it published, a
-//!   *target* at `2^-520` per candidate key (`≈ 2^-264` over the whole key space), and
-//!   that is what the width buys.  Read the "Security level" section
+//!   this crate does not put a number on): an attacker must reproduce a *fixed* value, but
+//!   that value is the 256-bit `subkey = HC(K′, N₁)`, not the 520-bit tag — an event of
+//!   probability `≈ 2^-256` per candidate key, so a full sweep of the key space expects
+//!   `≈ 1` second key (success `≈ 0.63`), i.e. key-search level.  The width does **not**
+//!   set this bound.  Read the "Security level" section
 //!   below before relying on a number: this crate advertised `2^260` for these for a
 //!   while, and that was wrong — the tag is a function of a 256-bit chaining value, so
 //!   what it *collides* at is `2^128`, well below the key.
@@ -123,7 +127,7 @@
 //! | --- | --- | --- |
 //! | Confidentiality | 256-bit | the ChaCha20 key |
 //! | Forgery resistance | **256-bit** | BLAKE3 keyed mode as a PRF over a 256-bit key |
-//! | Key commitment against a given ciphertext | **`2^-520` per candidate key** (the *target* game) | the tag hit as a *target*: the 520-bit width is what sets it |
+//! | Key commitment against a given ciphertext | **`≈ 2^-256` per candidate key** — `≈ 1` second key over the whole key space (the *target* game) | the 256-bit `subkey` the tag and the keystream are both derived from, **not** the tag's width |
 //! | Context commitment (nonce/AAD) | **`≈ 2^256`** target / **`2^128`** attacker-chosen | the 256-bit inner digest the context feeds, not the tag's width |
 //! | Attacker-chosen commitment (the literature's CMT-1/CMT-3) | **key route `2^128`, context route `2^128`** — both with identical plaintexts; the different-message salamander is not assigned a number | the `subkey` collision and the inner-digest collision, each a birthday |
 //! | Collision resistance of the tag | **2^128** | the 256-bit chaining value the tag is a function of, not the tag's width |
@@ -135,16 +139,23 @@
 //! collision costs `2^128` by birthday whatever the output length is.  (Commitment
 //! is not a birthday property at all — see below.)
 //!
-//! **Commitment: the width is what makes the scheme committing, and that is a *target*
-//! property, not a birthday one.** A second key that opens a given ciphertext must make
-//! its tag computation output the tag that was published: a `2^-520` event per candidate
-//! key, so enumerating the whole `2^256` key space yields nothing (`≈ 2^-264`), while a
-//! 32-byte tag would leave `≈ 1` such key in reach and the scheme would no longer be
-//! key-committing.  What the width does *not* buy is collision resistance (`2^128`, the
-//! birthday of the chaining value the tag is a function of) or forgery resistance
-//! (`2^256`, bounded by the key).  [`TAG_LEN`]'s own docs carry both arguments, and
+//! **Commitment: a *target* property, not a birthday one — and the width is not what sets
+//! it.** A second key that opens a given ciphertext must reproduce a fixed value, and that
+//! value is the 256-bit `subkey = HC(K′, N₁)`: it fixes `k_in`, `k_out` and `enc_seed`, and
+//! with them the derived key pair, the recovered message, the inner digest and the tag.  So
+//! the event is `≈ 2^-256` per candidate key, and a full sweep of the `2^256` key space
+//! expects `≈ 1` second key (success `≈ 0.63`) — key-search level, the same tier as the
+//! context route.  An earlier revision of this section said `2^-520` per candidate key
+//! (`≈ 2^-264` over the space) and "the width is what makes the scheme committing"; that
+//! prices only the *direct* tag-hit route, which is dominated above 256 bits.  Below 256
+//! bits it is the *tag* that becomes the binding object: a 32-byte tag would move the
+//! expectation from `≈ 1` to `≈ 2`, and a 16-byte one would be `2^-128` per candidate and
+//! therefore the thing to hit.  What the width does *not* buy is collision resistance
+//! (`2^128`, the birthday of the chaining value the tag is a function of), forgery
+//! resistance (`2^256`, bounded by the key), or the target bound, which is `subkey`-bound.
+//! [`TAG_LEN`]'s own docs carry both arguments, and
 //! `SECURITY-ANALYSIS.md` §4.5 the derivation; the format is frozen at revision `v0.3`,
-//! which is now a second reason the width cannot move, not the only one.
+//! which is a reason the width cannot move, not the reason it is wide.
 //!
 //! These rest on BLAKE3 being a secure PRF and collision-resistant and on
 //! ChaCha20 being a secure stream cipher: standard, heavily analysed assumptions,
@@ -365,21 +376,25 @@ pub const KEY_LEN: usize = 32;
 /// So, concretely (see `SECURITY-ANALYSIS.md` §4.5 for the argument and §5 for what a
 /// refutation would look like):
 ///
-/// * **the width is what makes it committing, through the *target* rather than a birthday.** A
-///   candidate key that is not the real one opens a given ciphertext with probability `2^-520`,
-///   so enumerating the whole `2^256` key space succeeds only with probability `≈ 2^-264`. A
-///   32-byte tag would make that `2^256 · 2^-256 ≈ 1`: one second key within reach of a key-space
-///   enumeration, which is exactly the non-committing failure mode of the 16-byte-tag SIV family.
-///   So the width stays, and a revision cannot shorten it without giving up CMT-1/CMTk;
+/// * **the width is not what makes it committing — the 256-bit `subkey` is.** A candidate key
+///   that is not the real one opens a given ciphertext by reproducing `subkey = HC(K′, N₁)`,
+///   at `≈ 2^-256` per candidate, so enumerating the whole `2^256` key space expects `≈ 1`
+///   second key (success `≈ 0.63`): key-search level. An earlier revision of this list said
+///   `2^-520` per candidate and `≈ 2^-264` over the space and attributed that to the width; it
+///   priced only the *direct* tag-hit route. What the width keeps is that that route is never
+///   the cheapest one — a 32-byte tag would sit exactly at the 256-bit level, and a 16-byte one
+///   (the short-tag SIV family's setting) would be `2^-128` per candidate. A revision therefore
+///   cannot shorten the tag much without making the tag itself the binding object;
 /// * **collision resistance is `2^128`, not `2^260`** — the birthday bound of that chaining
 ///   value, since a colliding prefix with a held-fixed tail gives identical tags. That is the
 ///   SHA-256-collision class: still far out of reach of a practical attack, but *below* the
 ///   256-bit key strength — the part of the old rationale that was simply false, and the one
 ///   place where the scheme is weaker than its key;
-/// * **a *target* is still 2^520 away.** The state shortcut is a *birthday* search over
-///   *pairs* of tags the adversary may both search; a tag that must be hit as given — a
-///   forgery, or a ciphertext that must also verify under a second key — is unaffected by
-///   it, because there the value is fixed by someone else. So `2^128` bounds collision
+/// * **a *target* is still the security level away.** The state shortcut is a *birthday* search
+///   over *pairs* of tags the adversary may both search; a tag that must be hit as given — a
+///   forgery, or a ciphertext that must also verify under a second key — is unaffected by it,
+///   because there the value is fixed by someone else (and for the second key the object to
+///   reproduce is the 256-bit `subkey`, not the tag at all). So `2^128` bounds collision
 ///   properties (§3 Corollary's two-time-pad event) and says nothing about forgery;
 /// * **forgery is unchanged**, and is bounded by the key (`2^256`) rather than by the tag:
 ///   key search dominates whatever the tag length, since guessing a 32-byte tag costs `2^-256`
@@ -778,8 +793,11 @@ impl Key {
 }
 
 /// Two keys compare in **constant time**, for the same reason [`Plaintext`]'s comparisons
-/// do: `==` is the spelling a caller reaches for, and the alternative -- letting `Deref`
-/// coerce both sides to `[u8; 32]` -- is a short-circuiting array comparison. An audit
+/// do: `==` is the spelling a caller reaches for, and it does not deref-coerce -- with no
+/// `PartialEq` for `Key`, `key_a == key_b` is a compile error (E0369), not a silent
+/// fallback. What *is* silently short-circuiting is the explicit spelling a caller writes
+/// instead, `*key_a == *key_b` (or `as_bytes()` on both sides): the deref target's
+/// `[u8; 32]` comparison, element by element, stopping at the first difference. An audit
 /// pointed out the inconsistency between the two types; this is the fix, not a warning
 /// about it. (A length mismatch is impossible here: both sides are `[u8; 32]`.)
 impl PartialEq for Key {
@@ -807,8 +825,9 @@ impl PartialEq<&Key> for Key {
 ///   `Key` deliberately does not implement `Clone`, and the deref target does. Copy
 ///   deliberately, with [`Key::from_bytes`], if the copy is meant to be a `Key`.
 /// * (`==` is *not* on this list: the `PartialEq` impl above means `key_a == key_b` uses
-///   `subtle`, not the deref target's short-circuiting array comparison. An earlier
-///   revision of this comment warned about `==` because that impl did not exist.)
+///   `subtle`; without that impl `==` would not compile at all, and the deref target's
+///   short-circuiting array comparison is reached only by writing `*key_a == *key_b`.
+///   An earlier revision of this comment warned that `==` would fall through to it.)
 impl core::ops::Deref for Key {
     type Target = [u8; KEY_LEN];
     #[inline]
@@ -1575,8 +1594,9 @@ pub mod locked {
     /// the page locked and charged against `RLIMIT_MEMLOCK` until the process exits, the
     /// same caveat every RAII lock has. The `Deref` impl carries the same warning as
     /// `crate::Key`'s: `key.clone()` copies the plain array. (The other `Deref` hazard,
-    /// `==`, is closed: this type has its own constant-time `PartialEq`, so `==` no longer
-    /// falls through to a short-circuiting array comparison.)
+    /// `==`, is closed: this type has its own constant-time `PartialEq`, and without it
+    /// `==` on two `LockedKey`s would not compile — the short-circuiting array comparison
+    /// is reached only by an explicit `*a == *b` or an `as_bytes()` comparison.)
     ///
     /// `locked`'s answer to the part of the wipe story a volatile store cannot reach:
     /// while this value is alive its pages cannot be swapped out, and a core dump will
@@ -2206,16 +2226,25 @@ const TAG_CONCAT_MIN: usize = 2_048;
 ///   `K`-in-input step made a subkey collision harmless (the tags still differed);
 ///   here it is not harmless.  That is a route in the *attacker-chosen* commitment
 ///   game, which `SECURITY-ANALYSIS.md` §4.5 does not price; the *target* bound this
-///   crate does claim — a given ciphertext, `2^-520` per candidate key — is untouched.
+///   crate does claim — a given ciphertext, `≈ 2^-256` per candidate key, the `subkey`
+///   preimage — is untouched.
 /// * **Lengths are encoded and every field is fixed width.** BLAKE3 is not
 ///   vulnerable to length extension (its finalisation is flagged, unlike
 ///   Merkle–Damgård constructions), but `A || M` alone would be ambiguous:
 ///   `("ab", "c")` and `("a", "bc")` would hash identically. The two `u64`
 ///   length fields remove that.
 ///
-/// The hasher is fed incrementally rather than through one concatenated buffer,
-/// so nothing secret lands in a growable heap allocation. (Nothing in the inner
-/// hash's *input* is secret either — the key is used as a key, not as data.)
+/// The parts are not always fed incrementally: within
+/// `TAG_CONCAT_MIN..=TAG_CONCAT_LIMIT` they are copied once into one exact-sized
+/// contiguous heap buffer — BLAKE3 only takes its batched SIMD path when a call
+/// starts on a chunk boundary, and the copy wins at mid sizes (the body has the
+/// measurements) — which is `zeroize_slice`d before it is dropped. Outside the
+/// window, and when the allocator refuses, the parts are fed incrementally and no
+/// buffer is allocated for them. The buffer cannot grow (`try_reserve_exact`
+/// reserves the whole total before anything is written), so that one allocation is
+/// all there is, and it is wiped before it is freed; no key material enters it:
+/// nothing in the inner hash's *input* is secret in the key-material sense,
+/// because the key is used as a key, not as data.
 fn derive_tag(
     k_in: &[u8; 32],
     k_out: &[u8; 32],
@@ -2575,7 +2604,7 @@ fn second_gate_comparison(a: &[u8; TAG_LEN], b: &[u8; TAG_LEN]) -> subtle::Choic
 /// gates defeats the purpose of having two.
 ///
 /// Unconditional *within the `hardened` family* since the cost was measured: one
-/// 65-byte fold, tens of nanoseconds, in exchange for turning a hand-modelled
+/// 65-byte fold, 1.4 ns, in exchange for turning a hand-modelled
 /// shortened-loop forgery from "accepted after 2,573 attempts" into "none in
 /// 2,000,000". It was `dual-mac`-only before that comparison, which left the
 /// *default* build on one comparison shape. It is not compiled at all under
@@ -2650,11 +2679,13 @@ fn ct_eq_independent(a: &[u8; TAG_LEN], b: &[u8; TAG_LEN]) -> subtle::Choice {
 //    uncaught mutant. One body means every mutatable line is compiled in the
 //    `ultra` build the campaign uses, which is a superset of the default one.
 //
-// The default is `hardened`, so in the default build both gates are live and the caller
-// passes two *different* recomputations (`gates.0`, `gates.1`) — the second gate branch
-// below is compiled in. Only `--no-default-features` passes the same `Choice` for both
-// gates, because the second gate is compiled out there: one comparison is the whole
-// decision and nothing is wasted computing a second one.
+// The default is `hardened`, so in the default build both gates are live and the two
+// decrypt entry points pass two *different* recomputations (`gates.0`, `gates.1`) — the
+// second gate branch below is compiled in. Two call sites pass the same `Choice` twice
+// instead: `encrypt`'s `ultra` branch, which has one comparison to make (the witness tag
+// against the computed one) so both gates carry its answer even though `ultra` implies
+// `hardened`; and every `--no-default-features` build, where the second gate is compiled
+// out — one comparison is the whole decision and nothing is wasted computing a second one.
 #[inline(never)]
 fn accept_or_reject(
     gate0: subtle::Choice,
@@ -4335,9 +4366,9 @@ mod tests {
     /// `qemu-x86_64 -cpu Nehalem`, which no script or CI job in this repository
     /// runs.
     ///
-    /// CI runs this test under qemu on aarch64 and i686, so a change that makes
-    /// one backend disagree with the others fails there rather than on a user's
-    /// machine.
+    /// CI runs this test under qemu on aarch64, i686, powerpc64 and riscv64, so a
+    /// change that makes one backend disagree with the others fails there rather
+    /// than on a user's machine.
     #[test]
     fn test_all_accelerated_paths_agree_on_a_boundary_corpus() {
         struct Rng(u64);
@@ -4579,9 +4610,10 @@ mod tests {
 
     /// The tag must change when *only* the key changes.
     ///
-    /// Key commitment itself is a security argument about *target* bounds — `2^-520`
-    /// per candidate key against a given ciphertext, `≈ 2^-264` over the whole key
-    /// space; the tag's *collision* bound is a separate `2^128` (see `TAG_LEN` and
+    /// Key commitment itself is a security argument about *target* bounds — `≈ 2^-256`
+    /// per candidate key against a given ciphertext (the 256-bit `subkey` preimage:
+    /// `≈ 1` second key over the key space, key-search level), not about the tag's
+    /// width; the tag's *collision* bound is a separate `2^128` (see `TAG_LEN` and
     /// the README's "Security level") — and cannot be established by sampling. What
     /// is testable is that the tag is not indifferent to the key, and the mechanism
     /// it rests on -- the key reaching the tag through *both* derived tag keys, with
@@ -4639,10 +4671,12 @@ mod tests {
         let nonce = [0u8; 24];
         let (_, tag) = encrypt(&key, &nonce, b"", b"").unwrap();
         assert_eq!(tag.len(), TAG_LEN);
-        // 65 bytes = 520 bits. Sized so the *target* form of commitment (a second key
-        // that opens a *given* ciphertext) has margin: each candidate key hits the
-        // published tag with probability 2^-520, so the whole 2^256 key space succeeds
-        // with probability ~2^-264. (An earlier comment here said "the birthday bound
+        // 65 bytes = 520 bits. The *target* form of commitment (a second key that opens
+        // a *given* ciphertext) is not set by this number: a candidate key succeeds by
+        // reproducing the 256-bit subkey, at ~2^-256 per candidate, so the whole 2^256
+        // key space expects ~1 second key. What the width keeps is that its own route --
+        // the candidate's tag computation landing on the published tag, 2^-|T| per
+        // candidate -- is never the cheapest one. (An earlier comment here said "the birthday bound
         // caps commitment at 2^(n/2) bits", which is the rationale §4.5 falsifies --
         // commitment is not a birthday problem, and the tag's birthday is 2^128 over
         // its 256-bit chaining value regardless of width. See `SECURITY-ANALYSIS.md`
@@ -4942,11 +4976,12 @@ mod tests {
     // to the owned form and drop the coverage.
     /// Keys compare in constant time, through the impl rather than through `Deref`.
     ///
-    /// Without the impl, `key_a == key_b` compiles anyway (both sides coerce to
-    /// `[u8; 32]`) and short-circuits — the trap an audit pointed at, and the same one
-    /// `Plaintext`'s `PartialEq` impls exist to close. This pins the impls' *presence*
-    /// (the calls below would still compile but be the wrong ones if the impls were
-    /// removed... they would not: see the note) and their semantics.
+    /// There is no `==` fallback to guard against: without the impl, `key_a == key_b`
+    /// does not compile, and the short-circuiting array comparison is what a caller gets
+    /// only by writing `*key_a == *key_b` or comparing `as_bytes()` — the trap an audit
+    /// reached for, and the same one `Plaintext`'s `PartialEq` impls exist to close.
+    /// This pins the impls' *presence* (removing one makes the calls below fail to
+    /// compile) and their semantics.
     // `a == &b` is deliberate: the by-reference spelling is part of what the impls
     // provide, and clippy's `op_ref` would rewrite it to the owned form and drop that
     // coverage. (Same allow, same reason, as `test_plaintext_eq_semantics` below.)
@@ -4964,8 +4999,8 @@ mod tests {
         assert!(a != c, "keys differing in the last byte must differ");
         assert!(!(a == c));
 
-        // The impl, not `Deref`: name it explicitly so removing it is a compile error here
-        // rather than a silent fallback to the array comparison.
+        // The impl, not `Deref`: named explicitly so that removing it fails to compile
+        // right here — pinning the constant-time comparison, not an array fallback.
         assert!(PartialEq::eq(&a, &b));
         assert!(!PartialEq::eq(&a, &c));
     }
