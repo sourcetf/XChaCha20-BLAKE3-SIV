@@ -365,6 +365,21 @@ fn differential_large_vectors_match_reference() {
             && sizes.contains(&65489),
         "large fixture lost a boundary vector: {sizes:?}"
     );
+    // ...and each of those four must carry the *empty* AAD the docstring above assumes.
+    // The switch is on `48 + aad + msg`, so a nonzero AAD on one of these rows moves the
+    // boundary in message lengths: `sizes.contains(&65488)` would keep passing while the
+    // row no longer sits at the top of the window, which is the one thing this fixture
+    // exists to witness. Pin the AAD too, so a regeneration that changes it fails here
+    // deliberately rather than silently retiring the boundary.
+    for (want_len, want_aad) in [(1999usize, 0usize), (2000, 0), (65488, 0), (65489, 0)] {
+        assert!(
+            rows.iter()
+                .any(|(m, a, _)| *m == want_len && *a == want_aad),
+            "large fixture lost the boundary vector msg_len={want_len} aad_len={want_aad} \
+             (the pair only straddles the tag's concatenation window with an empty AAD): \
+             {sizes:?}"
+        );
+    }
 
     for (msg_len, aad_len, want) in &rows {
         let pt = pt_for(*msg_len);

@@ -19,15 +19,20 @@ block, the `locked` page handling) found nothing, and each of the 13 Kani harnes
 re-checked for vacuity and re-verified SUCCESSFUL.
 
 - **`src/witness.rs`'s `hchacha20` unpacked the key and nonce into state words in an order
-  no test could see.** The code is correct, but every test that reaches it feeds
-  constant-byte inputs (`key = [0x42; 32]`, `nonce = [0x5A; 16]`), and with all bytes equal
-  any word permutation yields the identical state. An audit permuted the unpacking
-  (`s[4 + i]` → `s[4 + (7 - i)]`) and **all six existing witness tests stayed green**,
-  including the end-to-end agreement test; the same mutation in `block` *is* caught, because
-  `block`'s inputs are the derived subkey rather than the master key. Added
-  `matches_the_crate_on_distinct_key_and_nonce_bytes`, which cross-checks `block`,
-  `hchacha20`, `keyed_xof` and the whole construction against the crate on distinct-byte
-  key/nonce inputs — it fails under the mutation and passes on the correct code.
+  no *unit* test could see.** The code is correct, but every test that calls the witness
+  directly feeds constant-byte inputs (`key = [0x42; 32]`, `nonce = [0x5A; 16]`), and with
+  all bytes equal any word permutation yields the identical state. An audit permuted the
+  unpacking (`s[4 + i]` → `s[4 + (7 - i)]`) and **all six tests that reach the module
+  directly stayed green**, including the end-to-end agreement test. The permutation was not
+  invisible to the suite as a whole — `tests/ultra.rs`'s
+  `every_layer_answers_correctly_in_the_ultra_build` encrypts under a randomly generated key,
+  and `ultra`'s encrypt path cross-checks the witness tag, so that test fails — but it fails
+  as "the witness disagrees", naming no site, and only because that cross-check exists.
+  Added `matches_the_crate_on_distinct_key_and_nonce_bytes`, a unit test that cross-checks
+  `block`, `hchacha20`, `keyed_xof` and the whole construction against the crate on
+  distinct-byte key/nonce inputs: it fails under the permutation and points at the
+  unpacking. (The same permutation in `block` *is* caught by the existing end-to-end test,
+  because `block`'s inputs are the derived subkey rather than the master key.)
 - **`tools/cache_profile.sh`'s header quoted the `--trace 4` counts as the mode's own**
   (`~69k`/`~117k`) while the mode's default is **12** vectors (which CI passes explicitly);
   `tests/README.md` and the entry above still quoted the **pre-loader-trim** figures
@@ -62,7 +67,26 @@ re-checked for vacuity and re-verified SUCCESSFUL.
   named a collapse ("make `derive_enc` ignore the tag") that the test it cites does *not*
   catch — the two keystreams are keyed differently to begin with, so the refactor the test
   actually catches is pointing the message keystream at `subkey` with the derivation's
-  nonce, which is what `src/lib.rs`'s own comment says.
+  nonce, which is what `src/lib.rs`'s own comment says. A dedicated pass over the
+  *mathematics* of the reduction found two more, both real: **the bound charged `Adv^{A1}`
+  once where the scheme uses ChaCha20 at two hops** (the key-material block function and the
+  message keystream), so the term is `2·Adv^{A1}` — the document's own "where each
+  assumption enters" line says so — and hop 2's justification claimed the tags are
+  "uniform and independent" *and* collide at `q²/2^257`, which is the real tag's structural
+  collision bound rather than a random function's; the independence and the collision are
+  now both tied to the 256-bit chaining value. The same pass fixed three numeric or
+  attribution slips: "`2^-128` per attempt" at a 256-bit preimage (it is `2^-256` per
+  candidate, `~2^-128` over the whole re-split set), "confidentiality and forgery stay at
+  128 bits, classically and quantumly" (`2^256` classically, `2^128` under Grover), and
+  "the families remain separated by A4" (the separation is S1 — the distinct 8-byte
+  prefixes — not the encoding injectivity). The exponents, the hop games, A4 itself, the
+  §4.10 pair table and the structural falsification rows were all re-derived and hold.
+- **Two benchmark arms discarded the measured call's `Result`**, so an implementation that
+  returned `Err` — a stub, or one that had regressed into one — would be timed as the
+  (instant) error path and read as a throughput *win*: `benches/bench.rs`'s `encrypt` and
+  `decrypt`, and `benches/compare.rs`'s two *reference* encrypt arms. Every other measured
+  call site in those files already unwrapped. Added `.unwrap()`, which is a no-op on the
+  `Ok` path and so does not change the measured work or any ratio.
 - **A batch of smaller stale claims**, each confirmed against the code: `src/lib.rs`'s
   one-body comment called the mutation campaign's build `hardened` (the campaign runs
   `--features ultra`, and `hardened` *is* the default, so "a superset of the default" was

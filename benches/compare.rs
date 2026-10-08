@@ -63,11 +63,13 @@ fn bench_encrypt(c: &mut Criterion) {
             |b, _| {
                 let mut buf = pt.clone();
                 b.iter(|| {
-                    std::hint::black_box(xcp.encrypt_in_place_detached(
-                        &nonce24.into(),
-                        aad,
-                        &mut buf,
-                    ))
+                    // `.unwrap()` like the crate's own arm and the whole decrypt
+                    // group: without it an implementation that returned `Err`
+                    // would be timed as the error path and read as a win.
+                    std::hint::black_box(
+                        xcp.encrypt_in_place_detached(&nonce24.into(), aad, &mut buf)
+                            .unwrap(),
+                    )
                 })
             },
         );
@@ -77,11 +79,12 @@ fn bench_encrypt(c: &mut Criterion) {
             |b, _| {
                 let mut buf = pt.clone();
                 b.iter(|| {
-                    std::hint::black_box(cp.encrypt_in_place_detached(
-                        &nonce12.into(),
-                        aad,
-                        &mut buf,
-                    ))
+                    // `.unwrap()` for the same reason as the `xchacha20-poly1305`
+                    // arm above.
+                    std::hint::black_box(
+                        cp.encrypt_in_place_detached(&nonce12.into(), aad, &mut buf)
+                            .unwrap(),
+                    )
                 })
             },
         );

@@ -602,7 +602,8 @@ they are stated separately:
     success — **not** `2^-520` per candidate, because the object that must be reproduced is
     `X`, not the 520-bit `T`, and no tag width raises a 256-bit preimage. The byte components
     of the AAD are what this applies to. A length re-split has at most ~`2^128` candidates, so
-    it cannot reach a 256-bit preimage at all (`2^-128` per attempt, no attack); the
+    it cannot reach a 256-bit preimage at all (`2^-256` per candidate and ~`2^128` candidates,
+    so a total of ~`2^-128` — no attack); the
     length-split *binding* itself is §4.4's statement and is unaffected.
   * *Attacker-chosen — CMT-3's context half.* Two contexts the adversary chooses, colliding in
     `X` (`q²/2^257`, a `2^128` birthday), give the **same tag** — and the KDF's input is the
@@ -637,14 +638,15 @@ encryption is a uniformly random function of `(N, A, M)` (so repeated queries re
 answer) with the same length profile. Then
 
 ```
-Adv^{priv} ≤ Adv^{A1} + Adv^{A2} + 3·Adv^{A3} + q²/2^257
-Adv^{auth} ≤ Adv^{A1} + Adv^{A2} + 3·Adv^{A3} + q·2^-520 + q²/2^257
+Adv^{priv} ≤ 2·Adv^{A1} + Adv^{A2} + 3·Adv^{A3} + q²/2^257
+Adv^{auth} ≤ 2·Adv^{A1} + Adv^{A2} + 3·Adv^{A3} + q·2^-520 + q²/2^257
 ```
 
 where `q` bounds the adversary's oracle queries and each `Adv` is the *multi-query* PRF
 advantage of the corresponding assumption (each is already defined for a polynomial query
-bound). `Adv^{A1}`/`Adv^{A2}` are the ChaCha20/HChaCha20 terms of the key derivation (Thm 1),
-and the `Adv^{A3}` term is the three A3 applications the scheme makes — the tag's two
+bound). `Adv^{A1}` is the ChaCha20 term, charged **twice** — the key-material block function
+(Thm 1, hop 1) and the message keystream (hop 4) — and `Adv^{A2}` is the HChaCha20 term of the
+key derivation (Thm 1); the `Adv^{A3}` term is the three A3 applications the scheme makes — the tag's two
 keyed-BLAKE3 calls (the inner and outer hashes of Thm 2) and the per-message key derivation —
 charged as `3·Adv^{A3}`. There is no L3.6 term: revision `v0.3`'s
 two-level tag puts no master key in any hash message, so the tag is an ordinary A3 cascade.
@@ -662,8 +664,8 @@ now removed rather than priced. Both corrections lower nothing that was not alre
    observable changes except with the stated advantage.
 2. Replace the two-level tag function with a uniformly random function (A3, twice: the inner
    hash and the outer, as in Thm 2's cascade). From here, tags are uniform and independent for
-   distinct `(N, A, M)`; two queries collide in the tag with probability `q²/2^257`, the
-   birthday bound of the 256-bit chaining value the tag is a function of (§4.5), not
+   distinct *chaining values* (the tag is a function of the 256-bit state, §4.5); two queries
+   collide in the tag with probability `q²/2^257`, the birthday bound of that state, not
    `q²/2^521`.
 3. Replace `(enc_key, enc_nonce)` with a uniformly random function of the tag (A3). Tags
    that differ now give independent `(key, nonce)` pairs. A collision in that value is partly
@@ -887,7 +889,7 @@ The tag and the per-message key derivation both use keyed BLAKE3, with **differe
 (the tag's `k_in`/`k_out` vs `enc_seed`, independent by Thm 1) *and* different domain strings
 *and* different input layouts. Even in the impossible case two of those keys coincide, the tag
 is `B3(k, DOM_PRE ‖ …)` / `B3(k, DOM_TAG ‖ …)` and the key derivation is `B3(k, DOM_ENC ‖ T)`,
-so the families remain separated by A4. This is defence in depth: the separation does not depend
+so the families remain separated by S1 (their distinct 8-byte prefixes). This is defence in depth: the separation does not depend
 on the key derivation being right.
 
 ### 4.3 Cross-protocol key reuse (XChaCha20 / XChaCha20-Poly1305)
@@ -1062,8 +1064,8 @@ looking for "what would settle it" should go.
   strictly cheaper at `2^128`, so the bound carries one collision term and the tag's number is
   the right one. What would be wrong is quoting `q²/2^353`: that is the birthday of the output
   size, and the state that produces the output is what constrains it.
-* **Confidentiality and forgery stay at 128 bits, classically and quantumly** (Grover on the key
-  is `2^128`, which is the number the 256-bit key design targets). What is *not* 128-bit quantum
+* **Confidentiality and forgery are not moved by the correction — `2^256` classically, `2^128`
+  under Grover** (the number the 256-bit key design targets). What is *not* 128-bit quantum
   is the collision property: a 256-bit state has a ~`2^85` quantum collision search (BHT), which
   is inherent to the state size — SHA-256's collisions have the same quantum bound — and is one
   more reason not to claim that the tag width buys post-quantum margin. The correction changes

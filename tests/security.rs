@@ -480,6 +480,14 @@ fn fuzz_decrypt_never_panics_and_never_returns_plaintext() {
 // even if someone "fixes" the in-crate expectation to match. These values come
 // from tools/ref_impl.py, which is anchored to the published RFC 8439, HChaCha20
 // and official-BLAKE3 vectors — not from this crate.
+//
+// That independence is bounded at the *construction* layer, and `ref_impl.py`'s own
+// docstring (and `tests/README.md`) says where: the primitives are anchored to vectors
+// published by others, but the construction glue — domain strings, counter placement,
+// field order and widths, the two-level split — is a transcription of the same design,
+// with no external anchor. So this lock (like the differential fixture) catches a
+// *divergence* between the crate and the reference, not a shared misreading of the
+// specification. It is a lock on the bytes, not a correctness proof.
 
 #[test]
 fn kat_regression_lock() {
