@@ -90,17 +90,20 @@ git-fetch-with-cli = true
 # See https://spdx.org/licenses/ for list of possible licenses
 # [possible values: any SPDX 3.11 short identifier (+ optional exception)].
 # Derived from what the dependency tree actually uses, not copied from the
-# template. Enumerated with `cargo deny check licenses`:
+# template. Each crate named below declares the string exactly as written
+# (`cargo metadata --format-version 1` reports it), and `cargo deny --offline
+# check licenses` passes against the allow list that follows:
 #
-#   MIT OR Apache-2.0                                     (blake3, subtle, ...)
+#   MIT OR Apache-2.0                                     (arrayvec, aead, cc, ...)
 #   Apache-2.0 OR MIT                                     (zeroize)
-#   BSD-3-Clause                                          (arrayvec, ...)
-#   CC0-1.0 OR Apache-2.0 OR Apache-2.0 WITH LLVM-exception
-#   CC0-1.0 OR MIT-0 OR Apache-2.0
+#   BSD-3-Clause                                          (subtle)
+#   CC0-1.0 OR Apache-2.0 OR Apache-2.0 WITH LLVM-exception (blake3)
+#   CC0-1.0 OR MIT-0 OR Apache-2.0                        (constant_time_eq)
 #
 # cargo-deny satisfies an OR when any alternative is allowed, so MIT and
-# Apache-2.0 cover the first three and the two CC0 ones. BSD-3-Clause and the
-# LLVM exception are listed explicitly rather than relying on that.
+# Apache-2.0 cover the first two and the two CC0 ones. BSD-3-Clause is subtle's
+# only licence and therefore required; the LLVM exception is listed explicitly
+# rather than left to the OR rule.
 allow = [
     "MIT",
     "Apache-2.0",
