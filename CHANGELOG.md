@@ -8,6 +8,42 @@ green push to `main` — which are build artefacts of that job, not construction
 
 ## Unreleased
 
+### The key-commitment target bound is the 256-bit `subkey`, not the 520-bit tag
+
+A further audit pass — the third-party report's still-open item `F-C5b`, confirmed here against
+the derivation before anything was changed — found the *key* half of the commitment story still
+carrying the reasoning an earlier round had already retracted for the *context* half, in the same
+table. **No wire-format change, no code change, and no practical exploitability**: the corrected
+number is key-search level, the same tier the context row was corrected to.
+
+- **The target-game bound was stated as `2^-520` per candidate key (`≈ 2^-264` over the key
+  space); it is `≈ 2^-256` per candidate key (`≈ 1` second key over the space).** A candidate key
+  that is not the real one opens a given ciphertext by reproducing the **256-bit
+  `subkey = HC(K′, N₁)`** — that single value fixes `k_in`, `k_out` and `enc_seed`, and with them
+  the derived key pair, the recovered message, the inner digest and the tag — so the event is a
+  256-bit preimage, not a 520-bit tag hit. Enumerating all `2^256` keys therefore expects **one**
+  second key (success `≈ 0.63`), i.e. **key-search level**; `2^-520` per candidate is the *direct*
+  tag-hit route, which the `subkey` route dominates. The decision the number was attached to
+  survives — a second key is out of reach — but it is not a `2^-264` event, and **the tag width
+  does not set it**, which is precisely what the context row already said about the same kind of
+  256-bit intermediate. Corrected in `README.md` (the properties list, both commitment rows, the
+  "two games" section, the "`2^128` bounds *collisions*, not *targets*" section and the `2^260`
+  post-mortem), `SECURITY-ANALYSIS.md` (Thm 2's commitment bullet, §4.5's first and second
+  consequences, §4.10's target-game bullet and its preamble, §5 rows 3 and 17, §5.1, §8.1's cost
+  table and quantum row, §9's falsifier 4, the reference list, and the "strongest true sentence"
+  paragraph) and `AUDIT-RESPONSE.md`.
+- **What the width buys is narrower than the documents claimed.** It keeps the direct tag-hit
+  route (`2^-|T|` per candidate key) from becoming the binding object, which happens below 256
+  bits: a 32-byte tag would sit exactly at that level — raising the expected second-key count from
+  `≈ 1` to `≈ 2` — and a 16-byte one (the short-tag SIV family's setting) would be `2^-128` per
+  candidate and therefore the thing to hit. The width stays because the wire format is frozen and
+  because of that threshold, **not** because the target bound depends on it.
+- **The mechanism was already anchored, so the correction needed no new test.** The claim it
+  rests on — the key enters the derivation only through the `subkey` — is pinned by
+  `tests/construction_inventory.rs`, which asserts the source shape
+  (`subkey = hchacha20(key, &nonce[0..16])`, both derivation halves taken from `subkey`). What was
+  wrong was the number attached to it, not the code it describes.
+
 ### An eighth round: a word order no test could see, and a batch of stale figures
 
 An eighth audit round (twelve read-only audits run in parallel — one per file group, three on

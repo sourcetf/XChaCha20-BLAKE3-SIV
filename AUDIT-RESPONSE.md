@@ -330,10 +330,14 @@ record skips, not passes — and the reports' own measurements are the substitut
   `blake3_keyed_multi`'s comment now says this, and that no configuration probed left *both* a
   whole `k_in` and a whole `k_out` in reach (release keeps `k_in` whole and `k_out` short, debug
   the reverse), so the offline-forgery consequence is unchanged.
-* The `2^520` / `2^256` / `2^128` family: after §1.C's corrections the documents' statements match
-  the derivations (target `2^-520` per candidate key; key-space enumeration `≈ 2^-264`;
-  key-commitment and context routes `2^128` with identical plaintexts; different-message
-  salamander not derived).
+* The `2^256` / `2^128` family: after §1.C's corrections the documents' statements match the
+  derivations (target `≈ 2^-256` per candidate key — the 256-bit `subkey` preimage, so `≈ 1`
+  second key over the key space at key-search level; attacker-chosen key and context routes
+  `2^128` with identical plaintexts; different-message
+  salamander not derived). **An eighth round (2026-10-08) corrected this line again**: the target
+  figure had been `2^-520` per candidate key and `≈ 2^-264` over the key space, which prices only
+  the *direct tag-hit* route and is dominated by the `subkey` one. See `CHANGELOG.md`'s
+  eighth-round entry.
 
 ---
 
