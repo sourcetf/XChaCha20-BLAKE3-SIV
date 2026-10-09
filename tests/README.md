@@ -164,7 +164,8 @@ surprise:
   hunk headers in `mutants.out/diff/`, and the line numbers in `caught.txt` and
   `unviable.txt` are the coordinates of the revision the run was made against (that
   `a2a046d` tree, whose `accept_or_reject` starts at line 2428). They are **not** kept in
-  step with HEAD: at `ca5b8a8` that function starts at 2659 (+231), so a reader who
+  step with HEAD: at `ca5b8a8` that function starts at 2659 (+231), and it has moved
+  further with every commit since, so a reader who
   follows a recorded line number lands in the wrong place. It is still worth refreshing
   by re-running the campaign, which is what re-syncs the coordinates — and refreshing is
   also how the `decrypt_bounded` bound mutants were found to be uncaught (the run named a

@@ -141,7 +141,7 @@ before 1.0 would be a revision bump, not a silent one.
   succeeds by reproducing the 256-bit derivation that the tag *and* the keystream both come
   from — `subkey = HC(K′, N₁)` — which is a `≈ 2^-256` event per candidate key, i.e. `≈ 1`
   second key over the entire key space: key-search level, and **not** a bound the 520-bit
-  width sets. A tag short enough for the *direct* tag-hit route to fall below 256 bits would
+  width sets. A tag short enough for the *pure tag-collision* route to fall below 256 bits would
   be the weakest link instead, which is why the width is at least that; 65 bytes is the frozen
   format. The
   literature's *attacker-chosen* commitment games (CMT-1/CMT-3) are a different game whose
@@ -179,7 +179,7 @@ before 1.0 would be a revision bump, not a silent one.
 | Confidentiality (plaintext recovery) | 256-bit | the ChaCha20 key |
 | Forgery resistance | **256-bit** | BLAKE3 keyed mode as a PRF over a 256-bit key; a *target* problem, so no birthday search applies |
 | Context commitment (nonce/AAD) | **key-holder target: `≈ 2^256`; attacker-chosen: `2^128`, completion immediate** | the context enters the tag's *hash input* (`X`), not the tag's *key*, so the 65-byte width does **not** set this bound: a second context that reproduces a given `X` is a preimage of BLAKE3's 256-bit chaining value (`≈ 2^256`), and two *chosen* contexts whose `X` values collide are a `2^128` birthday — after which the tag, and therefore the derived keystream, are equal, so both openings share one plaintext and no fixed point is needed. The byte components of the AAD are what this exposes; a length re-split has too few candidates to reach a 256-bit preimage at all. An earlier revision of this row wrote `2^-520` per candidate key and "the width is what sets it", which is the *key*-search game, not this one — see below |
-| Key commitment **against a given ciphertext** (the target game) | `≈ 2^-256` per candidate key — `≈ 1` second key over the whole key space, key-search level | reproducing the 256-bit `subkey = HC(K′, N₁)`: that one value determines `k_in`, `k_out` and `enc_seed`, hence the derived key pair, the recovered message, the inner digest and the tag alike — so the object is 256-bit and **the tag width does not set this bound**, exactly as in the context row above. The direct `2^-520` tag-hit route is dominated by it. The key enters the tag through `k_in` (the inner digest) and `k_out` (the tag's own derivation); `enc_seed` does **not** enter the tag at all — it keys the KDF *whose input is the tag*, which is how the tag binds the keystream material too. The literature's CMT-3 is *attacker-chosen*, not this — see below |
+| Key commitment **against a given ciphertext** (the target game) | `≈ 2^-256` per candidate key — `≈ 1` second key over the whole key space, key-search level | reproducing the 256-bit `subkey = HC(K′, N₁)`: that one value determines `k_in`, `k_out` and `enc_seed`, hence the derived key pair, the recovered message, the inner digest and the tag alike — so the object is 256-bit and **the tag width does not set this bound**, exactly as in the context row above. The pure `2^-520` tag-collision route is dominated by it. The key enters the tag through `k_in` (the inner digest) and `k_out` (the tag's own derivation); `enc_seed` does **not** enter the tag at all — it keys the KDF *whose input is the tag*, which is how the tag binds the keystream material too. The literature's CMT-3 is *attacker-chosen*, not this — see below |
 | Commitment in the **attacker-chosen** games (invisible salamanders, CMT-1/CMT-3) | **two priced routes at `2^128`, both with identical plaintexts (key half and context half); the different-message salamander is not derived here** | the adversary outputs both keys (or contexts), both messages and `(C,T)`, so `2^520` does not describe it. A `subkey` collision at `2^128` gives two keys whose derived material, tag and keystream all coincide — one `(C,T)` valid under both, decrypting to the **same** plaintext (the key half). A collision of the inner digest `X` between two *chosen contexts* under one key does the same for the context half: equal tag, equal KDF output, equal keystream, one plaintext, completion immediate. The salamander — two *different* messages — is what is left: it needs `KS₁ ≠ KS₂`, hence two keys, so its object is the fixed point `T = tag(K₂, N, A, C ⊕ KS₂(T))` and it is not analysed. `SECURITY-ANALYSIS.md` §4.5, Thm 2 and §8.1 |
 | Tag collision resistance (the DAE bound's collision term) | **2^128** | the *chaining value*, not the tag: keyed BLAKE3's output is a function of its 256-bit state, so a state collision gives byte-identical tags of any length |
 
@@ -208,8 +208,12 @@ Two consequences, stated here because the old claim invited the opposite reading
   pair, the recovered message, the inner digest and the tag alike — so it succeeds with
   probability `≈ 2^-256`, and enumerating the whole `2^256` key space expects **`≈ 1` second key**
   (success `≈ 0.63`): key-search level, the same tier as the context route above. The route that
-  *is* `2^-520` per candidate — the second key's tag computation landing on the published tag —
-  is dominated. What the width does buy is that this direct route is never the weakest link: a
+  *is* `2^-520` per candidate is the ***pure tag-collision*** one — a candidate whose `subkey`
+  does *not* match the real one yet whose tag map still lands on the published tag — and the
+  `subkey` route dominates it. (The naming matters: the *union* event, "a candidate key's tag
+  computation lands on the published tag", is `≈ 2^-256` per candidate, because the `subkey`
+  route is one of its members.) What the width does buy is that this route is never the weakest
+  link: a
   32-byte tag would put it exactly at the 256-bit level, and a 16-byte one at `2^128`, which is the
   non-committing failure mode of the short-tag SIV family (`AES-GCM-SIV`). So the width stays —
   the format is frozen, and below 256 bits the tag becomes the binding object — but not for the
@@ -231,8 +235,9 @@ target row, applied that number to a game whose object is a 256-bit `subkey` rat
   is a target — but that value is the **256-bit `subkey = HC(K′, N₁)`**, not the 520-bit tag: a key
   whose subkey matches reproduces the derived material and everything downstream of it, so the
   event is `≈ 2^-256` per candidate key and a full enumeration expects `≈ 1` second key
-  (success `≈ 0.63`) — key-search level. **`2^-520` per candidate key is the *tag-guess* route,
-  which that same enumeration dominates**, and the 65-byte width is not what sets this bound
+  (success `≈ 0.63`) — key-search level. **`2^-520` per candidate key is the *pure tag-collision*
+  route** (a `subkey` miss whose tag still lands on the published one), **which that same
+  enumeration dominates**, and the 65-byte width is not what sets this bound
   (`SECURITY-ANALYSIS.md` §4.5, Thm 2).
 * **The attacker-chosen games** — these are the ones the commitment literature formalises as
   `CMT-1`/`CMT-3` (and the "invisible salamanders" attack): the adversary *outputs the entire
@@ -269,7 +274,7 @@ bounded by key search (`2^256`), and a second key succeeds by reproducing the 25
 `subkey`, with probability `≈ 2^-256` per candidate, so a full key-space enumeration expects
 `≈ 1` second key. Neither is a `2^520` problem. That is the same shape as the context row
 above — there the object is the 256-bit inner digest `X`, here it is the 256-bit `subkey`, and
-no tag width reaches either; the width prices only the *direct* tag-hit route, which is
+no tag width reaches either; the width prices only the *pure tag-collision* route, which is
 `2^-|T|` per candidate and therefore the weakest link exactly when `|T|` is below 256 bits.
 So forgery and commitment *against a given* ciphertext are untouched by the correction.
 What `2^128` bounds is the

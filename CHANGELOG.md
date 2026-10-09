@@ -8,6 +8,33 @@ green push to `main` — which are build artefacts of that job, not construction
 
 ## Unreleased
 
+### The v5 verification pass: a scale model of the commitment bound, a third silent exit, and a route's name
+
+A fifth audit pass (`audit_v5`) independently verified the three commits above. It re-derived the
+corrected commitment bound and confirmed it with a **scaled-down experiment** — truncating
+`subkey` to T bits so the whole (now `2^T`) key space can be enumerated for keys that open a given
+ciphertext. At T = 12, twenty trials give an extra-key mean of 1.15 and P(≥1 second key) = 0.65; at
+T = 16, ten trials give 1.20 and 0.90 — against the corrected `≈ 1` and `≈ 0.63` (`1 − e⁻¹`).
+Per-candidate hit rates measured `2.8·10⁻⁴` (T = 12) and `1.8·10⁻⁵` (T = 16) against `2^-T`: the
+**state** route's order, not the tag's. Its per-hunk reading of the diff found no defect in the
+three commits and confirmed every claimed fix by injection. Two things it did change:
+
+- **A third silent exit in `tests/locked.rs`'s refusal arm.** The fix that made an unexhaustible
+  allowance loud covered two branches — an unlimited or unreadable limit, and the loop that runs
+  out of headroom — and missed the **per-key probe** between them: if the baseline charge is
+  already within a page of the limit, `LockedKey::new(&KEY)` fails, the test printed `SKIPPED` and
+  returned, and libtest reports `ok`. The auditor reached it with
+  `prlimit --memlock=1024:67108864`, a 1 KiB soft limit under which a single 4 KiB lock fails, and
+  no `XSIV_ALLOW_UNEXERCISED_REFUSAL` set. That branch is now loud on the same terms as its two
+  siblings, and the comment that claimed this file had two such exits now says three.
+- **The `2^-520`-per-candidate route has a name.** It was written as "the second key's tag
+  computation landing on the published tag" — which is the name of the *union* event, and that
+  event is `≈ 2^-256` per candidate, because the `subkey` route is one of its members. The `2^-520`
+  belongs to the **pure tag-collision** route: a candidate whose `subkey` misses and whose tag
+  nonetheless lands on the published one (the expected `2^-264` other preimages of the tag over the
+  whole `2^256` domain). Renamed in all eleven places that gave that figure the union's name, with
+  the distinction spelled out at the main one.
+
 ### The acceptance report's 28 findings: two tests a comment could satisfy, a stage that could not fail, and drifted claims
 
 A third-party **acceptance** report on `b418e17` (28 findings) found **no high or medium security
@@ -132,7 +159,7 @@ number is key-search level, the same tier the context row was corrected to.
   said a matching `subkey` "almost surely belongs to a key *other* than the real one": a `subkey`
   has no unique preimage, so the real key is one of them and a sweep expects one more, making a
   match a *different* key about half the time. Neither changes an exponent.
-- **What the width buys is narrower than the documents claimed.** It keeps the direct tag-hit
+- **What the width buys is narrower than the documents claimed.** It keeps the pure tag-collision
   route (`2^-|T|` per candidate key) from becoming the binding object, which happens below 256
   bits: a 32-byte tag would sit exactly at that level — raising the expected second-key count from
   `≈ 1` to `≈ 2` — and a 16-byte one (the short-tag SIV family's setting) would be `2^-128` per

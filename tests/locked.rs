@@ -376,9 +376,23 @@ fn a_refused_lock_is_reported_and_returns_the_allowance() {
     // (`VmLck` counts bytes), and this crate locks one page per key.
     let per_key = {
         let Ok(probe) = LockedKey::new(&KEY) else {
+            // The third exit, and the one an audit found still silent: the baseline charge is
+            // already within a page of the limit, so even the probe cannot be locked. Same
+            // rule as the branches above and below — libtest prints `ok` for a returned test
+            // whether or not it reached the failure arm — so it is loud unless the operator
+            // records that this host accepts the gap.
+            assert!(
+                allow_unexercised_refusal(),
+                "a single lock already fails (baseline {baseline} bytes against a \
+                 {limit_bytes} byte allowance), so there is no headroom to exhaust and the \
+                 refusal path of `LockedKey::new` goes untested here. Raise \
+                 RLIMIT_MEMLOCK, or set XSIV_ALLOW_UNEXERCISED_REFUSAL=1 to record that this \
+                 host knowingly leaves the refusal path untested"
+            );
             eprintln!(
-                "SKIPPED: a single lock already fails (baseline {baseline} bytes against a \
-                 {limit_bytes} byte allowance), so there is no headroom to exhaust here"
+                "SKIPPED (allowed by XSIV_ALLOW_UNEXERCISED_REFUSAL=1): a single lock already \
+                 fails (baseline {baseline} bytes against a {limit_bytes} byte allowance), so \
+                 there is no headroom to exhaust here"
             );
             return;
         };
@@ -427,9 +441,10 @@ fn a_refused_lock_is_reported_and_returns_the_allowance() {
         }
         // Out of reach is not a pass: libtest prints `ok` for a returned test whether or not
         // it reached the failure arm it exists for, and an audit named this return as the one
-        // silently-vacuous outcome in this file (the other is the unlimited-limit branch
-        // above). So it is a failure unless the operator records that this host accepts the
-        // gap.
+        // silently-vacuous outcome in this file. It is not the only one — the unlimited-limit
+        // branch above, and the per-key probe between them, are the other two, and all three
+        // are loud by default now — so it is a failure unless the operator records that this
+        // host accepts the gap.
         assert!(
             allow_unexercised_refusal(),
             "the refusal path was not exercised: {} keys ({per_key} bytes charged each) were \

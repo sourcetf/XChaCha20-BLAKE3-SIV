@@ -336,7 +336,7 @@ record skips, not passes — and the reports' own measurements are the substitut
   `2^128` with identical plaintexts; different-message
   salamander not derived). **An eighth round (2026-10-08) corrected this line again**: the target
   figure had been `2^-520` per candidate key and `≈ 2^-264` over the key space, which prices only
-  the *direct tag-hit* route and is dominated by the `subkey` one. See `CHANGELOG.md`'s
+  the *pure tag-collision* route and is dominated by the `subkey` one. See `CHANGELOG.md`'s
   eighth-round entry.
 
 ---

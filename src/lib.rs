@@ -147,7 +147,7 @@
 //! expects `≈ 1` second key (success `≈ 0.63`) — key-search level, the same tier as the
 //! context route.  An earlier revision of this section said `2^-520` per candidate key
 //! (`≈ 2^-264` over the space) and "the width is what makes the scheme committing"; that
-//! prices only the *direct* tag-hit route, which is dominated above 256 bits.  Below 256
+//! prices only the *pure tag-collision* route, which is dominated above 256 bits.  Below 256
 //! bits it is the *tag* that becomes the binding object: a 32-byte tag would move the
 //! expectation from `≈ 1` to `≈ 2`, and a 16-byte one would be `2^-128` per candidate and
 //! therefore the thing to hit.  What the width does *not* buy is collision resistance
@@ -381,7 +381,7 @@ pub const KEY_LEN: usize = 32;
 ///   at `≈ 2^-256` per candidate, so enumerating the whole `2^256` key space expects `≈ 1`
 ///   second key (success `≈ 0.63`): key-search level. An earlier revision of this list said
 ///   `2^-520` per candidate and `≈ 2^-264` over the space and attributed that to the width; it
-///   priced only the *direct* tag-hit route. What the width keeps is that that route is never
+///   priced only the *pure tag-collision* route. What the width keeps is that that route is never
 ///   the cheapest one — a 32-byte tag would sit exactly at the 256-bit level, and a 16-byte one
 ///   (the short-tag SIV family's setting) would be `2^-128` per candidate. A revision therefore
 ///   cannot shorten the tag much without making the tag itself the binding object;
@@ -4675,8 +4675,8 @@ mod tests {
         // a *given* ciphertext) is not set by this number: a candidate key succeeds by
         // reproducing the 256-bit subkey, at ~2^-256 per candidate, so the whole 2^256
         // key space expects ~1 second key. What the width keeps is that its own route --
-        // the candidate's tag computation landing on the published tag, 2^-|T| per
-        // candidate -- is never the cheapest one. (An earlier comment here said "the birthday bound
+        // a candidate whose subkey misses yet whose tag still lands on the published tag
+        // (2^-|T| per candidate) -- is never the cheapest one. (An earlier comment here said "the birthday bound
         // caps commitment at 2^(n/2) bits", which is the rationale §4.5 falsifies --
         // commitment is not a birthday problem, and the tag's birthday is 2^128 over
         // its 256-bit chaining value regardless of width. See `SECURITY-ANALYSIS.md`
