@@ -75,6 +75,12 @@ def harnesses():
     is the failure mode this script exists to avoid.  Instead: find a line that
     is the `kani::proof` attribute, then take the next `fn` declaration,
     skipping attribute and comment lines in between.
+
+    The attribute is matched as a line *prefix*, because a trailing comment on
+    that line (`#[kani::proof] // why`) is valid Rust and used to drop the
+    harness silently; and a count cross-check at the end turns any other shape
+    this parser does not understand into a loud error rather than a harness that
+    is never sharded and never proven.
     """
     with open(PROOFS) as fh:
         lines = fh.read().splitlines()
@@ -83,24 +89,28 @@ def harnesses():
     armed = False
     for line in lines:
         stripped = line.strip()
-        # A harness may be written `#[kani::proof] fn foo()` on one line; matching only
-        # the exact attribute (as this did) made that harness invisible -- it was never
-        # sharded, never counted, and the `planned == len(names)` cross-check at the end
-        # could not fire because the name had never been seen.
-        inline = re.match(r"#\[kani::proof\]\s*fn\s+([A-Za-z0-9_]+)", stripped)
-        if inline:
-            names.append(inline.group(1))
-            continue
-        # The attribute may share its line with *other* attributes and then the `fn`
-        # (`#[kani::proof] #[kani::unwind(9)] fn foo()`): neither of the two shapes above
-        # matches that, so the harness was dropped silently -- the failure the comment at
-        # the top of this function says the parser exists to prevent.
-        inline_more = re.match(r"#\[kani::proof\]\s*(?:#\[[^\]]*\]\s*)+fn\s+([A-Za-z0-9_]+)", stripped)
-        if inline_more:
-            names.append(inline_more.group(1))
-            continue
-        if stripped == "#[kani::proof]":
-            armed = True
+        # Any line whose first token is the attribute starts a harness. The `fn` may share
+        # the line (`#[kani::proof] fn f()`, `#[kani::proof] #[kani::unwind(9)] fn f()`,
+        # each possibly with a trailing comment), or follow on a later line, possibly after
+        # more attributes and comments.
+        #
+        # Matching the attribute as a *prefix* rather than requiring the line to be exactly
+        # `#[kani::proof]` is the fix for shapes that used to fall through every branch
+        # below and vanish: `#[kani::proof] // why` and `#[kani::proof] /* why */` are
+        # valid Rust with the attribute attached to the following `fn`, and the old parser
+        # saw neither them nor a harness whose `fn` shares the line with them (`the count`,
+        # `--plan`, the Formal matrix and `tools/check_kani_cfg.sh`'s `>= 13` floor all
+        # missed it; a *new* harness in that shape cannot lower a count, so nothing else
+        # could notice). Measured before the fix: a file with one harness in each of the
+        # three shapes reported a count of 1.
+        if stripped.startswith("#[kani::proof]"):
+            # Attributes and comments can share the line; drop them and look for the `fn`.
+            rest = re.sub(r"#\[[^\]]*\]|//.*|/\*.*?\*/", " ", stripped[len("#[kani::proof]"):])
+            m = re.match(r"\s*(?:pub\s+)?fn\s+([A-Za-z0-9_]+)", rest)
+            if m:
+                names.append(m.group(1))
+            else:
+                armed = True
             continue
         if not armed:
             continue
@@ -117,6 +127,17 @@ def harnesses():
             f"error: #[kani::proof] not followed by a fn; got: {line!r}"
         )
 
+    # The cross-check: every line that *starts* with the attribute must have produced a
+    # name. This is what keeps a shape the loop above does not know from disappearing
+    # again -- the failure mode this parser exists to prevent, and the one a `>= 13` count
+    # floor in `tools/check_kani_cfg.sh` cannot see when the harness that vanishes is a new
+    # one. (A commented-out `// #[kani::proof]` starts with `//`, so it is not counted.)
+    attribute_lines = sum(1 for line in lines if line.strip().startswith("#[kani::proof]"))
+    if attribute_lines != len(names):
+        raise SystemExit(
+            f"error: {attribute_lines} line(s) start with #[kani::proof] but {len(names)} "
+            f"harness name(s) were parsed -- a harness is being dropped silently"
+        )
     if not names:
         raise SystemExit("error: found no Kani harnesses in src/proofs.rs")
     if len(set(names)) != len(names):

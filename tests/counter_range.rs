@@ -68,6 +68,34 @@ const CALL_SITES: &[(&str, usize)] = &[
     ("chacha20_block(", 2),
 ];
 
+/// The counter *arithmetic* inside the keystream paths, which the call-site census
+/// above cannot see: how far each kernel's caller advances `ctr`, and which counter
+/// each parallel lane of a kernel carries.
+///
+/// The census fixes the starting values; these lines are what make the reachable
+/// range `0 ..= blocks - 1` and make every block of a message distinct. A `blocks4`
+/// caller that advanced by 5 would skip or repeat keystream and would wrap the `u32`
+/// before the length bound is reached — the same silent reuse the bound exists to
+/// prevent — and the census, every argument check and the literal-1 count all stay
+/// green. (Measured: `wrapping_add(8)` -> `wrapping_add(9)` left this file green.)
+/// The lane offsets are the same fault one level down: lane `k` must carry
+/// `counter + k`, or the four/eight lanes of one kernel repeat each other.
+const COUNTER_STEPS: &[(&str, usize)] = &[
+    ("ctr = ctr.wrapping_add(8);", 1),
+    ("ctr = ctr.wrapping_add(4);", 2),
+    ("ctr = ctr.wrapping_add(1);", 1),
+    ("counter.wrapping_add(7) as i32,", 1),
+    ("counter.wrapping_add(6) as i32,", 1),
+    ("counter.wrapping_add(5) as i32,", 1),
+    ("counter.wrapping_add(4) as i32,", 1),
+    ("counter.wrapping_add(3) as i32,", 2),
+    ("counter.wrapping_add(2) as i32,", 2),
+    ("counter.wrapping_add(1) as i32,", 2),
+    ("counter.wrapping_add(3),", 1),
+    ("counter.wrapping_add(2),", 1),
+    ("counter.wrapping_add(1),", 1),
+];
+
 #[test]
 fn the_limit_is_exactly_the_block_counters_capacity() {
     let capacity = u32::MAX as u64 + 1;
@@ -182,6 +210,12 @@ fn every_keystream_call_site_starts_the_counter_at_zero() {
 
     let mut seen = vec![0usize; CALL_SITES.len()];
     let mut literal_one = 0;
+    // Every call whose counter argument is a *variable*, with the line that carries it:
+    // the variable names `counter`/`ctr` are only an acceptable argument when they are
+    // the enclosing function's own counter, and a name check alone cannot tell that
+    // from a local that happens to be called `counter`. See the assertion after the
+    // loop.
+    let mut forwarding: Vec<String> = Vec::new();
     for (idx, (name, _)) in CALL_SITES.iter().enumerate() {
         let bare = name.trim_end_matches('(');
         let mut from = 0usize;
@@ -221,6 +255,9 @@ fn every_keystream_call_site_starts_the_counter_at_zero() {
             let (first, second) = first_two_arguments(&body, open);
             let arg = second.trim();
             let is_literal_one = arg == "1";
+            if arg == "counter" || arg == "ctr" {
+                forwarding.push(line.trim().to_string());
+            }
             if is_literal_one {
                 literal_one += 1;
             }
@@ -265,6 +302,64 @@ fn every_keystream_call_site_starts_the_counter_at_zero() {
          found {literal_one}: a second one is either a new derivation block or a message \
          keystream starting at 1, and the latter wraps the counter"
     );
+
+    // The variable-counter sites, by their *text*. Allowing any argument spelled
+    // `counter`/`ctr` let a new call site inherit the allowance from its variable's
+    // name: measured, a helper with `let counter = 5u32;` around a moved
+    // `chacha20_keystream` call kept every count, every argument check and the
+    // literal-1 count green while the message keystream started at block 5 (keystream
+    // reuse, and a wrap before the length limit is reached). These seven lines are the
+    // internal dispatch: the two wrappers forwarding their own `counter` parameter,
+    // the SIMD kernels and the two scalar tails receiving the `ctr` their caller owns.
+    forwarding.sort();
+    let mut expected: Vec<String> = [
+        "chacha20_apply(key, counter, nonce, &Input::Keystream, out);",
+        "chacha20_apply(key, counter, nonce, &Input::Separate(input), output);",
+        "let mut ks = chacha20_block(key, ctr, nonce);",
+        "let mut ks = chacha20_block(key, ctr, nonce);",
+        "unsafe { aarch64_simd::blocks4(key, ctr, nonce, &mut ks) };",
+        "unsafe { x86_simd::blocks4(key, ctr, nonce, &mut ks) };",
+        "unsafe { x86_simd::blocks8(key, ctr, nonce, &mut ks) };",
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .collect();
+    expected.sort();
+    assert_eq!(
+        forwarding, expected,
+        "the set of variable-counter keystream calls changed. `counter`/`ctr` is only \
+         acceptable when it is the enclosing function's own counter, and this list is \
+         how that is written down: a new site here needs its start value reviewed, and \
+         a local that merely happens to be named `counter` is not the caller's own"
+    );
+}
+
+/// The counter *arithmetic*, which the call-site census cannot see: how far each
+/// kernel's caller advances the counter, and the lane offset each parallel block
+/// carries. See [`COUNTER_STEPS`].
+#[test]
+fn the_counter_steps_are_the_block_arithmetic() {
+    let src = include_str!("../src/lib.rs");
+    let cut = src.find("mod tests {").expect("the test module must exist");
+    let body = strip_comments(&src[..cut]);
+
+    let mut report = String::new();
+    for (step, expected) in COUNTER_STEPS {
+        // Occurrences, not lines: if two steps ever share a line, neither may hide.
+        let found: usize = body.lines().map(|l| l.matches(step).count()).sum();
+        report.push_str(&format!(
+            "      {step:<34} {found} (pinned at {expected})\n"
+        ));
+        assert_eq!(
+            found, *expected,
+            "a counter step in the keystream paths changed:\n{report}\n\
+             Each kernel consumes as many blocks as its caller advances by, and lane \
+             `k` carries `counter + k`; a step that no longer matches the blocks \
+             consumed repeats or skips keystream and can wrap the `u32` before \
+             MAX_MSG_SIZE is reached. Re-check the arithmetic against MAX_MSG_SIZE and \
+             the kernel widths before updating this table."
+        );
+    }
 }
 
 /// `text` with `//` line comments and `/* … */` block comments removed, and string
@@ -280,7 +375,13 @@ fn strip_comments(text: &str) -> String {
     enum Mode {
         Code,
         Line,
-        Block,
+        /// Inside a block comment, with its **nesting depth**: Rust block comments
+        /// nest, and a scanner that exits at the first `*/` reads the rest of the
+        /// comment as code and can then be pushed into `Str` by a quote inside it,
+        /// which *hides real code that follows*. Measured before this depth was
+        /// tracked: a `/* /* */ " */ … /* " */`-wrapped `chacha20_keystream(k, 7, …)`
+        /// was a live call site this census could not see.
+        Block(usize),
         Str,
         /// Inside a raw string (`r"…"`, `r#"…"#`), whose contents are dropped.
         RawStr(u8),
@@ -297,7 +398,7 @@ fn strip_comments(text: &str) -> String {
                     mode = Mode::Line;
                     i += 2;
                 } else if c == b'/' && b.get(i + 1) == Some(&b'*') {
-                    mode = Mode::Block;
+                    mode = Mode::Block(1);
                     i += 2;
                 } else if let Some((prefix, hashes)) = raw_string_prefix(&b[i..]) {
                     // A raw string (`r"…"`, `r#"…"#`, `br#"…"#`): its contents are
@@ -338,9 +439,17 @@ fn strip_comments(text: &str) -> String {
                 }
                 i += 1;
             }
-            Mode::Block => {
-                if c == b'*' && b.get(i + 1) == Some(&b'/') {
-                    mode = Mode::Code;
+            Mode::Block(depth) => {
+                if c == b'/' && b.get(i + 1) == Some(&b'*') {
+                    // A nested comment: Rust counts these, so the scanner must too.
+                    mode = Mode::Block(depth + 1);
+                    i += 2;
+                } else if c == b'*' && b.get(i + 1) == Some(&b'/') {
+                    mode = if depth == 1 {
+                        Mode::Code
+                    } else {
+                        Mode::Block(depth - 1)
+                    };
                     i += 2;
                 } else {
                     if c == b'\n' {

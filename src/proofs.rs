@@ -12,9 +12,9 @@
 //! to `cargo test`.
 //!
 //! Each harness states a property, and its own doc says what domain it quantifies
-//! over: most take symbolic inputs, while the KAT anchors, the constant properties
-//! and the sequencing experiments run concrete values and say so rather than
-//! implying full coverage.
+//! over: most take symbolic inputs, while the KAT anchors, the constant properties,
+//! the sequencing experiments and the concrete tag comparison run concrete values
+//! and say so rather than implying full coverage.
 //!
 //! # Sizing the harnesses (why some bounds look arbitrary)
 //!
@@ -43,6 +43,11 @@
 //!    slice length; too low a bound fails with a spurious "unwinding assertion"
 //!    error rather than a genuine counterexample. Harnesses therefore compare
 //!    scalars or short fields instead of whole slices.
+//!
+//! Ten of the thirteen harnesses carry an explicit `#[kani::unwind]`; the other
+//! three contain no loops.  The bounds are deliberately generous, and the
+//! unwinding assertions they turn on are what make a bound that is ever too low
+//! fail the harness rather than silently truncate the loop it guards.
 //!
 //! # What this suite can and cannot establish
 //!
@@ -78,12 +83,15 @@
 //!    on reading the function and on the release disassembly showing both calls
 //!    emitted, not on a proof.
 //! 2. **The model bounds the assertion strength.** It folds each input byte into
-//!    a positional accumulator, and a harness requiring *every* output byte to
-//!    move when a whole field changes could not be unrolled in reasonable time
-//!    (measured: over 18 minutes for one harness). Harnesses here therefore state
-//!    one-sided properties, and full-width coverage comes from the KATs and from
+//!    a positional accumulator, and a *symbolic* harness requiring *every* output
+//!    byte to move when a whole field changes could not be unrolled in reasonable
+//!    time (measured: over 18 minutes for one harness). The symbolic harnesses
+//!    here therefore state one-sided properties; full-width coverage comes from
+//!    the concrete comparison in `tag_matches_the_model_on_a_concrete_input` (all
+//!    65 bytes, one input), and from the KATs and
 //!    `test_tag_matches_blake3_over_the_documented_input` in `lib.rs`, which
-//!    compares all 65 tag bytes against an independently assembled input.
+//!    compares all 65 tag bytes against an independently assembled input with the
+//!    real BLAKE3.
 
 use super::*;
 use alloc::vec;
@@ -128,9 +136,10 @@ fn zeroize_slice_clears_all_bytes() {
 /// "unwinding assertion loop 2" failure rather than a counterexample.  Nothing
 /// is lost by shrinking it: `off` still sweeps all eight misalignments and `len`
 /// still reaches 15, so a window with `off > 0` exercises the byte-prefix path
-/// and (when `len >= 8 + off`) one full `usize` chunk write.  Two or more chunk
-/// stores do not fit at this size; the multi-chunk iteration is covered by the
-/// 64-byte unit test in `lib.rs`, not here.
+/// and (when `len >= 8 + off`) at least one full `usize` chunk write.  At this
+/// size at most two chunk stores fit, and only an aligned 16-byte window reaches
+/// two; the longer multi-chunk iteration is covered by the 64-byte unit test in
+/// `lib.rs`, not here.
 #[kani::proof]
 #[kani::unwind(24)]
 fn zeroize_slice_clears_unaligned_window() {
@@ -335,14 +344,16 @@ fn chacha20_keystream_involution_partial_blocks() {
 /// specification and on `test_all_accelerated_paths_agree_on_a_boundary_corpus`,
 /// which compares the scalar and SIMD paths over many inputs.
 ///
-/// This is the one harness that runs the *real* permutation, which is why it
-/// takes several minutes; it is kept because it is the only formal anchor for
-/// the round function and the output-word selection.
+/// This is the one harness that runs the *real* permutation, which makes it the
+/// suite's most expensive harness (the design note above carries the measured
+/// figures); it is kept because it is the only formal anchor for the round
+/// function and the output-word selection.
 #[kani::proof]
 // `hex32`/`hex16` decode 32/16 bytes one output byte per loop iteration (two
 // `nib` calls in the body), the HChaCha20 core runs 10 double-rounds, and its
-// output loop runs 8 times, so the default bound is far too low; 40 covers the
-// longest loop (32 iterations, in `hex32`) with room for its exit.
+// output loop runs 8 times; 40 covers the longest loop (32 iterations, in
+// `hex32`) with room for its exit, and the bound is what carries that loop's
+// unwinding assertion.
 #[kani::unwind(40)]
 fn hchacha20_matches_draft_vector() {
     let key = hex32("000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f");
@@ -366,10 +377,12 @@ fn hchacha20_matches_draft_vector() {
 // 6.11.0, the one harness that runs the real rounds takes **roughly 33-61 s depending
 // on host and flags** (the range in the design note above) and the whole
 // 13-harness set ~875 s.  The structural point stands: an end-to-end
-// `encrypt`/`decrypt` harness invokes HChaCha20 (20 rounds), the subkey block, the
-// tag block, the encryption-key block and then the keystream — five permutations —
-// and with *symbolic* plaintext it does not terminate at all.  So the AEAD level is
-// still reached through the model, not by proving the primitive end to end.
+// `encrypt`/`decrypt` harness invokes HChaCha20 (20 rounds), the two
+// `derive_material` keystream blocks and then one keystream block per 64 bytes of
+// message — three permutations for an empty message and one more per message block
+// (the tag itself costs none; it is BLAKE3) — and with *symbolic* plaintext it does
+// not terminate at all.  So the AEAD level is still reached through the model, not
+// by proving the primitive end to end.
 //
 // Two consequences:
 //
@@ -884,6 +897,7 @@ fn tag_is_keyed_hash_of_the_whole_context() {
 #[kani::proof]
 #[kani::stub(blake3_keyed_multi, model_blake3_keyed_multi)]
 #[kani::stub(zeroize_array, noop_zeroize_array)]
+#[kani::unwind(130)]
 fn tag_matches_the_model_on_a_concrete_input() {
     let k_in_c = [0x11u8; 32];
     let k_out_c = [0x22u8; 32];
@@ -934,6 +948,7 @@ fn tag_matches_the_model_on_a_concrete_input() {
 #[kani::proof]
 #[kani::stub(blake3_keyed_multi, model_blake3_keyed_multi)]
 #[kani::stub(zeroize_array, noop_zeroize_array)]
+#[kani::unwind(130)]
 fn tag_changes_when_the_key_changes() {
     let k_in: [u8; 32] = kani::any();
     let k_out: [u8; 32] = kani::any();
@@ -978,6 +993,7 @@ fn tag_changes_when_the_key_changes() {
 #[kani::proof]
 #[kani::stub(blake3_keyed_multi, model_blake3_keyed_multi)]
 #[kani::stub(zeroize_array, noop_zeroize_array)]
+#[kani::unwind(130)]
 fn derive_enc_reads_every_tag_byte() {
     let enc_seed: [u8; 32] = kani::any();
     let pos: usize = kani::any();
@@ -1033,6 +1049,7 @@ fn derive_enc_reads_every_tag_byte() {
 #[kani::proof]
 #[kani::stub(blake3_keyed_multi, model_blake3_keyed_multi)]
 #[kani::stub(zeroize_array, noop_zeroize_array)]
+#[kani::unwind(130)]
 fn every_aad_and_message_byte_reaches_the_tag() {
     let k_in: [u8; 32] = kani::any();
     let k_out: [u8; 32] = kani::any();

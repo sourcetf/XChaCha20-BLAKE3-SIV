@@ -89,13 +89,15 @@ use crate::{DOM_ENC, DOM_PRE, DOM_TAG, NONCE_LEN, SUBKEY_DOMAIN, TAG_LEN};
 ///     44-byte aggregate. The construction buffers are written through caller slices for that
 ///     reason; the caller (`src/lib.rs`) wipes its own copies of the tags, and `scrub_stack`
 ///     remains the cover for the return slots themselves.
-///   * **Short-lived 4-byte copies inside the BLAKE3 code**: the `[u8; 4]` built from the key
+///   * **Short-lived 4-byte copies inside the primitives**: the `[u8; 4]` built from the key
 ///     in `Hasher::new_keyed`, the ones `block`/`hchacha20` build from the key and nonce as
 ///     they unpack them into state words, the one built from a message word in
-///     `words_from_le_bytes`, and the per-word output copies in `hchacha20`. The sentence that
+///     `words_from_le_bytes`, the per-word output copies in `hchacha20`, and `block`'s named
+///     `x` — the added keystream word, written into `out` byte-wise. The sentence that
 ///     used to stand here said these were wiped; they are not — the inline array expressions
-///     have no local to name, and the two named `let mut b = [u8; 4]` locals
-///     (`Hasher::new_keyed`, `words_from_le_bytes`) go unwiped for the same cost reason as the
+///     have no local to name, and the named locals
+///     (`Hasher::new_keyed`'s and `words_from_le_bytes`'s `b`, `block`'s `x`) go unwiped for
+///     the same cost reason as the
 ///     inline ones. They are left rather than paid
 ///     for with a volatile store per word — four bytes of a 32-byte key is not a key, and
 ///     `tools/stack_residue.sh` searches for the whole value — and `scrub_stack` covers the
@@ -173,8 +175,13 @@ fn block(key: &[u8; 32], counter: u32, nonce: &[u8; 12]) -> [u8; 64] {
     }
 
     let mut out = [0u8; 64];
-    // Byte-wise, so the keystream word never exists as a named 4-byte temporary: that
-    // shape would need a wipe, on the same per-block path as the key unpacking above.
+    // Byte-wise, so no `[u8; 4]` temporary is built for each output word. The word itself
+    // is still a named 4-byte local (`x`, below) and is left unwiped, like the other
+    // short-lived 4-byte copies the module header lists and for the same reason (a
+    // volatile store per word, 16 per block, on this per-block path); the key-bearing
+    // `s`/`v` above are what this function is responsible for. (An earlier version of
+    // this comment claimed the keystream word "never exists as a named 4-byte
+    // temporary", which the `let x` line below contradicts.)
     for i in 0..16 {
         let x = v[i].wrapping_add(s[i]);
         out[i * 4] = x as u8;
@@ -566,13 +573,18 @@ impl CvStack {
         }
     }
 
-    fn push(&mut self, cv: [u32; 8]) {
+    fn push(&mut self, mut cv: [u32; 8]) {
         // Unreachable: the depth is bounded by the counter's width. A panic (rather than a
         // silent drop) is the right failure here -- a witness that forgot a chaining value
         // would disagree with the main path on a huge input instead of saying why.
         assert!(self.len < CV_STACK_RESERVE, "witness: CV stack exhausted");
         self.cvs[self.len] = cv;
         self.len += 1;
+        // The parameter is a by-value copy of the key-derived chaining value the caller
+        // passes (`add_chunk_cv` wipes its own local after this returns, but a copy that
+        // entered through an argument slot is a different place, and nothing else names
+        // it). Wipe it here too, so no whole CV copy is left merely because of the ABI.
+        wipe_words(&mut cv);
     }
 }
 

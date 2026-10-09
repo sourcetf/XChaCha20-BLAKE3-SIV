@@ -1057,6 +1057,12 @@ fn a_locked_key_can_move_to_another_thread() {
 /// and leaving it non-dumpable would remove core dumps for every other test in the process and
 /// stop `strace`/`gdb` from attaching to a run that is failing — which is exactly when someone
 /// wants them.
+///
+/// The environment can make the test vacuous in three ways (no `PR_GET_DUMPABLE`, a process
+/// that starts non-dumpable, a refused `PR_SET_DUMPABLE`), and each of them used to return
+/// `ok` with nothing asserted — a broken `deny_debugging` shipped silently through all three.
+/// They are now refusals unless `XSIV_ALLOW_UNLOCKED=1` records that this host knowingly runs
+/// the `locked` layer without its kernel-side half, the same convention as `lock_or_skip`.
 #[test]
 fn deny_debugging_is_enforced_by_the_kernel_and_reversible() {
     let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
@@ -1066,14 +1072,41 @@ fn deny_debugging_is_enforced_by_the_kernel_and_reversible() {
         return;
     }
 
+    // The three exits below all return `ok` without asserting anything about
+    // `deny_debugging`, and a broken implementation lands on one of them rather than failing
+    // anything: with `deny_debugging` changed to `return Err(-1);`, this test printed one
+    // `SKIPPED` line and libtest reported `ok`. They are therefore refusals by default, on
+    // the same terms as `lock_or_skip`'s: `XSIV_ALLOW_UNLOCKED=1` is the recorded way to say
+    // this host knowingly leaves the `locked` layer's kernel behaviour untested.
+    let allow_unlocked = std::env::var("XSIV_ALLOW_UNLOCKED").is_ok();
+
     let Some(before) = is_dumpable() else {
-        eprintln!("SKIPPED: the kernel would not report the dumpable flag here");
+        assert!(
+            allow_unlocked,
+            "the kernel would not report the dumpable flag (PR_GET_DUMPABLE), so this test \
+             cannot observe `deny_debugging`. Set XSIV_ALLOW_UNLOCKED=1 to record that this \
+             host knowingly leaves `deny_debugging` untested"
+        );
+        eprintln!(
+            "SKIPPED (allowed by XSIV_ALLOW_UNLOCKED=1): the kernel would not report the \
+             dumpable flag here"
+        );
         return;
     };
     if !before {
+        // An environment that started the test non-dumpable, not a kernel refusal -- but it
+        // makes the test exactly as vacuous, and an implementation that always answered
+        // "non-dumpable" would land here instead of failing anything.
+        assert!(
+            allow_unlocked,
+            "the process was already non-dumpable before the test (something in the \
+             environment set the flag), so the 1 -> 0 transition `deny_debugging` performs \
+             cannot be observed. Set XSIV_ALLOW_UNLOCKED=1 to record that this host \
+             knowingly leaves `deny_debugging` untested"
+        );
         eprintln!(
-            "SKIPPED: the process is already non-dumpable, so this test cannot observe the \
-             transition (something in the environment set it)"
+            "SKIPPED (allowed by XSIV_ALLOW_UNLOCKED=1): the process was already \
+             non-dumpable, so the transition was not observed"
         );
         return;
     }
@@ -1081,8 +1114,18 @@ fn deny_debugging_is_enforced_by_the_kernel_and_reversible() {
     let previous = match deny_debugging() {
         Ok(p) => p,
         Err(e) => {
+            assert!(
+                allow_unlocked,
+                "prctl(PR_SET_DUMPABLE, 0) was refused with errno {} on a target where this \
+                 file's `SUPPORTED` is true: the kernel-side half of `deny_debugging` is \
+                 absent here, and a returned `ok` would report that as a pass. Set \
+                 XSIV_ALLOW_UNLOCKED=1 to record that this host knowingly leaves \
+                 `deny_debugging` untested",
+                -e
+            );
             eprintln!(
-                "SKIPPED: prctl(PR_SET_DUMPABLE, 0) refused with errno {}",
+                "SKIPPED (allowed by XSIV_ALLOW_UNLOCKED=1): prctl(PR_SET_DUMPABLE, 0) \
+                 refused with errno {}",
                 -e
             );
             return;

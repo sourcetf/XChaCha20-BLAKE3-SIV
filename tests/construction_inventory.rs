@@ -52,7 +52,13 @@ fn strip_comments(text: &str) -> String {
     enum Mode {
         Code,
         Line,
-        Block,
+        /// Inside a block comment, with its **nesting depth**: Rust block comments
+        /// nest, and a scanner that exits at the first `*/` reads the rest of the
+        /// comment as code and can then be pushed into `Str` by a quote inside it,
+        /// which *hides real code that follows*. Measured before this depth was
+        /// tracked: `/* /* */ " */ fn f() { blake3_keyed_xof(…); } /* " */` added an
+        /// eighth primitive use that this file's census could not see.
+        Block(usize),
         Str,
         /// Inside a raw string (`r"…"`, `r#"…"#`), whose contents are dropped.
         RawStr(u8),
@@ -69,7 +75,7 @@ fn strip_comments(text: &str) -> String {
                     mode = Mode::Line;
                     i += 2;
                 } else if c == b'/' && b.get(i + 1) == Some(&b'*') {
-                    mode = Mode::Block;
+                    mode = Mode::Block(1);
                     i += 2;
                 } else if let Some((prefix, hashes)) = raw_string_prefix(&b[i..]) {
                     // A raw string (`r"…"`, `r#"…"#`, `br#"…"#`): its contents are
@@ -116,9 +122,17 @@ fn strip_comments(text: &str) -> String {
                 }
                 i += 1;
             }
-            Mode::Block => {
-                if c == b'*' && b.get(i + 1) == Some(&b'/') {
-                    mode = Mode::Code;
+            Mode::Block(depth) => {
+                if c == b'/' && b.get(i + 1) == Some(&b'*') {
+                    // A nested comment: Rust counts these, so the scanner must too.
+                    mode = Mode::Block(depth + 1);
+                    i += 2;
+                } else if c == b'*' && b.get(i + 1) == Some(&b'/') {
+                    mode = if depth == 1 {
+                        Mode::Code
+                    } else {
+                        Mode::Block(depth - 1)
+                    };
                     i += 2;
                 } else {
                     if c == b'\n' {
@@ -242,16 +256,22 @@ fn the_primitive_uses_are_the_ones_the_analysis_covers() {
     for (call, expected) in PRIMITIVE_CALLS {
         // Occurrences, not lines: a second call added to a line that already carried one
         // left the old count when this counted lines. The definition line is still
-        // skipped -- it contains the name without being a call -- by its trimmed start,
-        // not by a substring anywhere on the line.
+        // skipped -- it contains the name without being a call -- but only the
+        // definition *of the searched name*, matched by the name that follows the
+        // `fn `/`pub fn `/`unsafe fn `/`pub(crate) fn ` prefix. The old rule skipped
+        // every line starting with `fn `, so a call written on a one-line definition
+        // (`pub fn f(k: &[u8; 32], o: &mut [u8]) { blake3_keyed_xof(k, &[], o); }`)
+        // was invisible: measured, the eighth primitive use this census exists to
+        // catch stayed green.
+        let bare = call.trim_end_matches('(');
         let found: usize = body
             .lines()
             .filter(|l| {
                 let code = l.trim_start();
-                !code.starts_with("fn ")
-                    && !code.starts_with("pub fn ")
-                    && !code.starts_with("unsafe fn ")
-                    && !code.starts_with("pub(crate) fn ")
+                !["fn ", "pub fn ", "unsafe fn ", "pub(crate) fn "]
+                    .iter()
+                    .filter_map(|prefix| code.strip_prefix(prefix))
+                    .any(|rest| rest.starts_with(bare))
             })
             .map(|l| l.matches(call).count())
             .sum();
@@ -371,6 +391,45 @@ fn the_three_blake3_input_spaces_are_disjoint() {
         assert!(
             body.contains(site),
             "the domain prefix is not written where S1 needs it ({what}): {site}"
+        );
+    }
+
+    // Writing the prefix is not *hashing* it: the inner hash is fed `head` either as
+    // one part of the three-part call or through the contiguous buffer, and the outer
+    // hash is fed `outer`. A mutant that dropped one of those -- measured with
+    // `blake3_keyed_multi(k_in, &[&cat], &mut inner)` rewritten to `&[aad, msg]`, which
+    // removes the prefix, the nonce and both length fields from every mid-sized
+    // message's tag input -- left every assertion above, and the whole census, green.
+    // These four lines are the consumption half of S1; a new call shape has to be
+    // written down here before the lemma is complete again.
+    for (site, expected, what) in [
+        (
+            "blake3_keyed_multi(k_in, &[&head, aad, msg], &mut inner)",
+            2,
+            "the three-part inner hash must absorb `head`, the domain-prefixed buffer \
+             (once per call shape: the fallback and the `None` arm, whose lines end in \
+             `;` and `,` respectively, which is why the pin stops before the `,`)",
+        ),
+        (
+            "blake3_keyed_multi(k_in, &[&cat], &mut inner)",
+            1,
+            "the contiguous inner hash must absorb `cat`, the domain-prefixed copy",
+        ),
+        (
+            "cat.extend_from_slice(&head);",
+            1,
+            "`cat` must begin with the domain-prefixed `head`",
+        ),
+        (
+            "blake3_keyed_multi(k_out, &[&outer], &mut tag)",
+            1,
+            "the outer hash must absorb `outer`, the domain-prefixed buffer",
+        ),
+    ] {
+        assert_eq!(
+            body.matches(site).count(),
+            expected,
+            "the bytes S1 depends on are no longer fed to the hash ({what}): {site}"
         );
     }
 }

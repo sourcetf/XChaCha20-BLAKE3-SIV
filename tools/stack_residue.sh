@@ -31,6 +31,13 @@
 #     preallocated, so -- unlike the very first version, which allocated its
 #     output buffer and then searched through its own frames -- it cannot produce
 #     hits that fail to re-verify.
+#   * one case is the *scan's* own positive control: it copies the master key into
+#     the region and the tool fails if that copy is not found. Without it a scan
+#     that read the wrong memory (measured: a throwaway copy whose `paint()`
+#     returned a heap region, i.e. a plausible "fix" for the dead-stack-buffer UB)
+#     printed the same PASS line as a clean measurement, with every best-run at 0
+#     bytes. The false-positive control cannot catch that, because a scan that
+#     sees nothing produces no false positives either.
 #
 # Usage:  tools/stack_residue.sh [--pure | --ultra]
 set -euo pipefail
@@ -129,6 +136,29 @@ fn do_locked(k: &[u8; 32], _n: &[u8; 24]) {
     let key = LockedKey::new(k).expect("mlock failed");
     std::hint::black_box(key.as_bytes());
 }
+/// Positive control for the *scan*, not for the crate: the same shape as the cases above,
+/// but it copies the whole master key into a stack buffer and takes that buffer's address
+/// with `black_box`, so the key is in the region the scan reads. The verdict below requires
+/// this copy to be found.
+///
+/// Without it, a scan that read the wrong memory printed exactly the line a clean
+/// measurement prints: measured in a throwaway copy whose `paint()` returned a heap region
+/// (a plausible "fix" for the dead-stack-buffer UB), every best-run was 0 bytes -- nothing,
+/// anywhere -- and the tool still printed "PASS: this crate leaves neither the master key
+/// nor the locked integrity tag in the call-chain stack region". The false-positive control
+/// below cannot catch that: a scan that sees nothing produces no false positives either.
+/// This probe has already been blind once (the snapshot read the frames only *after* they
+/// had been overwritten), and that was found by a manual plant, not by the tool.
+#[inline(never)]
+fn do_planted_key(k: &[u8; 32], _n: &[u8; 24]) {
+    // `&copy` through `black_box` forces the array to exist in memory: a value that is
+    // only read cannot be kept in registers and still have its address taken. `copy[0]`
+    // is fed through `black_box` too, so nothing can prove the array equals `*k` and
+    // rematerialise it from the argument.
+    let mut copy = *k;
+    copy[0] = core::hint::black_box(copy[0]);
+    std::hint::black_box(&copy);
+}
 /// Attribution control: the *same* BLAKE3 XOF call and the same wipe discipline the crate's
 /// `integrity_tag` uses, but with no crate code around it. If the 8-byte tag shows up here
 /// too, the residue is a stack temporary inside the `blake3` dependency (`fill`'s output
@@ -171,8 +201,11 @@ fn main() {
         ("locked integrity tag BLAKE3(key)[0..8]", tag8),
     ];
 
-    let cases: [(&str, fn(&[u8; 32], &[u8; 24])); 6] = [
-        // First, so it can attribute the tag residue before the crate cases run.
+    let cases: [(&str, fn(&[u8; 32], &[u8; 24])); 7] = [
+        // First, so the scan's own positive control is known before any verdict and the
+        // blake3-only attribution below runs on a scan that is known to see this region.
+        ("planted key (control, must be found)", do_planted_key),
+        // Second, so it can attribute the tag residue before the crate cases run.
         ("blake3-only control", do_blake3_only),
         ("encrypt", do_encrypt),
         ("encrypt+decrypt", do_decrypt),
@@ -183,9 +216,11 @@ fn main() {
 
     let mut failures = 0usize;
     let mut dependency_leaks_tag = false;
+    let mut planted_found = false;
     println!("stack-residue scan: {} KiB of call-chain stack per entry point", PAINT / 1024);
     for (name, f) in cases {
         let is_control = name.starts_with("blake3-only");
+        let is_planted = name.starts_with("planted key");
         let ptr = paint();
         f(&key, &nonce);
         // The region is read *in place*, as the first statement after `f` returns.
@@ -239,8 +274,18 @@ fn main() {
             const THRESHOLD: usize = 8;
             let tag_case = label.starts_with("locked integrity tag");
             if label.starts_with("master KEY") && best >= THRESHOLD {
-                failures += 1;
-                line.push_str(&format!(" | KEY RESIDUE: {}-byte run @{}", best, at));
+                if is_planted {
+                    // The control's own copy, which is supposed to be found: the check
+                    // after the loop fails the run if it was not.
+                    planted_found = true;
+                    line.push_str(&format!(
+                        " | KEY RESIDUE (planted, expected): {}-byte run @{}",
+                        best, at
+                    ));
+                } else {
+                    failures += 1;
+                    line.push_str(&format!(" | KEY RESIDUE: {}-byte run @{}", best, at));
+                }
             } else if label.starts_with("control") && best >= THRESHOLD {
                 failures += 1;
                 line.push_str(&format!(" | CONTROL FALSE POSITIVE: {}-byte run @{}", best, at));
@@ -266,6 +311,18 @@ fn main() {
         println!("  {:<28}{}", name, line);
     }
 
+    // The scan's own verdict, and it comes first: a scan that cannot see a key copy placed
+    // in its own region has not measured anything, and its "no residue" lines below would
+    // be claims about memory it never read.
+    if !planted_found {
+        println!();
+        println!("FAIL: the positive control -- a 32-byte copy of the master key in the scanned");
+        println!("      region -- was NOT found (best run shorter than the 8-byte threshold),");
+        println!("      so this scan is not reading the frames it claims to read and every");
+        println!("      'no residue' line above is vacuous. Fix the probe before trusting a PASS.");
+        std::process::exit(1);
+    }
+
     if failures == 0 {
         println!();
         if dependency_leaks_tag {
@@ -273,10 +330,11 @@ fn main() {
             println!("      this crate's own code -- the 8-byte locked integrity tag above IS");
             println!("      left, by the blake3 dependency's XOF buffer, as the note below says.");
         } else {
-            println!("PASS: this crate leaves neither the master key nor the locked integrity tag");
+            println!("PASS: this crate leaves neither the master key nor the locked integrity");
+            println!("      tag in the call-chain stack region.");
         }
-        println!("      in the call-chain stack region, and the control shows the scan");
-        println!("      produces no false positives.");
+        println!("      The planted-key control shows the scan reads this region, and the");
+        println!("      never-used pattern shows it produces no false positives.");
         if dependency_leaks_tag {
             println!();
             println!("Note: the blake3-only control DOES leave the 8-byte tag, with the same");
@@ -300,7 +358,8 @@ RS
 
 cd "$WORK"
 # Exit codes are the repository's convention: 0 = measured, nothing found; 1 = measured,
-# residue found (the probe below exits 1 for that); 3 = could not run. The distinction
+# residue found -- or the scan's own positive control was not found, which means the
+# measurement was vacuous (the probe exits 1 for both); 3 = could not run. The distinction
 # matters to verify.sh, which reports 1 as ADVISORY (a change in compiler-chosen layout
 # must not fail a `--deep` run) but a *skipped stage* for 3. Nothing produced a 3 here
 # before -- so a build failure (cargo exits 101) was reported as "residue changed", which

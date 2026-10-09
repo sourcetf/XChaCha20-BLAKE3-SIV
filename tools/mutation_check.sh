@@ -108,8 +108,8 @@ run_shipped_ctgrind() {
   rc=$?
   set -e
   case "$rc" in
-    # The tool's own convention, documented in its header: 0 clean, 1 its harness
-    # failed a sanity check, 3 could not run, 99 a leak was reported.
+    # The tool's own convention, documented in its header: 0 clean, 1 no
+    # clean/leak verdict, 3 could not run, 99 a leak was reported.
     0) return 0 ;;   # clean on the mutated tree: the mutation was not caught
     99) return 1 ;;  # a leak was reported: caught
     3) return 3 ;;   # could not run

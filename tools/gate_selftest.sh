@@ -315,7 +315,11 @@ fi
 #    0, the caller cannot tell it from a measurement that ran and found nothing;
 #    mapped to cargo's own 101, it arrives at verify.sh's advisory branch as a
 #    compiler-layout change. A `cargo` stub that fails is the environmental case
-#    the mapping exists for.
+#    the mapping exists for. The tool's own reason is required on top of the
+#    status, for the same reason checks 2, 3, 4, 6, 7 and 8 require theirs: an
+#    unconditional `exit 3` at the top of `tools/stack_residue.sh` satisfies a
+#    status-only check while the measurement never runs -- and with the mapping
+#    right, the status alone cannot say which of the two happened.
 HOME_101="$(make_fake_home 101)"
 set +e
 sr_out="$(HOME="$HOME_101" PATH="$HOME_101/.cargo/bin:/usr/bin:/bin" \
@@ -330,6 +334,12 @@ if [ "$sr_rc" -eq 0 ] || [ "$sr_rc" -eq 124 ]; then
   fail=1
 elif [ "$sr_rc" -ne 3 ]; then
   echo "FAIL: tools/stack_residue.sh exited $sr_rc with a failing cargo, expected 3." >&2
+  printf '%s\n' "$sr_out" | tail -3 | sed 's/^/      | /' >&2
+  fail=1
+elif ! printf '%s\n' "$sr_out" | grep -q 'the measurement could not run'; then
+  echo "FAIL: tools/stack_residue.sh exited 3 with a failing cargo but without its" >&2
+  echo "      own could-not-run reason, so this is not the mapping firing: an" >&2
+  echo "      unconditional exit 3 reads the same from here." >&2
   printf '%s\n' "$sr_out" | tail -3 | sed 's/^/      | /' >&2
   fail=1
 else

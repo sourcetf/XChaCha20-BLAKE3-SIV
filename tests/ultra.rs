@@ -354,6 +354,31 @@ fn dual_mac_is_wired_into_both_decrypt_paths() {
         2,
         "the recomputed tag is secret-derived and must be wiped"
     );
+    // The *witness's* copies, which none of the assertions above reach: they pin what the
+    // blocks compare and return, never that the compared values were wiped. Deleting the
+    // witness wipes from both decrypt blocks and from `encrypt` (three that name
+    // `witness_tag`, two `witness_plaintext`, one `witness_ciphertext`) left every test in
+    // this file and in `security.rs` green. Exact counts, so one deleted site is one
+    // failure even though several survive.
+    assert_eq!(
+        body.matches("zeroize_array(&mut witness_tag)").count(),
+        3,
+        "the witness's tag is secret-derived and wiped at each of its call sites: the \
+         `encrypt` rejection path and both decrypt entry points"
+    );
+    assert_eq!(
+        body.matches("zeroize_slice(&mut witness_plaintext)")
+            .count(),
+        2,
+        "the witness's recovered plaintext is secret-derived and must be wiped in both \
+         decrypt entry points"
+    );
+    assert_eq!(
+        body.matches("zeroize_slice(&mut witness_ciphertext)")
+            .count(),
+        1,
+        "the in-place decrypt's witness ciphertext copy must be wiped with the rest"
+    );
 }
 
 /// Every `scrub_stack` call site must survive.
@@ -753,17 +778,27 @@ fn the_witness_shares_only_the_specification_with_the_crate() {
          else; expected to find:\n  {allowed}"
     );
     let without_imports = code.replace(allowed, "");
-    assert!(
-        !without_imports.contains("crate::"),
-        "the witness uses crate internals, so it is no longer a second implementation \
-         (the fault model it exists for assumes it shares no *code* with the crate): \
-         {}",
-        without_imports
-            .lines()
-            .filter(|l| l.contains("crate::"))
-            .collect::<Vec<_>>()
-            .join(" | ")
-    );
+    // `crate::` is one spelling of "the crate's own code", and not the only one: `super::`
+    // reaches it from inside this child module, the crate's own name resolves from inside
+    // it too, and `use crate as other_name;` renames it without ever writing `crate::`. An
+    // injected `super::blake3_keyed_multi(key, parts, out)` in the witness's `keyed_xof` --
+    // the crate's own hash call, the exact shared code the fault model assumes away -- left
+    // this test green while the witness stopped being a second implementation. So the
+    // check is over every spelling, after the one permitted import is removed.
+    for escape in ["crate", "super::", "xchacha20_blake3_siv"] {
+        assert!(
+            !without_imports.contains(escape),
+            "the witness uses `{escape}`, which reaches the crate's own code (`crate::`, \
+             `super::` from a child module, the crate name, `use crate as ...`), so it is no \
+             longer a second implementation (the fault model it exists for assumes it shares \
+             no *code* with the crate): {}",
+            without_imports
+                .lines()
+                .filter(|l| l.contains(escape))
+                .collect::<Vec<_>>()
+                .join(" | ")
+        );
+    }
 
     // And no use of the crate's dependencies: those are the shared code that a fault
     // could move both answers with.

@@ -58,7 +58,14 @@ fn strip_comments(text: &str) -> String {
     enum Mode {
         Code,
         Line,
-        Block,
+        /// Inside a block comment, with its **nesting depth**: Rust block comments
+        /// nest, and a scanner that exits at the first `*/` reads the rest of the
+        /// comment as code (a false positive) and can then be pushed into `Str` by a
+        /// quote inside it, which *hides real code that follows*. Measured before this
+        /// depth was tracked: `/* /* */ " */ fn f() { <a real call> } /* " */` was
+        /// invisible to every count in this file, so it could add a branch to
+        /// `accept_or_reject` or a call to the crate without any assertion moving.
+        Block(usize),
         Str,
         /// Inside a raw string (`r"…"`, `r#"…"#`), whose contents are dropped.
         RawStr(u8),
@@ -77,7 +84,7 @@ fn strip_comments(text: &str) -> String {
                     mode = Mode::Line;
                     i += 2;
                 } else if c == b'/' && b.get(i + 1) == Some(&b'*') {
-                    mode = Mode::Block;
+                    mode = Mode::Block(1);
                     i += 2;
                 } else if let Some((prefix, hashes)) = raw_string_prefix(&b[i..]) {
                     // A raw string (`r"…"`, `r#"…"#`, `br#"…"#`): its contents are
@@ -132,9 +139,17 @@ fn strip_comments(text: &str) -> String {
                 }
                 i += 1;
             }
-            Mode::Block => {
-                if c == b'*' && b.get(i + 1) == Some(&b'/') {
-                    mode = Mode::Code;
+            Mode::Block(depth) => {
+                if c == b'/' && b.get(i + 1) == Some(&b'*') {
+                    // A nested comment: Rust counts these, so the scanner must too.
+                    mode = Mode::Block(depth + 1);
+                    i += 2;
+                } else if c == b'*' && b.get(i + 1) == Some(&b'/') {
+                    mode = if depth == 1 {
+                        Mode::Code
+                    } else {
+                        Mode::Block(depth - 1)
+                    };
                     i += 2;
                 } else {
                     if c == b'\n' {
@@ -363,6 +378,33 @@ fn the_suppressed_function_contains_only_the_decision() {
     // which unlike `find("//")` is not fooled by a `//` inside a string literal.
     let code = strip_comments(def);
 
+    // `strip_comments` copies `#[cfg(…)]` payloads through *verbatim* (they are match
+    // targets below), so a payload carrying a branch's text -- `#[cfg(feature =
+    // "if")]` -- would count as that branch and let a real one be deleted. Only the
+    // two attributes the decision really writes may appear; with those payloads
+    // pinned, the keyword and spelling counts below cannot be fed by an attribute.
+    let mut cfgs = Vec::new();
+    let mut rest = code.as_str();
+    while let Some(at) = rest.find("#[cfg(") {
+        let end = at
+            + rest[at..]
+                .find(']')
+                .expect("a `#[cfg(` attribute without a closing `]`");
+        cfgs.push(rest[at..=end].to_string());
+        rest = &rest[end + 1..];
+    }
+    assert_eq!(
+        cfgs,
+        [
+            "#[cfg(feature = \"hardened\")]".to_string(),
+            "#[cfg(not(feature = \"hardened\"))]".to_string(),
+        ],
+        "the suppressed function must carry exactly the two cfg attributes the decision \
+         needs (gate 1, and the opt-out copy). The scanner copies their payloads \
+         verbatim, so any other attribute is a place branch text can hide from the \
+         counts below"
+    );
+
     for construct in ["for", "while", "loop", "match"] {
         assert!(
             keyword_occurrences(&code, construct) == 0,
@@ -378,6 +420,22 @@ fn the_suppressed_function_contains_only_the_decision() {
          discriminant; it belongs at the call site, where ctgrind verifies that the \
          branch is on a constant"
     );
+    // `?` is not the only conditional jump that is not one of the four keywords.
+    // `&&` and `||` short-circuit through a branch, and a panicking macro (`assert!`,
+    // `debug_assert!`, `.unwrap()`, `.expect()`, `panic!`) compiles to a branch to the
+    // panic path. Inside the suppressed function either one branches on a
+    // secret-derived value where no memcheck report can be seen. (Measured: both a
+    // `(gate0.unwrap_u8() & 1) == 0 || { … }` line and an `assert!(…)` line were
+    // accepted by the keyword counts alone.)
+    for spelled in ["&&", "||", "assert", "panic", "unwrap", "expect"] {
+        assert_eq!(
+            code.matches(spelled).count(),
+            0,
+            "`{spelled}` inside accept_or_reject is a conditional jump on the \
+             secret-derived gates, inside the one function `tests/ctgrind.supp` \
+             covers: the body must contain only the two `if` branches"
+        );
+    }
 
     // A keyword is counted when the character after it is not an identifier
     // character, so `if(` is the same branch as `if ` rather than an invisible
@@ -452,6 +510,26 @@ fn the_hardened_second_gate_is_recomputed() {
              read, or the comparison can be common-subexpression-eliminated into the \
              first gate's. Block was:\n{block}"
         );
+        // The *sources* of the two volatile reads, not just their count. Two reads
+        // that both target `computed_tag` -- `tag_copy` re-read from the stored value
+        // rather than from the caller's `tag` -- make gate 1 compare a value with
+        // itself, which is always true: the second gate is gone while the read count,
+        // the argument names, `(first, second)` and every other count here still hold.
+        // (Measured: re-pointing `tag_copy` at `&computed_tag` kept this test green.)
+        for (site, what) in [
+            (
+                "let mut computed_tag_copy = unsafe { core::ptr::read_volatile(&computed_tag) };",
+                "the second gate's computed-tag operand must be a volatile re-read of \
+                 `computed_tag`",
+            ),
+            (
+                "let mut tag_copy = unsafe { core::ptr::read_volatile(tag) };",
+                "the second gate's received-tag operand must be a volatile re-read of the \
+                 caller's `tag`",
+            ),
+        ] {
+            assert_eq!(block.matches(site).count(), 1, "{what}:\n{block}");
+        }
         assert!(
             block.contains("zeroize_array(&mut computed_tag_copy)"),
             "the re-read copy of the computed tag is secret-derived and must be \
@@ -880,6 +958,35 @@ fn the_decision_outcome_is_fail_closed() {
             last, "agree",
             "the witness agreement must be the value its block returns rather than a \
              comparison computed and discarded with a constant returned in its place:\n{block}"
+        );
+        // The returned `agree` must *be* the comparison. The last line alone is
+        // satisfied by `let _dead = <comparison>; let agree = Choice::from(1); agree`,
+        // so pin that `agree` is bound exactly once (a second binding would shadow the
+        // real one), and -- below the loop -- what each of the two bindings is.
+        assert_eq!(
+            block_code.matches("agree =").count(),
+            1,
+            "the witness block must bind `agree` exactly once, so the value it returns \
+             cannot be a second binding that shadows the comparison:\n{block}"
+        );
+    }
+    for (site, what) in [
+        (
+            "let agree = witness_tag.ct_eq(&computed_tag)\n            \
+             & witness_plaintext.as_slice().ct_eq(plaintext.as_slice());",
+            "`decrypt`",
+        ),
+        (
+            "let agree = witness_tag.ct_eq(&computed_tag) & witness_plaintext.ct_eq(buffer);",
+            "`decrypt_in_place_detached`",
+        ),
+    ] {
+        assert_eq!(
+            non_test.matches(site).count(),
+            1,
+            "the witness agreement in {what} must be bound to `agree` by the comparison \
+             itself; an existence count elsewhere in the function let the comparison be \
+             bound to a dead name and `agree` be a constant:\n{site}"
         );
     }
     assert_eq!(

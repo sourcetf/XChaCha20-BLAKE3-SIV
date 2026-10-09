@@ -67,17 +67,26 @@ fn a_tag_must_commit_to_the_message_it_was_issued_for() {
     // cheap forgeries an uncommitted tag permits.
     let other = b"a completely different message!!";
     let (ct_other, _) = encrypt(&KEY, &NONCE, AAD, other).unwrap();
-    let mut same_len = ct_issued.clone();
-    same_len[0] ^= 1;
 
     assert!(
         decrypt(&KEY, &NONCE, AAD, &ct_other, &tag_issued).is_err(),
         "a tag issued for one message authenticated another message's ciphertext"
     );
-    assert!(
-        decrypt(&KEY, &NONCE, AAD, &same_len, &tag_issued).is_err(),
-        "a tag issued for one message authenticated a same-length forgery"
-    );
+    // Every byte position of the ciphertext, not just the first: a tag that stopped
+    // committing to the message's tail accepts a flip there and rejects one in byte 0,
+    // so a single first-byte flip proves only that the tag depends on the prefix.
+    // (Measured: `let msg: &[u8] = &msg[..1.min(msg.len())];` at the top of `derive_tag`
+    // — a tag that commits to one byte of the message — passed the first-byte-only
+    // version of this file.)
+    for pos in 0..ct_issued.len() {
+        let mut same_len = ct_issued.clone();
+        same_len[pos] ^= 1;
+        assert!(
+            decrypt(&KEY, &NONCE, AAD, &same_len, &tag_issued).is_err(),
+            "a tag issued for one message authenticated a same-length forgery \
+             (byte {pos})"
+        );
+    }
 
     // The genuine pair still works, so the rejections above are the forgeries rather than a
     // broken harness.

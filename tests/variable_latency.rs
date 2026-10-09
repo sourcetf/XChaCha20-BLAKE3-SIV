@@ -20,7 +20,9 @@
 //! and did not name `src/proofs.rs` as the exclusion; a later one called both scanned
 //! files "always-compiled" when `src/witness.rs` is gated on `ultra`.) It says nothing
 //! about whether the listed operations are *actually* safe -- it makes them visible, which
-//! is the part that can be automated.
+//! is the part that can be automated. The operator inventory cannot see a division
+//! spelled as a method (`x.wrapping_div(3)`), so `DIVISION_METHODS` below is a second,
+//! zero-count tripwire for those names.
 //!
 //! The same idea covers the crate's control flow, one section down: `CONTROL_FLOW`
 //! counts `if` / `while` / `for` / `loop` / `match` in the non-test source. ctgrind
@@ -46,9 +48,31 @@ const ALLOWED: &[(&str, &str)] = &[
     ),
     (
         "MAX_MSG_SIZE / CHACHA20_BLOCK as u64 <= u32::MAX as u64 + 1,",
-        "the same binding, same reason: `const` context, constant operands, no run-time \
-         division at all",
+        "the same binding, same reason: `const` context, constant operands, no \
+         run-time division at all",
     ),
+];
+
+/// Division and remainder spelled as **method calls**, which carry no `/` or `%` glyph
+/// for the inventory above to find.
+///
+/// `x.wrapping_div(3)` divides exactly as much as `x / 3`, with the same
+/// magnitude-dependent latency, and nothing else in this repository can see it (the
+/// module doc's argument is that no tool detects this class, so the list is the whole
+/// control). A list of operator glyphs is not complete while the language also spells
+/// division as a method name, so these names are a tripwire with expected count
+/// **zero**: as with the operator table there is no allowed entry, and a line that
+/// matches has to be audited like any `/`.
+const DIVISION_METHODS: &[&str] = &[
+    "div_euclid(",
+    "rem_euclid(",
+    "wrapping_div(",
+    "wrapping_rem(",
+    "checked_div(",
+    "checked_rem(",
+    "overflowing_div(",
+    "overflowing_rem(",
+    "saturating_div(",
 ];
 
 /// `(keyword, occurrences in the non-test source)` — `src/lib.rs`.
@@ -241,7 +265,13 @@ fn strip_comments(text: &str) -> String {
     enum Mode {
         Code,
         Line,
-        Block,
+        /// Inside a block comment, with its **nesting depth**: Rust block comments
+        /// nest, and a scanner that exits at the first `*/` reads the rest of the
+        /// comment as code and can then be pushed into `Str` by a quote inside it,
+        /// which *hides real code that follows*. Measured before this depth was
+        /// tracked: a `/* /* */ " */`-wrapped division and a keyword wrapped the same
+        /// way were invisible to both inventories in this file.
+        Block(usize),
         Str,
         /// Inside a raw string (`r"…"`, `r#"…"#`), whose contents are dropped.
         RawStr(u8),
@@ -258,7 +288,7 @@ fn strip_comments(text: &str) -> String {
                     mode = Mode::Line;
                     i += 2;
                 } else if c == b'/' && b.get(i + 1) == Some(&b'*') {
-                    mode = Mode::Block;
+                    mode = Mode::Block(1);
                     i += 2;
                 } else if let Some((prefix, hashes)) = raw_string_prefix(&b[i..]) {
                     // A raw string (`r"…"`, `r#"…"#`, `br#"…"#`): its contents are
@@ -305,9 +335,17 @@ fn strip_comments(text: &str) -> String {
                 }
                 i += 1;
             }
-            Mode::Block => {
-                if c == b'*' && b.get(i + 1) == Some(&b'/') {
-                    mode = Mode::Code;
+            Mode::Block(depth) => {
+                if c == b'/' && b.get(i + 1) == Some(&b'*') {
+                    // A nested comment: Rust counts these, so the scanner must too.
+                    mode = Mode::Block(depth + 1);
+                    i += 2;
+                } else if c == b'*' && b.get(i + 1) == Some(&b'/') {
+                    mode = if depth == 1 {
+                        Mode::Code
+                    } else {
+                        Mode::Block(depth - 1)
+                    };
                     i += 2;
                 } else {
                     if c == b'\n' {
@@ -425,6 +463,35 @@ fn variable_latency_operations_are_inventoried() {
     );
 }
 
+#[test]
+fn division_spelled_as_a_method_cannot_hide_from_the_inventory() {
+    // The same two files, cut and stripped the same way as the operator inventory
+    // above, so the two views of "the non-test source" cannot drift apart.
+    let sources = [
+        ("src/lib.rs", include_str!("../src/lib.rs")),
+        ("src/witness.rs", include_str!("../src/witness.rs")),
+    ];
+    let mut found: Vec<String> = Vec::new();
+    for (name, src) in sources {
+        let cut = src.find("mod tests {").unwrap_or(src.len());
+        let body = strip_comments(&src[..cut]);
+        for l in body.lines() {
+            for method in DIVISION_METHODS {
+                if l.contains(method) {
+                    found.push(format!("{name}: {}", l.trim()));
+                }
+            }
+        }
+    }
+    assert!(
+        found.is_empty(),
+        "division/remainder spelled as a method call, which the `/`/`%` inventory above \
+         cannot see: {found:?}. Audit it like any division -- what does the divisor \
+         depend on? -- and spell the operation `/` so the operator inventory carries it, \
+         recording the line in ALLOWED with the reason."
+    );
+}
+
 /// Whether a line is an `impl` header, in any of the three spellings.
 ///
 /// This function exists because the first version of the skip was `starts_with("impl ")`,
@@ -446,7 +513,9 @@ fn is_impl_header(code: &str) -> bool {
 /// Whole-word occurrences of `kw` in code, ignoring comments and string literals.
 ///
 /// `impl Drop for Plaintext` is not a branch, so `impl` headers are skipped — see
-/// [`is_impl_header`] for why that test is not just `starts_with("impl ")`.
+/// [`is_impl_header`] for why that test is not just `starts_with("impl ")`. Only the
+/// header *text* is skipped, not the whole line: a branch after the header's `{` is
+/// still counted.
 fn count_keyword(line: &str, kw: &str) -> usize {
     // String literals are removed *before* the comment split, for the same reason as in
     // `has_division`: a `"http://"` literal would otherwise truncate the line at the
@@ -476,9 +545,21 @@ fn count_keyword(line: &str, kw: &str) -> usize {
         }
     }
     let code = stripped.split("//").next().unwrap_or("");
-    if is_impl_header(code) {
-        return 0;
-    }
+    // An `impl` header is not a branch -- `for` in `impl PartialEq<…> for Plaintext` is
+    // a trait, not a loop -- but only the *header* is skipped. The old rule returned 0
+    // for the whole line, so a branch written after the header's `{` on the same line
+    // was invisible: measured with a one-line `impl Plaintext { pub fn f(x: u8) -> u8
+    // { if x == 0 { 1 } else { 0 } } }`, whose `if` moved no count. A header that does
+    // not open its body on this line (a wrapped `impl … for …` followed by `{`) has
+    // nothing after the brace to count, and contributes no keyword of its own.
+    let code = if is_impl_header(code) {
+        match code.find('{') {
+            Some(open) => &code[open + 1..],
+            None => "",
+        }
+    } else {
+        code
+    };
 
     let bytes = code.as_bytes();
     let mut n = 0;

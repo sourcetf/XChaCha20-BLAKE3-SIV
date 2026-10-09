@@ -72,9 +72,12 @@ fn timing_guard() -> std::sync::MutexGuard<'static, ()> {
 //   **`Instant::now()` costs ~35 ns here** (re-measured; an earlier revision of
 //   this file said ~40,000 ns, which was wrong by three orders of magnitude and
 //   made the screen look far weaker than it is). `_rdtsc` would add ~7 ns on top of
-//   that and is not used. The tests print the resolution they achieve: ~0.16 us/op
-//   on a quiet release run, so a `ct_eq` -> `==` regression of a few tens of ns is
-//   below the floor by a factor of a few, not by a factor of a hundred.
+//   that and is not used. The tests print the resolution they achieve: a few to a
+//   few tens of ns/op (the tag test's doc records the measured range, ~8-57 ns/op,
+//   and this file's own last release run at 24 ns/op for that test; ~168 ns/op under
+//   `ultra`). A `ct_eq` -> `==` regression of a few tens of ns therefore sits *at*
+//   the floor rather than comfortably inside it -- a figure this paragraph used to
+//   put at ~0.16 us/op, which contradicted the tag test's own measurements by ~7x.
 //
 // So a naive "time one operation" sample is >90% clock overhead, and an earlier
 // version of these tests was **vacuous**: it passed with t < 1.5 not because

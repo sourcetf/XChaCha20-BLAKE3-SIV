@@ -39,9 +39,13 @@
 # worth running separately is the *opt-out* one (`--no-default-features`).
 #         tools/ctgrind.sh --setup  # print how to obtain valgrind here
 #
-# Exit codes: 0 clean; 1 clean but the harness failed its own sanity checks;
-#             3 could not run (no valgrind -- the caller must report that as a
-#             skipped stage, not as a pass); 99 a leak was detected.
+# Exit codes: 0 clean; 1 no clean/leak verdict (a control or input failed: the
+#             negative control was not detected, the four filters did not all
+#             match, the planted-leak self-test was not reported, the suppression
+#             file was missing or widened, or no test binary was built -- the
+#             output says which); 3 could not run (no valgrind -- the caller must
+#             report that as a skipped stage, not as a pass); 99 a leak was
+#             detected.
 set -euo pipefail
 
 SELFTEST=1

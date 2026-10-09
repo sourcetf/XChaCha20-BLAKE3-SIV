@@ -112,7 +112,10 @@ comparison, and both are the price of a defence rather than an accident:
   (the two gates run `subtle`'s byte loop both ways round — four 65-byte comparison
   passes on the default build, against the opt-out build's single pass — plus the
   fold), the volatile re-reads
-  and the fail-closed plumbing — so it shows at the small end (1.06 → 1.32 us at 64 B) and
+  and the fail-closed plumbing — so it shows at the small end (1.06 → 1.32 us at 64 B; the
+  same campaign's decrypt medians across the rest of the range the `hardened` cost is
+  quoted over are 1.247 → 1.546 us at 256 B (+24%), 1.919 → 2.352 at 1 KiB (+23%) and
+  3.058 → 3.405 at 4 KiB (+11%), the percentages the README's layer rows carry) and
   its share is inside the noise floor by 1 MiB (391 → 394 us, i.e. a tie inside the
   noise floor). Encryption pays nothing for it: 0.95 → 0.94 us.
 * **`ultra`'s witness is a per-byte cost on decrypt**, because it is a scalar
@@ -125,8 +128,8 @@ comparison, and both are the price of a defence rather than an accident:
   `encrypt`, which does carry the witness, lands at 7.1x the default on the round trip at 1 MiB. If a deployment wants the fault model and not
   the cost, `hardened,dual-mac` — `ultra`'s two fault-model layers, without the witness
   and without the `locked`/`rng` layers — is the configuration to measure against; the
-  table's `opt-out` and `hardened` columns bracket it, since `dual-mac` costs one extra
-  tag pass. (`ultra` minus *only* the witness is `hardened,dual-mac,locked,rng`; the
+  table's `hardened` and `ultra` columns bracket it, since `dual-mac` costs one extra
+  tag pass over the default and the witness is what `ultra` adds on top. (`ultra` minus *only* the witness is `hardened,dual-mac,locked,rng`; the
   "what the `ultra` layer costs" table below prices `ultra` — that configuration plus
   the witness — against the default.)
 
@@ -200,8 +203,12 @@ a genuine tail-latency measurement still needs bare metal, where the clock and t
 scheduler are far quieter than in this container.
 
 The allocating `encrypt`/`decrypt` API costs more than the in-place one on a round
-trip, and by how much depends on the allocator: 4-7% in the criterion harness for the
-default build (re-measured 2026-10-03; for `ultra` the table above gives its allocating
+trip, and by how much depends on the allocator: **+4.0 to +6.9% at every size from 256 B
+up** in the criterion harness for the
+default build (read off the same campaign's `encrypt_then_decrypt` groups, in place against
+`(allocating API)`; 64 B is the exception and sits *inside* this file's noise floor, where
+the two measured within 5% of each other and of either sign, because the round trip there is
+fixed cost rather than allocation. For `ultra` the table above gives its allocating
 round trip at 6.65x the default against 5.46x in place at 16 KiB), but up to
 **2.5x at 1 MiB in a standalone probe** (`examples/profile_probe.rs`: 2098 us against
 843 us per message). The extra

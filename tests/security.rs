@@ -27,6 +27,60 @@ use xchacha20_blake3_siv::{
     KEY_LEN, NONCE_LEN, TAG_LEN,
 };
 
+// ── Allocation counting ───────────────────────────────────────────────
+//
+// `decrypt_bounded`'s contract is that the caller's bound is checked *before* the buffer
+// is allocated, and the `MessageTooLong` variant alone cannot witness that: a check moved
+// below `decrypt` returns the same variant after allocating (and then zeroizing) the
+// plaintext. This allocator makes the ordering observable. The count is per-thread, so the
+// proptest cases running on other threads of the same binary cannot move it.
+
+use std::alloc::{GlobalAlloc, Layout, System};
+use std::cell::Cell;
+
+thread_local! {
+    /// Allocator calls made on this thread so far.
+    static ALLOCATIONS: Cell<u64> = const { Cell::new(0) };
+}
+
+/// Counts allocator calls, then defers to the system allocator.
+struct CountingAllocator;
+
+#[global_allocator]
+static COUNTING_ALLOCATOR: CountingAllocator = CountingAllocator;
+
+/// One allocator call seen on the calling thread. `try_with` so an allocation made while a
+/// thread's TLS is being torn down cannot recurse into a panic here.
+fn count_alloc() {
+    let _ = ALLOCATIONS.try_with(|n| n.set(n.get() + 1));
+}
+
+/// Allocator calls made on the calling thread so far.
+fn allocations_on_this_thread() -> u64 {
+    ALLOCATIONS.with(|n| n.get())
+}
+
+// SAFETY: every method forwards to `System` with the same arguments and returns its
+// result; the only addition is a thread-local `Cell<u64>` increment, which allocates
+// nothing and cannot recurse into the allocator.
+unsafe impl GlobalAlloc for CountingAllocator {
+    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+        count_alloc();
+        System.alloc(layout)
+    }
+    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+        System.dealloc(ptr, layout)
+    }
+    unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
+        count_alloc();
+        System.realloc(ptr, layout, new_size)
+    }
+    unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
+        count_alloc();
+        System.alloc_zeroed(layout)
+    }
+}
+
 // ── Generators ────────────────────────────────────────────────────────
 
 fn key_strategy() -> impl Strategy<Value = [u8; KEY_LEN]> {
@@ -593,23 +647,46 @@ fn decrypt_bounded_enforces_the_callers_limit() {
     // once, and `impl PartialEq<Plaintext> for Plaintext` plus `Debug` exist now, so
     // `assert_eq!` on the `Result` would work too.)
     for max_len in [0, message.len() - 1] {
+        let before = allocations_on_this_thread();
+        let refused = decrypt_bounded(&key, &nonce, b"aad", &ciphertext, &tag, max_len);
+        let after = allocations_on_this_thread();
         assert!(
-            matches!(
-                decrypt_bounded(&key, &nonce, b"aad", &ciphertext, &tag, max_len),
-                Err(Error::MessageTooLong)
-            ),
+            matches!(refused, Err(Error::MessageTooLong)),
             "a {max_len}-byte limit must refuse a {}-byte ciphertext",
             ciphertext.len()
+        );
+        // And the refusal must not have allocated the plaintext it refuses to produce. The
+        // variant cannot see the difference on its own: an injected copy that checked the
+        // bound *after* `decrypt` still returned `MessageTooLong` -- having allocated and
+        // dropped the plaintext -- and this test stayed green until the counter existed.
+        assert_eq!(
+            after,
+            before,
+            "the refusal at max_len={max_len} allocated {} time(s) before returning \
+             MessageTooLong: the bound must be checked before `decrypt`, or an over-long \
+             request costs exactly the allocation the bound exists to avoid",
+            after - before
         );
     }
 
     // At the limit and above: accepted, and the plaintext is what was encrypted.
     for max_len in [message.len(), message.len() + 1, usize::MAX] {
+        let before = allocations_on_this_thread();
+        let accepted = decrypt_bounded(&key, &nonce, b"aad", &ciphertext, &tag, max_len).unwrap();
+        let after = allocations_on_this_thread();
         assert_eq!(
-            decrypt_bounded(&key, &nonce, b"aad", &ciphertext, &tag, max_len).unwrap(),
+            accepted,
             message,
             "a {max_len}-byte limit should accept a {}-byte ciphertext",
             ciphertext.len()
+        );
+        // The counter is live: an accepted call does allocate its plaintext buffer and the
+        // witness copy under `ultra`. Without this, the zero-delta assertions above would
+        // also hold for a counter that never fires.
+        assert!(
+            after > before,
+            "the allocation counter saw no allocation on the accepted path, so its \
+             zero-delta assertion on the refused path is vacuous"
         );
     }
 
@@ -874,6 +951,43 @@ fn every_allocation_happens_before_any_derivation() {
         }
     }
 
+    // The ordering above recognizes one *spelling* of "allocation". A second allocation
+    // added at its use site under another name -- `vec![…]`, `Vec::with_capacity`,
+    // `try_reserve`, `.to_vec()`, `Box::new` -- is the same defect (its `?`/abort path
+    // returns through live key material) and every `alloc_zeroed(` match above is blind to
+    // it: an injected `Vec::<u8>::with_capacity(1)` after `derive_enc` in
+    // `decrypt_in_place_detached` left this test green (a first version of this list named
+    // `Vec::with_capacity`, which the turbofish walked past). Pin the other spellings so a
+    // new one has to be added deliberately, at a decided position, rather than slipping past
+    // the ordering.
+    for name in [
+        "encrypt",
+        "encrypt_in_place_detached",
+        "decrypt",
+        "decrypt_in_place_detached",
+    ] {
+        let body = body(name);
+        for spelling in [
+            "vec![",
+            // The bare path form, so the turbofish spelling `Vec::<u8>::with_capacity` is
+            // caught too: an injected `Vec::<u8>::with_capacity(1)` after `derive_enc`
+            // walked straight past a `Vec::with_capacity` match.
+            "Vec::",
+            "with_capacity",
+            "try_reserve",
+            ".to_vec()",
+            "Box::new",
+        ] {
+            assert!(
+                !body.contains(spelling),
+                "{name} allocates through `{spelling}`, which the ordering above cannot \
+                 place relative to the first derivation; route it through the fallible \
+                 `alloc_zeroed` helper before the derivation, or add this spelling to the \
+                 list deliberately and order it too"
+            );
+        }
+    }
+
     // And `ultra` adds its own buffers, which is how this came back: the witness writes
     // into caller slices, so those allocations are in the entry points too -- and all of
     // them must be on the early side of the same line.
@@ -911,6 +1025,12 @@ fn every_allocation_happens_before_any_derivation() {
     // stayed green. The counts are exact, so deleting a wipe of a buffer that has more
     // than one site (`encrypt`'s three `k_in` wipes) fails too rather than being covered
     // by a surviving site.
+    //
+    // `tag` is the `ultra`-only pair: `encrypt`'s two witness-rejection returns wipe the
+    // computed tag before returning. Those two lines are counted as *text* here (this test
+    // runs in every configuration), which is the point -- deleting either one leaves the
+    // secret-derived KDF input in the frame, and no behavioural test can reach the
+    // rejection path because reaching it needs a witness disagreement.
     for (name, buffers) in [
         (
             "encrypt",
@@ -920,6 +1040,7 @@ fn every_allocation_happens_before_any_derivation() {
                 ("enc_seed", 3),
                 ("enc_key", 1),
                 ("enc_nonce", 1),
+                ("tag", 2),
             ][..],
         ),
         (

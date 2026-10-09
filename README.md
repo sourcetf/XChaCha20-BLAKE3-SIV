@@ -357,8 +357,9 @@ decision therefore writes its outcome through a parameter the caller initialises
 a rejection, so a fault that never makes the call accepts nothing — that shape is
 not decoration: `tools/fi_instruction.sh` measured six single-byte faults in
 `decrypt` that skipped the call and accepted a forgery while the outcome was
-returned by value. That is also the shape RustCrypto's `chacha20poly1305` has, and
-neither crate documents fault countermeasures.
+returned by value. RustCrypto's `chacha20poly1305` still has that by-value shape
+(a single branch on one comparison), and neither crate documents fault
+countermeasures.
 
 What the construction gives for free is asymmetric: a fault on the *encryption*
 side degrades to rejection rather than to forgery, because the tag is computed over
@@ -473,11 +474,13 @@ mutated the unobservable one and the campaign reported "expected fail, got pass"
 which is what a mutation nothing can catch looks like).
 
 Measured cost, on the host `performance.md` describes and re-measured for `v0.3`: the added
-work is the **second gate** — three more 65-byte constant-time comparisons plus an independently
-written eight-byte fold (so four 65-byte comparison passes in total on the default build,
-against the opt-out build's one) — a fixed per-message cost that does not scale — **+25% at 64 B, +24% at 256 B, +23% at 1 KiB, +11% at 4 KiB, and
+work is the **gates' extra comparison passes** — three more 65-byte constant-time comparisons
+(the first gate adds one by comparing both ways round, and the second gate's two repeat that)
+plus an independently written eight-byte fold (so four 65-byte comparison passes in total on
+the default build, against the opt-out build's one) — a fixed per-message cost that does not
+scale — **+25% at 64 B, +24% at 256 B, +23% at 1 KiB, +11% at 4 KiB, and
 within the noise floor from 16 KiB up** (default over `--no-default-features`; `performance.md`'s
-latency and ratio tables are the source). Encryption pays nothing for it (flat to the noise
+`hardened`-cost bullet carries the campaign medians these are rounded from). Encryption pays nothing for it (flat to the noise
 floor at every size), so the in-place *round trip* shows a smaller, noisier fraction of the same
 cost. The default build is byte-for-byte identical on the wire (the KATs and
 both differential fixtures replay unchanged), which is what keeps every other piece
@@ -506,10 +509,10 @@ out as `features = ["hardened", "dual-mac", "locked"]`.
 
 | Layer | What it defends | Cost (measured, this host) |
 | --- | --- | --- |
-| `hardened` (already default) | a single corrupted decision value or instruction | +25% at 64 B, +24% at 256 B, +23% at 1 KiB, +11% at 4 KiB, and within the noise floor from 16 KiB up (`performance.md`'s latency and ratio tables are the source) |
+| `hardened` (already default) | a single corrupted decision value or instruction | +25% at 64 B, +24% at 256 B, +23% at 1 KiB, +11% at 4 KiB, and within the noise floor from 16 KiB up (`performance.md`'s `hardened`-cost bullet carries the campaign medians) |
 | `hardened` (moved here from `dual-mac`) | a fault inside the shared constant-time comparison (a shortened loop, a corrupted bound): the second gate `AND`s a differently *written* comparison (an 8-byte fold into a `u64`, rather than `subtle`'s per-byte loop), so one fault reaches only one of the two shapes and a forgery needs two faults | **+1.4 ns** per decryption, measured (0.1% at 64 B). It was `dual-mac`-only until the two numbers were put side by side: this cost against a hand-modelled change from "forgery accepted after 2,573 attempts" to "no forgery in 2,000,000" |
 | `dual-mac` | the tag being pinned to a constant or to the received tag — the one model the two gates fail *together* on | +30% at 64 B, +40% at 1 KiB, +24% at 1 MiB on decryption (a +21–40% range); +6–25% on a round trip (the two ranges `Cargo.toml` and the changelog state). An independent build measured the same layer higher on its own harness (1.69–1.81x at 1 KiB, and +43–44% on the *encrypt* side at 64 B, where the fixed `scrub_stack` cost dominates); `performance.md` says how far these ratios move between builds |
-| `dual-mac` | key residue surviving in stack frames this crate cannot name — the `blake3` dependency's XOF output (`enc_key ‖ enc_nonce`) and, under `pure`, the outer key `k_out`: `scrub_stack()` overwrites the 16 KiB below the entry point after the last derivation | ~16 KiB of volatile stores, ~0.5–1 µs per operation, **and a 16,408-byte frame — 32 KiB of thread stack in all**, the published budget. Measured on a thread with a 32 KiB stack: the default build still runs after 16 KiB of the stack is already consumed, this one does not survive 8 KiB. A caller that spawns threads with small stacks must size them for it — the scrub is a 16 KiB frame, so it can fault the thread it is protecting. The budget is public as `stack_requirement_bytes()`: **32 KiB** under `dual-mac` (zero elsewhere), which is that frame plus the ordinary frames around it (~10 KiB in the same measurement, which overflowed a 24,576-byte thread and fitted in 26,624) with margin, and `the_reported_stack_requirement_is_sufficient` measures that a thread given exactly that budget survives a round trip |
+| `dual-mac` | key residue surviving in stack frames this crate cannot name — the `blake3` dependency's XOF output (`enc_key ‖ enc_nonce`) and, under `pure`, the outer key `k_out`: `scrub_stack()` overwrites the 16 KiB below the entry point after the last derivation | ~16 KiB of volatile stores, ~0.5–1 µs per operation, **and a 16,408-byte frame — 32 KiB of thread stack in all**, the published budget. Measured on a thread with a 32 KiB stack: the default build still runs after 16 KiB of the stack is already consumed, this one does not survive 8 KiB. A caller that spawns threads with small stacks must size them for it — the scrub is a 16 KiB frame, so it can fault the thread it is protecting. The budget is public as `stack_requirement_bytes()`: **32 KiB** under `dual-mac` (zero elsewhere), which is that frame plus the ordinary frames around it (~10 KiB in the same measurement, which overflowed a 24,576-byte thread and fitted in 26,624) with margin, and `the_reported_stack_requirement_is_sufficient` measures that a thread given that budget plus the test's documented margin (64 KiB in release, 1 MiB in debug) survives a round trip — so what it pins is that the constant does not understate by more than the margin, not that it is exact |
 | `witness` (in `ultra` only) | a fault aimed at the **derivation arithmetic both tag computations share** — `derive_tag`, the keyed BLAKE3 under it, and the SIMD kernels: the one model `dual-mac` alone cannot close, and where every accepting fault the sweep finds in the `hardened` build sits | decryption costs **2.7x at 64 B, 4.0x at 1 KiB, 11.0x at 64 KiB, 12.4x at 1 MiB** against the default configuration, and the round trip 2.2x/2.8x/6.1x/6.5x in place or 2.5x/3.3x/6.6x/7.1x allocating (re-measured after the witness's residue-wipe pass) (measured; the four tables are in [`performance.md`](performance.md), and that file's "what the `ultra` layer costs" table is the one to read for this row). It is a *scalar* implementation, so its cost is per byte, and on the encrypt side it is present **only on the allocating `encrypt`** — see "What the witness is" for why the in-place path does not carry it. It does not make the *totals* in the fault table zero — it removes accepting faults from the decision and from the shared derivation, and the `ultra` build has a handful elsewhere (§§) |
 | `locked` | key pages readable out of **swap** or a **core dump** | ~7 µs once per key (`mlock`+`munlock`), not per message. The key is heap-allocated so its address is stable: `mlock` is address-based, and a key returned by value moves after being locked, which left this layer protecting a dead stack slot |
 | `locked` | a **hardware fault or bit flip in the key page** turning into a silent wrong key | `+42 ns` per use, measured: an 8-byte BLAKE3 tag of the key is stored beside it and checked (constant time) on every `as_bytes()`, so a corrupted page panics at the first use instead of decrypting with a key that is not the caller's. It does not detect a fault that rewrites the tag too, nor one outside the key-and-tag region (the rest of the page is never read) |
@@ -858,8 +861,8 @@ Two entry points, both runnable from a fresh checkout:
                             # the planted-bug checks, the cargo-mutants campaign with
                             # its committed-evidence gate, the Kani cfg check, the
                             # 4000-vector differential against the Python reference
-                            # (the rotation CI defers to its scheduled `wide` job
-                            # rather than running on every push), and the advisory
+                            # (CI defers that one to its scheduled `wide` job
+                            # rather than running it on every push), and the advisory
                             # stack-residue scan.
 ./verify.sh --deep          # every switch above; `--all` is the same set
 ```
@@ -999,8 +1002,9 @@ configuration it is ahead of `XChaCha20Poly1305` on encryption at 64–256 B, be
 up, and on decryption it is behind or within the noise floor up to 4 KiB (0.70x at
 1 KiB, where the fixed per-message cost dominates) and ahead from 16 KiB up.
 The two costs it prices are a fixed per-message cost on
-`hardened` decryption (the second gate's two 65-byte constant-time comparisons — three more
-passes than the opt-out build makes — plus the
+`hardened` decryption (the gates' four 65-byte constant-time comparison passes — three more
+than the opt-out build's single pass, since each gate runs `subtle`'s loop both ways round —
+plus the
 independently written fold, over the opt-out build; a fixed cost, so its share is inside the
 measured noise floor from 16 KiB up) and a per-byte
 cost on `ultra` decryption, whose scalar witness is **2.7x at 64 B and 12.4x at 1 MiB**.

@@ -8,6 +8,76 @@ green push to `main` — which are build artefacts of that job, not construction
 
 ## Unreleased
 
+### An independent line-by-line round: two false claims, and one the audit itself introduced
+
+A fresh, adversarial line-by-line pass over the whole tree — deliberately independent of the
+previous rounds' own summaries, with every comment and doc sentence treated as a hypothesis
+rather than as evidence. It ran as nine parallel audits, **two of which completed** and seven
+of which were cut off by an upstream account restriction and by local database contention; the
+areas that lost their auditor were then reviewed as a diff. **No wire-format change.**
+
+**Found and fixed by the two audits that completed:**
+
+- **`src/lib.rs` claimed the stack scan exists as a *unit test*.** `derive_enc`'s doc said
+  "`tools/stack_residue.sh`'s method, **run as a unit test**" and "the unit test exists as a
+  regression check"; there is no such test — not in `mod tests`, not in `tests/`, not in
+  `src/proofs.rs`, and `git log --all -- tests/stack_residue.rs` is empty (a path named in an
+  even earlier revision and never created). The scan ran from a scratch copy with crate
+  internals precisely because neither `enc_key` nor `enc_nonce` is reachable from the public
+  API, which is what the tool's own closing note says. Both sentences now say that, and say
+  explicitly that `cargo test` has no case that can search for those two values.
+- **`decrypt`'s documented peak ignored `ultra`.** `alloc_zeroed`'s doc and `decrypt`'s said
+  "twice the message" / "a buffer as large as `ciphertext`"; under `ultra` a **third**
+  ciphertext-sized buffer is allocated for the witness's plaintext. Both now name it.
+- **`src/proofs.rs`: four harnesses carried no `#[kani::unwind]`** and therefore no unwinding
+  assertions, relying on undocumented CBMC behaviour. Checked against the pinned CBMC 6.11.0
+  that they were not *vacuous* (concrete-guard loops are fully unwound with or without the
+  bound), but a future symbolic-trip loop would have hung instead of failing; all four now carry
+  a bound (one re-verified SUCCESSFUL under Kani, 36 s). Also corrected there: a false claim
+  that two chunk stores cannot fit at 16 bytes, a stale per-harness timing, a stale count of the
+  permutations an end-to-end harness costs, and two over- and under-claims in the module header.
+- The same pass confirmed **no Kani harness is vacuous** — checked one by one against what each
+  assertion would accept (a constant-returning `derive_tag`, an ignored key, a truncation at 40
+  bytes, a missing tail-block advance all fail somewhere) — and found the per-harness premises
+  sound.
+
+**One wrong claim introduced by this round's own unfinished work**, caught while reviewing it:
+
+- `performance.md` had been made to say the allocating API costs "**4.0-6.9% across the seven
+  tabulated sizes**". Re-derived from the campaign's raw per-pass output (the median-of-three
+  rule the file documents), the seven cells are +6.9, +4.6, +4.0, +4.4, +5.2, +5.5 and **-5.3%**
+  at 64 B — the allocating API measured *faster* there, inside the file's own noise floor. The
+  text now gives the range for the six sizes from 256 B up and says what 64 B actually is. (The
+  precise medians added beside it — `1.247 → 1.546` at 256 B and the rest — were checked the
+  same way and are correct.)
+
+**From the seven areas whose auditor was cut off** (reviewed as a diff, mechanically verified —
+the tree is `fmt`/`clippy`/rustdoc clean and all suites pass — but the injections their comments
+describe were not re-run):
+
+- `tests/differential_reference.rs`, `tests/decision.rs`, `tests/mac_commitment.rs`: the
+  tamper sweeps now flip **all eight bits** of every position rather than one fixed bit per
+  byte (the docstrings claimed the exhaustive form; the sweep was one bit in eight), and
+  `tests/security.rs` asserts per-byte forgeries and adds a **counting global allocator** so
+  `decrypt_bounded`'s "the bound is checked before the allocation" is observable rather than
+  inferred from the error variant.
+- `tests/locked.rs`: `deny_debugging`'s three environment-dependent exits are now refusals
+  unless `XSIV_ALLOW_UNLOCKED=1` records the gap, the same convention as `lock_or_skip` — a
+  `deny_debugging` changed to `Err(-1)` used to land on one of them and print `ok`.
+- `tools/stack_residue.sh` gained a **positive control for the scan itself** (a planted key copy
+  the scan must find): a scan reading the wrong memory printed the same PASS line as a clean
+  measurement, and the false-positive control cannot catch that because a scan that sees nothing
+  produces no false positives either. Verified here: the planted 32-byte run is reported.
+- `tools/kani_shards.py`'s harness parser now matches the attribute as a *line prefix* (so
+  `#[kani::proof] // why` no longer vanishes) and **cross-checks that every attribute line
+  produced a name**, turning any unrecognised shape into a loud error rather than a harness that
+  is never sharded and never proven. Verified: `--count` 13, `--plan` consistent.
+- `src/lib.rs`/`src/witness.rs` doc corrections (the L3.6 correlation sentence, the `MAX_MSG_SIZE`
+  const assertion, `locked`'s availability and `deny_debugging` scope, `lock_range`'s page
+  rounding and its un-rolled-back `mlock`); `tests/decision_scope.rs` and friends refined the
+  source-shape scanners' function-definition skip to a name-aware rule; `tools/gate_selftest.sh`
+  now requires `stack_residue.sh`'s own could-not-run reason, not merely exit 3.
+
 ### The v7 pre-emption round: code defects, tests and gates that could not fail, and the forgery term
 
 A seventh audit round (`audit_v7` and a fresh line-by-line report) was in flight while this round

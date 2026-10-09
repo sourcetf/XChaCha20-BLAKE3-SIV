@@ -42,8 +42,10 @@
 //!   hash's key and a 32-byte substring of its input are two correlated functions of
 //!   one secret, a key-dependent-input step that no reduction from "keyed BLAKE3 is
 //!   a PRF" covers (`SECURITY-ANALYSIS.md` §2.1, node L3.6).  Two levels remove the
-//!   correlation: every message hashed here is public.  It does **not**, however,
-//!   widen the equal-material route: all three derived values are functions of the
+//!   correlation: neither hash call has a secret in its *message* — the inner one
+//!   absorbs the public context, and the outer one's message is the inner digest,
+//!   which the cascade step (L1.3) covers.  It does **not**, however, widen the
+//!   equal-material route: all three derived values are functions of the
 //!   single 256-bit `subkey = HChaCha20(K, N₁)`, so two keys agreeing on the triple
 //!   need a `subkey` collision — a `2^128` birthday, the same order as the tag's own
 //!   collision bound, not a 768-bit one.  (In revision `v0.2` the `K`-in-input step
@@ -337,9 +339,10 @@ pub(crate) mod test_counters {
 pub const MAX_MSG_SIZE: u64 = 1u64 << 38;
 
 // The limit and the block counter are two halves of one fact, so they are bound by a
-// `const` assertion: this fails to *compile* if either side is changed without the
-// other. `MAX_MSG_SIZE` is exactly 2^32 ChaCha20 blocks, so the last block of a
-// maximum-length message uses counter `u32::MAX` -- and one block more would wrap it
+// `const` assertion: a limit that is not a whole number of blocks, or that would need
+// more blocks than the counter has values, fails to *compile*. `MAX_MSG_SIZE` is exactly
+// 2^32 ChaCha20 blocks, so the last block of a maximum-length message uses counter
+// `u32::MAX` -- and one block more would wrap it
 // (`ctr = ctr.wrapping_add(1)` in every keystream path, SIMD included) and reuse the
 // keystream inside a single message, silently. `src/proofs.rs` proves the same
 // arithmetic with Kani, but a proof in the Formal job is a different thing from a build
@@ -557,7 +560,9 @@ pub enum Error {
     MessageTooLong,
     /// The associated data is longer than [`MAX_MSG_SIZE`] (256 GiB).
     AadTooLong,
-    /// The buffer for the recovered plaintext could not be allocated.
+    /// A buffer the operation needed could not be allocated: the ciphertext on
+    /// [`encrypt`], the recovered plaintext on [`decrypt`] (and [`decrypt_bounded`]),
+    /// or one of `ultra`'s witness buffers.
     ///
     /// Distinct from [`AuthenticationFailed`](Error::AuthenticationFailed) because
     /// it is about this process's memory, not about the key or the message: a
@@ -572,7 +577,7 @@ impl core::fmt::Display for Error {
         let msg = match self {
             Error::MessageTooLong => "message exceeds the maximum supported length",
             Error::AadTooLong => "associated data exceeds the maximum supported length",
-            Error::AllocationFailed => "the plaintext buffer could not be allocated",
+            Error::AllocationFailed => "a required buffer could not be allocated",
             Error::AuthenticationFailed => "authentication failed",
         };
         f.write_str(msg)
@@ -761,8 +766,8 @@ impl core::fmt::Debug for Plaintext {
 ///
 /// `Debug` prints no key bytes and no fingerprint of them.  The wipe is the same
 /// volatile-store wipe the rest of the crate uses, with the same limits — see
-/// "What is not defended against" in the README: it does not cover a page that was
-/// already swapped out, a core dump, or a cold boot.
+/// "What this crate cannot fix for you" in the README: it does not cover a page
+/// that was already swapped out, a core dump, or a cold boot.
 ///
 /// A caller that already holds key bytes can wrap them with [`Key::from_bytes`];
 /// that *copies*, so the array passed in is still the caller's to wipe.
@@ -1048,16 +1053,19 @@ pub mod random {
 // copy. Those are the two OS-level reads a userspace library can still ask the kernel
 // to prevent, and this module is that request.
 //
-// It cannot cover everything, and the doc comments say which: a debugger or
-// `/proc/<pid>/mem` from a same-uid process, cold-boot remanence, and a hypervisor
-// remain outside what any in-process code can do. What it reaches is the *deployment*
-// half of the wipe story, which is why it is opt-in rather than default: it changes what
-// the process asks of the kernel, not what the crate computes.
+// It cannot cover everything, and the doc comments say which: cold-boot remanence, a
+// hypervisor reading guest memory, and a debugger *holding* `CAP_SYS_PTRACE` remain
+// outside what any in-process code can do. (A non-privileged same-uid debugger or
+// `/proc/<pid>/mem` reader is answered by `deny_debugging` below — in-process code, opt-in.)
+// What it reaches is the *deployment* half of the wipe story, which is why it is opt-in
+// rather than default: it changes what the process asks of the kernel, not what the crate
+// computes.
 //
-// Availability: Linux only. On any other target the functions are stubs that report the
-// platform limit rather than pretending (`lock_range` and `deny_debugging` return `ENOSYS`,
-// `locked_bytes` and `is_dumpable` return `None`, and `unlock_range` is a no-op), so a caller
-// can decide what to do about it (and the default build never calls them).
+// Availability: Linux on x86_64/aarch64 (see `SUPPORTED` below). On every other target the
+// functions are stubs that report the platform limit rather than pretending (`lock_range` and
+// `deny_debugging` return `ENOSYS`, `locked_bytes` and `is_dumpable` return `None`, and
+// `unlock_range` is a no-op), so a caller can decide what to do about it (and the default
+// build never calls them).
 /// Locking keys out of swap and core dumps (the `locked` feature; `ultra` includes it).
 ///
 /// The volatile-store wipe this crate uses everywhere reaches the bytes the process owns
@@ -1065,11 +1073,13 @@ pub mod random {
 /// about to copy. `mlock` and `madvise(MADV_DONTDUMP)` are the two requests a userspace
 /// library can still make, and this module makes them for a key.
 ///
-/// What it does not cover, stated here as well as in the README: a debugger or
-/// `/proc/<pid>/mem` from a process with the same uid, a hypervisor reading guest memory,
-/// and cold-boot remanence. `LockedKey::new` fails loudly when the kernel refuses
-/// (`RLIMIT_MEMLOCK` is the usual reason) rather than leaving the caller unsure which
-/// state it is in.
+/// What it does not cover, stated here as well as in the README: a hypervisor reading guest
+/// memory, cold-boot remanence, and a tracer that holds `CAP_SYS_PTRACE`. A non-privileged
+/// same-uid debugger — or `/proc/<pid>/mem` reader — is answered by
+/// [`locked::deny_debugging`], which
+/// is opt-in and does not help against a tracer already attached. `LockedKey::new` fails
+/// loudly when the kernel refuses (`RLIMIT_MEMLOCK` is the usual reason) rather than leaving
+/// the caller unsure which state it is in.
 // Gated on `locked`, not on `ultra`: `Cargo.toml` exposes `locked` as a feature of its
 // own, so gating the module on `ultra` made `--features locked` an *empty* feature -- it
 // compiled nothing and said nothing, while the README's table lists `locked` as a layer a
@@ -1195,19 +1205,29 @@ pub mod locked {
 
         /// Lock `len` bytes at `ptr` into RAM and exclude them from core dumps.
         ///
-        /// Returns `Ok(())` only if **both** succeeded. `EFAULT`/`EINVAL` are impossible
-        /// for a live slice, so a failure here is the environment's: `ENOMEM` means the
+        /// Returns `Ok(())` only if **both** succeeded. `EFAULT` is impossible for a live
+        /// slice, so a failure here is the environment's: `ENOMEM` means the
         /// `RLIMIT_MEMLOCK` allowance is exhausted (common, and not fatal), `EPERM` a
-        /// hardened container. The caller decides; this crate's default build never
-        /// calls it.
+        /// hardened container. `EINVAL` has one environment of its own — a kernel whose
+        /// pages are larger than the `page_size` fallback (see there), where the advice is
+        /// misaligned and this refuses rather than leaving the range unlocked; and
+        /// [`LockedKey::new`](crate::locked::LockedKey::new) fails closed on that error
+        /// too. The caller decides; this
+        /// crate's default build never calls it.
         ///
-        /// The `mlock` covers exactly `ptr..ptr + len`, but `madvise` demands a
-        /// page-aligned range, so the dump exclusion is applied to the **whole pages
-        /// covering** that range. Unrelated data sharing those pages is therefore also
-        /// excluded from core dumps, until [`unlock_range`] clears the advice — and that
-        /// call clears a `VM_DONTDUMP` it did not set (see its documentation), so a
-        /// caller pairing the two on memory it does not own outright should read this as
-        /// "the pages are now non-dumpable", not as a range-local operation.
+        /// Both syscalls act on **whole pages**, and neither is range-local. `mlock` locks
+        /// every page that contains a byte of the range — the kernel rounds the range out
+        /// to page boundaries itself, exactly as `munlock` does, so the lock is not
+        /// range-exact — while `madvise` *rejects* an address that is not page-aligned
+        /// instead of rounding, so this function aligns the range out to the same covering
+        /// pages before applying the advice. (Measured: a one-byte lock through this
+        /// function charges one page of `VmLck` and sets `lo` on the whole page.)
+        /// Unrelated data sharing those pages is therefore locked out of swap *and*
+        /// excluded from core dumps, until [`unlock_range`] releases both — and that call
+        /// clears a `VM_DONTDUMP` it did not set (see its documentation) and unlocks the
+        /// whole page range, so a caller pairing the two on memory it does not own outright
+        /// should read this as "the pages are now locked and non-dumpable", not as a
+        /// range-local operation.
         ///
         /// The failure path has the same "not range-local" property in the other
         /// direction: `madvise` applies its advice as it walks the range and can return
@@ -1217,6 +1237,19 @@ pub mod locked {
         /// partial advice rather than only the lock — mirroring the successful
         /// `mlock`-then-`DONTDUMP` order in reverse, and clearing a dump exclusion it may
         /// not have been the one to set, exactly as [`unlock_range`] does.
+        ///
+        /// A refused `mlock` is **not** rolled back, because this function cannot tell
+        /// whether the kernel locked a prefix of the range before failing — and undoing a
+        /// lock on a guess is the one direction this module does not take: a page that was
+        /// locked and is now not is the failure that cannot be taken back (compare
+        /// [`unlock_range`] on the window its ordering closes). For the input documented
+        /// here — a live allocation, one contiguous range — the case does not arise: the
+        /// allowance is accounted for the whole range before any of it is locked, so an
+        /// `ENOMEM` from `RLIMIT_MEMLOCK` leaves nothing locked (measured on a three-VMA
+        /// range with headroom for one page). A range with a *hole* in it, outside that
+        /// contract, is the exception: `mlock` fails at the hole and the pages before it
+        /// stay locked and charged, so a caller that passes such a range must read `Err` as
+        /// "part of the range may now be locked" and release it with [`unlock_range`].
         pub fn lock_range(ptr: *const u8, len: usize) -> Result<(), isize> {
             if len == 0 {
                 return Ok(());
@@ -1449,7 +1482,11 @@ pub mod locked {
         /// every x86_64 Linux, but an aarch64 kernel can be built with 16 or 64 KiB
         /// pages, where aligning to 4096 would still not be aligned and the call
         /// would keep returning `EINVAL`.  Falls back to 4096 if auxv cannot be
-        /// read, which is the x86_64 answer and the common aarch64 one.
+        /// read, which is the x86_64 answer and the common aarch64 one.  On a kernel
+        /// whose pages are larger than that fallback the address is misaligned for
+        /// `madvise` unless it happens to be aligned to the real page size, and
+        /// `lock_range` then refuses with `EINVAL` — the failure mode is a
+        /// `LockedKey::new` that fails closed, not an unlocked key (see `lock_range`).
         fn page_size() -> usize {
             const PATH: &[u8] = b"/proc/self/auxv\0";
             const AT_PAGESZ: u64 = 6;
@@ -2415,16 +2452,19 @@ fn derive_tag(
 /// It used to return `([u8; 32], [u8; 12])`. Returning a 44-byte aggregate makes
 /// the compiler materialise an unnamed temporary for the return value — a copy
 /// no `zeroize_array` call in this function can name, and therefore none can
-/// wipe. A stack scan (`tools/stack_residue.sh`'s method, run as a unit test)
-/// found exactly that: the tail of this value, `material[16..44]` — the second
+/// wipe. A stack scan (`tools/stack_residue.sh`'s method, run from a scratch copy
+/// with crate internals — neither `enc_key` nor `enc_nonce` is reachable from the
+/// public API, which is why the tool's own cases cannot search for them) found
+/// exactly that: the tail of this value, `material[16..44]` — the second
 /// half of `enc_key` together with the whole `enc_nonce` — survived in the frame
 /// after a full round trip, in all three build configurations. Writing into the
 /// caller's buffers leaves the caller's own named locals as the only copies, and
 /// the caller already wipes them.
 ///
 /// This does not make the wipe *provable* — a compiler may still spill to the
-/// stack — which is why the unit test exists as a regression check rather than
-/// as an argument.
+/// stack — which is why the scan is committed as a tool and run as a regression
+/// check (`tools/stack_residue.sh`) rather than as an argument. It is a tool and
+/// not a unit test: `cargo test` has no case that can search for these two values.
 fn derive_enc(
     enc_seed: &[u8; 32],
     tag: &[u8; TAG_LEN],
@@ -2475,7 +2515,9 @@ fn check_lengths(msg_len: usize, aad_len: usize) -> Result<(), Error> {
 ///
 /// Note the peak this implies for [`decrypt`]: the caller already holds the ciphertext,
 /// so the call holds ciphertext **and** plaintext — twice the message — for its
-/// duration.  [`decrypt_bounded`] bounds the second half; the first is the caller's.
+/// duration; under `ultra` it holds a third of the same size, the independent witness's
+/// plaintext, which is allocated through here too.  [`decrypt_bounded`] bounds the
+/// buffers the call allocates; the ciphertext is the caller's.
 fn alloc_zeroed(len: usize) -> Result<Vec<u8>, Error> {
     let mut buf = Vec::new();
     buf.try_reserve_exact(len)
@@ -2816,7 +2858,8 @@ fn accept_or_reject(
 
 /// Decrypt `ciphertext`, verifying the tag.
 ///
-/// **This allocates a buffer as large as `ciphertext`.** Bound untrusted input
+/// **This allocates a buffer as large as `ciphertext`** — a second one under
+/// `ultra`, for the independent witness's plaintext. Bound untrusted input
 /// before calling it: [`MAX_MSG_SIZE`] (256 GiB) is the format's ceiling, not a safe
 /// one, and a service that trusts a length field off the wire can be made to
 /// allocate that much per request. [`decrypt_bounded`] takes a policy limit and
@@ -4176,8 +4219,11 @@ mod tests {
 
     #[test]
     fn test_xchacha20_blake3_siv_kat_c2sp_key() {
-        // A published c2sp.org test-vector key in the first 16 nonce bytes, with a
-        // fixed suffix in the last 8; exercises the empty-AAD path.
+        // A published c2sp.org/chacha20-poly1305-siv test-vector key (see `standard.txt`),
+        // with that vector's 16-byte nonce in the first 16 nonce bytes and a fixed suffix
+        // in the last 8; exercises the empty-AAD path. (The sentence here used to read
+        // "test-vector key in the first 16 nonce bytes", which put the key in the wrong
+        // place: the key is the `key` array, the vector's nonce is what starts the nonce.)
         let key: [u8; 32] = hex("1a1ea9537ef6e0587ac4d36d4c73e07b1526e18bf5bb008f63e4a49b2178a8d2")
             .try_into()
             .unwrap();
@@ -4258,8 +4304,13 @@ mod tests {
     }
 
     /// The dispatched keystream (SIMD where available) must equal the scalar
-    /// reference for *every* length and counter, including the tails that fall
-    /// between SIMD width, block size, and exact multiples.
+    /// reference at every length, including the tails that fall between SIMD width,
+    /// block size, and exact multiples. (Counter 0 throughout: this test is the length
+    /// sweep; `test_simd_matches_scalar_counters` below is the counter sweep, at a
+    /// subset of these lengths. Together they cover every length at one counter and
+    /// several counters at several lengths, not the full cross product — an earlier
+    /// revision of this comment said "every length and counter" while neither test
+    /// crossed the two.)
     #[test]
     fn test_simd_matches_scalar_all_lengths() {
         let key = [0x9Bu8; 32];
@@ -4753,7 +4804,15 @@ mod tests {
         let key = [0u8; 32];
         let nonce = [0u8; 24];
         let (_, tag) = encrypt(&key, &nonce, b"", b"").unwrap();
-        assert_eq!(tag.len(), TAG_LEN);
+        // `tag.len()` is fixed by the returned type (`[u8; TAG_LEN]`), so comparing it
+        // against `TAG_LEN` is a tautology the compiler enforces regardless of this test;
+        // the assertion that can fail is on the constant itself. What is checked at run
+        // time is that the tag is derived rather than a constant block of bytes -- the
+        // width argument below is only worth anything over a real tag.
+        assert!(
+            tag.iter().any(|&b| b != 0),
+            "the public API returned an all-zero tag, so nothing was derived"
+        );
         // 65 bytes = 520 bits. The *target* form of commitment (a second key that opens
         // a *given* ciphertext) is not set by this number: a candidate key succeeds by
         // reproducing the 256-bit subkey, at ~2^-256 per candidate, so the whole 2^256
@@ -4915,6 +4974,15 @@ mod tests {
 
     // ── Plaintext wrapper ──
 
+    /// `Debug` must render the documented redacted form, not merely a rendering that
+    /// happens to avoid one substring.
+    ///
+    /// The first version asserted only `!rendered.contains("TOP-SECRET")` and
+    /// `rendered.contains("len")`, which a `Debug` that dumped the bytes as hex, decimal
+    /// or base64 passes — measured by mutation: a hex-printing `Debug` left this test
+    /// green. The form the type's own docs promise (`Plaintext { len: N, .. }`) is pinned
+    /// exactly instead, the way `test_key_zeroizes_on_drop_and_hides_itself` pins
+    /// `Key`'s.
     #[test]
     fn test_plaintext_debug_does_not_leak() {
         let key = [0x01u8; 32];
@@ -4924,11 +4992,12 @@ mod tests {
         let pt = decrypt(&key, &nonce, b"", &ct, &tag).unwrap();
 
         let rendered = alloc::format!("{:?}", pt);
-        assert!(
-            !rendered.contains("TOP-SECRET"),
-            "Debug leaked plaintext: {rendered}"
+        assert_eq!(
+            rendered,
+            alloc::format!("Plaintext {{ len: {}, .. }}", secret.len()),
+            "`Debug` must print the length only; any other rendering can carry the \
+             plaintext (hex, decimal and base64 all pass a substring search)"
         );
-        assert!(rendered.contains("len"));
 
         // Deref / as_slice / len behave as expected.
         assert_eq!(pt.len(), secret.len());
@@ -6167,8 +6236,12 @@ mod tests {
     /// refactor can silently destroy: point the message keystream at `subkey` (or
     /// `enc_seed`) with the derivation's nonce, drop the domain word from that nonce, or
     /// otherwise give the two ChaCha20 calls the same key and nonce — and the two uses
-    /// collapse into one keystream with no other test noticing, because the round trip
-    /// still works and the tags still verify. (An earlier revision led with "make
+    /// collapse into one keystream. The round trip and the tag checks stay green because
+    /// they are comparisons of values the collapse changes consistently (or of tags,
+    /// which never see the message keystream); the tests that do move — the KATs'
+    /// pinned ciphertexts and the boundary-corpus digest — report only that some
+    /// ciphertext byte changed, not that the two ChaCha20 uses now coincide. This test
+    /// names the site. (An earlier revision led with "make
     /// `derive_enc` ignore the tag"; that alone does *not* collapse them, since the two
     /// keystreams are keyed differently to begin with.)
     ///
@@ -6249,9 +6322,15 @@ mod tests {
     /// message held fixed).
     ///
     /// A regression that made the KDF ignore the tag — deriving the key from the message
-    /// *length*, say — passes every other test in this file: the tags would still be
+    /// *length*, say — leaves the tag comparisons intact: the tags would still be
     /// correct, the round trip would still work, and the `dual-mac`/witness cross-checks
-    /// would still agree with it, because they only compare tags.
+    /// would still agree with it, because they only compare tags. It does not escape this
+    /// file: `test_every_tag_byte_reaches_the_ciphertext` catches it one level down, at
+    /// `derive_enc` itself (measured by mutation: under a `derive_enc` that ignores its
+    /// `tag` argument, that test fails along with the KATs,
+    /// `test_avalanche_single_bit_flip` and
+    /// `test_all_accelerated_paths_agree_on_a_boundary_corpus`), and the assertions below
+    /// catch it at the message level.
     #[test]
     fn nonce_reuse_does_not_reuse_the_keystream() {
         let key = [0x9Au8; 32];

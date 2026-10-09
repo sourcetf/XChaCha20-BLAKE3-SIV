@@ -27,8 +27,9 @@
 # Stage switches, all off by default: --cross-exec (aarch64, i686,
 # powerpc64 big-endian and riscv64, under qemu), --miri, --ctgrind, --deny, --fuzz,
 # --tsan, --tools (the tool-level gates: the fault campaign, the instruction
-# sweeps, the cache-profile differential, the planted-bug checks, the Kani cfg
-# check and the broad differential), --kani.
+# sweeps, the cache-profile differential, the planted-bug checks -- the mutation
+# campaign and the committed evidence it must match -- the Kani cfg check, the
+# broad differential and the stack-residue measurement), --kani.
 #
 #   ./verify.sh --deep       # all of them
 #   ./verify.sh --all        # the same thing; the name says what it means

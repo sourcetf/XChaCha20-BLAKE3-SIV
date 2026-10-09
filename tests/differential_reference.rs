@@ -227,9 +227,9 @@ fn differential_every_position_is_authenticated() {
     // regenerated fixture whose sizes all exceeded it would make this test scan
     // zero positions and pass vacuously; the exact count at the end forbids that.
     //
-    // The cap is a cost bound, not a boundary: each swept byte costs one full
-    // decryption, so the 300-byte rows are ~600 positions each, while a 1 MiB row
-    // would be 2^20. Above the cap the sampled differential and the fuzzer cover
+    // The cap is a cost bound, not a boundary: every swept position costs one full
+    // decryption per bit, so the 300-byte rows are ~600 positions each, while a 1 MiB
+    // row would be 2^23. Above the cap the sampled differential and the fuzzer cover
     // the same property with random positions.
     let mut swept_rows = 0usize;
     let mut swept_positions = 0usize;
@@ -258,21 +258,34 @@ fn differential_every_position_is_authenticated() {
             "the untampered row must round-trip (msg_len={msg_len}, aad_len={aad_len})"
         );
 
+        // Every bit, not one fixed bit per byte: the old sweep flipped 0x01 in every
+        // ciphertext byte and 0x80 in every tag byte, so seven of the eight bits per byte
+        // were never tried by the test whose docstring says "any single bit anywhere". A
+        // tag computation that ignored one bit of the absorbed ciphertext would survive it.
+        // (The property tests in `security.rs` sample the bit, so the suite did cover this;
+        // the sweep that *claims* the exhaustive form now is one.) Cost is 8x, bounded by
+        // the cap above.
         for pos in 0..ct.len() {
-            let mut bad = ct.clone();
-            bad[pos] ^= 0x01;
-            assert!(
-                decrypt(&f.key, &f.nonce, &aad, &bad, tag).is_err(),
-                "ciphertext byte {pos} not authenticated (msg_len={msg_len}, aad_len={aad_len})"
-            );
+            for bit in 0..8 {
+                let mut bad = ct.clone();
+                bad[pos] ^= 1u8 << bit;
+                assert!(
+                    decrypt(&f.key, &f.nonce, &aad, &bad, tag).is_err(),
+                    "ciphertext byte {pos} bit {bit} not authenticated (msg_len={msg_len}, \
+                     aad_len={aad_len})"
+                );
+            }
         }
         for pos in 0..TAG_LEN {
-            let mut bad = *tag;
-            bad[pos] ^= 0x80;
-            assert!(
-                decrypt(&f.key, &f.nonce, &aad, ct, &bad).is_err(),
-                "tag byte {pos} not authenticated (msg_len={msg_len}, aad_len={aad_len})"
-            );
+            for bit in 0..8 {
+                let mut bad = *tag;
+                bad[pos] ^= 1u8 << bit;
+                assert!(
+                    decrypt(&f.key, &f.nonce, &aad, ct, &bad).is_err(),
+                    "tag byte {pos} bit {bit} not authenticated (msg_len={msg_len}, \
+                     aad_len={aad_len})"
+                );
+            }
         }
     }
     // Exact, not a floor: `>= 10` and `> 0` were satisfied after deleting rows, and the
@@ -330,13 +343,18 @@ fn differential_every_aad_bit_is_authenticated() {
             "the untampered row must round-trip (msg_len={msg_len}, aad_len={aad_len})"
         );
 
+        // As in the message sweep: every bit of every AAD byte, not one fixed bit per
+        // byte, so the docstring's "any AAD bit" is what runs.
         for pos in 0..aad.len() {
-            let mut bad = aad.clone();
-            bad[pos] ^= 0x01;
-            assert!(
-                decrypt(&f.key, &f.nonce, &bad, ct, tag).is_err(),
-                "aad byte {pos} not authenticated (msg_len={msg_len}, aad_len={aad_len})"
-            );
+            for bit in 0..8 {
+                let mut bad = aad.clone();
+                bad[pos] ^= 1u8 << bit;
+                assert!(
+                    decrypt(&f.key, &f.nonce, &bad, ct, tag).is_err(),
+                    "aad byte {pos} bit {bit} not authenticated (msg_len={msg_len}, \
+                     aad_len={aad_len})"
+                );
+            }
         }
     }
     // Exact, as above: 16 non-empty AAD rows below the cap (the fixture's non-empty AADs

@@ -48,13 +48,18 @@ fn a_forged_tag_must_not_be_accepted() {
             );
         }
 
-        // And a corrupted ciphertext against a valid tag.
-        if !ct.is_empty() {
+        // And a corrupted ciphertext against a valid tag — *every* byte position, not
+        // just the first. A tag that stopped committing to the message's tail accepts a
+        // flip there and rejects one in byte 0, so a single first-byte flip proves only
+        // that the tag depends on the prefix. (Measured: `let msg: &[u8] =
+        // &msg[..1.min(msg.len())];` at the top of `derive_tag` passed the earlier
+        // first-byte-only check through both entry points.)
+        for pos in 0..ct.len() {
             let mut forged_ct = ct.clone();
-            forged_ct[0] ^= 0x01;
+            forged_ct[pos] ^= 0x01;
             assert!(
                 decrypt(&KEY, &NONCE, AAD, &forged_ct, &tag).is_err(),
-                "corrupted ciphertext accepted at message length {pt_len}"
+                "corrupted ciphertext accepted at message length {pt_len}, byte {pos}"
             );
         }
 
@@ -83,13 +88,14 @@ fn a_forged_tag_must_not_be_accepted() {
         // A corrupted ciphertext under the valid tag, through the in-place entry too.
         // The allocating path's flip above is not evidence for the in-place decision:
         // the two are separate call sites, and "through both entry points" is the
-        // claim this test makes.
-        if !ct.is_empty() {
+        // claim this test makes. Every byte position here as well, for the reason
+        // given over the allocating sweep.
+        for pos in 0..ct.len() {
             let mut forged_ct = ct.clone();
-            forged_ct[0] ^= 0x01;
+            forged_ct[pos] ^= 0x01;
             assert!(
                 decrypt_in_place_detached(&KEY, &NONCE, AAD, &mut forged_ct, &detached).is_err(),
-                "corrupted ciphertext accepted in place at message length {pt_len}"
+                "corrupted ciphertext accepted in place at message length {pt_len}, byte {pos}"
             );
         }
 
@@ -142,13 +148,19 @@ fn a_tag_from_one_message_must_not_authenticate_another() {
     );
 
     // ... and neither must it authenticate a ciphertext of the same length, which is the
-    // cheap forgery: same tag, different bytes.
-    let mut same_len = ct_a.clone();
-    same_len[0] ^= 1;
-    assert!(
-        decrypt(&KEY, &NONCE, AAD, &same_len, &tag_a).is_err(),
-        "a tag authenticated a ciphertext it was not issued for"
-    );
+    // cheap forgery: same tag, different bytes. Every byte position, because a tag that
+    // commits only to the message's first byte still permits a forgery everywhere else —
+    // a flip in byte 0 is the one position such a fault *would* catch. (Measured:
+    // `let msg: &[u8] = &msg[..1.min(msg.len())];` in `derive_tag` passed the earlier
+    // first-byte-only version.)
+    for pos in 0..ct_a.len() {
+        let mut same_len = ct_a.clone();
+        same_len[pos] ^= 1;
+        assert!(
+            decrypt(&KEY, &NONCE, AAD, &same_len, &tag_a).is_err(),
+            "a tag authenticated a ciphertext it was not issued for (byte {pos})"
+        );
+    }
 
     // The genuine pair still works, so the rejections above are the forgery.
     assert_eq!(decrypt(&KEY, &NONCE, AAD, &ct_a, &tag_a).unwrap(), a);
