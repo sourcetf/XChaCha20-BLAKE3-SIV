@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# shellcheck disable=SC2329  # the mutate_/run_ functions are invoked indirectly by name
 #
 # Verify the verifier: inject a known bug into a throwaway copy of the tree and
 # require a *named check* to fail.
@@ -63,7 +64,7 @@ open(p, "w").write(s.replace(old, 'pub const SUBKEY_DOMAIN: [u8; 4] = *b"XSIX";'
 PY
 }
 
-run_ctgrind() {
+run_shipped_ctgrind() {
   local dir="$1"
   # Valgrind first, before the build: the driver's preflight already answers 3 when
   # none is found, but one that exists and *cannot start* (a broken extracted copy,
@@ -83,44 +84,43 @@ run_ctgrind() {
     echo "SKIPPED: $vg exists but cannot start (missing VALGRIND_LIB? see tools/ctgrind.sh --setup)" >&2
     return 3
   fi
-  ( cd "$dir"
-    local bin
-    # Ask cargo for the executable rather than globbing the deps directory: `ls -t` takes
-    # the newest match, which is the binary just built only by an ordering this script
-    # would be relying on silently. (Same fix as `tools/ctgrind.sh`, where a glob picked up
-    # the self-test's planted binary.)
-    bin="$(CARGO_TARGET_DIR="$dir/target-ctgrind" \
-             RUSTFLAGS="-C target-feature=+crt-static -C strip=none" \
-             cargo test --release --target x86_64-unknown-linux-gnu --test ctgrind --no-run \
-               --no-default-features --message-format=json 2>/dev/null \
-           | python3 -c '
-import json, sys
-exes = []
-for line in sys.stdin:
-    if not line.startswith("{"):
-        continue
-    try:
-        m = json.loads(line)
-    except ValueError:
-        continue
-    if m.get("reason") == "compiler-artifact" and m.get("executable") \
-       and (m.get("target") or {}).get("name") == "ctgrind":
-        exes.append(m["executable"])
-print(exes[-1] if exes else "")
-')"
-    [ -n "$bin" ] || { echo "could not build the ctgrind binary"; return 2; }
-    # The same classification the real check uses: a report inside this crate
-    # means the leak was seen.
-    local out
-    out="$("$vg" --quiet --suppressions=tests/ctgrind.supp "$bin" \
-      --test-threads=1 encrypt_does_not_branch_on_secrets \
-      decrypt_does_not_branch_on_secrets encrypt_in_place_does_not_branch_on_secrets \
-      constant_time_eq_does_not_branch_on_operands 2>&1 || true)"
-    case "$out" in
-      *xchacha20_blake3_siv*) return 1 ;;   # caught: the check would fail
-      *) return 0 ;;                        # not caught
-    esac
-  )
+  # Run the *shipped* check -- the copy of `tools/ctgrind.sh` inside the tree under
+  # test -- rather than an in-file re-implementation of its valgrind invocation and
+  # its `*xchacha20_blake3_siv*` needle. The re-implementation this replaced meant a
+  # regression confined to the shipped driver (down to `exit 0`) kept this row green
+  # while verify.sh's ctgrind stage silently stopped detecting leaks: the row was
+  # validating a copy of the check, not the check. `--no-default-features` is the
+  # configuration the in-file row used, and it is the one that sees this mutation:
+  # measured on this host, the mutated tree answers 0 (clean) under the default
+  # `hardened` build and 99 (leak) under the opt-out build, so dropping the flag
+  # would make the row report a regression the detector does not actually have.
+  # `--no-selftest` because this row *is* a planted-leak control for exactly this
+  # tool (the mutation below is the plant), and the tool's internal control builds a
+  # second tree; verify.sh and CI run the selftest itself.
+  [ -f "$dir/tools/ctgrind.sh" ] || {
+    echo "SKIPPED: $dir/tools/ctgrind.sh is missing, so the check under test does not exist" >&2
+    return 3
+  }
+  local log="$dir.ctgrind.log"
+  local rc=0
+  set +e
+  ( cd "$dir" && VALGRIND="$vg" bash tools/ctgrind.sh --no-selftest --no-default-features ) >"$log" 2>&1
+  rc=$?
+  set -e
+  case "$rc" in
+    # The tool's own convention, documented in its header: 0 clean, 1 its harness
+    # failed a sanity check, 3 could not run, 99 a leak was reported.
+    0) return 0 ;;   # clean on the mutated tree: the mutation was not caught
+    99) return 1 ;;  # a leak was reported: caught
+    3) return 3 ;;   # could not run
+    *)               # 1, or anything else: the check did not reach a verdict.
+      # 4, not the tool's own code: check_one reads 1 as "caught", and a sanity
+      # failure of the check is *not* a caught mutation -- this branch exists so the
+      # two cannot be confused when the check itself is broken.
+      echo "FAIL: tools/ctgrind.sh did not reach a clean/leak verdict (exit $rc):" >&2
+      tail -15 "$log" | sed 's/^/      | /' >&2
+      return 4 ;;
+  esac
 }
 
 # The valgrind to use, or nothing. One function so the preflight in the driver and the
@@ -230,7 +230,7 @@ rc=0
 skipped=0
 if [ "$want" = "all" ] || [ "$want" = "ctgrind" ]; then
   # Preflight, so "no valgrind" answers exit 3 *before* the baseline copy, its build and
-  # the mutation's build. The lookup cannot disagree with `run_ctgrind`'s because both
+  # the mutation's build. The lookup cannot disagree with `run_shipped_ctgrind`'s because both
   # call `find_valgrind`. It also keeps `tools/gate_selftest.sh` cheap: it hides valgrind,
   # and without this it would pay two full builds to learn what it already knows.
   if [ -z "$(find_valgrind)" ]; then
@@ -246,7 +246,7 @@ if [ "$want" = "all" ] || [ "$want" = "ctgrind" ]; then
     # The `||` list is an errexit-exempt context, so the verdict survives to be
     # classified.
     status=0
-    check_one ctgrind mutate_ctgrind run_ctgrind \
+    check_one ctgrind mutate_ctgrind run_shipped_ctgrind \
       "ct_eq -> == in both decrypt paths" || status=$?
     # `check_one` answers 1 for "not caught" and 3 for "could not run": the first is a
     # finding about the check, the second is a gap in it, and collapsing them into one

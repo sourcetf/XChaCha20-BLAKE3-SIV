@@ -30,7 +30,7 @@ const LIB: &str = include_str!("../src/lib.rs");
 /// The suppression file itself.
 const SUPP: &str = include_str!("ctgrind.supp");
 
-/// `LIB` with comments removed and string-literal contents blanked, cut at `mod tests {`.
+/// `LIB` with comments removed, string-literal contents blanked, cut at `mod tests {`.
 ///
 /// Every presence and count assertion below runs on this, not on the raw file. Both
 /// of those used to be satisfiable without the code: delete a real line and add a
@@ -38,7 +38,15 @@ const SUPP: &str = include_str!("ctgrind.supp");
 /// back to its expected value. Stripping comments and stopping at the test module
 /// removes that. The scanner is a small state machine rather than `find("//")`,
 /// because a `//` inside a string literal used to cut a line short — which hid a real
-/// call site from the count — and a `/* … */` block was scanned as code.
+/// call site from the count — and a `/* … */` block was scanned as code. String
+/// literal contents are dropped for the same reason (an audit kept
+/// `the_hardened_second_gate_is_recomputed` green by replacing the real
+/// `zeroize_array(&mut computed_tag_copy);` with a dead `let _ = "…";` carrying it),
+/// raw strings included — a `r#"…"#` may contain `"`, and without handling it the
+/// scanner re-entered code mode at the first one and scanned the text between two
+/// quotes as code — with one exception: `#[cfg(…)]` attributes are copied through
+/// verbatim, because their `"feature"` payload is itself a match target and no literal
+/// can stand in for an attribute.
 fn non_test_source() -> String {
     let cut = LIB.find("mod tests {").expect("the test module must exist");
     strip_comments(&LIB[..cut])
@@ -52,6 +60,10 @@ fn strip_comments(text: &str) -> String {
         Line,
         Block,
         Str,
+        /// Inside a raw string (`r"…"`, `r#"…"#`), whose contents are dropped.
+        RawStr(u8),
+        /// Inside a `#[cfg(…)]` attribute, whose text is copied through verbatim.
+        Cfg,
     }
     let b = text.as_bytes();
     let mut out = String::with_capacity(text.len());
@@ -67,6 +79,40 @@ fn strip_comments(text: &str) -> String {
                 } else if c == b'/' && b.get(i + 1) == Some(&b'*') {
                     mode = Mode::Block;
                     i += 2;
+                } else if let Some((prefix, hashes)) = raw_string_prefix(&b[i..]) {
+                    // A raw string (`r"…"`, `r#"…"#`, `br#"…"#`): its contents are
+                    // dropped like any other literal's, with the prefix and the closing
+                    // quotes kept. Without this, a `"` inside the raw string re-entered
+                    // code mode and the text between two quotes was scanned as code.
+                    for k in 0..=prefix {
+                        out.push(b[i + k] as char);
+                    }
+                    i += prefix + 1;
+                    mode = Mode::RawStr(hashes);
+                } else if c == b'#' && b[i..].starts_with(b"#[cfg(") {
+                    // Copy the attribute whole: `feature = "hardened"` and
+                    // `not(feature = "dual-mac")` are match targets below, and a string
+                    // literal cannot stand in for one — reaching `Mode::Code` at all
+                    // means the attribute is really written at this position. (The
+                    // payload is copied verbatim rather than blanked; everything
+                    // outside a `#[cfg]` is still `Mode::Str`.)
+                    out.push('#');
+                    mode = Mode::Cfg;
+                    i += 1;
+                } else if c == b'\'' {
+                    // A char literal is opaque, and this must come before the `"` case:
+                    // `'"'` is a char literal whose *closing* quote would otherwise open
+                    // `Mode::Str` and swallow the rest of the scan. A lifetime (`&'a`)
+                    // and a lone apostrophe have no closing quote, so the look-ahead
+                    // tests for one of the two literal shapes and otherwise treats the
+                    // `'` as an ordinary byte.
+                    let escaped = b.get(i + 1) == Some(&b'\\') && b.get(i + 3) == Some(&b'\'');
+                    if escaped || b.get(i + 2) == Some(&b'\'') {
+                        i += if escaped { 4 } else { 3 };
+                    } else {
+                        out.push('\'');
+                        i += 1;
+                    }
                 } else if c == b'"' {
                     // Keep the opening quote; the contents are dropped in `Mode::Str`
                     // and the closing quote is kept there, so a literal becomes `""`
@@ -97,31 +143,99 @@ fn strip_comments(text: &str) -> String {
                     i += 1;
                 }
             }
+            Mode::Cfg => {
+                out.push(c as char);
+                i += 1;
+                if c == b']' {
+                    // `#[cfg(…)]` has no bracket inside; the first `]` closes it.
+                    mode = Mode::Code;
+                }
+            }
             Mode::Str => {
-                // String literals are copied through unchanged. They are recognised so
-                // that a `//` inside one is not read as a comment (which cut the rest
-                // of the line out of the scan); their contents are still *code* for
-                // the assertions below (`#[cfg(feature = "hardened")]` is a match on
-                // one), so blanking them would break the checks instead of hardening
-                // them.
                 if c == b'\\' {
-                    out.push(c as char);
-                    if let Some(n) = b.get(i + 1) {
-                        out.push(*n as char);
-                    }
-                    i += 2;
+                    i += 2; // skip the escaped byte (including `\"`)
                 } else if c == b'"' {
                     out.push('"');
                     mode = Mode::Code;
                     i += 1;
                 } else {
-                    out.push(c as char);
+                    // Drop the contents so no byte inside a literal is scanned, and a
+                    // literal carrying a statement's text is no longer an occurrence
+                    // of it.
+                    i += 1;
+                }
+            }
+            Mode::RawStr(hashes) => {
+                let h = hashes as usize;
+                // The terminator is `"` followed by as many `#`s as opened the string;
+                // until then every byte (quotes included) is contents, so it is dropped.
+                // Newlines are kept so line positions stay comparable.
+                if c == b'"'
+                    && b.len() >= i + 1 + h
+                    && b[i + 1..i + 1 + h].iter().all(|&x| x == b'#')
+                {
+                    out.push('"');
+                    for _ in 0..h {
+                        out.push('#');
+                    }
+                    i += 1 + h;
+                    mode = Mode::Code;
+                } else {
+                    if c == b'\n' {
+                        out.push('\n');
+                    }
                     i += 1;
                 }
             }
         }
     }
     out
+}
+
+/// `(bytes before the opening quote, hash count)` when `b` starts a raw string literal
+/// (`r"…"`, `r#"…"#`, `br"…"`, `br#"…"#`); `None` otherwise.
+///
+/// A raw identifier (`r#name`) is not a string — the byte after its hashes is not a
+/// quote — and a plain `"…"` is handled by `Mode::Str`.
+fn raw_string_prefix(b: &[u8]) -> Option<(usize, u8)> {
+    let mut i = 0usize;
+    if b.get(i) == Some(&b'b') {
+        if b.get(i + 1) != Some(&b'r') {
+            return None;
+        }
+        i += 2;
+    } else if b.get(i) == Some(&b'r') {
+        i += 1;
+    } else {
+        return None;
+    }
+    let start = i;
+    while b.get(i) == Some(&b'#') {
+        i += 1;
+    }
+    if b.get(i) != Some(&b'"') {
+        return None;
+    }
+    // A raw string's hash count is tiny (the compiler caps it far below 256).
+    Some((i, (i - start) as u8))
+}
+
+/// Count occurrences of `keyword` in `code` whose following character is not an
+/// identifier character.
+///
+/// `code.matches("if ")` missed the same branch spelled `if(`; a keyword is a
+/// keyword whatever follows it, so the boundary is what counts rather than the
+/// spacing rustfmt happens to write. A keyword at the end of the text counts (there
+/// is no character to make it part of a longer identifier).
+fn keyword_occurrences(code: &str, keyword: &str) -> usize {
+    code.match_indices(keyword)
+        .filter(|(at, _)| {
+            !code[at + keyword.len()..]
+                .chars()
+                .next()
+                .is_some_and(|c| c.is_alphanumeric() || c == '_')
+        })
+        .count()
 }
 
 /// Every brace-matched block in the non-test source that starts at `needle`,
@@ -249,9 +363,9 @@ fn the_suppressed_function_contains_only_the_decision() {
     // which unlike `find("//")` is not fooled by a `//` inside a string literal.
     let code = strip_comments(def);
 
-    for construct in ["for ", "while ", "loop ", "match "] {
+    for construct in ["for", "while", "loop", "match"] {
         assert!(
-            !code.contains(construct),
+            keyword_occurrences(&code, construct) == 0,
             "`{construct}` inside accept_or_reject: the whole function is suppressed, \
              so a loop in it would be a secret-dependent branch that no check can \
              see. Move it out, or accept that the entry is no longer a reviewable \
@@ -265,11 +379,10 @@ fn the_suppressed_function_contains_only_the_decision() {
          branch is on a constant"
     );
 
-    // Keywords are matched with their trailing space. A spelling without one (`if(`,
-    // `while(`) would slip past this scan, which is a known limit of reading source: the
-    // mechanical evidence is ctgrind, which sees the compiled form, and `cargo fmt
-    // --check` is a CI gate whose rustfmt always writes the space.
-    let branches = code.matches("if ").count();
+    // A keyword is counted when the character after it is not an identifier
+    // character, so `if(` is the same branch as `if ` rather than an invisible
+    // spelling: matching `"if "` alone let `if(` slip past this scan.
+    let branches = keyword_occurrences(&code, "if");
     assert_eq!(
         branches, 2,
         "the decision must have exactly two branches: the first gate, and the \
@@ -377,6 +490,21 @@ fn the_hardened_second_gate_is_recomputed() {
              branch of its own -- a branch on a secret-derived comparison outside \
              `accept_or_reject` is what the suppression file forbids:\n{block}"
         );
+        // The *operands*, not just the callee and the fold-in. `second_gate_comparison(
+        // &computed_tag_copy, &computed_tag_copy)` makes gate 1 compare a value with
+        // itself -- always true in the default build, where `witness_ok` is constant
+        // true -- and every count above still holds. Only `tests/ultra.rs` caught that
+        // mutation before, and only with `ultra` compiled in; this pins it per entry
+        // point in every configuration that builds the gates.
+        assert_eq!(
+            block
+                .matches("second_gate_comparison(&computed_tag_copy, &tag_copy) & witness_ok")
+                .count(),
+            1,
+            "the second gate must compare the volatile re-read of the computed tag against \
+             the volatile re-read of the received tag (each volatile read is pinned above), \
+             not a value with itself:\n{block}"
+        );
         assert_eq!(
             block.matches("let gate_pair =").count(),
             1,
@@ -468,18 +596,57 @@ fn the_second_gate_uses_two_comparison_shapes_wherever_the_gates_are_built() {
     );
 
     // The fold must be a different *shape* from `subtle`'s loop rather than a call to it, or
-    // the two "comparisons" are one comparison wearing two hats.
+    // the two "comparisons" are one comparison wearing two hats. And it must *use both
+    // operands*: the presence checks this replaces (`u64::from_le_bytes`, `acc |= x`,
+    // `acc.ct_eq(&0u64)`) stayed green when the accumulation was made a constant
+    // (`acc |= x & 0;`), which leaves `ct_eq_independent` returning constant true and
+    // silently removes the single-fault defence these two shapes exist for. Pin the exact
+    // fold lines instead, whitespace-flattened so rustfmt's line breaks are not the subject.
     let fold = brace_blocks("fn ct_eq_independent(");
     assert_eq!(fold.len(), 1, "one `ct_eq_independent` expected");
+    let fold_code = strip_comments(&fold[0]);
+    let flat = fold_code.split_whitespace().collect::<Vec<_>>().join(" ");
     assert!(
-        fold[0].contains("u64::from_le_bytes") && fold[0].contains("acc |= x"),
-        "the fold must accumulate 8-byte words into one comparison:\n{}",
+        flat.contains(
+            "let x = u64::from_le_bytes(a[i..i + 8].try_into().unwrap()) \
+             ^ u64::from_le_bytes(b[i..i + 8].try_into().unwrap());"
+        ),
+        "the fold must XOR the *same 8-byte word position* of both tags: `a` and `b` \
+         appear in that order, one `from_le_bytes` each. A copy-paste of `a` into the \
+         second operand, or a swapped position, makes the comparison depend on one \
+         tag twice:\n{}",
         fold[0]
     );
     assert!(
-        fold[0].contains("acc.ct_eq(&0u64)"),
-        "the fold must end in a constant-time comparison of the accumulator: a body that kept \
-         the loop but returned `subtle::Choice::from(1)` passed this test before:\n{}",
+        flat.contains("acc |= x;"),
+        "the word must be accumulated into the running value: `acc |= x;` is the \
+         accumulation; a masked `acc |= x & 0;` is a constant and passed the substring \
+         checks this test used to make:\n{}",
+        fold[0]
+    );
+    assert!(
+        flat.contains("acc |= (a[i] ^ b[i]) as u64;"),
+        "the tail byte must XOR the same position of both tags into the accumulator, \
+         not one of them twice:\n{}",
+        fold[0]
+    );
+    // The accumulator comparison must be the function's *return expression*, not a
+    // discarded computation followed by a constant: compare the last non-empty line of
+    // the body (comments and the closing brace removed), as the `plain & also` pin above.
+    let last = fold_code
+        .trim_end()
+        .strip_suffix('}')
+        .expect("ct_eq_independent must end in a closing brace")
+        .lines()
+        .rev()
+        .find(|l| !l.trim().is_empty())
+        .map(str::trim)
+        .unwrap_or("");
+    assert_eq!(
+        last, "acc.ct_eq(&0u64)",
+        "the fold must return the constant-time comparison of the accumulator: a body \
+         that kept the loop but returned `subtle::Choice::from(1)` passed this test \
+         before:\n{}",
         fold[0]
     );
 }
@@ -682,6 +849,39 @@ fn the_decision_outcome_is_fail_closed() {
         "`decrypt_in_place_detached` must compare the witness plaintext against the caller's \
          buffer"
     );
+    // And the agreement must be what the block *returns*: every count above is an
+    // existence witness for the comparison, none of them requires the returned `Choice`
+    // to be that comparison's value. An audit kept every count, left the comparison dead
+    // in the block, and returned `subtle::Choice::from(1)` -- the second implementation
+    // then contributes nothing while still being called. Pin the last non-empty line of
+    // each block, the technique this file already uses for `plain & also`.
+    let witness_blocks = brace_blocks("let witness_ok: subtle::Choice = {");
+    assert_eq!(
+        witness_blocks.len(),
+        2,
+        "one `ultra` witness-agreement block per decrypt entry point"
+    );
+    for block in &witness_blocks {
+        let block_code = strip_comments(block);
+        // `let … = { … };`: strip the trailing `;` (the closing brace comes before it),
+        // then the closing brace, then take the last non-empty line -- the same shape
+        // as the `plain & also` pin above, which ends in a bare `}`.
+        let trimmed = block_code.trim_end();
+        let trimmed = trimmed.strip_suffix(';').unwrap_or(trimmed).trim_end();
+        let last = trimmed
+            .strip_suffix('}')
+            .expect("each witness_ok block must end in a closing brace")
+            .lines()
+            .rev()
+            .find(|l| !l.trim().is_empty())
+            .map(str::trim)
+            .unwrap_or("");
+        assert_eq!(
+            last, "agree",
+            "the witness agreement must be the value its block returns rather than a \
+             comparison computed and discarded with a constant returned in its place:\n{block}"
+        );
+    }
     assert_eq!(
         non_test.matches("witness::decrypt(").count(),
         2,
@@ -696,9 +896,11 @@ fn the_decision_outcome_is_fail_closed() {
     // `LIB.contains("mod witness;")` held in every build while proving nothing about the
     // `ultra` build (and would also hold if the module were compiled into the opt-out
     // baseline, changing the documented feature set). Pin the gated declaration, which is
-    // the text the `ultra` build compiles.
+    // the text the `ultra` build compiles. Read through `non_test`, not `LIB`: the raw
+    // file let an ungated `mod witness;` sit beside a block comment carrying the old
+    // attribute, so the gate could be deleted while this stayed green.
     assert!(
-        LIB.contains("#[cfg(feature = \"ultra\")]\nmod witness;"),
+        non_test.contains("#[cfg(feature = \"ultra\")]\nmod witness;"),
         "the independent implementation must be declared as the `ultra`-gated module \
          `witness`: a bare `mod witness;` would compile it into every build, and a missing \
          gate would silently move the feature boundary"

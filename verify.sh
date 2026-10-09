@@ -32,6 +32,11 @@
 #
 #   ./verify.sh --deep       # all of them
 #   ./verify.sh --all        # the same thing; the name says what it means
+#   ./verify.sh --deep-no-cross-exec
+#                            `--deep`'s set and its strict bookkeeping, minus
+#                            cross-architecture execution; the flag
+#                            `check.sh --fast --all` delegates with, because a
+#                            `--fast` host runs no cross-target work
 #
 # `--deep`/`--all` are the invocations that claim to leave nothing out, so they
 # refuse to finish while any stage was skipped. Until this was fixed, `--all` set
@@ -93,6 +98,16 @@ for arg in "$@"; do
       # defect as a skip reported as a pass -- a word claiming more than the code does.
       RUN_KANI=1; RUN_CROSS_EXEC=1; RUN_MIRI=1; RUN_CTGRIND=1
       RUN_DENY=1; RUN_FUZZ=1; RUN_TSAN=1; RUN_TOOLS=1; STRICT=1 ;;
+    --deep-no-cross-exec)
+      # `--deep`'s set minus the one stage a `--fast` host deliberately cannot run,
+      # with STRICT kept. `check.sh --fast --all` delegates here; without the strict
+      # bookkeeping, `--all`'s promise ("every verification stage") covered only the
+      # named switches, and stages 1-4 could skip while the run still called itself
+      # complete. Stage 4's per-target type-checks are strict under this flag too: a
+      # cross target that is not installed is a skipped stage, and this invocation
+      # claims every stage it can run.
+      RUN_KANI=1; RUN_MIRI=1; RUN_CTGRIND=1
+      RUN_DENY=1; RUN_FUZZ=1; RUN_TSAN=1; RUN_TOOLS=1; STRICT=1 ;;
     *) echo "unknown option: $arg" >&2; exit 1 ;;
   esac
 done
@@ -125,6 +140,27 @@ skip() {
   fi
   echo "SKIPPED ($stage): $*"
 }
+
+# Findings from an advisory tool that did not fail the run (`tools/stack_residue.sh`
+# measures residue in frames the *compiler* chose, so a narrow run reports instead of
+# blocking). The closing summary has to mention them; a run that prints "FAIL: ...
+# left key material on the stack" and then "all requested checks passed" reports a
+# pass its own log contradicts. Under `--deep`/`--all` the finding is a failure
+# instead, and this list is what the narrow-run summary reads.
+ADVISORIES=()
+
+# Log files the output-parsing wrappers write and read back. One EXIT trap for both,
+# so every exit path -- including the early `exit 1`s those wrappers take -- removes
+# them. `miri_log` is filled in only by the Miri stage; `TEST_LOG` only by the test
+# stages' wrapper.
+TEST_LOG=""
+miri_log=""
+cleanup_logs() {
+  if [ -n "$TEST_LOG" ]; then rm -f "$TEST_LOG"; fi
+  if [ -n "$miri_log" ]; then rm -f "$miri_log"; fi
+  return 0
+}
+trap cleanup_logs EXIT
 
 # Locate a qemu-user emulator for a target.  Honours `$QEMU_<ARCH>` (e.g.
 # `$QEMU_AARCH64`, `$QEMU_I386`) first, then the usual user-local install, then
@@ -168,10 +204,51 @@ if [ "$KANI_ONLY" -eq 0 ]; then
   # gate_selftest, and neither terminated). The marker makes the nesting explicit; the
   # inner invocation has nothing to add because the outer one is the assertion.
   if [ "${XSIV_IN_GATE_SELFTEST:-}" = "1" ]; then
-    echo "(gate contract control skipped: this verify.sh is being run by it)"
+    # Recorded as a skipped stage, not just printed. This variable is the recursion
+    # marker `tools/gate_selftest.sh` sets while it runs this script; exported by hand
+    # (or inherited from an outer context that had it), it used to remove this run's
+    # own gate-contract control while the run still reported "all requested checks
+    # passed" -- a fully provisioned `--deep` ended green with the control gone. The
+    # skip has no caller-named stage key (nothing on the command line asks for it), so
+    # a narrow run lists it and a `--deep`/`--all` run fails on it.
+    skip "gate contract self-test" "XSIV_IN_GATE_SELFTEST=1 is set, so this verify.sh is being run by tools/gate_selftest.sh (which asserts the contract itself) or by a caller that exported the marker"
   else
     tools/gate_selftest.sh
   fi
+
+  # The five `cargo test` invocations below used to be judged by exit status alone.
+  # libtest exits 0 when a name filter matches nothing and when every test in a
+  # target was compiled away (`#![cfg]`), printing "test result: ok. 0 passed" --
+  # so emptying a test file, or deleting a target, left these stages green while
+  # checking nothing. The Miri stage (6b) already carries this guard; this wrapper
+  # gives the main suite the same one. The count is summed over the whole
+  # invocation, not required per target: one `cargo test` run covers several
+  # targets and some are legitimately empty under some feature sets
+  # (`tests/locked.rs` without `locked`, `tests/ultra.rs` without `ultra`,
+  # `tests/timing.rs` in a debug build), but a total of zero means the invocation
+  # ran nothing at all.
+  #
+  # A literal `ok.` is not matched: CI sets CARGO_TERM_COLOR=always and libtest
+  # then wraps the word in colour codes (the `test result:` prefix and the count
+  # stay unpainted), the same reason the Miri wrapper parses the count instead.
+  # `tee` rather than capturing in a variable, so the test output keeps streaming.
+  TEST_LOG="$(mktemp)"
+  cargo_test() {  # <description> <cargo args...>
+    local what="$1"; shift
+    if ! cargo "$@" 2>&1 | tee "$TEST_LOG"; then
+      echo "FAIL: cargo test for $what exited non-zero" >&2
+      exit 1
+    fi
+    local passed
+    passed="$(sed -n '/test result:/{s/.* \([0-9][0-9]*\) passed.*/\1/p}' "$TEST_LOG" \
+      | awk '{ total += $1 } END { print total + 0 }')"
+    if [ "${passed:-0}" -lt 1 ]; then
+      echo "FAIL: the cargo test run for $what reported no passed test, so every" >&2
+      echo "      target was empty, filtered out or compiled away and this stage" >&2
+      echo "      checked nothing (libtest exits 0 on '0 passed')." >&2
+      exit 1
+    fi
+  }
 
   step "3. test suite"
   # The timing screen is its own target (step 3c) and runs exactly once, there.
@@ -180,25 +257,25 @@ if [ "$KANI_ONLY" -eq 0 ]; then
   # four times, three of them in parallel with the rest of the suite (an interference
   # source the screen's own header discusses). `--skip timing_` keeps it in 3c; no
   # other test name contains `timing_`.
-  cargo test --release -- --skip timing_
+  cargo_test "the default-feature suite" test --release -- --skip timing_
   # `rng` gates the `random` module and its tests.
-  cargo test --release --features rng -- --skip timing_
+  cargo_test "the rng suite" test --release --features rng -- --skip timing_
   # `locked` gates the mlock'd-key type and its in-crate integrity test. The audit
   # found no host-side entry for it (the cross-target job only runs `cargo check`
   # and qemu), so a machine where mlock is refused would never have said so here.
   # The test itself reports a skip to stderr when the platform refuses to lock.
-  cargo test --release --features locked -- --skip timing_
+  cargo_test "the locked suite" test --release --features locked -- --skip timing_
 
   # The security tests are in `tests/security.rs` and run with the rest above,
   # but they are called out because one of them is a fuzz loop -- if it starts
   # failing, this line says which area to look at.
   step "3b. security tests (property, fuzz)"
-  cargo test --release --test security
+  cargo_test "the security tests" test --release --test security
 
   # The timing screen is its own target, gated `#![cfg(not(debug_assertions))]`,
   # so a release build is what runs it.
   step "3c. timing screen (release builds only)"
-  cargo test --release --test timing
+  cargo_test "the timing screen" test --release --test timing
 
   # `--no-default-features` is how a `no_std` user consumes this crate.
   step "3d. no-default-features build"
@@ -430,8 +507,7 @@ if [ "$RUN_MIRI" -eq 1 ]; then
     # because CI sets `CARGO_TERM_COLOR=always` and libtest then wraps the `ok` in
     # colour codes ("test result: <green>ok<reset>. 5 passed"); the prefix and the
     # count are unpainted either way.
-    miri_log="$(mktemp)"
-    trap 'rm -f "$miri_log"' EXIT
+    miri_log="$(mktemp)"   # removed by the global EXIT trap at the top
     miri_run() {  # <expected tests> <description> <command...>
       local want="$1" what="$2"; shift 2
       if ! "$@" 2>&1 | tee "$miri_log"; then
@@ -591,8 +667,16 @@ if [ "$RUN_FUZZ" -eq 1 ]; then
   # the second run's half 0; either turns these bounded runs unbounded. Validate.
   case "$FUZZ_SECONDS" in
     ''|*[!0-9]*) echo "FAILED: FUZZ_SECONDS must be a positive integer, got '$FUZZ_SECONDS'" >&2; exit 1 ;;
-    0) echo "FAILED: FUZZ_SECONDS=0 means no time limit to libFuzzer; give a positive number of seconds" >&2; exit 1 ;;
   esac
+  # `10#`: without it, a leading zero is read as an octal literal. `08` passed the
+  # digit screen above and then died in `$((FUZZ_SECONDS / 2))` under `set -e` with
+  # "value too great for base", mid-stage, under a message that says the value is
+  # fine. Normalised rather than rejected, because `08` is 8 seconds by intent.
+  FUZZ_SECONDS=$((10#$FUZZ_SECONDS))
+  if [ "$FUZZ_SECONDS" -eq 0 ]; then
+    echo "FAILED: FUZZ_SECONDS=0 means no time limit to libFuzzer; give a positive number of seconds" >&2
+    exit 1
+  fi
   if cargo fuzz --version >/dev/null 2>&1 && cargo +nightly --version >/dev/null 2>&1; then
     # One absolute target directory, passed explicitly to every cargo-fuzz command
     # below. cargo-fuzz honours CARGO_TARGET_DIR when no --target-dir is given, and
@@ -705,6 +789,22 @@ if [ "$RUN_TOOLS" -eq 1 ]; then
   XSIV_FEATURES=ultra run_tool "cache profile (ultra)"           tools/cache_profile.sh 24
   XSIV_FEATURES=ultra run_tool "cache profile self-test (ultra)" tools/cache_profile.sh --selftest
 
+  # The counts differential above cannot see a secret-dependent access into a
+  # cache-resident table: two runs make the same number of accesses by construction
+  # ("the counts called it identical, correctly and uselessly", as cache_profile.sh's
+  # own header puts it). `--trace` compares the addresses instead and can see it.
+  # CI's Deep job runs the trace mode with its own planted-leak control in both
+  # configurations, and `--deep`/`--all` claims to run what CI runs, so the strict
+  # set carries all three trace invocations. The `--selftest --trace` pair is the
+  # positive control for *this* mode: without it a trace comparison that silently
+  # stopped comparing (the mode's own history includes exactly that) would still PASS.
+  # A narrow `--tools` stays on the counts differential rather than doubling its cost.
+  if [ "$STRICT" -eq 1 ]; then
+    run_tool "cache profile (trace)"           tools/cache_profile.sh --trace 12
+    run_tool "cache profile self-test (trace)" tools/cache_profile.sh --selftest --trace
+    XSIV_FEATURES=ultra run_tool "cache profile (trace, ultra)" tools/cache_profile.sh --trace 12
+  fi
+
   # The mutation campaign over the decision, and the gate that says the committed
   # `mutants.out/` still describes *this* source (tests/README.md calls it evidence that
   # must match HEAD; until `tools/mutation_evidence.py` existed, nothing checked).
@@ -767,29 +867,51 @@ if [ "$RUN_TOOLS" -eq 1 ]; then
   run_tool "Kani cfg check"     tools/check_kani_cfg.sh
   run_tool "broad differential" tools/broad_differential.py "${BROAD_VECTORS:-4000}"
 
-  # Advisory, and said out loud rather than silently: what this measures is residue in
-  # frames the *compiler* chose, so a change in layout reports instead of blocking --
-  # CI's `stack-residue` job is `continue-on-error` for the same reason.
-  if [ -f tools/stack_residue.sh ]; then
-    local_rc=0
+  # What this measures is residue in frames the *compiler* chose, so a change in
+  # layout reports instead of blocking -- CI's `stack-residue` job is `continue-on-error`
+  # for the same reason, and a narrow `--tools` run keeps an ADVISORY line and exits 0.
+  # CI also runs the `--ultra` configuration (`scrub_stack` is what the run shows
+  # working), so the strict set does too. Under `--deep`/`--all` (and
+  # `--deep-no-cross-exec`) a finding *fails*: those invocations claim to leave nothing
+  # out, and a summary line reading "all requested checks passed" over a tool that just
+  # printed "FAIL: ... left key material on the stack" is the contradiction this script
+  # exists to remove. (The finding is recorded either way, so a narrow run's summary
+  # repeats it rather than reporting an unqualified pass.)
+  stack_residue_run() {  # <label> [tool args...]
+    local label="$1"; shift
+    if [ ! -f tools/stack_residue.sh ]; then
+      skip "stack residue ($label)" "tools/stack_residue.sh is missing"
+      return 0
+    fi
+    local rc=0
     set +e
-    bash tools/stack_residue.sh
-    local_rc=$?
+    bash tools/stack_residue.sh "$@"
+    rc=$?
     set -e
-    if [ "$local_rc" -eq 3 ]; then
+    if [ "$rc" -eq 3 ]; then
       # "Could not run" is a skipped stage, and `--deep`/`--all` refuse to finish while one
       # is recorded. Treating 3 as 0 was the same silence this script removes elsewhere.
       # The tool emits 3 itself when the measurement cannot run (cargo failing to build or
       # start); before it did, a build failure arrived as exit 101 and was read as a
       # measurement change by the branch below.
-      skip "stack residue" "tools/stack_residue.sh could not run (exit 3; see above)"
-    elif [ "$local_rc" -ne 0 ] && [ "$local_rc" -ne 3 ]; then
-      echo "ADVISORY: tools/stack_residue.sh reported a change (exit $local_rc) -- see" >&2
+      skip "stack residue ($label)" "tools/stack_residue.sh could not run (exit 3; see above)"
+    elif [ "$rc" -ne 0 ]; then
+      ADVISORIES+=("stack residue ($label): tools/stack_residue.sh reported a finding (exit $rc)")
+      if [ "$STRICT" -eq 1 ]; then
+        echo "FAILED: tools/stack_residue.sh ($label) reported a finding (exit $rc), and" >&2
+        echo "        this invocation claims to leave nothing out, so it fails here rather" >&2
+        echo "        than under a green summary line." >&2
+        exit "$rc"
+      fi
+      echo "ADVISORY: tools/stack_residue.sh ($label) reported a change (exit $rc) -- see" >&2
       echo "          above. This measures compiler-chosen stack layout, so it does not" >&2
-      echo "          fail the run (CI's stack-residue job is continue-on-error)." >&2
+      echo "          fail this run (CI's stack-residue job is continue-on-error); the" >&2
+      echo "          closing summary repeats this." >&2
     fi
-  else
-    skip "stack residue" "tools/stack_residue.sh is missing"
+  }
+  stack_residue_run default
+  if [ "$STRICT" -eq 1 ]; then
+    stack_residue_run ultra --ultra
   fi
 fi
 
@@ -851,8 +973,18 @@ if [ "$RUN_KANI" -eq 0 ] || [ "$RUN_CROSS_EXEC" -eq 0 ] || [ "$RUN_MIRI" -eq 0 ]
   echo " ThreadSanitizer + the tool-level gates; --deep and --all are the same set.)"
 fi
 
+# The closing line must not report an unqualified pass while an ADVISORY was printed
+# above: a narrow run's stack-residue finding is not a failure (see the tools stage),
+# but "all requested checks passed" over a tool that printed "FAIL: ... left key
+# material on the stack" is the contradiction this script exists to remove. Under
+# STRICT the finding already failed the run inside the tools stage.
+ADVISORY_NOTE=""
+if [ "${#ADVISORIES[@]}" -gt 0 ]; then
+  ADVISORY_NOTE=", with ${#ADVISORIES[@]} advisory finding(s) -- see above"
+fi
+
 if [ "${#SKIPPED_STAGES[@]}" -eq 0 ]; then
-  step "all requested checks passed"
+  step "all requested checks passed${ADVISORY_NOTE}"
 elif [ "$STRICT" -eq 1 ]; then
   step "FAILED: ${#SKIPPED_STAGES[@]} stage(s) skipped in a run that claims to be complete"
   for stage in "${SKIPPED_STAGES[@]}"; do echo "  skipped: $stage"; done
@@ -881,6 +1013,12 @@ else
     echo "missing; install it, or drop the flag."
     exit 1
   fi
-  step "all requested checks passed, apart from ${#SKIPPED_STAGES[@]} skipped stage(s)"
+  step "all requested checks passed, apart from ${#SKIPPED_STAGES[@]} skipped stage(s)${ADVISORY_NOTE}"
   for stage in "${SKIPPED_STAGES[@]}"; do echo "  skipped: $stage"; done
 fi
+
+# Repeat the advisory findings under whichever closing line was reached, so the
+# summary is self-contained rather than pointing at the middle of the log.
+for advisory in ${ADVISORIES[@]+"${ADVISORIES[@]}"}; do
+  echo "  advisory: $advisory"
+done

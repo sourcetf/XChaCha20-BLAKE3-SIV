@@ -17,17 +17,33 @@
 //! deliberately racy negative control below is what proves the sanitizer is
 //! actually watching.)
 //!
-//! The run that makes this concrete is ThreadSanitizer, which is why the test
-//! keeps every thread on the same inputs:
+//! The run that makes this concrete is ThreadSanitizer, which this test is shaped
+//! for — identical inputs, one cold cache:
 //!
 //! ```text
 //! RUSTFLAGS='-Zsanitizer=thread' cargo +nightly test --test threads \
 //!     --target x86_64-unknown-linux-gnu
 //! ```
 //!
-//! A data race in the cache would not corrupt the derived material (the answer
-//! CPUID returns is the same whichever thread asks), so the assertions here are
-//! about the *outputs* staying identical across threads.
+//! **What a plain run does and does not establish.** Every thread gets identical
+//! inputs, so the equality assertions in `concurrent_use_agrees_across_threads`
+//! cannot fail for a *race*: identical inputs are specified to produce identical
+//! outputs whether or not the cache update races, and a data race in the cache
+//! would not corrupt the derived material anyway (the answer CPUID returns is the
+//! same whichever thread asks). What the plain run does establish is that the
+//! cold-cache window under 32 threads does not crash, hang, deadlock or corrupt
+//! any output, on every path through the crate. A race introduced in *new* shared
+//! state would be invisible here; the only race *detector* is ThreadSanitizer.
+//!
+//! That detector is not in `ci.yml` and is not a release gate. `tools/tsan.sh`
+//! needs nightly and `-Zbuild-std` — std ships uninstrumented, and mixing it with
+//! an instrumented crate is an ABI mismatch rustc rejects — so it rebuilds std,
+//! which is minutes of work per run; the check lives in the separate Deep checks
+//! workflow (`.github/workflows/deep.yml`, job `tsan`), which runs it on every
+//! push to `main`, every PR and weekly. `deliberate_race_is_detected` below is
+//! that run's negative control: it must be *reported* by the sanitizer, or
+//! `tools/tsan.sh` refuses to draw any conclusion from the clean run — which is
+//! the only thing that proves the sanitizer is actually looking.
 
 use std::thread;
 

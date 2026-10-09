@@ -334,13 +334,25 @@ value the reduction is not given. (Concretely: the reduction's oracle is `B3(k*,
 uniform and unknown; to answer a query it must build `D(K) ‖ … ‖ K ‖ …`, which needs `K`, and
 `D` is not invertible without `K`.)
 
-That this was a genuine gap rather than a missing paragraph is shown by a separation. Take any
-keyed hash `B3'` that is L3.3-secure but *notices* its input: `B3'(k, x) = 0` if `k` occurs in
-`x`, and `B3(k, x)` otherwise. For a fixed query string that function is still a PRF (the bad
-event has probability ≈ `2^-256` per query, so it costs at most `q·2^-256`), yet the composed
-map `K ↦ B3'(D(K), P ‖ K ‖ S)` is the constant zero function — distinguishable from random by
-a single query. So no black-box reduction could exist: L3.6 was strictly stronger than L3.3, and
-a construction that got it wrong is not caught by the PRF assumption on the hash alone.
+What a separation can show here is narrower than an earlier revision of this paragraph claimed.
+Take any keyed hash `B3'` that is L3.3-secure but *notices* its input: `B3'(k, x) = 0` if `k`
+occurs in `x`, and `B3(k, x)` otherwise. For a fixed query string that function is still a PRF —
+the bad event is that the key occurs anywhere in `x`, at most `|x|` starting positions, so it
+costs at most `|x|·2^-256` per query (`≈ 2^-218` at the `2^38`-byte message limit) — and yet the
+composed map `K ↦ B3'(K, P ‖ K ‖ S)`, where the *same* secret keys the hash **and** appears in
+its message, is the constant zero function: distinguishable from random by a single query. That
+separates the **key-dependent-input shape** from L3.3, and no black-box reduction reaches that
+shape.
+
+It does **not** separate the `v0.2` tag's composed map, which is the shape L3.6 concerned.
+`v0.2` keyed the hash with `mac_key = D(K, N)` while the message held the **master** `K`, so
+`D(K, N)` occurring in the message is itself a negligible event, and `K ↦ B3'(D(K), P ‖ K ‖ S)`
+is *not* the constant zero function — with this `B3'` it is the actual `v0.2` map up to that
+negligible event, so the example exhibits no distinguisher for it. The gap L3.6 names therefore
+rests on the reduction-impossibility argument two paragraphs above — the reduction would have to
+hold `D(K, N)` as the challenge key while placing `K`, whose image it is, in the query — rather
+than on this separation. That argument is heuristic (a reduction cannot be *written*, not a proof
+that no distinguisher exists), and `v0.3` removed the construction instead of resolving it.
 
 **How the two-level tag removes it.** The `v0.3` tag is
 
@@ -392,10 +404,11 @@ XOF distinguisher past the first output block (the output counter is part of the
 compression's input, so this reduces to L3.3/L3.4). **L3.6 (removed)**: its falsifier was any
 distinguisher for the composed map `K ↦ B3(D(K), … ‖ K ‖ …)` that was *not* a distinguisher for
 `x ↦ B3(k, x)` at a fixed input — a concrete exploit of the key also appearing in the message.
-The separation above showed such distinguishers exist in general (a hash that greps its input for
-the key), which is why the node was a real assumption and why `v0.3` removed it rather than
-keeping it; no such structure is known in BLAKE3. A4 (the encoding) is not a conjecture: it is
-proven in §4.4.
+The separation above showed such distinguishers exist for the key-dependent-input shape (the same
+secret keying the hash and occurring in its message); the `v0.2` map itself (keyed by `D(K, N)`,
+containing `K`) rests on the reduction argument above, not on that example. That is why the node
+was treated as a real assumption and why `v0.3` removed it rather than keeping it; no such
+structure is known in BLAKE3. A4 (the encoding) is not a conjecture: it is proven in §4.4.
 
 **The honest bottom line.** Every claim in this document rests on **L3.1, L3.2 and L3.3** and
 nothing else. There is no proof of any of the three, and no test in this repository — or any
@@ -416,7 +429,7 @@ ChaCha20-is-a-PRF, keyed-BLAKE3-is-a-PRF, HChaCha20-is-a-PRF, the two-level casc
 "the 520-bit XOF output gives more than `2^256` collision resistance", the SIV composition theorem,
 and the `K`-in-the-head key-dependent-input step — maps onto this document as follows. **The
 letters below are the auditor's, not §2's**; this section's own A1–A5 are a different list, and the
-numbers in `Adv^{A1}`–`Adv^{A3}` in the theorems refer to *these* document's, so the mapping is
+numbers in `Adv^{A1}`–`Adv^{A3}` in the theorems refer to *this* document's, so the mapping is
 worth having in one place:
 
 | Auditor's item | Where it lives here | Status |
@@ -469,7 +482,7 @@ separation needs to be when the two statements are about different objects:
 | L3.2 | L3.1 | the same pair, read the other way: dropping the feed-forward is not a strengthening |
 | L3.3 (keyed compression is a PRF) | L3.4 (the tree preserves it) | keep BLAKE3's compression, change only the *root's input assembly* so that half of the left chaining value is ignored: the compression is still a PRF, but two messages differing in the ignored half have identical roots *deterministically*, and no PRF does that. So L3.3 **alone** does not give L3.4 — but L3.3 + Lemma T does (§2.1): the separated object is precisely one where Lemma T fails, and BLAKE3's own assembly is one where it holds |
 | L3.3 | L3.5 (the XOF keeps it past block 1) | keep the compression and the tree, define output block `i ≥ 1` as a constant: the first block is still a PRF and the tree is untouched, while the multi-block output carries no input-dependence at all. Again L3.3 alone does not give it, but with the output counter in the compression input (BLAKE3's own assembly) the blocks are distinct points and §2.1 reduces it |
-| L3.3 | L3.6 (the composed tag map is a PRF) — **the row that motivated `v0.3`** | the grep-the-key hash of §2.1: `B3'(k, x) = 0` if `k` occurs in `x`, else `B3(k, x)`. L3.3 holds up to `q·2^-256`; the composed map of the *single-level* tag is the constant zero function. This separation is why the two-level tag exists: it removes the composed map rather than assuming it is a PRF |
+| L3.3 | L3.6 (the composed tag map is a PRF) — **the row that motivated `v0.3`** | the grep-the-key hash of §2.1: `B3'(k, x) = 0` if `k` occurs in `x`, else `B3(k, x)`. L3.3 holds up to `|x|·2^-256` per query, and for the **key-dependent-input shape** (`K ↦ B3'(K, P ‖ K ‖ S)`) the composed map is the constant zero function. It does *not* reach the `v0.2` map (`B3'(D(K,N), P ‖ K ‖ S)`), where the value keying the hash does not occur in the message; that gap rests on §2.1's reduction-impossibility argument. This is why the two-level tag exists: it removes the key-dependent-input shape rather than assuming the composed map is a PRF |
 | any of L3.1–L3.3 | any other | different objects: they are statements about three different primitives, so nothing follows in either direction, and the document cites each only for the layer that uses it |
 
 The converse directions are not claimed and not needed: the document never derives a lower layer
@@ -550,7 +563,10 @@ they are stated separately:
   and `enc_seed`, and with them the tag, the derived key pair and the recovered message. So this
   is a *target* problem, not a birthday — and the object to hit is the **subkey, not the 520-bit
   tag**: the attempt succeeds with probability `≈ 2^-256` per candidate key, and enumerating the
-  whole `2^256` key space expects `≈ 1` second key (success `≈ 0.63`), i.e. key-search level. (The
+  whole `2^256` key space expects `≈ 1` second key — *existence* `P(≥ 1) = 1 − e^-1 ≈ 0.63` — i.e.
+  key-search level; a game that requires the adversary to output one key different from `K₁`
+  without being given `K₁` wins with `E[N/(1+N)] = e^-1 ≈ 0.368` (an earlier revision quoted `0.63`
+  for both). (The
   *pure tag-collision* route — a candidate whose `subkey` misses and whose computation still
   lands on the published `T₁` — is `2^-520` per candidate and is dominated by it. An earlier
   revision of this bullet quoted that one alone, as
@@ -593,7 +609,9 @@ they are stated separately:
   key-commitment break, `v0.3` reopens it at `2^128`, and the salamander half is not reached at
   `2^128` at all. `2^128` is infeasible today, and the attacker-chosen games are ones this document
   does not price, so the *target* commitment — the property this crate actually claims, `≈ 2^-256`
-  per candidate key, key-search level — is untouched; but the trade for removing L3.6 is real and is recorded here
+  per candidate key, key-search level — is a different game and is untouched by that break; its
+  *object* did move with the same revision (from the 520-bit tag to the `subkey`, as the correction
+  at the head of this bullet records), so the trade for removing L3.6 is real and is recorded here
   rather than described as a free structural win. A revision that wanted both would have to break
   the 256-bit `subkey` bottleneck, e.g. by deriving the tag keys from `K` directly rather than
   through `HChaCha20(K, N₁)`.
@@ -643,7 +661,7 @@ answer) with the same length profile. Then
 
 ```
 Adv^{priv} ≤ 2·Adv^{A1} + Adv^{A2} + 3·Adv^{A3} + q²/2^257
-Adv^{auth} ≤ 2·Adv^{A1} + Adv^{A2} + 3·Adv^{A3} + q·2^-520 + q²/2^257
+Adv^{auth} ≤ 2·Adv^{A1} + Adv^{A2} + 3·Adv^{A3} + q·2^-256 + q·2^-520 + q²/2^257
 ```
 
 where `q` bounds the adversary's oracle queries and each `Adv` is the *multi-query* PRF
@@ -655,6 +673,15 @@ keyed-BLAKE3 calls (the inner and outer hashes of Thm 2) and the per-message key
 charged as `3·Adv^{A3}`. There is no L3.6 term: revision `v0.3`'s
 two-level tag puts no master key in any hash message, so the tag is an ordinary A3 cascade.
 MRAE security is the pair.
+
+The two forgery terms are different routes, and the larger is the *key guess*: a decryption
+query can be computed **offline under a guessed key** `K′`, and it is accepted whenever `K′`'s
+256-bit `subkey` is the real one — `≈ 2^-256` per query, the same event as Thm 2's commitment
+bullet (§3, §4.5) — while the alternative is a **fresh-tag guess** at `2^-520` (a PRF output hit
+directly, at a point determined by the guessed `T` itself). An earlier revision printed only
+`q·2^-520` and called it the per-query bound; the key-guess route dominates it. The **strength**
+headline is unaffected: it is the minimum of the two, `min(2^256 key search, 2^520 tag guess) =
+2^256`, and the key-guess route is a key search.
 
 An earlier revision of this document wrote `Adv^{A3} + Adv^{L3.6}` in place of `3·Adv^{A3}` and
 `q²/2^521` in place of `q²/2^257`. The `q²/2^521` treated the 65-byte tag as 65 independent
@@ -688,12 +715,21 @@ now removed rather than priced. Both corrections lower nothing that was not alre
    forgery consists of `(N, A, C, T)` with `T ≠ T(K, N, A, M')` for the recovered `M'` —
    i.e. the adversary must output the value of a PRF at a point it does not get to choose
    directly, since `M'` depends on `T` itself through the KDF. Each decryption query
-   succeeds with probability at most `2^-520` (fresh `T`, a PRF output) or by hitting a tag
-   the oracle already produced — a *target*, so `≤ q · 2^-520` in total, and the
-   chaining-value shortcut of §4.5 does not apply: it makes pairs of *searchable* tags
-   collide cheaply, and here the value to hit is fixed by someone else. The self-referential
-   dependence `M'(T)` does not help: inverting it is as hard as inverting the KDF, and the
-   key is secret. ∎
+   succeeds by one of two routes, and the larger is the *key guess*: a query computed
+   **offline under a guessed key** `K′` — encrypt a chosen `(N, A, M)` under `K′`, submit the
+   tuple — is accepted whenever `K′`'s 256-bit `subkey` is the real one, probability
+   `≈ 2^-256` (Thm 2's commitment bullet, §4.5; a tag collision under a wrong key is its
+   `2^-520` tail). The pure alternative — no key guess at all — is a **fresh-tag guess**,
+   `2^-520`, a PRF output hit directly. So the
+   per-query acceptance is at most `2^-256 + 2^-520`, i.e. `q · 2^-256 + q · 2^-520` over `q`
+   queries, and the key-guess term dominates. (An earlier revision quoted the `2^-520` route
+   alone and called it the per-query bound.) Hitting a tag the oracle already produced is a
+   *target* as well, and the chaining-value shortcut of §4.5 does not apply: it makes pairs of
+   *searchable* tags collide cheaply, and here the value to hit is fixed by someone else. The
+   self-referential dependence `M'(T)` does not help: inverting it is as hard as inverting the
+   KDF, and the key is secret; nor does it impede the key guess, which inverts nothing. The
+   **strength** is unchanged — `min(2^256 key search, 2^520 tag guess) = 2^256`, and the
+   key guess *is* a key search. ∎
 
 *Where each assumption enters:* A1 in the keystream (hop 4) and in the key material (hop 1);
 A2 in the subkey (hop 1); A3 in the tag (hop 2, twice — the two-level cascade) and in the
@@ -708,7 +744,8 @@ If the adversary repeats a nonce, hops 1–3 are unchanged: the per-query tags s
 independent keystreams (Thm 3), so two *different* `(A, M)` pairs under one nonce are still
 encrypted with independent keys. What the adversary learns is:
 
-* whether two `(A, M)` pairs are equal (identical tags ⇒ identical ciphertexts), and
+* whether two `(A, M)` pairs are equal (equal pairs give identical tags, hence identical
+  ciphertexts), and
 * the message length.
 
 This is the strongest misuse behaviour a deterministic scheme can have, and it is the whole
@@ -831,8 +868,10 @@ Adv^{priv}_{multi}(Q, q) ≤ Q · Adv^{priv}_{single}(q),      Adv^{auth}_{multi
 
 so Thm 4's bound gains the factor `Q` on every term, and in particular the collision term becomes
 `Q · q²/2^257`. At `Q = 2^32` devices and `q = 2^32` messages each — 2^64 messages in total, well
-past any real deployment — that is `2^(32+64-257) = 2^-161`, and the forgery term `Q·q·2^-520` is
-`2^-456`: the multi-user loss is not what a deployment size costs.
+past any real deployment — that is `2^(32+64-257) = 2^-161`, and the forgery term is dominated
+by the key-guess route, `Q·q·2^-256 = 2^-192` (an earlier revision quoted the fresh-tag-guess
+route alone, `Q·q·2^-520 = 2^-456`, which is not the leading term): the multi-user loss is not
+what a deployment size costs.
 
 Two things do *not* follow that factor, and one that does is worth naming separately:
 
@@ -966,27 +1005,29 @@ messages of equal length that agree on their final block `S`, and vary the bytes
 chaining value entering `S` is a 256-bit value, so a collision in it costs a birthday search over
 that state (`2^128` candidates), and the two colliding inputs then have identical
 `(cv, tail, |tail|, counter, flags)` — hence identical tags, and therefore identical derived keys
-and, for equal-length messages, identical ciphertexts, since `derive_enc` is a function of the
-tag alone. The same argument applies to a multi-chunk input by fixing the subtree that holds the
-tail and colliding the prefix subtree's chaining value. This is a *collision* search, not a
+and keystreams: two equal-length messages under that `(key, nonce)` are a two-time pad
+(`C₁ ⊕ C₂ = M₁ ⊕ M₂`), since `derive_enc` is a function of the tag alone. The same argument
+applies to a multi-chunk input by fixing the subtree that holds the tail and colliding the
+prefix subtree's chaining value. This is a *collision* search, not a
 preimage: the adversary needs the two tags to agree *with each other*. A tag that must be hit *as
 given* — a forged tag, or a ciphertext that must open under a second key — is still a target, but
 the object it hangs from is 256-bit: a second key succeeds by reproducing the 256-bit `subkey`,
 with probability `≈ 2^-256` per candidate, so a full enumeration of the `2^256`-key space expects
-`≈ 1` second key (success `≈ 0.63`) — key-search level. The *pure tag-collision* route — a
+`≈ 1` second key (existence `≈ 0.63`; a one-output game `≈ 0.368`, Thm 2) — key-search level. The *pure tag-collision* route — a
 candidate whose `subkey` misses yet whose tag computation still lands on the given tag — is
 `2^-520` per candidate and is dominated by it (a tag
 *guess* is the `2^520` search; a key search cannot run more trials than there are keys).
 
 **Consequently, the numbers are these, and the pair (target, birthday) is now written out
-wherever the distinction matters. All of them still carry at least 128 bits of margin.**
+wherever the distinction matters. All of the classical bounds still carry at least 128 bits of
+margin** (the model-dependent BHT row below is the one exception, at ≈`2^85`).
 
 | Event | Bound |
 | --- | --- |
 | Tag collision, same key, `q` queries | `q² / 2^257` (≈ `2^128` at the birthday point) |
 | Derived `(key, nonce)` collision over `q` queries | `q² / 2^257` — see below: the tag term dominates it, and the KDF's own birthday is over a 328-bit state (256-bit chain value plus the 72-bit tail block), not the 352-bit output |
 | A tag agreeing with a *given* tag (forgery, second open, commitment **against a given ciphertext**) | the object to hit is 256-bit in every case: forgery is `min(2^256 key search, 2^520 tag guess)`, and a second key reproduces the 256-bit `subkey` at `≈ 2^-256` per candidate — `≈ 1` second key over the key space. The pure tag collision is `2^-520` per candidate and dominated |
-| Forgery (one decryption query) | `2^-520`, plus the tag-collision terms. **Forgery *strength* is `min(2^256 key search, 2^520 tag guess) = 2^256`** — this row is the per-guess acceptance probability, not the strength; §8.1 writes the minimum out |
+| Forgery (one decryption query) | `≈ 2^-256` — a query computed offline under a guessed key, the same 256-bit `subkey` event as the commitment row above — plus the fresh-*tag*-guess route `2^-520`, which it dominates, and the tag-collision terms. **Forgery *strength* is `min(2^256 key search, 2^520 tag guess) = 2^256`** — this row is the per-query acceptance probability, not the strength; §8.1 writes the minimum out |
 | **Attacker-chosen commitment game** (CMT-1/CMT-3 as the literature writes them — the adversary *outputs* both keys, both messages and `(C,T)`) | **two of its three routes are priced at `2^128`, both with identical plaintexts**: the *key* route (a `subkey` collision gives equal `k_in`/`k_out`/`enc_seed`) and the *context* route (an inner-digest collision gives equal `T`, and the KDF takes `T` rather than the context, so equal keystreams too). Both completions are immediate. The **different-message** route — the salamander — is **not analysed**: it needs `KS₁ ≠ KS₂`, so two keys, and its object is the fixed point `T = tag(K₂, N, A, C ⊕ KS₂(T))` over the 520-bit tag space. See "The two commitment games" below |
 | Exhaustive key search | `2^256` |
 | Quantum: Grover on the key | `2^128` |
@@ -1004,12 +1045,12 @@ game's number either.
   validates. It has to hit a *fixed* value, so it is a target — but the value is the **256-bit
   `subkey`**, not the 520-bit tag: a second key whose subkey matches reproduces the derived
   material and everything downstream of it, so the event is `≈ 2^-256` per candidate key and the
-  whole key space expects `≈ 1` second key (success `≈ 0.63`) — key-search level. This is the
+  whole key space expects `≈ 1` second key (existence `≈ 0.63`; a one-output game `≈ 0.368`) — key-search level. This is the
   number in Thm 2's commitment bullet, in the table above, and in the README's security table.
   What the wide tag prices in this game is only the *pure tag-collision* route (`2^-520` per
   candidate), which the `subkey` route dominates above 256 bits; below 256 bits the tag itself
-  becomes the binding object, which is why the width is not free to shrink (§4.10, and the
-  derivation route Thm 2 closes).
+  becomes the binding object, which is why the width is not free to shrink (§4.10, and Thm 2's
+  commitment bullet on the derivation route).
 * **The *attacker-chosen* game — this is what the literature's CMT-1/CMT-3 are.** Those games are
   **not** "given a ciphertext": the adversary *outputs the entire tuple* — two keys (or two
   contexts), two messages, and the `(C, T)` — and wins if the one `(C, T)` validates under both.
@@ -1055,7 +1096,7 @@ looking for "what would settle it" should go.
   a given ciphertext by reproducing the 256-bit `subkey = HC(K′, N₁)`: that one value fixes `k_in`,
   `k_out` and `enc_seed`, and with them the derived key pair, the recovered message, the inner
   digest and the tag. So the attempt succeeds with probability `≈ 2^-256`, and enumerating the whole
-  `2^256` key space expects **`≈ 1` second key** (success `≈ 0.63`) — key-search level, the same
+  `2^256` key space expects **`≈ 1` second key** (existence `≈ 0.63`; a one-output game `≈ 0.368`) — key-search level, the same
   tier as the context route above. The *pure tag-collision* route — a candidate whose `subkey`
   misses and whose tag nonetheless lands on the published one — is `2^-520` per candidate, and
   the `subkey` route dominates it. A 32-byte tag
@@ -1286,12 +1327,12 @@ refutation, and the status of the attempt.
 | 9 | Nonce reuse leaks only equality | Two distinct `(A,M)` under one nonce with the same tag or keystream | Tested at the keystream level (#4); the tag collision that would *additionally* give `C₁ ⊕ C₂ = M₁ ⊕ M₂` is a `2^128` search (§4.5, §3 Corollary), so that half is a bound rather than a test |
 | 10 | Cross-scheme separation | Keystream agreement with XChaCha20-Poly1305 for one `(K,N)` | Tested at the derivation level: the label is in the nonce, not the counter (`test_subkey_domain_occupies_nonce_not_counter`) |
 | 11 | The implementation matches the design | A divergence between `src/lib.rs` and the specification above | Differential testing against an independent Python reference, published KATs (RFC 8439, the XChaCha draft, BLAKE3's official keyed vectors), the independent implementation in `src/witness.rs` under `ultra`, and the Kani layout harnesses |
+| 12 | An adversary cannot get unverified plaintext | A decryption failure that returns bytes, or that returns them for a moment the caller can observe | `tests/security.rs`, the wipe contracts, and `tools/fi_check.sh`'s `wipe-skipped` row |
 | 13 | **The combination needs no assumption of its own** (§4.10) | An unlisted call site of a primitive (the inventory covers the seven construction uses *and* the one standalone unkeyed hash), or two listed uses sharing a key/domain/point in a way the table does not list | **Mechanised**: `tests/construction_inventory.rs` counts the cryptographic call sites in the non-test source and fails if the set changes, and pins the two structural lemmas (S1: the three BLAKE3 input spaces are disjoint by their 8-byte prefixes; S2: this crate's counter-0 key-material block is at a different ChaCha20 point than XChaCha20-Poly1305's first data block, for the same key and nonce) |
 | 14 | U2/U5 share counter 0 (§4.1) | The key-material block equals the message keystream for one `(K,N,M)` | **Tested** for a spread of inputs (`the_key_material_block_is_not_the_message_keystream`); a real collision needs the master key to compute, so it is a probability statement (`≈2^-352`) rather than an attack |
-| 12 | An adversary cannot get unverified plaintext | A decryption failure that returns bytes, or that returns them for a moment the caller can observe | `tests/security.rs`, the wipe contracts, and `tools/fi_check.sh`'s `wipe-skipped` row |
 | 15 | **L3.6** [REMOVED in `v0.3`]: the tag was a PRF in the master key even though the master key was also in the tag's input (§2.1) | Through `v0.2`: a distinguisher for `K ↦ B3(D(K), … ‖ K ‖ …)` that is not a distinguisher for `x ↦ B3(k, x)` at a fixed input | **No longer a claim.** The two-level tag has no hash message containing `K`, so there is nothing to refute; the row records the removal rather than an attempt. (The `v0.2` evidence was: not attemptable by test — a statement about a primitive's internal structure — supported by BLAKE3's design, a separation showing the black-box reduction cannot exist, and the fact that every `H(k ‖ m)`-shaped MAC rests on the same assumption. `v0.3` removed the assumption instead of arguing it.) |
 | 16 | The tag-collision birthday is `2^128`, not `2^260` (§4.5) | An argument that some state other than the 256-bit chain value binds the tag; or a collision search cheaper than `2^128` | **Derived here, not tested**: it is a bound on computation. What the harnesses do pin is the premise — that the tag is exactly the root XOF of the encoded input — through the published keyed-BLAKE3 KATs, the differential reference implementation, and `src/witness.rs` under `ultra` |
-| 17 | **Commitment in the attacker-chosen games (CMT-1/CMT-3)** — the adversary outputs both keys (or contexts), both messages and `(C,T)` and wins if one `(C,T)` opens under both (§4.5) | A worked-out attack in that game, or a completed derivation of its probability | **Two of its three routes are priced, both same-plaintext breaks; the third is not derived.** (a) *Key route*: a `subkey` collision at `2^128` gives two keys with identical derived material, hence identical tags *and keystreams*; the two decryptions are byte-identical (Thm 2's commitment bullet). Closed in `v0.2` by the `K`-in-input step, **not** closed by the two-level tag — the honest record of that trade. (b) *Context route*: two chosen contexts (a different AAD, with the key, nonce and message held fixed — a nonce change moves `k_in`/`k_out` too, so the birthday argument does not reach it) whose inner digests `X` collide at `2^128` give the same tag, and the KDF takes the tag rather than the context, so the same keystream follows; one `(C,T)` validates under both contexts with the same plaintext and no fixed point (Thm 2's context bullet). (c) *Different-message route* — the salamander: needs two keys with `KS₁ ≠ KS₂`, so it is the fixed point `T = tag(K₂, N, A, C ⊕ KS₂(T))`, whose cheapest route known to this document is `≈ 2^520`. The target bound (`≈ 2^-256` per candidate key, the `subkey` preimage) does not describe any of the three. A proof (or a break) of (c) would settle what is left; `2^128` is infeasible, and the *target* game is untouched |
+| 17 | **Commitment in the attacker-chosen games (CMT-1/CMT-3)** — the adversary outputs both keys (or contexts), both messages and `(C,T)` and wins if one `(C,T)` opens under both (§4.5) | A worked-out attack in that game, or a completed derivation of its probability | **Two of its three routes are priced, both same-plaintext breaks; the third is not derived.** (a) *Key route*: a `subkey` collision at `2^128` gives two keys with identical derived material, hence identical tags *and keystreams*; the two decryptions are byte-identical (Thm 2's commitment bullet). Closed in `v0.2` by the `K`-in-input step, **not** closed by the two-level tag — the honest record of that trade. (b) *Context route*: two chosen contexts (a different AAD, with the key, nonce and message held fixed — a nonce change moves `k_in`/`k_out` *and* `enc_seed`, so equal inner digests would not even give equal tags or keystreams: the cross-key search is still a `2^128` birthday, it just does not complete) whose inner digests `X` collide at `2^128` give the same tag, and the KDF takes the tag rather than the context, so the same keystream follows; one `(C,T)` validates under both contexts with the same plaintext and no fixed point (Thm 2's context bullet). (c) *Different-message route* — the salamander: needs two keys with `KS₁ ≠ KS₂`, so it is the fixed point `T = tag(K₂, N, A, C ⊕ KS₂(T))`, whose cheapest route known to this document is `≈ 2^520`. The target bound (`≈ 2^-256` per candidate key, the `subkey` preimage) does not describe any of the three. A proof (or a break) of (c) would settle what is left; `2^128` is infeasible, and the *target* game is untouched |
 
 Rows 1, 16 and 17 are the honest boundary: **no test in this repository, and none that could be
 written, falsifies or establishes them.** Row 1 is the standing bet that every
@@ -1311,16 +1352,17 @@ which it is not.)
 
 The table above says what would refute each claim; this says *how* someone would go about
 refuting it, so that "out of reach" is a number attached to an algorithm rather than a feeling.
-Per-attempt costs are in primitive calls (one HChaCha20, two ChaCha20 blocks, two BLAKE3 hashes for
-the tag), and the numbers are work, not wall-clock.
+Per-attempt costs are in primitive calls (one HChaCha20, the two ChaCha20 blocks of the
+derivation — counter 0 for the two tag keys and counter 1 for `enc_seed` — and the two BLAKE3
+hashes for the tag), and the numbers are work, not wall-clock.
 
 | Target | Procedure | Per attempt | Where it dies |
 | --- | --- | --- | --- |
-| **Confidentiality** (fresh nonce, no plaintext oracle) | guess the key: for each `K′ ∈ {0,1}^256`, recompute the tag of one known `(N, A, M)` and compare; on a hit, decrypt everything | ≈ 4 calls (HC, CC, tag, first keystream block) | `2^256` attempts; `2^256/Q` for an attacker satisfied with any of `Q` devices (§3, multi-key) |
-| **Forgery** | submit `(N, A, C, T)` guesses to the decryption oracle, or search the key space and then forge *legitimately* | 1 verify (oracle) or ≈ 4 calls (key search) | `2^-520` acceptance per fresh tag (the tag is a PRF of `(N,A,M)`, Thm 2), or `2^256` key search — the *minimum* is the key search, which is what "forgery is bounded by the key" means. Note the offline variant needs the key: without it an attacker cannot even test a guess without the oracle |
-| **Key commitment** (a second key that opens a *given* ciphertext) | for each candidate `K′`: derive the material from `subkey = HC(K′, N₁)`, decrypt `C` under the tag-derived key pair, recompute the tag over the recovered `M′`, compare with `T` | ≈ 4 calls | the chance that any one candidate works is `≈ 2^-256`: it has to reproduce the 256-bit `subkey`, which the derivation makes sufficient (the direct `2^-520` tag hit is dominated by it), so the whole `2^256` key space expects `≈ 1` second key — success `≈ 0.63`, key-search level, not a `2^-264` event. **A 32-byte tag would raise that to `≈ 2`**: the width is not what sets this (§4.5) |
+| **Confidentiality** (fresh nonce, no plaintext oracle) | guess the key: for each `K′ ∈ {0,1}^256`, recompute the tag of one known `(N, A, M)` and compare; on a hit, decrypt everything | ≈ 4 calls (HC, the derivation's counter-0 block, and the two tag hashes) | `2^256` attempts; `2^256/Q` for an attacker satisfied with any of `Q` devices (§3, multi-key) |
+| **Forgery** | submit `(N, A, C, T)` guesses to the decryption oracle, or search the key space and then forge *legitimately* | 1 verify (oracle) or ≈ 4 calls (key search) | `≈ 2^-256` acceptance per query — the tuple can be computed *offline under a guessed key* `K′`, and is accepted when `K′`'s 256-bit `subkey` is the real one — with the blind fresh-*tag* guess at `2^-520` (the tag is a PRF of `(N,A,M)`, Thm 2) dominated, or `2^256` key search. Note the per-query route needs the key: a guess is accepted with probability `≈ 2^-256`, and the oracle is what tells the attacker whether the guess was the key |
+| **Key commitment** (a second key that opens a *given* ciphertext) | for each candidate `K′`: derive the material from `subkey = HC(K′, N₁)`, decrypt `C` under the tag-derived key pair, recompute the tag over the recovered `M′`, compare with `T` | ≈ 7 calls (HC, both derivation blocks, the KDF, and the two tag hashes), plus the candidate's keystream and re-hash, which are per byte | the chance that any one candidate works is `≈ 2^-256`: it has to reproduce the 256-bit `subkey`, which the derivation makes sufficient (the direct `2^-520` tag hit is dominated by it), so the whole `2^256` key space expects `≈ 1` second key — existence `≈ 0.63`, a one-output game `≈ 0.368`, key-search level, not a `2^-264` event. **A 32-byte tag would raise that to `≈ 2`**: the width is not what sets this (§4.5) |
 | **Tag collision** (the two-time-pad event of §3's Corollary) | *with the key*: fix `N`, `A`, the lengths and the final block; vary the prefix; hash until two prefixes collide in the 256-bit chaining value. *Without the key*: wait for the birthday event in the traffic | 1 hash per candidate (with the key); zero (without) | `2^128` by birthday. The keyless variant is the one to fear, because at the moment it happens the two-time pad costs the observer *nothing* |
-| **The context route to a non-committing ciphertext** (attacker-chosen game, CMT-3's context half) | fix one key, nonce and message; choose two AADs and search for an inner-digest collision `B3(k_in, DOM_PRE ‖ N ‖ le64|A₁| ‖ … ) = B3(k_in, … A₂ …)` (the nonce must be held fixed: changing it moves `k_in`/`k_out`, so the two digests would be under different keys) | 1 inner hash per candidate; the birthday over the 256-bit digest is `2^128` | the tag is `B3(k_out, DOM_TAG ‖ X)`, so equal `X` gives equal `T`; the KDF's input is the tag, not the context, so `(enc_key, enc_nonce)` — and the keystream — are equal too. One `(C,T)` therefore validates under both contexts with the same plaintext: an immediate completion at a `2^128` birthday, no fixed point. It is the *attacker-chosen* game, so the *target* commitment is untouched; the same 256-bit digest is why the *key-holder* target is `≈ 2^256` rather than `2^520` |
+| **The context route to a non-committing ciphertext** (attacker-chosen game, CMT-3's context half) | fix one key, nonce and message; choose two AADs and search for an inner-digest collision `B3(k_in, DOM_PRE ‖ N ‖ le64|A₁| ‖ … ) = B3(k_in, … A₂ …)` (the nonce must be held fixed: a nonce change moves `k_in`/`k_out` *and* `enc_seed`, so equal inner digests would not give equal tags or keystreams and the completion fails — the cross-key digests themselves are still a `2^128` birthday) | 1 inner hash per candidate; the birthday over the 256-bit digest is `2^128` | the tag is `B3(k_out, DOM_TAG ‖ X)`, so equal `X` gives equal `T`; the KDF's input is the tag, not the context, so `(enc_key, enc_nonce)` — and the keystream — are equal too. One `(C,T)` therefore validates under both contexts with the same plaintext: an immediate completion at a `2^128` birthday, no fixed point. It is the *attacker-chosen* game, so the *target* commitment is untouched; the same 256-bit digest is why the *key-holder* target is `≈ 2^256` rather than `2^520` |
 | **The derivation route to a non-committing ciphertext** (attacker-chosen game, the key half) | choose `K₁ ≠ K₂` and search for two keys whose derived material agrees — `(k_in, k_out, enc_seed)`, all functions of the 256-bit `subkey = HC(K, N₁)` | 1 HC + 2 CC per candidate key | the triple is a function of the 256-bit `subkey`, so two agreeing keys are a `subkey` **collision at a `2^128` birthday**, and it gives equal tags *and* equal keystreams — one ciphertext opening under both. Through `v0.2` this route was **closed by `K` in the tag input** (equal material still gave different tags); `v0.3`'s two-level tag does **not** close it (Thm 2's commitment bullet, §4.10). It is `2^128` — infeasible — and it is the *attacker-chosen* game, so the *target* commitment (`≈ 2^-256` per candidate key, the `subkey` preimage) is unaffected |
 | **Encoding and parsing** (length ambiguity, `A`/`M` re-split, trailing zeros, a tag byte that does not reach the ciphertext) | the differential suite's byte-position scans, the KATs, the Kani layout harnesses | — | §4.4 proves injectivity; §7 names the harnesses; §4.7 records the one member of this class that *was* real (a 28-byte tag truncation) |
 | **The implementation** (a divergence from the specification, a secret-dependent branch, a skipped wipe) | `tools/ref_impl.py` differential, `src/witness.rs` under `ultra`, ctgrind, the fault campaign, Kani | — | §7 and `tests/README.md` |
@@ -1334,8 +1376,11 @@ weight of the claims is visible:
    with them every claim in this document. Published cryptanalysis reaches 7–8 of ChaCha20's 20
    rounds and reduced-round BLAKE2/BLAKE3 only; a full-round result would be a major one.
 2. **A concrete distinguisher for the *two-level* tag cascade.** Through `v0.2` this item was the
-   L3.6 gap: the single-level tag keyed by a value it also contained, with a separation showing no
-   black-box reduction from L3.3. `v0.3` removed that construction, so the tag is now an ordinary
+   L3.6 gap: the single-level tag's hash key `D(K, N)` and its message both depended on the master
+   `K`, so no black-box reduction from L3.3 was available (this rests on §2.1's
+   reduction-impossibility argument; the separation there covers the equal-secret
+   key-dependent-input shape, which the `v0.2` map did not literally have). `v0.3` removed that
+   construction, so the tag is now an ordinary
    A3 cascade and the only thing that would refute it is a break of A3 (item 1). What remains
    worth naming is narrower: a distinguisher that separates the *cascade* `B3(k_out, DOM ‖ B3(k_in,
    …))` from a random function while leaving `x ↦ B3(k, x)` a PRF — i.e. a failure of the cascade
@@ -1402,8 +1447,10 @@ missing later (L3.6, §2.1).
   afterwards, which is why the `ultra` stack scan reports clean — but that is a **frame-layout
   heuristic, not a proof**: it is best-effort, compiler-dependent, and covers the region the
   scrubber's own 16 KiB frame happens to reach, not the caller's frames above it. `README.md`
-  ("What this crate cannot fix for you") carries the measurements and `tools/stack_residue.sh`
-  re-runs them. This is in the residual list because it is the one hygiene claim that rests on
+  ("What this crate cannot fix for you") carries the measurements, and `tools/stack_residue.sh`
+  re-runs the half of them reachable from the public API — the master key and `locked`'s tag;
+  the derived-value scans need crate internals, as the tool's own closing note says. This is in
+  the residual list because it is the one hygiene claim that rests on
   something other than a wipe the code names.
 * **Beyond the model.** Side channels, fault injection, a debugger, cold boot, a hostile
   hypervisor: out of scope here and covered where they belong.
@@ -1496,11 +1543,11 @@ target bounds are §4.5's, and each harness named in the last column is describe
 | Integral / division-property / cube | ChaCha20, BLAKE3 | out of reach at full rounds |
 | Algebraic / SAT / Gröbner | same | no practical result; the systems are far beyond solvable sizes |
 | Slide / invariant-subspace | round self-similarity | the same constants and flags make rounds non-identical; no attack |
-| Meet-in-the-middle / dissection | key recovery | there is no key schedule to split: every derived key is a PRF output, so the generic cost is `2^256` (or `2^128` time with `2^128` memory via a classical trade-off) — the same as exhaustive search |
+| Meet-in-the-middle / dissection | key recovery | there is no key schedule to split: every derived key is a PRF output, so the generic *single-target* cost is `2^256`, and a classical time-memory trade-off does not lower it — at `2^128` memory Hellman's online time is still `2^256` for one target, and `2^128` work appears only with `2^128` targets or `2^128` parallel walkers (multi-target key search, total work still ≥ `2^256`) — the same as exhaustive search |
 | Related-key | key schedule | **not applicable**: the construction is keyed by one uniformly random 256-bit key, and the per-message keys are PRF outputs of distinct nonces (Thm 1). No key class is exposed |
 | Length extension | Merkle–Damgård padding | **not applicable**: BLAKE3 finalises with a flag, and the encoding carries explicit `|A|`/`|M|` (§4.4). Its real descendants — re-splitting `A ‖ M`, trailing zeros — are defeated by A4 and pinned by `test_aad_message_split_is_unambiguous` |
 | Collision (incl. Joux multicollisions, herding) | the tag | `2^128` by birthday over the 256-bit chain value, via the fixed-tail procedure of §4.5; no tag width raises it |
-| Commitment **against a given ciphertext** (the target game) | a ciphertext that opens under two keys, with the ciphertext *given* | **`≈ 2^-256` per candidate key** — the candidate has to reproduce the 256-bit `subkey = HC(K′, N₁)`, which fixes the tag, the derived key pair and the recovered message alike, so enumerating the whole key space expects **`≈ 1` second key** (success `≈ 0.63`): a target, not a birthday, at key-search level. It is *not* `2^-520` per candidate / `≈ 2^-264` over the space — that is the *pure tag-collision* route, which the `subkey` route dominates — and it is not key recovery either: a `subkey` has no unique preimage — the real key is one, and a sweep of the key space expects **one more** — so a match found is a *different* key about half the time, which is what makes this a second opening rather than a recovery. The wide tag does **not** set this (Thm 2, §4.5) |
+| Commitment **against a given ciphertext** (the target game) | a ciphertext that opens under two keys, with the ciphertext *given* | **`≈ 2^-256` per candidate key** — the candidate has to reproduce the 256-bit `subkey = HC(K′, N₁)`, which fixes the tag, the derived key pair and the recovered message alike, so enumerating the whole key space expects **`≈ 1` second key** (existence `≈ 0.63`; a one-output game `≈ 0.368`): a target, not a birthday, at key-search level. It is *not* `2^-520` per candidate / `≈ 2^-264` over the space — that is the *pure tag-collision* route, which the `subkey` route dominates — and it is not key recovery either: a `subkey` has no unique preimage — the real key is one, and a sweep of the key space expects **one more** — so in expectation the sweep finds as many second keys as real ones, which is what makes this a second opening rather than a recovery. The wide tag does **not** set this (Thm 2, §4.5) |
 | Commitment in the **attacker-chosen** games — the **key-commitment** half (one `(C,T)` valid under two keys) | a ciphertext the *adversary* chooses, opening under two keys it also chooses | **`2^128`** — a `subkey` collision (all three derived values are functions of the 256-bit `subkey`) gives two keys with identical material, tags *and* keystreams, so both keys decrypt to the **same plaintext** and the completion is immediate. This was closed in `v0.2` by `K`-in-input and is **not** closed by the two-level tag: the honest record of that trade. §4.5, "The two commitment games", and §5 row 17 |
 | Commitment to the **context** (nonce/AAD) — for a key-holder, and in the attacker-chosen game | a ciphertext that opens under a second context, with the ciphertext *given* (key-holder) or chosen | **`≈ 2^256` target / `2^128` attacker-chosen**, and the 65-byte width does not set either: the context enters the tag's hash input `X`, so a second context reproducing a given `X` is a preimage of BLAKE3's 256-bit chaining value, and two *chosen* contexts collide in `X` at a `2^128` birthday — after which the tag, the KDF output and the keystream are all equal, so the completion is immediate and the plaintext is the same. The AAD's byte components are what this exposes; a length re-split has too few candidates to reach a 256-bit preimage. §4.5, Thm 2's context bullet, §5 rows 3 and 17 |
 | Commitment in the **attacker-chosen** games — the **salamander** route (one `(C,T)` opening to two *different* messages) | the same, but the two openings must differ: `M₁ ≠ M₂` | **not derived here, and not reached by the `2^128` route**: identical derived material forces `KS₁ = KS₂` and hence `M₁ = M₂`, so two messages need the fixed point `T = tag(K₂, N, A, C ⊕ KS₂(T))`, whose cheapest known route is the `2^520` search over the tag space. §4.5, Thm 2's commitment bullet |
@@ -1515,10 +1562,10 @@ target bounds are §4.5's, and each harness named in the last column is describe
 
 | Class | `opt-out` | `hardened` | `ultra` | Evidence |
 | --- | --- | --- | --- | --- |
-| Timing: branch on a secret | defended — constant-time by construction, with no secret-dependent branch apart from the documented decision; ctgrind checks the *branches* | defended; more constant-time work | defended | ctgrind in three configurations, `tests/variable_latency.rs`, the timing screens (advisory in CI, strict under `verify.sh --deep`) |
+| Timing: branch on a secret | defended in the AEAD path — constant-time by construction, with no secret-dependent branch apart from the documented decision there; `locked`'s `check_integrity` fail-stop branches on a key-derived tag but is never taken under no-fault operation and is outside the code ctgrind runs (no `LockedKey` in `tests/ctgrind.rs`) | defended; more constant-time work | defended | ctgrind in three configurations, `tests/variable_latency.rs`, the timing screens (advisory in CI, strict under `verify.sh --deep`) |
 | Timing: secret-dependent index or memory access | defended — no tables and no secret-dependent index by construction (ARX, no lookup tables) | same | same | the structural argument (no table in the source) and `tools/cache_profile.sh --trace` (identical address traces for two keys, both phases); memcheck does not report an address derived from a poisoned byte, so this is not ctgrind's evidence |
 | Cache-timing (Prime+Probe, Flush+Reload, Evict+Time) | defended — no tables, no secret-dependent indices | same | same | `tools/cache_profile.sh` (instruction counts invariant for two keys, and identical address traces in `--trace` mode, both phases) |
-| Microarchitectural / speculative (Spectre family, port contention, execution-unit timing) | not defended | not defended | not defended — **and the crate contributes no gadget** | Two statements, kept apart because they are different claims. (i) *Here*: the constant-time discipline leaves no secret-dependent index or memory access, and the one secret-dependent branch (the decision) has a **public** outcome, so speculating past it reveals what the caller learns anyway — there is no `if (secret_index < len) { table[secret_index] }` shape to build a gadget from (the ARX structural argument, and `cache_profile.sh`'s trace mode). Software measures for gadgets — index masking (`array_index_nospec`), `lfence`/`csdb` barriers, LLVM's Speculative Load Hardening — exist and are the right answer *for code that has a gadget*; adding a barrier here would serialize a comparison whose result is already public. (ii) *Elsewhere*: no library can bound the CPU's speculation in other code, nor the non-speculative microarchitectural channels (port contention, and the Hertzbleed-class power/frequency channel that constant-time code does not address at all) |
+| Microarchitectural / speculative (Spectre family, port contention, execution-unit timing) | not defended | not defended | not defended — **and the crate contributes no gadget** | Two statements, kept apart because they are different claims. (i) *Here*: the constant-time discipline leaves no secret-dependent index or memory access, and the AEAD path's one secret-dependent branch (the decision) has a **public** outcome, so speculating past it reveals what the caller learns anyway — as does `locked`'s integrity fail-stop, which fires only on detected corruption — there is no `if (secret_index < len) { table[secret_index] }` shape to build a gadget from (the ARX structural argument, and `cache_profile.sh`'s trace mode). Software measures for gadgets — index masking (`array_index_nospec`), `lfence`/`csdb` barriers, LLVM's Speculative Load Hardening — exist and are the right answer *for code that has a gadget*; adding a barrier here would serialize a comparison whose result is already public. (ii) *Elsewhere*: no library can bound the CPU's speculation in other code, nor the non-speculative microarchitectural channels (port contention, and the Hertzbleed-class power/frequency channel that constant-time code does not address at all) |
 | Power / EM (SPA, DPA, CPA, templates) | not defended | not defended | not defended, **but partly by construction — and the exception is narrower than this row first said** | needs proximity and equipment, and software algorithms for it exist — §8.5 names them (masking, hiding, fresh re-keying, leakage-resilient designs) with the model each is proven in. Fresh re-keying (Medwed–Standaert) is *already the shape of this construction* for the **payload cipher**: `enc_key`/`enc_nonce` are derived from the tag, so they are per message, and traces of the XOR pass cannot be averaged across messages (the same nonce *and* message replays one trace; a different message is a different key). **That argument does not extend to the other BLAKE3 uses, and the exception is nonce reuse.** The derived tag keys `k_in`/`k_out` and `enc_seed` are functions of `(K, N)` alone (Thm 1) — they must be, or the tag would not be deterministic in `(K, N, A, M)` — so `q` messages under one nonce hand the attacker `q` traces of **the tag passes and the enc-KDF under fixed keys with varying, attacker-chosen input**: exactly the setup CPA/DPA averages. The surface grows with the number of messages under a reused nonce, and for the tag pass it grows with the *message length*, since the tag hashes the whole message under `k_in`. Under a nonce-respecting deployment every key but the master key is per message, and the residual is the per-nonce derivation (HChaCha20 plus two ChaCha20 blocks, ~2 blocks, under `K`) — which is what this row claimed for *all* cases, and was wrong. Three consequences: for DPA, nonce reuse is worse than the "leak of equality" the misuse story describes; a nonce collision between two messages does the same thing, so the README's low-entropy-nonce warning covers this class too; and the exposure is **inherent to the frozen format** — a revision could re-key the tag's inner key *from the message* (`T = B3(k_out, DOM_TAG ‖ B3(k_in, A ‖ M))` is still deterministic in the quadruple) and remove it, at the price of changing every tag, which is a revision decision rather than a cleanup. No leakage assessment has been run, so this is a structural argument, not a measurement |
 | Single fault, decision *value* | **not defended** — accepting sites exist | defended: two gates, separate branches, fail-closed | defended | README fault table; `tools/fi_check.sh` rows per configuration |
 | Single fault, decision *instruction* (skip or corrupt a byte/bit) | **not defended** (4 accepting in the bit model, inside the decision) | 0 | 0 | `tools/fi_instruction.sh`, both models |
@@ -1590,9 +1637,11 @@ that no configuration currently covers:
 * **Debugger / ptrace** — *done*, above: `PR_SET_DUMPABLE` is the kernel's own enforcement and a
   library can ask for it. It is opt-in because it is process policy.
 * **Speculative execution** — *partly structural already*: this crate has no secret-dependent
-  index or memory access, so it presents no known Spectre-v1 gadget, and the one secret-dependent
-  branch has a public outcome. What remains is not this crate's to fix (the CPU's speculation, the
-  OS's mitigations, other code in the process), so a barrier added here would be theatre.
+  index or memory access, so it presents no known Spectre-v1 gadget; the AEAD path's one
+  secret-dependent branch (the decision) has a public outcome, and `locked`'s integrity fail-stop
+  is never taken under no-fault operation. What remains is not this crate's to fix (the CPU's
+  speculation, the OS's mitigations, other code in the process), so a barrier added here would be
+  theatre.
 * **Power / EM** — *software mitigations exist and are not claimed*: masking with fresh
   randomness is the known answer, at 10–100x cost, with the compiler free to undo it, and with a
   claim whose falsification needs a leakage-assessment lab (§8.5 — the earlier revision of this
@@ -1622,7 +1671,7 @@ decisions.
 | --- | --- | --- | --- |
 | Power / EM (DPA, CPA) | Boolean and arithmetic **masking** (ISW, threshold implementations, domain-oriented masking); **hiding** (operation shuffling, random delays, dummy rounds); **fresh re-keying** / key ratcheting; leakage-resilient designs | Masking is proven in the **probing model** and evaluated by **TVLA / ISO 17825** on real hardware — so it *is* falsifiable, with a lab | Cost 10–100x; the compiler can undo a software mask (needs asm barriers or a masked-type discipline); validation needs a scope. **One of these is already in the construction, for the payload cipher** (see the table row above): fresh re-keying is what per-tag key derivation *is* — with the nonce-reuse exception spelled out there, where the tag pass and the enc-KDF revert to fixed per-nonce keys and become averageable |
 | Faults (single, multi, laser, DFA) | **Infective computation** (Prouff–Giraud: on detection, randomise the output rather than reject); **redundancy with diversity** and randomised scheduling; **tamper-resilient encodings** and **AMD codes**; key ratcheting with destructive read-out; non-malleable codes for continuous tampering | Proven under models: bounded faults, unknown location, no fault in the verifier, encoded secrets. A bench (laser/EM) is what falsifies a claim | `ultra` has *redundancy* twice over (the second gate; the `dual-mac` recomputation) but *diversity* only once — the witness — since both recompute through the same `derive_tag`/BLAKE3/SIMD path. A **stored-secret integrity check** (the `LockedKey` tag, above) is the implemented kernel of the tamper-detection idea, but it is an *unkeyed* hash, so it is not an AMD code as the literature defines one (AMD codes are keyed primitives). Infectivity is deliberately *not* adopted: this crate's detected faults are rejections rather than randomised outputs, because a rejection is what keeps a fault on the encryption side from becoming a ciphertext the caller cannot distinguish from a good one, and because the payoff of a recovered intermediate here is one message (the row above). The rest — encoded secrets, randomised scheduling, non-malleable codes — needs a bench and a redesign of the key path, not a flag |
-| Speculative execution | `array_index_nospec`-style index masking, `lfence`/`csdb` barriers, LLVM **Speculative Load Hardening**, retpolines, dual-page mitigations | Falsified by a PoC gadget on the target microarchitecture | This crate has no gadget to harden (no secret index, no secret-dependent access) and the one secret-dependent branch has a public outcome; a barrier here would serialize a comparison the attacker already knows the result of |
+| Speculative execution | `array_index_nospec`-style index masking, `lfence`/`csdb` barriers, LLVM **Speculative Load Hardening**, retpolines, dual-page mitigations | Falsified by a PoC gadget on the target microarchitecture | This crate has no gadget to harden (no secret index, no secret-dependent access), and the AEAD path's one secret-dependent branch has a public outcome — as does `locked`'s integrity fail-stop, which reveals only whether corruption was detected; a barrier here would serialize a comparison the attacker already knows the result of |
 | Cold boot / remanence | **TRESOR** and descendants (key lives in CPU debug registers, never DRAM), Sentry/AESSE-style page encryption, sealed-key suspend | Soundness depends on the OS: debug registers are readable by any tracer and clobbered at context switches, so it needs kernel cooperation | A library cannot hold a key out of RAM on a general-purpose OS; the honest measures are deployment-level (encrypt the image, lock and wipe early) |
 | Rowhammer | Guard-page allocators that keep secrets off vulnerable rows, periodic re-touch to force refreshes, **integrity checks** on stored secrets | Falsified by a flip that also lands in the redundancy; ECC/TRR is the only prevention | **The integrity check is implemented**: `LockedKey` stores an unkeyed 8-byte BLAKE3 tag beside the key and verifies it on every use (+42 ns, measured), so a corrupted **key or tag** region fails loudly at first use (a flip in the unused remainder of the page is not read, so it is not reported). Guard pages and refresh loops are not, because they cannot be validated here and would not stop flips |
 | Debugger / ptrace | `PR_SET_DUMPABLE = 0`, `PR_SET_PTRACER`, seccomp/Yama; **tracer detection** (`TracerPid` in `/proc/self/status`) with key destruction on attach | Enforced by the kernel up to `CAP_SYS_PTRACE` | The first is **implemented** (`locked::deny_debugging()`); detection-and-destroy is deliberately not: it races the tracer (who reads the key first), it fires on legitimate profilers, and it is the behaviour of malware rather than of a library |

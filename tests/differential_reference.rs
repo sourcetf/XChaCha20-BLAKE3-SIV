@@ -242,6 +242,22 @@ fn differential_every_position_is_authenticated() {
         swept_positions += ct.len() + TAG_LEN;
         let aad = aad_for(*aad_len);
 
+        // The untampered row must authenticate first, or the sweep certifies
+        // nothing: under a broken tag (an audit made `derive_tag` hash the empty
+        // message) every `is_err()` below holds because the *untampered* row is
+        // rejected too, and this was one of the two only-green tests in the file.
+        let back = decrypt(&f.key, &f.nonce, &aad, ct, tag).unwrap_or_else(|_| {
+            panic!(
+                "the untampered fixture row must authenticate before its tampers can \
+                 mean anything (msg_len={msg_len}, aad_len={aad_len})"
+            )
+        });
+        assert_eq!(
+            back.as_slice(),
+            pt_for(*msg_len).as_slice(),
+            "the untampered row must round-trip (msg_len={msg_len}, aad_len={aad_len})"
+        );
+
         for pos in 0..ct.len() {
             let mut bad = ct.clone();
             bad[pos] ^= 0x01;
@@ -297,6 +313,23 @@ fn differential_every_aad_bit_is_authenticated() {
             swept_rows += 1;
         }
         let aad = aad_for(*aad_len);
+
+        // As above: the untampered row must authenticate, or every rejection below
+        // below is the broken tag rather than the tampered AAD. The empty-AAD rows
+        // are checked too -- they sweep no positions, so this is the only thing the
+        // loop asserts for them.
+        let back = decrypt(&f.key, &f.nonce, &aad, ct, tag).unwrap_or_else(|_| {
+            panic!(
+                "the untampered fixture row must authenticate before its AAD tampers can \
+                 mean anything (msg_len={msg_len}, aad_len={aad_len})"
+            )
+        });
+        assert_eq!(
+            back.as_slice(),
+            pt_for(*msg_len).as_slice(),
+            "the untampered row must round-trip (msg_len={msg_len}, aad_len={aad_len})"
+        );
+
         for pos in 0..aad.len() {
             let mut bad = aad.clone();
             bad[pos] ^= 0x01;

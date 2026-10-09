@@ -5,7 +5,13 @@
 #
 # Measured on this machine, full sweeps: 1 accepting byte in 5526 and 13 accepting
 # single-bit flips in 44208 for the default (hardened) build; 9 in 4268 and 152 in 34144
-# for the opt-out one. **Not zero**, and that is the corrected picture -- see the
+# for the opt-out one. **These are an earlier revision's figures** -- taken after the
+# offset-mapping fix but before the driver's aggregation fix (the `cat` of the shards'
+# accepted-offset files merged a last line with no trailing newline into the next file, so
+# a printed total was `true count - (files with entries - 1)`). The README's fault table
+# quotes the later local full re-run, where the same region reads opt-out `17`/`163` and
+# hardened `1`/`5`; the counts also move with the code, so neither set is a constant.
+# **Not zero**, and that is the corrected picture -- see the
 # criterion comment below, which also records the offset bug that made an earlier
 # version of this script report zero. The hardened build's map is printed beside the
 # opt-out one so the difference is visible as a number rather than asserted.
@@ -68,6 +74,11 @@ cd "$(dirname "$0")/.."
 export PATH="$HOME/.cargo/bin:$PATH"
 export CC="${CC:-$HOME/.local/bin/cc}"
 
+# The detector every verdict below rests on: `run()` reads an exit status, and an
+# exit status is only that test's verdict if the test ran. The baseline guard in
+# `scan` requires the test's own `... ok` line before any fault is swept.
+DECISION_TEST="a_forged_tag_must_not_be_accepted"
+
 WORK="$(mktemp -d)"
 # Keep the work directory on failure: the FAIL messages below point at files under
 # $WORK (`*.accepted_decision`, the per-shard logs), and an unconditional cleanup
@@ -129,6 +140,68 @@ print(exes[-1] if exes else "")
 '
 }
 
+# The detector's own positive control, model-independent and run before any sweep.
+#
+# The baseline guard inside `scan` only makes the unpatched binary *report* the
+# decision test's `... ok` line; it cannot tell a sensitive detector from a blind one.
+# With every assertion in tests/decision.rs weakened -- `x.is_err()` written as
+# `x.is_err() || true` -- the test still passes, the `... ok` line still appears, and
+# every fault below reads as "rejected": in the default (`nop`) model the all-zero map
+# and exit 0 are byte-identical to a healthy run (measured: an audit blinded all eight
+# assertions and `--quick` printed the same counts and exited 0). The `bits` model's
+# opt-out control does catch that detector, but it is compiled out of the default
+# invocation's verdict -- verify.sh runs the two models as separate stages, so a `nop`
+# stage whose control never ran would still be green.
+#
+# So the control checks the detector itself rather than the sweep: a scratch copy of
+# the crate forces `accept_or_reject` to accept (both gate slots take the Ok arm),
+# and the decision test must then *report* the forgery -- the same "forged tag
+# accepted" line `run()` reads as an acceptance. A blinded detector does not print it,
+# and no fault map is trusted until this passes.
+detector_sensitivity_control() {
+  local dir="$WORK/sensitivity"
+  mkdir -p "$dir"
+  cp -r src tests benches Cargo.toml Cargo.lock "$dir/"
+  python3 - "$dir/src/lib.rs" <<'PY'
+import sys
+
+p = sys.argv[1]
+s = open(p).read()
+# One text replacing each gate with a constant `true`: both slots then take the Ok
+# arm, and `decrypt` accepts whatever it is given. The anchor must be unique --
+# counts are asserted so a refactor that moves the gates fails the control loudly
+# instead of planting nothing.
+a, b = "bool::from(gate0)", "bool::from(gate1)"
+if s.count(a) != 1 or s.count(b) != 1:
+    sys.exit("the gates are not where this control expects them: %d x %s, %d x %s"
+             % (s.count(a), a, s.count(b), b))
+open(p, "w").write(s.replace(a, "true", 1).replace(b, "true", 1))
+PY
+  local bin
+  # shellcheck disable=SC2086
+  bin="$(cd "$dir" && CARGO_TARGET_DIR="$WORK/sensitivity/target" \
+           cargo test --release --test decision --no-run \
+             --config 'profile.release.strip=false' --message-format=json 2>/dev/null \
+         | cargo_decision_executable)"
+  [ -n "$bin" ] || {
+    echo "FAIL: the detector sensitivity control could not build the forced-accept copy" >&2
+    exit 1
+  }
+  set +e
+  local out rc
+  out="$("$bin" "$DECISION_TEST" 2>&1)"; rc=$?
+  set -e
+  if ! printf '%s\n' "$out" | grep -q "forged tag accepted"; then
+    echo "FAIL: the decision test is not sensitive to an accepted forgery: a copy whose" >&2
+    echo "      accept_or_reject accepts everything was run and '$DECISION_TEST' did NOT" >&2
+    echo "      report it (binary exit $rc). Every fault below would read as 'rejected'" >&2
+    echo "      with no detector behind it; fix the test before trusting this sweep." >&2
+    printf '%s\n' "$out" | tail -5 | sed 's/^/      | /' >&2
+    exit 1
+  fi
+  echo "detector sensitivity control: the forced-accept copy is reported by the decision test"
+}
+
 scan() {  # label, features
   local label="$1" features="$2"
   local bin
@@ -140,6 +213,29 @@ scan() {  # label, features
     echo "FAIL: no decision binary (cargo reported no executable for it)" >&2
     exit 1
   }
+
+  # The named test has to have RUN, not merely left the binary exiting 0. libtest
+  # exits 0 for a binary whose tests are all `#[ignore]`d, renamed or `#[cfg]`-ed
+  # out ("test result: ok. 0 passed"), and every fault below would then read as
+  # "rejected" with no detector behind it. The test's own `... ok` line is the
+  # witness, the same one `tools/tsan.sh` requires of its concurrent test. This
+  # says the test ran; that it would still *report* an acceptance is the separate,
+  # model-independent property `detector_sensitivity_control` proves above, before
+  # any sweep starts.
+  set +e
+  base_out="$("$bin" 2>&1)"; base_rc=$?
+  set -e
+  if [ "$base_rc" -eq 0 ]; then
+    case "$base_out" in
+      *"test $DECISION_TEST ... ok"*) ;;
+      *)
+        echo "FAIL: the unpatched decision binary exits 0 without reporting" >&2
+        echo "      'test $DECISION_TEST ... ok' -- the detector did not run," >&2
+        echo "      so every fault below would read as rejected with nothing behind it." >&2
+        printf '%s\n' "$base_out" | tail -5 | sed 's/^/      | /' >&2
+        exit 1 ;;
+    esac
+  fi
 
   local shard pids=()
   for shard in $(seq 0 $((JOBS - 1))); do
@@ -388,6 +484,7 @@ with open(sys.argv[1] + ".ranges", "w") as fh:
 PY
 }
 
+detector_sensitivity_control
 scan "plain (no hardened)"  "--no-default-features"
 scan "hardened (default)"   "--features hardened"
 # `ultra` adds the independent second implementation, so a byte corrupted in the shared
@@ -422,13 +519,16 @@ echo
 #   * no single-byte fault -- neutralised byte or flipped bit -- inside `accept_or_reject`
 #     accepts a forgery in the `hardened` or `ultra` build;
 #   * the opt-out build *does* have such a byte in the bit-flip model, or this scan is not
-#     reaching the decision at all. That is the positive control, and it is model-specific
-#     for a reason worth writing down: the opt-out decision is one `test`/`je` pair, and
-#     flipping the bit that turns `je` into `jne` falls through into the *accept* store.
-#     Overwriting that byte with `0x90` does not do that -- the next byte then decodes as
-#     part of a different instruction, and the run crashes instead of accepting -- so in
-#     the `nop` model this control cannot hold and is not required. (Both models are still
-#     swept in full; only the control is model-specific.)
+#     reaching the decision at all. That is the sweep's own positive control, and it is
+#     model-specific for a reason worth writing down: the opt-out decision is one
+#     `test`/`je` pair, and flipping the bit that turns `je` into `jne` falls through into
+#     the *accept* store. Overwriting that byte with `0x90` does not do that -- the next
+#     byte then decodes as part of a different instruction, and the run crashes instead of
+#     accepting -- so in the `nop` model this control cannot hold and is not required.
+#     (Both models are still swept in full; only this control is model-specific. The
+#     *detector*'s sensitivity -- that it would report an acceptance at all -- is the
+#     separate, model-independent control `detector_sensitivity_control` runs above,
+#     before any sweep.)
 #   * all six counts are printed, so a regression outside the decision is visible as a
 #     number rather than absorbed by a threshold.
 #

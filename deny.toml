@@ -42,6 +42,19 @@ targets = [
 # If true, metadata will be collected with `--all-features`. Note that this can't
 # be toggled off if true, if you want to conditionally enable `--all-features` it
 # is recommended to pass `--all-features` on the cmd line instead
+#
+# Repo note: left `false` deliberately, and the checks in this file are scoped to
+# exactly that graph -- the dependencies the published library builds with, 12
+# crates printed by `cargo deny --offline list` (11 dependencies plus this crate).
+# The graph excludes *both* dev-dependencies (always, however this is set: cargo-deny
+# never puts dev edges in the checked graph) and non-default features, so the
+# optional `rng` -> getrandom 0.4 edge is absent too. `--all-features` on the
+# command line would add getrandom 0.4 but still not criterion/proptest/aead.
+# The `licenses`, `bans` and `sources` sections below therefore say nothing about
+# dev or optional crates; the earlier wording here and in the licence block claimed
+# otherwise (it named `aead`, a dev-dependency). Advisories are the one check that
+# does cover the whole locked tree: `cargo audit --deny warnings` reads Cargo.lock,
+# dev dependencies included (deep.yml, `audit` job).
 all-features = false
 # If true, metadata will be collected with `--no-default-features`. The same
 # caveat with `all-features` applies
@@ -89,12 +102,19 @@ git-fetch-with-cli = true
 # List of explicitly allowed licenses
 # See https://spdx.org/licenses/ for list of possible licenses
 # [possible values: any SPDX 3.11 short identifier (+ optional exception)].
-# Derived from what the dependency tree actually uses, not copied from the
-# template. Each crate named below declares the string exactly as written
-# (`cargo metadata --format-version 1` reports it), and `cargo deny --offline
-# check licenses` passes against the allow list that follows:
+# Derived from the crates in the checked graph -- the default-feature, non-dev graph
+# described in the `[graph]` note above, the same 12 crates `cargo deny --offline
+# list` prints -- not copied from the template and not "the whole dependency tree":
+# dev-only crates (criterion, proptest, chacha20poly1305, aead, ...) never enter
+# this check, and the optional `rng` -> getrandom 0.4 edge is off. Each crate named
+# below declares the string exactly as written (`cargo metadata --format-version 1`
+# reports it), and `cargo deny --offline check licenses` passes against the allow
+# list that follows:
 #
-#   MIT OR Apache-2.0                                     (arrayvec, aead, cc, ...)
+#   MIT OR Apache-2.0                                     (arrayvec, cc, cfg-if,
+#                                                          cpufeatures,
+#                                                          find-msvc-tools, libc,
+#                                                          shlex, this crate)
 #   Apache-2.0 OR MIT                                     (zeroize)
 #   BSD-3-Clause                                          (subtle)
 #   CC0-1.0 OR Apache-2.0 OR Apache-2.0 WITH LLVM-exception (blake3)
@@ -158,7 +178,16 @@ registries = [
 # More documentation about the 'bans' section can be found here:
 # https://embarkstudios.github.io/cargo-deny/checks/bans/cfg.html
 [bans]
-# Lint level for when multiple versions of the same crate are detected
+# Lint level for when multiple versions of the same crate are detected.
+#
+# Scope note: again the default-feature, non-dev graph, where this ban currently has
+# nothing to fire on -- there is no duplicate in it. The duplicates Cargo.lock does
+# carry are all outside that graph, so this deny cannot see them: cpufeatures
+# 0.2.17/0.3.1 (0.2 comes via the dev-only chacha20poly1305 -> chacha20), getrandom
+# 0.2.17/0.3.4/0.4.3 (0.4 is the optional `rng` dependency; the others are dev),
+# r-efi 5/6, rand_core 0.6/0.9 (dev-only) and syn 2/3 (criterion/proptest build
+# graphs). Adding a duplicate to the shipped graph is what makes this fire; the
+# wording here used to imply it policed the whole lockfile, which it never did.
 multiple-versions = "deny"
 # Lint level for when a crate version requirement is `*`
 wildcards = "deny"

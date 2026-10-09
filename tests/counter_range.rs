@@ -93,7 +93,16 @@ fn the_limit_is_exactly_the_block_counters_capacity() {
 /// second parameter, which is what the call-site check below assumes.
 #[test]
 fn the_counter_is_the_second_parameter() {
-    let src = include_str!("../src/lib.rs");
+    // Comments and string-literal contents stripped (`strip_comments` below), and cut at
+    // `mod tests {`. The raw text let a *doc comment* carrying the old signature satisfy the
+    // `find` while the real second parameter had been widened to `u64` — exactly the drift
+    // this test exists to catch, because the call-site check below reads arguments by
+    // position and would still see `0` in the second slot.
+    let source = strip_comments(include_str!("../src/lib.rs"));
+    let cut = source
+        .find("mod tests {")
+        .expect("the test module must exist");
+    let src = &source[..cut];
     for (name, signature) in [
         ("chacha20_keystream", "fn chacha20_keystream("),
         ("chacha20_apply", "fn chacha20_apply("),
@@ -188,9 +197,24 @@ fn every_keystream_call_site_starts_the_counter_at_zero() {
             let line_start = body[..at].rfind('\n').map_or(0, |i| i + 1);
             let line = body[line_start..].lines().next().unwrap_or("");
             let line_no = body[..at].matches('\n').count() + 1;
-            // The definition itself contains the name being searched for.
-            let before_on_line = &body[line_start..at];
-            if before_on_line.contains("fn ") || before_on_line.trim_start().starts_with("fn ") {
+            // Skip the *definition of the searched function*, and only that: the line
+            // `fn chacha20_keystream(` carries the name without being a call. The old
+            // rule skipped any line carrying `fn ` anywhere before the name, so a
+            // one-liner `pub fn f(k, n, i, o) { chacha20_keystream(k, 7, n, i, o); }`
+            // hid a live non-zero-counter call from the census (measured: the census
+            // stayed at its expected count). A definition is matched by its trimmed
+            // start -- `fn `/`pub fn `/`unsafe fn `/`pub(crate) fn ` -- *and* by the
+            // name that follows being the one searched for; a call inside someone
+            // else's (one-line) body follows a different name and is counted.
+            let trimmed = line.trim_start();
+            let defines_the_searched_name = ["fn ", "pub fn ", "unsafe fn ", "pub(crate) fn "]
+                .iter()
+                .any(|prefix| {
+                    trimmed
+                        .strip_prefix(prefix)
+                        .is_some_and(|rest| rest.starts_with(bare))
+                });
+            if defines_the_searched_name {
                 continue;
             }
             seen[idx] += 1;
@@ -248,7 +272,9 @@ fn every_keystream_call_site_starts_the_counter_at_zero() {
 ///
 /// A plain `line.split("//")` let a string literal containing `//` cut the rest of
 /// its line out of the scan (hiding a real call), and never removed block comments
-/// (so commented-out code counted as a call site).
+/// (so commented-out code counted as a call site). Raw strings (`r#"…"#`) are dropped
+/// too: their contents may contain quotes, and without that the scanner re-entered code
+/// mode at the first `"` and the text between quotes was scanned as code.
 fn strip_comments(text: &str) -> String {
     #[derive(PartialEq)]
     enum Mode {
@@ -256,6 +282,8 @@ fn strip_comments(text: &str) -> String {
         Line,
         Block,
         Str,
+        /// Inside a raw string (`r"…"`, `r#"…"#`), whose contents are dropped.
+        RawStr(u8),
     }
     let b = text.as_bytes();
     let mut out = String::with_capacity(text.len());
@@ -271,6 +299,29 @@ fn strip_comments(text: &str) -> String {
                 } else if c == b'/' && b.get(i + 1) == Some(&b'*') {
                     mode = Mode::Block;
                     i += 2;
+                } else if let Some((prefix, hashes)) = raw_string_prefix(&b[i..]) {
+                    // A raw string (`r"…"`, `r#"…"#`, `br#"…"#`): its contents are
+                    // dropped like any other literal's, with the prefix and the closing
+                    // quotes kept.
+                    for k in 0..=prefix {
+                        out.push(b[i + k] as char);
+                    }
+                    i += prefix + 1;
+                    mode = Mode::RawStr(hashes);
+                } else if c == b'\'' {
+                    // A char literal is opaque, and this must come before the `"` case:
+                    // `'"'` is a char literal whose *closing* quote would otherwise open
+                    // `Mode::Str` and swallow the rest of the scan. A lifetime (`&'a`)
+                    // and a lone apostrophe have no closing quote, so the look-ahead
+                    // tests for one of the two literal shapes and otherwise treats the
+                    // `'` as an ordinary byte.
+                    let escaped = b.get(i + 1) == Some(&b'\\') && b.get(i + 3) == Some(&b'\'');
+                    if escaped || b.get(i + 2) == Some(&b'\'') {
+                        i += if escaped { 4 } else { 3 };
+                    } else {
+                        out.push('\'');
+                        i += 1;
+                    }
                 } else if c == b'"' {
                     out.push('"');
                     mode = Mode::Str;
@@ -310,9 +361,59 @@ fn strip_comments(text: &str) -> String {
                     i += 1;
                 }
             }
+            Mode::RawStr(hashes) => {
+                let h = hashes as usize;
+                // The terminator is `"` followed by as many `#`s as opened the string;
+                // until then every byte (quotes included) is contents, so it is dropped.
+                // Newlines are kept so line positions stay comparable.
+                if c == b'"'
+                    && b.len() >= i + 1 + h
+                    && b[i + 1..i + 1 + h].iter().all(|&x| x == b'#')
+                {
+                    out.push('"');
+                    for _ in 0..h {
+                        out.push('#');
+                    }
+                    i += 1 + h;
+                    mode = Mode::Code;
+                } else {
+                    if c == b'\n' {
+                        out.push('\n');
+                    }
+                    i += 1;
+                }
+            }
         }
     }
     out
+}
+
+/// `(bytes before the opening quote, hash count)` when `b` starts a raw string literal
+/// (`r"…"`, `r#"…"#`, `br"…"`, `br#"…"#`); `None` otherwise.
+///
+/// A raw identifier (`r#name`) is not a string — the byte after its hashes is not a
+/// quote — and a plain `"…"` is handled by `Mode::Str`.
+fn raw_string_prefix(b: &[u8]) -> Option<(usize, u8)> {
+    let mut i = 0usize;
+    if b.get(i) == Some(&b'b') {
+        if b.get(i + 1) != Some(&b'r') {
+            return None;
+        }
+        i += 2;
+    } else if b.get(i) == Some(&b'r') {
+        i += 1;
+    } else {
+        return None;
+    }
+    let start = i;
+    while b.get(i) == Some(&b'#') {
+        i += 1;
+    }
+    if b.get(i) != Some(&b'"') {
+        return None;
+    }
+    // A raw string's hash count is tiny (the compiler caps it far below 256).
+    Some((i, (i - start) as u8))
 }
 
 /// The first two top-level comma-separated arguments of the call whose `(` is at

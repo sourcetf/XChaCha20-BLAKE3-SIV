@@ -10,6 +10,28 @@ readme = "README.md"
 rust-version = "1.85"
 keywords = ["cryptography", "aead", "xchacha20", "blake3", "siv"]
 categories = ["cryptography", "no-std"]
+# What the published `.crate` contains. Without this, `cargo package` ships every
+# tracked file: the CI workflows, `tools/`, `tests/`, and (worst) `mutants.out/`,
+# whose logs carry developer host paths -- 108 files, most of them not part of the
+# library a consumer builds. The allow list below is the crate plus the documents
+# `README.md` links to; run `cargo package --list` to verify it stays that way.
+#
+# `Cargo.toml` and the `readme` file are not listed: cargo always includes them.
+# Naming `README.md` here would also sweep in `tests/README.md` -- include globs
+# match a bare file name at any depth (measured), so only the readme key keeps
+# that file's auto-inclusion limited to the package root.
+include = [
+    "src/**",
+    "benches/**",
+    "examples/**",
+    "CHANGELOG.md",
+    "SECURITY.md",
+    "SECURITY-ANALYSIS.md",
+    "performance.md",
+    "standard.txt",
+    "LICENSE-MIT",
+    "LICENSE-APACHE",
+]
 [dependencies]
 # subtle provides constant-time comparison
 subtle = { version = "2.6.1", default-features = false }
@@ -119,12 +141,13 @@ subtle = { version = "2.6.1", default-features = false }
 # `default-features = false` (or `--no-default-features`).
 #
 # Measured cost of the default configuration against `--no-default-features`,
-# AMD Ryzen 9 7945HX, re-measured for `v0.3`. The added work is four 65-byte
-# constant-time comparisons on **decrypt**, so it is a fixed per-message cost:
-# +25% at 64 B, +24% at 256 B, +23% at 1 KiB, +11% at 4 KiB, and within the noise
-# floor from 16 KiB up. Encryption pays nothing for it, so a round-trip figure
-# shows a smaller, noisier fraction of the same cost. `performance.md` is the
-# source.
+# AMD Ryzen 9 7945HX, re-measured for `v0.3`. The added work is three more 65-byte
+# constant-time comparisons on **decrypt** — four in the default build, against the
+# opt-out build's single pass — plus the eight-byte fold, so it is a fixed
+# per-message cost: +25% at 64 B, +24% at 256 B, +23% at 1 KiB, +11% at 4 KiB, and
+# within the noise floor from 16 KiB up. Encryption pays nothing for it, so a
+# round-trip figure shows a smaller, noisier fraction of the same cost.
+# `performance.md` is the source.
 #
 # This is not a claim of fault-injection resistance. It defends against a single
 # fault on the decision only; two faults, a targeted fault in the tag computation
@@ -171,8 +194,10 @@ rng = ["dep:getrandom"]
 
 # Force BLAKE3's portable Rust backends. Off by default: the native ones are
 # faster, and BLAKE3 falls back to the Rust ones automatically when the target
-# has no compiler. Turn this on when cross-compiling to a target with C kernels
-# and no cross C toolchain, or when running under Miri.
+# has no compiler -- except on little-endian aarch64, where its NEON kernels are
+# attempted unconditionally (see the note on the `blake3` dependency above).
+# Turn this on when cross-compiling to such a target without a cross C toolchain,
+# or when running under Miri.
 pure = ["blake3/pure"]
 
 [[bench]]

@@ -227,6 +227,162 @@ fn has_division(line: &str) -> bool {
     false
 }
 
+/// `text` with `//` line comments and `/* … */` block comments removed, and string-literal
+/// contents blanked so nothing inside one is scanned.
+///
+/// [`has_division`] and [`count_keyword`] already handle `//` and string literals per line,
+/// but neither can see a `/* … */` block: a division or a branch moved into one kept its
+/// line in the inventory. Removing comments (and blanking literal contents) before the
+/// per-line scans closes that. `libtest` cannot share items between test binaries, so the
+/// scanner is copied from `tests/decision_scope.rs`, `tests/counter_range.rs`,
+/// `tests/ultra.rs` and `tests/locked.rs` rather than imported.
+fn strip_comments(text: &str) -> String {
+    #[derive(PartialEq)]
+    enum Mode {
+        Code,
+        Line,
+        Block,
+        Str,
+        /// Inside a raw string (`r"…"`, `r#"…"#`), whose contents are dropped.
+        RawStr(u8),
+    }
+    let b = text.as_bytes();
+    let mut out = String::with_capacity(text.len());
+    let mut mode = Mode::Code;
+    let mut i = 0usize;
+    while i < b.len() {
+        let c = b[i];
+        match mode {
+            Mode::Code => {
+                if c == b'/' && b.get(i + 1) == Some(&b'/') {
+                    mode = Mode::Line;
+                    i += 2;
+                } else if c == b'/' && b.get(i + 1) == Some(&b'*') {
+                    mode = Mode::Block;
+                    i += 2;
+                } else if let Some((prefix, hashes)) = raw_string_prefix(&b[i..]) {
+                    // A raw string (`r"…"`, `r#"…"#`, `br#"…"#`): its contents are
+                    // dropped like any other literal's, with the prefix and the closing
+                    // quotes kept. Without this the scanner re-enters code mode at the
+                    // first `"` inside the string, and the text between two quotes is
+                    // scanned as code — `let _ = r#"x" scrub_stack(); "x"#;` used to
+                    // satisfy a `scrub_stack();` count while the real call was spelled
+                    // with a space.
+                    for k in 0..=prefix {
+                        out.push(b[i + k] as char);
+                    }
+                    i += prefix + 1;
+                    mode = Mode::RawStr(hashes);
+                } else if c == b'\'' {
+                    // A char literal is opaque, and this must come before the `"` case:
+                    // `'"'` is a char literal whose *closing* quote would otherwise open
+                    // `Mode::Str` and swallow the rest of the scan. A lifetime (`&'a`)
+                    // and a lone apostrophe have no closing quote, so the look-ahead
+                    // tests for one of the two literal shapes and otherwise treats the
+                    // `'` as an ordinary byte.
+                    let escaped = b.get(i + 1) == Some(&b'\\') && b.get(i + 3) == Some(&b'\'');
+                    if escaped || b.get(i + 2) == Some(&b'\'') {
+                        i += if escaped { 4 } else { 3 };
+                    } else {
+                        out.push('\'');
+                        i += 1;
+                    }
+                } else if c == b'"' {
+                    // Keep the opening quote; the contents are dropped in `Mode::Str`
+                    // and the closing quote is kept there.
+                    out.push('"');
+                    mode = Mode::Str;
+                    i += 1;
+                } else {
+                    out.push(c as char);
+                    i += 1;
+                }
+            }
+            Mode::Line => {
+                if c == b'\n' {
+                    out.push('\n');
+                    mode = Mode::Code;
+                }
+                i += 1;
+            }
+            Mode::Block => {
+                if c == b'*' && b.get(i + 1) == Some(&b'/') {
+                    mode = Mode::Code;
+                    i += 2;
+                } else {
+                    if c == b'\n' {
+                        out.push('\n'); // keep line numbers aligned
+                    }
+                    i += 1;
+                }
+            }
+            Mode::Str => {
+                if c == b'\\' {
+                    i += 2; // skip the escaped byte (including `\"`)
+                } else if c == b'"' {
+                    out.push('"');
+                    mode = Mode::Code;
+                    i += 1;
+                } else {
+                    // Drop the contents so no byte inside a literal is scanned.
+                    i += 1;
+                }
+            }
+            Mode::RawStr(hashes) => {
+                let h = hashes as usize;
+                // The terminator is `"` followed by as many `#`s as opened the string;
+                // until then every byte (quotes included) is contents, so it is dropped.
+                // Newlines are kept so line positions stay comparable.
+                if c == b'"'
+                    && b.len() >= i + 1 + h
+                    && b[i + 1..i + 1 + h].iter().all(|&x| x == b'#')
+                {
+                    out.push('"');
+                    for _ in 0..h {
+                        out.push('#');
+                    }
+                    i += 1 + h;
+                    mode = Mode::Code;
+                } else {
+                    if c == b'\n' {
+                        out.push('\n');
+                    }
+                    i += 1;
+                }
+            }
+        }
+    }
+    out
+}
+
+/// `(bytes before the opening quote, hash count)` when `b` starts a raw string literal
+/// (`r"…"`, `r#"…"#`, `br"…"`, `br#"…"#`); `None` otherwise.
+///
+/// A raw identifier (`r#name`) is not a string — the byte after its hashes is not a
+/// quote — and a plain `"…"` is handled by `Mode::Str`.
+fn raw_string_prefix(b: &[u8]) -> Option<(usize, u8)> {
+    let mut i = 0usize;
+    if b.get(i) == Some(&b'b') {
+        if b.get(i + 1) != Some(&b'r') {
+            return None;
+        }
+        i += 2;
+    } else if b.get(i) == Some(&b'r') {
+        i += 1;
+    } else {
+        return None;
+    }
+    let start = i;
+    while b.get(i) == Some(&b'#') {
+        i += 1;
+    }
+    if b.get(i) != Some(&b'"') {
+        return None;
+    }
+    // A raw string's hash count is tiny (the compiler caps it far below 256).
+    Some((i, (i - start) as u8))
+}
+
 #[test]
 fn variable_latency_operations_are_inventoried() {
     // Both files the crate compiles in its widest configuration, so a division added
@@ -238,15 +394,21 @@ fn variable_latency_operations_are_inventoried() {
         ("src/lib.rs", include_str!("../src/lib.rs")),
         ("src/witness.rs", include_str!("../src/witness.rs")),
     ];
-    let found: BTreeSet<String> = sources
-        .iter()
-        .flat_map(|(_, src)| {
-            let cut = src.find("mod tests {").unwrap_or(src.len());
-            src[..cut].lines()
-        })
-        .filter(|l| has_division(l))
-        .map(|l| l.trim().to_string())
-        .collect();
+    // Block comments are removed by `strip_comments` *before* `has_division` runs. The
+    // per-line function strips `//` and string literals but scanned `/* … */` as code, so
+    // a real division moved behind a block comment (with an equivalent spelling that has
+    // no `/` or `%` left in the code) kept its line in `found` and the inventory stayed
+    // green — the same guard-satisfied-by-a-comment shape the other files pin down.
+    let mut found: BTreeSet<String> = BTreeSet::new();
+    for (_, src) in sources {
+        let cut = src.find("mod tests {").unwrap_or(src.len());
+        let body = strip_comments(&src[..cut]);
+        for l in body.lines() {
+            if has_division(l) {
+                found.insert(l.trim().to_string());
+            }
+        }
+    }
     let allowed: BTreeSet<String> = ALLOWED.iter().map(|(l, _)| l.to_string()).collect();
 
     let added: Vec<&String> = found.difference(&allowed).collect();
@@ -361,7 +523,11 @@ fn control_flow_is_inventoried() {
              order: a missing row is a keyword nothing counts"
         );
         let cut = src.find("mod tests {").unwrap_or(src.len());
-        let body = &src[..cut];
+        // Comments stripped (see `variable_latency_operations_are_inventoried`): a branch
+        // wrapped in `/* … */` and replaced by an equivalent `let … else` used to keep its
+        // keyword counted, so a removed `if` was invisible to the table it is supposed to
+        // trip.
+        let body = strip_comments(&src[..cut]);
 
         let mut drifted = Vec::new();
         let mut report = String::new();

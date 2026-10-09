@@ -18,14 +18,29 @@
 //! What that does and does not buy, stated plainly, because "two implementations" invites
 //! over-reading:
 //!
-//! * **It does buy:** any fault confined to one implementation — the compressed keystream,
-//!   a corrupted comparison, a skipped round, a wrong constant, a pin on the tag, a fault in
-//!   the `blake3` dependency's own state. The two sides are computed by different code, so a
-//!   fault has to land on both, in the same way, to survive.
+//! * **It does buy:** any fault confined to one implementation, *on a path the caller
+//!   cross-checks in full*. The two decryption entry points compare both the recomputed
+//!   keystream (through the plaintext) and the tag, so a compressed keystream, a corrupted
+//!   comparison, a skipped round, a wrong constant, a pin on the tag or a fault in the
+//!   `blake3` dependency's own state has to land on both implementations, in the same way,
+//!   to survive. **Where the comparison is narrower, so is this bullet:** the allocating
+//!   `encrypt` cross-checks only the *tag* (`witness::encrypt_tag`; there is no witness
+//!   keystream), so a keystream fault there yields a correct tag over a corrupt ciphertext
+//!   and is caught by the receiver's `decrypt`, not locally — and
+//!   `encrypt_in_place_detached` carries no witness at all. Both asymmetries are
+//!   deliberate and stated in the README and `src/lib.rs`'s entry-point docs.
 //! * **It does not buy:** two faults, one in each implementation; a fault in the shared
 //!   *inputs* (a corrupted key byte corrupts both sides identically); a fault in the
 //!   comparison that ANDs the agreement itself; and anything physical — power, EM, a
 //!   hypervisor, cold boot. Those are the residual, and the README says so.
+//! * **It fails by `assert!`, not by `Result`, and that is deliberate.** The module's three
+//!   internal-contract checks — equal buffer lengths in `keystream_xor` and `decrypt`, and
+//!   the CV-stack bound in `CvStack::push` — are active in release and panic rather than
+//!   return an error. There is no caller to hand one to: the only caller is `src/lib.rs`,
+//!   which sizes every buffer it passes and bounds inputs by `MAX_MSG_SIZE`, so none of the
+//!   three is reachable from the public API today; and a witness that quietly gave up would
+//!   be worse than one that says why (the `CvStack::push` comment makes the same argument
+//!   locally).
 //!
 //! Cost is the point of `ultra`: this doubles the cipher and the MAC and allocates a second
 //! plaintext. It is not on unless the feature is, and the crate's default build does not
@@ -78,8 +93,10 @@ use crate::{DOM_ENC, DOM_PRE, DOM_TAG, NONCE_LEN, SUBKEY_DOMAIN, TAG_LEN};
 ///     in `Hasher::new_keyed`, the ones `block`/`hchacha20` build from the key and nonce as
 ///     they unpack them into state words, the one built from a message word in
 ///     `words_from_le_bytes`, and the per-word output copies in `hchacha20`. The sentence that
-///     used to stand here said
-///     these were wiped; nothing names them, so they are not. They are left rather than paid
+///     used to stand here said these were wiped; they are not — the inline array expressions
+///     have no local to name, and the two named `let mut b = [u8; 4]` locals
+///     (`Hasher::new_keyed`, `words_from_le_bytes`) go unwiped for the same cost reason as the
+///     inline ones. They are left rather than paid
 ///     for with a volatile store per word — four bytes of a 32-byte key is not a key, and
 ///     `tools/stack_residue.sh` searches for the whole value — and `scrub_stack` covers the
 ///     region afterwards under `ultra`.

@@ -22,6 +22,178 @@
 
 use xchacha20_blake3_siv::{DOM_ENC, DOM_PRE, DOM_TAG, SUBKEY_DOMAIN};
 
+/// `src/lib.rs` with comments removed and string-literal contents blanked, cut at
+/// `mod tests {`.
+///
+/// Every presence and count assertion in this file runs on this rather than on the raw
+/// text. `include_str!` text makes a `contains`/`count` satisfiable without the code: a use
+/// replaced by a comment carrying the same call, or by a dead string literal, kept its
+/// count — an audit moved `head[0..8].copy_from_slice(&DOM_PRE);` behind a block comment
+/// (with an equivalent `head[..8]` spelling) and all three tests here stayed green.
+/// `libtest` cannot share items between test binaries, so the scanner is copied from
+/// `tests/decision_scope.rs`, `tests/counter_range.rs`, `tests/ultra.rs` and
+/// `tests/locked.rs` rather than imported.
+fn non_test_source() -> String {
+    let src = include_str!("../src/lib.rs");
+    let cut = src.find("mod tests {").expect("the test module must exist");
+    strip_comments(&src[..cut])
+}
+
+/// See [`non_test_source`]: comments and string-literal contents are removed, with newlines
+/// kept so line positions stay comparable.
+///
+/// A small state machine rather than `find("//")`, because a `//` inside a string literal
+/// used to cut the rest of the line out of the scan — which hid a real call site from a
+/// count — and a `/* … */` block was scanned as code. Literal contents are dropped (the
+/// quotes remain, so a literal becomes `""`), so a *string* carrying the text cannot stand
+/// in for a statement either.
+fn strip_comments(text: &str) -> String {
+    #[derive(PartialEq)]
+    enum Mode {
+        Code,
+        Line,
+        Block,
+        Str,
+        /// Inside a raw string (`r"…"`, `r#"…"#`), whose contents are dropped.
+        RawStr(u8),
+    }
+    let b = text.as_bytes();
+    let mut out = String::with_capacity(text.len());
+    let mut mode = Mode::Code;
+    let mut i = 0usize;
+    while i < b.len() {
+        let c = b[i];
+        match mode {
+            Mode::Code => {
+                if c == b'/' && b.get(i + 1) == Some(&b'/') {
+                    mode = Mode::Line;
+                    i += 2;
+                } else if c == b'/' && b.get(i + 1) == Some(&b'*') {
+                    mode = Mode::Block;
+                    i += 2;
+                } else if let Some((prefix, hashes)) = raw_string_prefix(&b[i..]) {
+                    // A raw string (`r"…"`, `r#"…"#`, `br#"…"#`): its contents are
+                    // dropped like any other literal's, with the prefix and the closing
+                    // quotes kept. Without this the scanner re-enters code mode at the
+                    // first `"` inside the string, and the text between two quotes is
+                    // scanned as code — `let _ = r#"x" scrub_stack(); "x"#;` used to
+                    // satisfy a `scrub_stack();` count while the real call was spelled
+                    // with a space.
+                    for k in 0..=prefix {
+                        out.push(b[i + k] as char);
+                    }
+                    i += prefix + 1;
+                    mode = Mode::RawStr(hashes);
+                } else if c == b'\'' {
+                    // A char literal is opaque, and this must come before the `"` case:
+                    // `'"'` is a char literal whose *closing* quote would otherwise open
+                    // `Mode::Str` and swallow the rest of the scan. A lifetime (`&'a`)
+                    // and a lone apostrophe have no closing quote, so the look-ahead
+                    // tests for one of the two literal shapes and otherwise treats the
+                    // `'` as an ordinary byte.
+                    let escaped = b.get(i + 1) == Some(&b'\\') && b.get(i + 3) == Some(&b'\'');
+                    if escaped || b.get(i + 2) == Some(&b'\'') {
+                        i += if escaped { 4 } else { 3 };
+                    } else {
+                        out.push('\'');
+                        i += 1;
+                    }
+                } else if c == b'"' {
+                    // Keep the opening quote; the contents are dropped in `Mode::Str`
+                    // and the closing quote is kept there.
+                    out.push('"');
+                    mode = Mode::Str;
+                    i += 1;
+                } else {
+                    out.push(c as char);
+                    i += 1;
+                }
+            }
+            Mode::Line => {
+                if c == b'\n' {
+                    out.push('\n');
+                    mode = Mode::Code;
+                }
+                i += 1;
+            }
+            Mode::Block => {
+                if c == b'*' && b.get(i + 1) == Some(&b'/') {
+                    mode = Mode::Code;
+                    i += 2;
+                } else {
+                    if c == b'\n' {
+                        out.push('\n'); // keep line numbers aligned
+                    }
+                    i += 1;
+                }
+            }
+            Mode::Str => {
+                if c == b'\\' {
+                    i += 2; // skip the escaped byte (including `\"`)
+                } else if c == b'"' {
+                    out.push('"');
+                    mode = Mode::Code;
+                    i += 1;
+                } else {
+                    // Drop the contents so no byte inside a literal is scanned.
+                    i += 1;
+                }
+            }
+            Mode::RawStr(hashes) => {
+                let h = hashes as usize;
+                // The terminator is `"` followed by as many `#`s as opened the string;
+                // until then every byte (quotes included) is contents, so it is dropped.
+                // Newlines are kept so line positions stay comparable.
+                if c == b'"'
+                    && b.len() >= i + 1 + h
+                    && b[i + 1..i + 1 + h].iter().all(|&x| x == b'#')
+                {
+                    out.push('"');
+                    for _ in 0..h {
+                        out.push('#');
+                    }
+                    i += 1 + h;
+                    mode = Mode::Code;
+                } else {
+                    if c == b'\n' {
+                        out.push('\n');
+                    }
+                    i += 1;
+                }
+            }
+        }
+    }
+    out
+}
+
+/// `(bytes before the opening quote, hash count)` when `b` starts a raw string literal
+/// (`r"…"`, `r#"…"#`, `br"…"`, `br#"…"#`); `None` otherwise.
+///
+/// A raw identifier (`r#name`) is not a string — the byte after its hashes is not a
+/// quote — and a plain `"…"` is handled by `Mode::Str`.
+fn raw_string_prefix(b: &[u8]) -> Option<(usize, u8)> {
+    let mut i = 0usize;
+    if b.get(i) == Some(&b'b') {
+        if b.get(i + 1) != Some(&b'r') {
+            return None;
+        }
+        i += 2;
+    } else if b.get(i) == Some(&b'r') {
+        i += 1;
+    } else {
+        return None;
+    }
+    let start = i;
+    while b.get(i) == Some(&b'#') {
+        i += 1;
+    }
+    if b.get(i) != Some(&b'"') {
+        return None;
+    }
+    // A raw string's hash count is tiny (the compiler caps it far below 256).
+    Some((i, (i - start) as u8))
+}
+
 /// The cryptographic calls in the non-test source, with how many call sites each has.
 ///
 /// These are the seven uses of §4.10, plus the one call outside the construction:
@@ -62,23 +234,27 @@ const PRIMITIVE_CALLS: &[(&str, usize)] = &[
 
 #[test]
 fn the_primitive_uses_are_the_ones_the_analysis_covers() {
-    let src = include_str!("../src/lib.rs");
-    let cut = src.find("mod tests {").expect("the test module must exist");
-    let body = &src[..cut];
+    // Comments and string-literal contents stripped: a use replaced by a comment (or by a
+    // dead literal) carrying the same call must not keep its count.
+    let body = non_test_source();
 
     let mut report = String::new();
     for (call, expected) in PRIMITIVE_CALLS {
-        let found = body
+        // Occurrences, not lines: a second call added to a line that already carried one
+        // left the old count when this counted lines. The definition line is still
+        // skipped -- it contains the name without being a call -- by its trimmed start,
+        // not by a substring anywhere on the line.
+        let found: usize = body
             .lines()
             .filter(|l| {
-                let code = l.split("//").next().unwrap_or("");
-                // The definitions themselves are not call sites.
-                !code.trim_start().starts_with("fn ")
-                    && !code.trim_start().starts_with("pub fn ")
-                    && !code.trim_start().starts_with("unsafe fn ")
-                    && code.contains(call)
+                let code = l.trim_start();
+                !code.starts_with("fn ")
+                    && !code.starts_with("pub fn ")
+                    && !code.starts_with("unsafe fn ")
+                    && !code.starts_with("pub(crate) fn ")
             })
-            .count();
+            .map(|l| l.matches(call).count())
+            .sum();
         report.push_str(&format!(
             "      {call:<28} {found} (analysis says {expected})\n"
         ));
@@ -111,6 +287,39 @@ fn the_primitive_uses_are_the_ones_the_analysis_covers() {
     );
 }
 
+/// **Where the derivation blocks are consumed.** The census above counts the two
+/// `chacha20_keystream_raw` calls but cannot see what their output is *used* for: an audit
+/// changed `k_in.copy_from_slice(&block0[0..32]);` to read `block1` -- the wrong tag key, a real
+/// KDF change -- and this file stayed green (the sibling differential and KAT tests caught it).
+/// These three lines are the consumption half of U2 in §4.10's case analysis: counter 0's block
+/// splits into the two tag keys, counter 1's block seeds the encryption key.
+#[test]
+fn the_derivation_slices_are_the_analyzed_ones() {
+    let body = non_test_source();
+    for (site, what) in [
+        (
+            "k_in.copy_from_slice(&block0[0..32]);",
+            "the inner tag key must be the first half of counter 0's block",
+        ),
+        (
+            "k_out.copy_from_slice(&block0[32..64]);",
+            "the outer tag key must be the second half of counter 0's block",
+        ),
+        (
+            "enc_seed.copy_from_slice(&block1[0..32]);",
+            "the encryption seed must be the first half of counter 1's block",
+        ),
+    ] {
+        assert_eq!(
+            body.matches(site).count(),
+            1,
+            "the derivation slice `{site}` must be written exactly once ({what}); a \
+             `block0`/`block1` or offset change here is a different key schedule, and \
+             §4.10's case analysis plus the KAT values have to be re-checked"
+        );
+    }
+}
+
 /// **Lemma S1**: the three keyed-BLAKE3 families have disjoint input spaces.
 ///
 /// The inner tag hash is computed over `DOM_PRE ‖ …`, the outer over `DOM_TAG ‖ X`, and the
@@ -140,9 +349,11 @@ fn the_three_blake3_input_spaces_are_disjoint() {
     // "disjoint input spaces" lemma says nothing about the bytes actually hashed. (A swap of
     // the two tag-hash prefixes is also caught by `test_tag_matches_blake3_over_the_documented_input`,
     // but pinning it here keeps this lemma self-contained rather than resting on another test.)
-    let src = include_str!("../src/lib.rs");
-    let cut = src.find("mod tests {").expect("the test module must exist");
-    let body = &src[..cut];
+    //
+    // Comments and literal contents stripped by `non_test_source`: a block comment carrying
+    // `head[0..8].copy_from_slice(&DOM_PRE);` (behind an equivalent `head[..8]` spelling)
+    // used to satisfy this.
+    let body = non_test_source();
     for (site, what) in [
         (
             "head[0..8].copy_from_slice(&DOM_PRE);",
@@ -196,9 +407,11 @@ fn the_derivation_nonce_does_not_use_xchacha20s_nul_padding() {
     // file made the assertion true even with the real write at `derive_material` deleted — a
     // guard satisfied by the test that was supposed to need it. The sibling test above already
     // cuts at `mod tests {`; this one did not.
-    let src = include_str!("../src/lib.rs");
-    let cut = src.find("mod tests {").expect("the test module must exist");
-    let body = &src[..cut];
+    //
+    // And it now reads `non_test_source`: cutting alone left the assertions satisfiable by a
+    // block comment or a dead string literal carrying the same line, which is the same
+    // guard-satisfied-by-a-comment shape one level down.
+    let body = non_test_source();
     assert!(
         body.contains("subkey_nonce[0..4].copy_from_slice(&SUBKEY_DOMAIN);"),
         "the label is no longer written into the nonce's first four bytes"

@@ -8,6 +8,128 @@ green push to `main` — which are build artefacts of that job, not construction
 
 ## Unreleased
 
+### The v7 pre-emption round: code defects, tests and gates that could not fail, and the forgery term
+
+A seventh audit round (`audit_v7` and a fresh line-by-line report) was in flight while this round
+ran; this closes what it had found before it published. Its own full report of `5a48def` records
+**0 open findings**, so everything below is either from its working notes or found while verifying
+them against the tree. **No wire-format change.**
+
+**Code defects** (each verified against the code, fixed, and checked with an experiment):
+
+- **`lock_range`'s rollback left pages non-dumpable.** When `madvise(MADV_DONTDUMP)` failed the
+  function munlocked and returned `Err` — but a partial call can already have flagged the VMAs it
+  walked, and `VM_DONTDUMP` is sticky, so a refused lock could leave a buffer `unlock_range` never
+  sees permanently out of core dumps. The failure branch now restores `MADV_DODUMP` over the same
+  range first. Verified against `VmFlags`: before, `Err(-12)` with `dd` set; after, `Err(-12)`
+  with `dd` clear.
+- **`/proc` descriptors were opened without `O_CLOEXEC`** (`open_ro`), so a fork/exec from another
+  thread between the open and the read could inherit one. Added — `0o2000000`, checked against the
+  platform headers and the `libc` crate for x86_64 and aarch64 — and visible in the release
+  disassembly as `openat(…, 0x80000)` at both call sites.
+- **`ultra`'s rejection paths in `encrypt` left the computed 65-byte tag unwiped**, though they
+  wipe `k_in`/`k_out`/`enc_seed` and the ciphertext. It is the KDF's input, and secret-derived; it
+  is now wiped on both the `decision0` and `decision1` branches, with a scratch test that observes
+  it.
+- **`stack_requirement_bytes()` under-reported the `dual-mac` need.** It returned 16 KiB, which is
+  the `scrub_stack` *frame* alone (16,408 bytes in a release build); the ordinary frames around it
+  were another ~10 KiB — a 4 KiB round trip overflowed a 24,576-byte thread and fitted in 26,624.
+  It now reports **32 KiB** (that need with margin), and its doc says what the number covers, what
+  it excludes, and that the measurement is a release one. `README.md` and `performance.md` were
+  quoting 16 KiB as if it were the budget; they now give the frame and the budget separately.
+
+**Tests that could not fail** — each reproduced by injecting the fault into a throwaway copy, then
+shown red after the fix:
+
+- `tests/decision_scope.rs`'s fold-shape test asserted substrings, so `acc |= x;` →
+  `acc |= x & 0;` (a constant fold) passed every configuration; the fold is pinned line by line now.
+- The `ultra` witness agreement was pinned only by counts and substrings, so a witness whose tag
+  ignores the AAD plus both `witness_ok` blocks rewritten to `subtle::Choice::from(1)` passed
+  everything; each block's *return value* is pinned now.
+- The default build never pinned the second gate's operands, so
+  `second_gate_comparison(&computed_tag_copy, &computed_tag_copy)` was accepted by the whole default
+  suite; both call sites are pinned.
+- Deleting `zeroize_array(&mut enc_key);` from `encrypt` was undetected by all four test files and
+  all 50 lib tests; every named secret buffer is now asserted wiped, per entry point.
+- The per-position tamper sweeps asserted only `is_err()`, so under a tag computation broken to hash
+  an empty message they passed *vacuously* — the only two green tests. Each sweep now authenticates
+  the untampered row first.
+- `tests/construction_inventory.rs` was a count tripwire (swapping `block0` for `block1` in the
+  derivation stayed green) and counted *lines* rather than occurrences; both fixed.
+  `tests/counter_range.rs`'s census skipped any line containing `fn `, so a one-line function hid a
+  call — the auditor's suggested rule does not close it, a name-aware skip does.
+- `tests/locked.rs`'s `XSIV_ALLOW_UNLOCKED` skips and two of `tests/ultra.rs`'s kernel-refusal skips
+  now print the `SKIPPED (allowed by …)` line their sibling branches already printed.
+- `tests/ctgrind.rs` was a no-op outside valgrind that still reported four `ok`s: its tests are now
+  ignored except in the static build `tools/ctgrind.sh` makes, and assert a live valgrind
+  client-request path when they do run. `tools/ctgrind.sh` was re-run end to end afterwards.
+- `tests/timing.rs`'s tag-position screen could not fail for the leak it names (both classes were
+  mixtures over the first-mismatch position, because the received tag feeds the KDF); it now
+  encrypts an empty message, which makes the two classes a clean byte-0-vs-byte-64 mismatch. And
+  `ci.yml` gained a deterministic blocking step that both screens still *exist* in a release build.
+
+**Gates that could not fail** — each shown able to be neutered, then pinned by a new self-test check:
+
+- `tools/fi_instruction.sh`'s `nop` model could not tell a blind detector from a healthy one:
+  blinding every `is_err()` assertion in `tests/decision.rs` produced a byte-identical all-zero map.
+  It now runs a **sensitivity control** — a scratch copy with a forced accept, whose forgery the
+  decision test must report — before any sweep verdict.
+- `tools/mutation_check.sh`'s ctgrind row re-implemented the check instead of running
+  `tools/ctgrind.sh`, so replacing the tool with `exit 0` left the row green; it now execs the
+  shipped tool (keeping `--no-default-features`, the configuration where the planted leak is visible
+  at all).
+- `tools/check_kani_cfg.sh` passed with `src/proofs.rs` emptied; it now requires the harness count
+  `tools/kani_shards.py` derives to be at least the committed 13, and plants its control inside that
+  module.
+- `tools/stack_residue.sh` pushed its own snapshot frame — and a `Vec` — into the painted region
+  before reading it, so the *shallowest* frames (the freshest residue) were what it overwrote: a
+  planted 32-byte copy was visible to an in-place scan and 2 bytes to the snapshot. It now scans in
+  place, and finds the plant. Its master-key threshold also dropped from 16 to 8 bytes, so a 12-byte
+  run that printed `master: 12 B` now fails instead of passing.
+- `verify.sh`: the cargo-test stages had no ran-count guard (emptying a test file left them green);
+  `--deep`/`--all` omitted CI's `cache_profile --trace` and `stack_residue --ultra`; a
+  `stack_residue` finding could never fail a run even under `--deep`; an exported
+  `XSIV_IN_GATE_SELFTEST=1` silently removed verify.sh's own control; and `FUZZ_SECONDS=08` died
+  mid-stage. All five fixed, with `tools/gate_selftest.sh` checks that pin them — and its older
+  checks now require the guard's own reason, not merely a non-zero exit.
+
+**Claims and mathematics:**
+
+- **The per-query forgery probability was priced only at `2^-520`** (`SECURITY-ANALYSIS.md`'s hop 5,
+  the DAE bound, §4.5's table and §5.1; `README.md`'s concrete bound). A query computed *offline
+  under a guessed key* is accepted with probability `≈ 2^-256` — the same 256-bit `subkey` object
+  the commitment rows were corrected to — so the per-query term is `2^-256 + 2^-520` and the
+  multi-key forgery term is `Q·q·2^-256` (`2^-192` at `Q = q = 2^32`, where the document had
+  `2^-456`). The *strength* headline, `min(2^256, 2^520) = 2^256`, is unchanged.
+- The claimed **L3.6 separation did not separate** the `v0.2` tag: it keyed the hash with `D(K)`
+  while the message carried the master `K`, so the composed map is not identically zero. The example
+  is scoped to the key-dependent-input shape it does separate, and the gap now rests where it
+  belonged — on the reduction-impossibility argument, labelled as such.
+- The **context route's obstruction was misattributed**: a cross-nonce `X` collision is still a
+  `2^128` birthday; what blocks the completion is that a nonce change also moves the derived
+  keystream, unless the KDF itself collides at `≈2^-352`. `README.md` and §4.10 now say so.
+- **"success ≈ 0.63"** is `P(at least one second key)`; the single-output game is `≈0.368`. Both are
+  stated where the number appears.
+- The MITM row's "`2^128` time with `2^128` memory" does not hold for a single target; qualified.
+- Plus: `N[16..24]` keys the *derivation* block, not the message cipher's nonce; the fault sweeps
+  are one chosen bit per byte, not "every single-bit corruption"; `SECURITY.md`'s "one tolerated
+  secret-dependent decision" is scoped to the AEAD path (the crate header names three, and `locked`'s
+  `check_integrity` is a fourth that ctgrind never executes — `tests/ctgrind.rs` has no `LockedKey`);
+  `deny_debugging` issues two `prctl` calls, not one; the two fault-total runs are labelled so they
+  cannot read as a disagreement; and a dozen smaller comment claims (the `vpbroadcastd` count, an
+  inverted binomial tail, "every bit position", "a collision in a permutation", the `Plaintext` doc
+  attached to the wrong test, the witness's buy-list scope, a `stack_requirement` measurement, a
+  weekly-vs-nightly comment).
+
+**Coverage and packaging:** the fuzz target now exercises a second key and nonce (a key-ignoring
+build used to survive 275,209 executions), a non-empty-AAD arm, the empty↔non-empty AAD swap, and
+`decrypt_bounded`'s two arms; the benchmarks assert correctness before timing rather than only
+rejecting `Err`; the round trip's throughput label is `2*size`; `Cargo.toml` gained a
+`package.include` list (the published crate was shipping `.github/`, the internal audit documents
+and `mutants.out/` — 108 files, now 20); `deny.toml`'s comments match the 12-crate non-dev graph it
+actually checks; and `deep.yml`'s "every night" became "weekly" (its cron), its tool versions are
+pinned, and its scheduled fuzz run gained the witness-symbol check the other two already had.
+
 ### The v5 verification pass: a scale model of the commitment bound, a third silent exit, and a route's name
 
 A fifth audit pass (`audit_v5`) independently verified the three commits above. It re-derived the
@@ -86,11 +208,12 @@ fails the self-test — the auditor had shown that deleting it was invisible.
   decryption's crossover as 16 KiB.
 - **`mutants.out/` does not describe HEAD, while `tests/README.md` claimed the match was
   enforced.** The recorded coordinates are the run's (`mutants.out/diff`'s hunk headers and
-  `unviable.txt` match the `a2a046d` tree; `accept_or_reject` has since moved +231 lines), and
-  `tools/mutation_evidence.py` deliberately keys on `(function, genre, replacement, occurrence)`
-  and never reads line/column — so the enforced invariant is the **mutant→outcome mapping**, not
-  the coordinates. Regenerating the evidence would mean re-running the campaign, and rewriting the
-  line numbers by hand would fabricate outcomes for sites that were never mutated, so the **claim**
+  `unviable.txt` match the `a2a046d` tree; `accept_or_reject` has since moved — +231 lines at
+  `ca5b8a8` and +262 at `e340df2`), and `tools/mutation_evidence.py` deliberately keys on
+  `(function, genre, replacement, occurrence)` and never reads line/column — so the enforced
+  invariant is the **mutant→outcome mapping**, not the coordinates. Regenerating the evidence would
+  mean re-running the campaign, and rewriting the line numbers by hand would fabricate outcomes for
+  sites that were never mutated, so the **claim**
   was corrected instead, in `tests/README.md` and in the tool's own docstring and messages: the
   mapping is what is checked, an external reader following a recorded line number lands in the
   wrong place, and only a fresh campaign re-syncs the coordinates.
@@ -123,6 +246,18 @@ is gone: `git log -S` shows the named temporary it referred to was never wiped i
 the saving is unmeasured here. `tools/kani_shards.py`'s single 1:01 figure and `src/proofs.rs`'s
 37 s now agree as a host-dependent range (33–61 s), and `tools/mutation_evidence.py`'s and
 `tools/kani_shards.py`'s own wording moved with the claims they support.
+
+**The report's last two 低 items** were fixed in the follow-up commit `4545d8d`, each verified
+from the packages rather than from the report. `deny.toml`'s grouped licence examples named the
+wrong crates and — the actual error — counted `BSD-3-Clause` as covered by the MIT/Apache pair:
+read from `cargo metadata` and the registry manifests, `blake3@1.8.7` is `CC0-1.0 OR
+Apache-2.0 OR Apache-2.0 WITH LLVM-exception`, `subtle@2.6.1` is `BSD-3-Clause` and nothing else
+(so genuinely required), and `arrayvec@0.7.8` is `MIT OR Apache-2.0`; the allow-list itself was
+already sufficient, and `cargo deny --offline check licenses` passes. `Cargo.toml`'s
+aarch64-musl note had the mechanism and the target list wrong: only aarch64 is a hard failure
+without a cross C toolchain (`blake3` 1.8.7 builds its NEON kernels unconditionally on
+little-endian aarch64 when `pure` is off, with no compiler probe on that path), while the x86_64
+and i686 paths probe and fall back to the Rust backends.
 
 ### The key-commitment target bound is the 256-bit `subkey`, not the 520-bit tag
 
@@ -380,7 +515,7 @@ byte, and the rest are claims that no longer matched the tree. **No wire-format 
   `scrub_stack` to "the `ultra` layer" (each is its own feature, which `ultra` merely includes),
   and said `LockedKey`'s key "lives behind a `Box`" (it lives in a page of its own).
 
-: a fault row that ran no tests, an abort in `ultra`, and nine smaller defects
+### Four audits and a fix round: a fault row that ran no tests, an abort in `ultra`, and nine smaller defects
 
 A fresh adversarial pass over the tree — four independent read-only audits (core construction
 and API; witness and Kani; tools and workflows; tests and doc claims), every candidate then

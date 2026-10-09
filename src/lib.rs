@@ -90,8 +90,9 @@
 //! Key properties:
 //!
 //! - 520-bit tag (65 bytes), committing **against a given ciphertext** (the *target*
-//!   game; the literature's CMT-1/CMT-3 are *attacker-chosen* and are a different game
-//!   this crate does not put a number on): an attacker must reproduce a *fixed* value, but
+//!   game; the literature's CMT-1/CMT-3 are *attacker-chosen*, a different game whose key
+//!   and context routes are priced at `2^128` in the table below and whose different-message
+//!   route is not assigned a number): an attacker must reproduce a *fixed* value, but
 //!   that value is the 256-bit `subkey = HC(K′, N₁)`, not the 520-bit tag — an event of
 //!   probability `≈ 2^-256` per candidate key, so a full sweep of the key space expects
 //!   `≈ 1` second key (success `≈ 0.63`), i.e. key-search level.  The width does **not**
@@ -128,7 +129,7 @@
 //! | Confidentiality | 256-bit | the ChaCha20 key |
 //! | Forgery resistance | **256-bit** | BLAKE3 keyed mode as a PRF over a 256-bit key |
 //! | Key commitment against a given ciphertext | **`≈ 2^-256` per candidate key** — `≈ 1` second key over the whole key space (the *target* game) | the 256-bit `subkey` the tag and the keystream are both derived from, **not** the tag's width |
-//! | Context commitment (nonce/AAD) | **`≈ 2^256`** target / **`2^128`** attacker-chosen | the 256-bit inner digest the context feeds, not the tag's width |
+//! | Context commitment (the AAD; the nonce also enters `k_in`/`k_out`/`enc_seed`, so a context route holds it fixed) | **`≈ 2^256`** target / **`2^128`** attacker-chosen | the 256-bit inner digest the context feeds, not the tag's width |
 //! | Attacker-chosen commitment (the literature's CMT-1/CMT-3) | **key route `2^128`, context route `2^128`** — both with identical plaintexts; the different-message salamander is not assigned a number | the `subkey` collision and the inner-digest collision, each a birthday |
 //! | Collision resistance of the tag | **2^128** | the 256-bit chaining value the tag is a function of, not the tag's width |
 //!
@@ -137,7 +138,9 @@
 //! and a longer tag does not raise it.  **Nor does it raise collision
 //! resistance**: the tag is a function of a 256-bit chaining value, so a
 //! collision costs `2^128` by birthday whatever the output length is.  (Commitment
-//! is not a birthday property at all — see below.)
+//! *against a given ciphertext* is not a birthday property at all — see below.  The
+//! attacker-chosen routes in the table above **are** birthdays, and the table prices
+//! them as such.)
 //!
 //! **Commitment: a *target* property, not a birthday one — and the width is not what sets
 //! it.** A second key that opens a given ciphertext must reproduce a fixed value, and that
@@ -256,9 +259,9 @@
 //!
 //! # Formal verification
 //!
-//! Construction properties (limb arithmetic, carry propagation, buffer wiping,
-//! counter sequencing, length limits) are proved with Kani bounded model
-//! checking; the harnesses live in the `proofs` module and are compiled only
+//! Construction properties (buffer wiping, counter sequencing, length limits, the
+//! tag's input layout and its MAC argument shapes) are proved with Kani bounded
+//! model checking; the harnesses live in the `proofs` module and are compiled only
 //! under `cfg(kani)`.
 //!
 //! ```text
@@ -396,9 +399,12 @@ pub const KEY_LEN: usize = 32;
 ///   because there the value is fixed by someone else (and for the second key the object to
 ///   reproduce is the 256-bit `subkey`, not the tag at all). So `2^128` bounds collision
 ///   properties (§3 Corollary's two-time-pad event) and says nothing about forgery;
-/// * **forgery is unchanged**, and is bounded by the key (`2^256`) rather than by the tag:
-///   key search dominates whatever the tag length, since guessing a 32-byte tag costs `2^-256`
-///   per guess and searching the key costs `2^256`.
+/// * **forgery is unchanged**, and at this width is bounded by the key (`2^256`) rather than
+///   by the tag: guessing the 65-byte tag costs `2^-520` per guess against the `2^256` key
+///   search, so the key dominates — and the two cross at a 32-byte tag, where a guess costs
+///   `2^-256`, the same as the key search. (Below that the tag would set the bound — the
+///   second reason a revision cannot shorten the width much; the first is the commitment
+///   route above.)
 ///
 /// (The bullet list above was duplicated once, verbatim but for the collision entry, in the
 /// revision that introduced the commitment correction — a merge artefact in the one doc
@@ -459,17 +465,23 @@ pub const DOM_ENC: [u8; 8] = *b"XSIV-ENC";
 /// Extra stack, in bytes, that one call into this crate may touch below its entry point.
 ///
 /// Non-zero only under `dual-mac` (and therefore `ultra`), where the entry points call
-/// `scrub_stack` to overwrite the call-chain region the key derivations used: that overwrite is
-/// a single **16 KiB frame**, so a thread whose remaining stack is smaller faults inside the
-/// function rather than returning. The README's layer table carries the measurement (a 32 KiB
-/// thread survives ~16 KiB of prior consumption without this feature and fails at 8 KiB with
-/// it); this function is that number as a value a caller can check, because "size your threads
-/// for it" is advice and `stack_size(stack_requirement_bytes() + margin)` is a build step.
+/// `scrub_stack` to overwrite the call-chain region the key derivations used. That overwrite is
+/// a single **16 KiB frame** — 16,408 bytes in a release x86_64 build, the buffer plus the saved
+/// registers — and the ordinary frames around it (the derivations, the tag buffers, the SIMD
+/// kernels, the allocator) were another ~10 KiB in the same measurement: an audit measured a
+/// 4 KiB round trip overflowing a 24,576-byte thread and fitting 26,624. This function reports
+/// **32 KiB** — that measured need with margin — because "size your threads for the scrub frame"
+/// was advice in a table row, and `stack_size(stack_requirement_bytes() + margin)` is a build
+/// step. The README's layer table carries the measurement's other half (a 32 KiB thread survives
+/// ~16 KiB of prior consumption without this feature and fails at 8 KiB with it).
 ///
-/// Zero means "no large fixed frame" — not a promise that the crate uses no stack at all: the
-/// derivations, the tag buffers and the SIMD kernels are ordinary frames, in the hundreds of
-/// bytes, and a caller that gives a thread a stack smaller than that has a problem no constant
-/// can describe.
+/// Zero means "no large fixed frame" — not a promise that the crate uses no stack at all:
+/// outside `dual-mac` the derivations, the tag buffers and the SIMD kernels are ordinary frames,
+/// in the hundreds of bytes to a few kilobytes, and none of them is large enough to be worth a
+/// named budget. A caller that gives a thread less stack than those need has a problem no
+/// constant can describe either. The measurement above is a release one; unoptimized frames are
+/// several times larger, which is why the in-crate test of this value adds a 1 MiB margin under
+/// `debug_assertions` (64 KiB in release) rather than treating the constant as the whole budget.
 ///
 /// ```no_run
 /// # #[cfg(feature = "dual-mac")]
@@ -481,7 +493,7 @@ pub const DOM_ENC: [u8; 8] = *b"XSIV-ENC";
 pub const fn stack_requirement_bytes() -> usize {
     #[cfg(feature = "dual-mac")]
     {
-        16 * 1024
+        32 * 1024
     }
     #[cfg(not(feature = "dual-mac"))]
     {
@@ -578,6 +590,11 @@ impl core::error::Error for Error {}
 /// be used anywhere a byte slice is expected.
 ///
 /// `Debug` deliberately prints only the length, never the contents.
+///
+/// The wipe covers *this* buffer. As with [`Key`]'s `Deref`, a copy made through
+/// the deref — `to_vec()`, `to_owned()`, an explicit `&*pt` — is an ordinary heap
+/// allocation the caller owns and this type cannot reach, so it is not wiped when
+/// this value drops.
 pub struct Plaintext(Vec<u8>);
 
 impl Plaintext {
@@ -1037,9 +1054,10 @@ pub mod random {
 // half of the wipe story, which is why it is opt-in rather than default: it changes what
 // the process asks of the kernel, not what the crate computes.
 //
-// Availability: Linux only. On any other target the functions are no-ops that report
-// "not locked", so a caller can decide what to do about it (and the default build never
-// calls them).
+// Availability: Linux only. On any other target the functions are stubs that report the
+// platform limit rather than pretending (`lock_range` and `deny_debugging` return `ENOSYS`,
+// `locked_bytes` and `is_dumpable` return `None`, and `unlock_range` is a no-op), so a caller
+// can decide what to do about it (and the default build never calls them).
 /// Locking keys out of swap and core dumps (the `locked` feature; `ultra` includes it).
 ///
 /// The volatile-store wipe this crate uses everywhere reaches the bytes the process owns
@@ -1076,12 +1094,13 @@ pub mod locked {
     ))]
     mod imp {
 
-        // Sycall numbers, from the kernel's own headers -- `unistd_64.h` on x86_64
+        // Syscall numbers, from the kernel's own headers -- `unistd_64.h` on x86_64
         // (mlock 149, munlock 150, madvise 28) and `asm-generic/unistd.h` everywhere
         // else (mlock 228, munlock 229, madvise 233). Having these in a `const` that a
         // test checks against `/usr/include` would be circular; what is checked instead
-        // is *behaviour*: `lock` must make `is_locked` true, and `mlock` is the only
-        // call that can do that through this path.
+        // is *behaviour*: `lock_range` must make the kernel report the page as locked
+        // (`tests/locked.rs` reads `Locked:` back from `/proc/self/smaps`), and `mlock`
+        // is the only call that can do that through this path.
         #[cfg(target_arch = "x86_64")]
         const NR_MLOCK: usize = 149;
         #[cfg(target_arch = "x86_64")]
@@ -1189,6 +1208,15 @@ pub mod locked {
         /// call clears a `VM_DONTDUMP` it did not set (see its documentation), so a
         /// caller pairing the two on memory it does not own outright should read this as
         /// "the pages are now non-dumpable", not as a range-local operation.
+        ///
+        /// The failure path has the same "not range-local" property in the other
+        /// direction: `madvise` applies its advice as it walks the range and can return
+        /// `ENOMEM` at a hole (or `EINVAL` at a special VMA) *after* flagging the VMAs it
+        /// already passed, and `VM_DONTDUMP` is sticky. The rollback therefore issues
+        /// `MADV_DODUMP` over the same page-aligned range before `munlock`, undoing any
+        /// partial advice rather than only the lock — mirroring the successful
+        /// `mlock`-then-`DONTDUMP` order in reverse, and clearing a dump exclusion it may
+        /// not have been the one to set, exactly as [`unlock_range`] does.
         pub fn lock_range(ptr: *const u8, len: usize) -> Result<(), isize> {
             if len == 0 {
                 return Ok(());
@@ -1223,7 +1251,18 @@ pub mod locked {
                 let end = ((ptr as usize).saturating_add(len).saturating_add(ps - 1)) & !(ps - 1);
                 let d = syscall3(NR_MADVISE, start, end - start, MADV_DONTDUMP);
                 if !ok(d) {
-                    // Do not leave it locked without the dump exclusion: undo.
+                    // `madvise` applies as it walks: it can stop at a hole (`ENOMEM`) or a
+                    // special VMA (`EINVAL`) *after* flagging the VMAs before it, and
+                    // `VM_DONTDUMP` is sticky -- so `munlock` alone would leave that
+                    // prefix out of every core dump written afterwards.  Undo the advice
+                    // over the same range first (the success path's
+                    // `mlock`-then-`DONTDUMP` in reverse), then the lock.  Both results
+                    // are ignored, as in `unlock_range`: this call is already failing and
+                    // there is nothing useful a caller could do with them.  The transient
+                    // locked-and-dumpable state that `DODUMP`-before-`munlock` opens is
+                    // the one the success path already has between its two syscalls, and
+                    // no caller keeps using a range this function just refused.
+                    let _ = syscall3(NR_MADVISE, start, end - start, MADV_DODUMP);
                     let _ = syscall2(NR_MUNLOCK, ptr as usize, len);
                     return Err(d);
                 }
@@ -1264,7 +1303,8 @@ pub mod locked {
         /// only thing that ever advised it — but a caller pairing `lock_range`/`unlock_range`
         /// on memory it does not own outright should treat this as "the range is now
         /// dumpable" rather than "restored to how I found it". The symmetric caveat applies
-        /// to `lock_range`'s failure path, which unconditionally `munlock`s.
+        /// to `lock_range`'s failure path, which unconditionally restores dumpability over
+        /// the whole page range **and** `munlock`s.
         ///
         /// Idempotent for an unlocked range.
         pub fn unlock_range(ptr: *const u8, len: usize) {
@@ -1298,13 +1338,14 @@ pub mod locked {
         /// `/proc/<pid>/mem`, or obtain its memory through a core dump, unless it holds
         /// `CAP_SYS_PTRACE` (or is otherwise privileged).
         ///
-        /// This is the one entry in this crate's attack-class table that *is* a software
-        /// measure: every other class in SECURITY-ANALYSIS.md §8.2 that the configurations do
-        /// not answer — power, EM, laser faults, cold boot, Rowhammer, speculative execution —
-        /// is a property of the machine, and no line of Rust changes it. A debugger is not: the
-        /// kernel enforces this flag, and `PTRACE_MODE_ATTACH` fails for a non-dumpable process
-        /// even from the same user. `prctl(PR_SET_DUMPABLE, 0)` is what `sshd`, `sudo` and every
-        /// setuid program set for the same reason.
+        /// The debugger class does have a software measure, and this is it; the machine-side
+        /// classes in SECURITY-ANALYSIS.md §8.2 — power, EM, laser faults, cold boot,
+        /// speculative execution — have none, and the remaining software measure aimed at a
+        /// machine-owned class, Rowhammer, is `LockedKey`'s integrity tag: a *detection* of a
+        /// flip in the key page (§8.2's row), not a prevention. The kernel enforces this flag:
+        /// `PTRACE_MODE_ATTACH` fails for a non-dumpable process even from the same user, and
+        /// `prctl(PR_SET_DUMPABLE, 0)` is what `sshd`, `sudo` and every setuid program set for
+        /// the same reason.
         ///
         /// **It is not called automatically, not even by `ultra`, because it is *process*
         /// policy rather than crate policy.** A library that silently makes its host
@@ -1373,8 +1414,16 @@ pub mod locked {
         const AT_FDCWD: isize = -100;
         /// `O_RDONLY`.
         const O_RDONLY: usize = 0;
+        /// `O_CLOEXEC`, so a `fork`/`exec` in a sibling thread between the open and the
+        /// close cannot inherit the descriptor.
+        ///
+        /// `02000000` octal (`0x80000`) on **both** arms this file compiles: the host's
+        /// `asm-generic/fcntl.h` defines `O_CLOEXEC` as `02000000` (x86_64's glibc
+        /// headers redefine it to the same `02000000`), and the `libc` crate's per-arch
+        /// constants give `0x80000` for both `x86_64` and `aarch64` (GNU and musl).
+        const O_CLOEXEC: usize = 0o2000000;
 
-        /// `openat(AT_FDCWD, path, O_RDONLY)`.
+        /// `openat(AT_FDCWD, path, O_RDONLY | O_CLOEXEC)`.
         ///
         /// `openat` on both architectures, because `asm-generic`'s table has no
         /// `__NR_open` at all: the number this used first (56) is `openat` on aarch64,
@@ -1388,7 +1437,7 @@ pub mod locked {
                     NR_OPENAT,
                     AT_FDCWD as usize,
                     path.as_ptr() as usize,
-                    O_RDONLY,
+                    O_RDONLY | O_CLOEXEC,
                 )
             }
         }
@@ -1577,9 +1626,9 @@ pub mod locked {
     /// The page size, for `Page`'s allocation, on targets with no syscall arm.
     ///
     /// The supported arm reads `AT_PAGESZ` from `/proc/self/auxv`; here nothing is locked,
-    /// so all that matters is an alignment generous enough for the platform (16 KiB covers
-    /// the 4/16/64 KiB page sizes in use), and `LockedKey::new` fails closed before this
-    /// value could mislead anyone.
+    /// so all that matters is an allocation alignment generous enough for this arm's
+    /// allocator (16 KiB), and `LockedKey::new` fails closed before this value could
+    /// mislead anyone.
     #[cfg(not(all(
         target_os = "linux",
         any(target_arch = "x86_64", target_arch = "aarch64")
@@ -1656,11 +1705,13 @@ pub mod locked {
     /// value is a hash of the key, i.e. key material by this crate's classification (see
     /// `Key`'s redacted `Debug`). A returning version put a copy in this function's own frame
     /// — a local the function cannot wipe, because it is the return value — and that copy sat
-    /// on the ordinary stack. `tools/stack_residue.sh` measured it: an 8-byte `TAG RESIDUE`
-    /// run in the `locked` case, in the frame of *this* function, after the callers' copies
-    /// had already been wiped. Writing into the caller's buffer leaves exactly one copy, and
-    /// both callers wipe it (`new` before its fallible `lock_range`, `check_integrity` before
-    /// its branch, so the `panic!` path is covered too).
+    /// on the ordinary stack. `tools/stack_residue.sh` reports an 8-byte `TAG RESIDUE` run in
+    /// the `locked` case after the callers' copies are wiped, but it scans the whole
+    /// call-chain region rather than attributing a frame, and its blake3-only control leaves
+    /// the same 8-byte pattern with no crate code — so the run it finds *today* is the
+    /// dependency's XOF output buffer. What the write-through shape removes is the copy this
+    /// crate names: exactly one is left, and both callers wipe it (`new` before its fallible
+    /// `lock_range`, `check_integrity` before its branch, so the `panic!` path is covered too).
     fn integrity_tag(key: &[u8], out: &mut [u8; KEY_TAG_LEN]) {
         // An explicit hasher rather than `blake3::hash`, so its internal state can be
         // wiped. `blake3::hash` builds and drops a hasher with no handle, which leaves the
@@ -1683,8 +1734,9 @@ pub mod locked {
         /// `munlock` and `madvise` are page-granular, so a 32-byte key sharing a page with
         /// another `LockedKey` would not be independent of it -- dropping one would unlock
         /// the other's page while it was still alive and still documented as locked. A
-        /// page-aligned allocation of exactly one page costs 4 KiB per key and makes the
-        /// lock the key's own.
+        /// page-aligned allocation of exactly one page — 4 KiB on x86_64 and the common
+        /// aarch64 configuration, 16 or 64 KiB where the kernel uses larger pages (see
+        /// `page_size`) — costs one page per key and makes the lock the key's own.
         ///
         /// The bytes are copied into that page (so the locked range is the range the caller
         /// uses) and the *whole* page is locked and excluded from core dumps, which is also
@@ -2149,11 +2201,15 @@ fn blake3_keyed_multi(key: &[u8; 32], parts: &[&[u8]], out: &mut [u8]) {
     // function -- which also keeps `zeroize`'s own inline assembly out of the
     // verification scope.
     //
-    // This wipe is not free, and it is worth knowing what it costs: callgrind puts
+    // This wipe is not free, and it is worth knowing what it costs. The profile this
+    // figure comes from predates the two-level tag: callgrind then put
     // `<Hasher as Zeroize>::zeroize` at 15% of all instructions in a 64-byte round
-    // trip (four calls: tag and key derivation, each encrypting and decrypting),
-    // because BLAKE3 wipes its whole CV stack rather than the part a one-chunk
-    // input touched. It stays. What it guarantees is this crate's own copies: every
+    // trip, with four calls per round trip (tag and key derivation, each encrypting
+    // and decrypting). The two-level tag adds one keyed call per direction — six per
+    // round trip — so that call count is stale, and the share has not been measured
+    // again. The cost is structural either way: BLAKE3 wipes its whole CV stack
+    // rather than the part a one-chunk input touched. It stays. What it guarantees is
+    // this crate's own copies: every
     // named buffer holding key material in this file is wiped, and the dependency's
     // state is wiped by the two calls below. What it cannot reach are the
     // dependency's *by-value* temporaries (the `Hasher::new_keyed` return, a
@@ -2189,11 +2245,13 @@ fn blake3_keyed_xof(key: &[u8; 32], data: &[u8], out: &mut [u8]) {
     blake3_keyed_multi(key, &[data], out);
 }
 
-/// Message sizes whose tag is hashed through one contiguous buffer instead of
-/// three `update` calls. See `derive_tag` for why, and for the measurements.
+/// Total sizes of the inner hash's input — the `8 + NONCE_LEN + 16` head plus AAD
+/// plus message (`48 + aad.len() + msg.len()`), not the message length alone — whose
+/// tag is hashed through one contiguous buffer instead of three `update` calls. See
+/// `derive_tag` for why, and for the measurements.
 const TAG_CONCAT_LIMIT: usize = 65_536;
-/// Below this, the copy is pure overhead: with less than a chunk to batch,
-/// BLAKE3 gains nothing from a single call.
+/// Below this, the copy wins nothing measurable: at most one 1 KiB chunk to batch,
+/// where BLAKE3 gains little from a single call.
 const TAG_CONCAT_MIN: usize = 2_048;
 
 /// The 520-bit tag, computed in **two levels**.
@@ -2453,10 +2511,15 @@ pub fn encrypt(
     let mut k_out = [0u8; 32];
     let mut enc_seed = [0u8; 32];
     derive_material(key, nonce, &mut k_in, &mut k_out, &mut enc_seed);
-    let tag = derive_tag(&k_in, &k_out, nonce, aad, plaintext);
+    // `mut` is needed only under `ultra`, whose rejection paths wipe the tag; the allow
+    // keeps the default build's `unused_mut` quiet.
+    #[allow(unused_mut)]
+    let mut tag = derive_tag(&k_in, &k_out, nonce, aad, plaintext);
     // `ultra`: the independent implementation must produce the same tag. A mismatch is a
-    // rejection here rather than a ciphertext the peer will refuse -- and it is the only way
-    // to notice a fault in the tag computation on the *sending* side at all.
+    // rejection here rather than a ciphertext the peer will refuse -- and on *this* entry
+    // point it is the only way to notice a fault in the tag computation on the sending side
+    // at all. `encrypt_in_place_detached` sends too and deliberately carries no witness
+    // (see its documentation), so the sentence is scoped to `encrypt`.
     //
     // The comparison is secret-derived (both operands are), so the branch on it goes through
     // `accept_or_reject` with the decrypt side's rather than standing here as an `if`: a
@@ -2482,6 +2545,10 @@ pub fn encrypt(
             zeroize_array(&mut k_in);
             zeroize_array(&mut k_out);
             zeroize_array(&mut enc_seed);
+            // The tag is secret-derived -- it is the KDF input for `enc_key`/`enc_nonce`
+            // below -- so it is named and wiped with the derived keys on this path, not
+            // left to `scrub_stack`.
+            zeroize_array(&mut tag);
             // The buffer has not been written yet (the keystream runs below), but it is
             // zeroized on this path anyway rather than left to `Drop`, so the two rejection
             // paths out of this function differ only in what they have derived.
@@ -2499,6 +2566,7 @@ pub fn encrypt(
             zeroize_array(&mut k_in);
             zeroize_array(&mut k_out);
             zeroize_array(&mut enc_seed);
+            zeroize_array(&mut tag);
             zeroize_slice(&mut ciphertext);
             #[cfg(feature = "dual-mac")]
             scrub_stack();
@@ -2527,6 +2595,17 @@ pub fn encrypt(
 }
 
 /// Encrypt `buffer` in place, returning the detached tag.
+///
+/// **The `ultra` witness is deliberately not called here, and that asymmetry is part of
+/// the design rather than an omission.** The allocating [`encrypt`] cross-checks its tag
+/// against `witness::encrypt_tag` before returning; this entry point computes the tag once.
+/// A fault in the tag computation on this path therefore yields a tag the *receiver* will
+/// reject (the peer derives its encryption material from the received tag and recomputes
+/// the tag over the plaintext it recovers), rather than a local rejection — availability,
+/// not authenticity. The reason is cost: the scalar witness is a full re-hash, measured at
+/// roughly +1.2 ms/MiB, which is the wrong trade on the API a caller chooses for speed.
+/// README's "What the witness is" states the same thing, and `tests/ultra.rs`
+/// (`the_witness_is_called_from_exactly_these_entry_points`) pins the set of call sites.
 #[must_use = "the returned tag must be handled"]
 pub fn encrypt_in_place_detached(
     key: &[u8; 32],
@@ -3520,8 +3599,10 @@ mod x86_simd {
         // state.  Holding it as 16 live `__m256i` alongside the working `x`
         // needs 32 YMM registers and x86-64 has 16, so every call spilled half
         // the state to the stack.  Re-broadcasting from the scalar words at the
-        // end is 16 `vpbroadcastd` (they stay in cache) and keeps the round loop
-        // entirely register-resident.
+        // end is 15 `vpbroadcastd` (they stay in cache) and keeps the round loop
+        // entirely register-resident: word 12 is the counter, whose initial value
+        // differs per lane, so it is the `ctr_vec` saved below rather than a
+        // broadcast of `s[12]`.
         let ctr_vec = x[12];
         for _ in 0..10 {
             qr256!(x, 0, 4, 8, 12);
@@ -4355,6 +4436,8 @@ mod tests {
     /// * x86_64 with AVX2 (native, so the AVX2 and SSE2 loops and the scalar tail),
     /// * aarch64 under `qemu-aarch64` (NEON),
     /// * i686 under `qemu-i386` (no SIMD backend at all, pure scalar),
+    /// * powerpc64 under `qemu-ppc64` and riscv64 under `qemu-riscv64` — both scalar,
+    ///   and the first of them big-endian in compiled code rather than interpreted,
     /// * s390x, big-endian, interpreted by Miri (`verify.sh --miri` runs this test
     ///   under that target; it is the run that makes the big-endian claim backed
     ///   by a committed entry point rather than by prose).
@@ -4968,12 +5051,6 @@ mod tests {
         }
     }
 
-    /// `Plaintext` equality must be constant-time but still *correct*:
-    /// equal, differing-in-last-byte, differing-in-first-byte and
-    /// different-length must all behave as expected.
-    // A `PartialEq<&Plaintext>` impl exists for the same reason the `&[u8]` ones do, and
-    // the `&same` assertion below is what exercises it; clippy's `op_ref` would rewrite it
-    // to the owned form and drop the coverage.
     /// Keys compare in constant time, through the impl rather than through `Deref`.
     ///
     /// There is no `==` fallback to guard against: without the impl, `key_a == key_b`
@@ -5054,6 +5131,12 @@ mod tests {
         assert!(PartialEq::eq(&a, &b) && !PartialEq::eq(&a, &c));
     }
 
+    /// `Plaintext` equality must be constant-time but still *correct*:
+    /// equal, differing-in-last-byte, differing-in-first-byte and
+    /// different-length must all behave as expected.
+    // A `PartialEq<&Plaintext>` impl exists for the same reason the `&[u8]` ones do, and
+    // the `&same` assertion below is what exercises it; clippy's `op_ref` would rewrite it
+    // to the owned form and drop the coverage.
     #[allow(clippy::op_ref)]
     #[test]
     fn test_plaintext_eq_semantics() {
@@ -5103,16 +5186,19 @@ mod tests {
 
     /// A thread sized for [`stack_requirement_bytes`] survives a round trip.
     ///
-    /// The constant exists because "size your threads for the 16 KiB scrub frame" was advice in
-    /// a table row, and advice does not fail a build. This test is the other half: the number
+    /// The constant exists because "size your threads for the scrub frame" was advice in a
+    /// table row, and advice does not fail a build. This test is the other half: the number
     /// the crate reports is *sufficient*, measured by spawning a thread with exactly that stack
-    /// plus a small margin and running the AEAD on it.
+    /// plus a small margin and running the AEAD on it. The number is 32 KiB, not the 16 KiB
+    /// frame alone: an audit measured the release frame at 16,408 bytes and a 4 KiB round trip
+    /// needing 24,576 < stack ≤ 26,624, so the surrounding ordinary frames are part of the
+    /// budget (see the function's own docs).
     ///
     /// **Not a regression lock on the number itself**, and an earlier revision of this
     /// doc read as though it were: with the default feature set `stack_requirement_bytes`
-    /// is 0 (`dual-mac` is what makes it 16384), so the assertion is that the *reported*
-    /// value is sufficient — and the margin (64 KiB in release, 1 MiB in debug) is 4x to
-    /// 64x the constant, so a constant under-reported within that margin still passes.
+    /// is 0 (`dual-mac` is what makes it 32768), so the assertion is that the *reported*
+    /// value is sufficient — and the margin (64 KiB in release, 1 MiB in debug) is 2x to
+    /// 32x the constant, so a constant under-reported within that margin still passes.
     /// What it does pin is that the reported value does not *understate by more than the
     /// margin*, which is the direction that would fault a caller's thread.
     ///
@@ -5254,20 +5340,22 @@ mod tests {
         );
     }
 
-    /// The tag must depend on **every** byte of the AAD, including bytes well
-    /// past where a truncating implementation would plausibly stop (BLAKE3's
-    /// 64-byte block and 1024-byte chunk boundaries).
+    /// The tag must depend on **every** byte of the AAD, including bytes past
+    /// where a truncating implementation might plausibly stop (BLAKE3's 64-byte
+    /// block and 1024-byte chunk boundaries).
     ///
-    /// `test_aad_message_split_is_unambiguous` covers the encoding and a
-    /// 4-byte AAD; this sweeps every position of a 200-byte one, so a
-    /// `&aad[..N]` truncation would be caught.
+    /// `test_aad_message_split_is_unambiguous` covers the encoding with its 1- to
+    /// 3-byte AAD/message splits (the fixed four-byte AAD shape is the Kani harness
+    /// `every_aad_and_message_byte_reaches_the_tag`, not a test); this sweeps every
+    /// position of a 1100-byte one, past the 1024-byte chunk boundary, so a
+    /// `&aad[..N]` truncation at either boundary would be caught.
     #[test]
     fn test_tag_depends_on_every_aad_byte() {
         let key = [0x71u8; 32];
         let nonce = [0x93u8; 24];
         let pt = b"fixed plaintext";
 
-        let aad: Vec<u8> = (0..200u32).map(|i| (i % 256) as u8).collect();
+        let aad: Vec<u8> = (0..1100u32).map(|i| (i % 256) as u8).collect();
         let (_, tag0) = encrypt(&key, &nonce, &aad, pt).unwrap();
 
         for pos in 0..aad.len() {
@@ -5410,9 +5498,11 @@ mod tests {
         // named "whole buffer" could not see the defect it was named for. Demanding
         // *zero* matches overshot the other way: a correct random fill reproduces the
         // sentinel byte with probability 1/256 per byte, so "none of 64" fails about
-        // 22% of the time (measured in CI: two jobs red on this line). Four or fewer
-        // matches has probability ~6e-6 for a correct fill, while a prefix-writing
-        // `fill` leaves the whole tail at the sentinel -- far more than four.
+        // 22% of the time (measured in CI: two jobs red on this line). Five or more
+        // matches is the actual failure tail: P(X >= 5) ~ 5.7e-6 for X ~ Binomial(64,
+        // 1/256), i.e. four or fewer matches ~ 1 - 5.7e-6 passes -- while a
+        // prefix-writing `fill` leaves the whole tail at the sentinel, far more than
+        // four.
         let mut buf = [0xAAu8; 64];
         crate::random::fill(&mut buf).unwrap();
         let untouched = buf.iter().filter(|&&b| b == 0xAA).count();
@@ -5656,10 +5746,11 @@ mod tests {
     /// The MAC must cover the **whole** AAD and the **whole** message: flipping a
     /// bit of any byte of either must change the tag.
     ///
-    /// The flipped bit rotates through all eight positions as the byte position
-    /// advances, so the sweep covers every bit position of every byte rather than
-    /// bit 0 of each. (An earlier revision flipped `^= 1` at every position and its
-    /// doc still said "any bit", which the sweep did not test.)
+    /// The bit flipped rotates with the byte position (`1 << (pos % 8)`), so all eight
+    /// bit positions occur across the sweep rather than bit 0 of every byte. It is one
+    /// bit per byte, not every (byte, bit) pair: byte 0 gets bit 0, byte 8 bit 0 again.
+    /// (An earlier revision flipped `^= 1` at every position and its doc still said
+    /// "any bit", which the sweep did not test.)
     #[test]
     fn test_tag_covers_every_aad_and_message_byte() {
         let key = [0x71u8; 32];
@@ -6280,8 +6371,10 @@ mod tests {
                 xsi_block, draft_block,
                 "the key-material block equals XChaCha20-Poly1305's first keystream block for \
                  (K, N) = (trial {i}): the two nonces differ in four fixed bytes, so equal \
-                 keystreams would mean ChaCha20's block function is not injective in its \
-                 nonce — which is a collision in a permutation"
+                 keystreams would mean two distinct ChaCha20 states collide under the \
+                 feed-forward map `P(state) + state` — ChaCha20's round function is a \
+                 permutation, but this output map is not one, and this check is a concrete \
+                 trial rather than a proof the collision cannot happen"
             );
 
             // And the split of the block is what the derivation uses: the two halves are

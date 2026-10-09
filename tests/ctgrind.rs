@@ -24,10 +24,20 @@
 //! recalled from memory.
 //!
 //! Outside valgrind the sequence executes as four rotates that cancel and a
-//! no-op `xchg`, so every function here returns its default and has no effect.
-//! The tests therefore pass trivially in a normal `cargo test` run; the verdict
-//! comes from running the binary under valgrind, which `verify.sh --ctgrind`
-//! does.
+//! no-op `xchg`, so every function here returns its default and has no effect:
+//! a plain `cargo test` of this file would report four `ok`s with nothing
+//! tested. That is why the four tests below are `#[ignore]`d unless the build
+//! is the *static* one `tools/ctgrind.sh` makes with
+//! `-C target-feature=+crt-static` (that script needs a static binary for an
+//! unrelated reason: valgrind cannot redirect `strcmp` in a dynamic linker
+//! without root-installed libc debuginfo). A plain run therefore reports the
+//! four as `ignored` rather than `passed` — libtest's summary line reads
+//! `0 passed; 5 ignored`, the fifth being the always-ignored negative control —
+//! and the static build runs them, with every one calling
+//! `require_live_valgrind` first, which fails unless valgrind is present *and*
+//! the poison request took effect -- so even a direct run of the static binary
+//! without valgrind cannot report a vacuous `ok`. The verdict comes from
+//! running that binary under valgrind, which `tools/ctgrind.sh` does.
 //!
 //! # The valgrind run must be a **release** build
 //!
@@ -251,6 +261,35 @@ fn secret_dependent_branch(byte: u8, threshold: u8) -> u8 {
     }
 }
 
+/// Fails unless valgrind is running this process *and* the memory-poisoning
+/// client request actually reaches it.
+///
+/// The four tests below are `#[ignore]`d outside the static build
+/// `tools/ctgrind.sh` makes, so when they do execute they must not be able to
+/// run vacuously: without this, running that binary directly -- no valgrind --
+/// would leave every `poison` call inert, every assertion trivially true, and
+/// all four tests green with nothing measured. This is also stricter than
+/// `valgrind_present()` alone: the probe is the same request path the tests
+/// rely on, so a valgrind that is running but not answering client requests
+/// (a wrong instruction sequence, an incompatible tool) fails here instead of
+/// leaving four tests to pass against unpoisoned memory.
+fn require_live_valgrind() {
+    assert!(
+        valgrind_present(),
+        "this static build runs these tests only under valgrind, and it is not under \
+         valgrind now: run tools/ctgrind.sh (or start this binary under valgrind by hand); \
+         a plain `cargo test` reports them `ignored` instead"
+    );
+    let probe = [0u8; 8];
+    poison(probe.as_ptr(), probe.len());
+    assert!(
+        all_bytes_undefined(probe.as_ptr(), probe.len()),
+        "valgrind is present but the poison client request did not take effect, so every \
+         assertion in this file would be vacuous"
+    );
+    unpoison(probe.as_ptr(), probe.len());
+}
+
 // ── Tests ─────────────────────────────────────────────────────────────
 
 use xchacha20_blake3_siv::{
@@ -264,10 +303,17 @@ use xchacha20_blake3_siv::{
 /// outputs unpoisoned so this test can inspect them. Anything inside the library
 /// that branched on a secret would be reported by memcheck.
 ///
-/// Run under valgrind (see `verify.sh --ctgrind`); in a plain `cargo test` the
-/// poisoning is inert and this only checks the outputs are consistent.
+/// Run under valgrind (see `tools/ctgrind.sh`); a plain `cargo test` reports
+/// this test `ignored` rather than passing it vacuously, and
+/// `require_live_valgrind` fails if the build it does run in is started
+/// without valgrind.
 #[test]
+#[cfg_attr(
+    not(target_feature = "crt-static"),
+    ignore = "valgrind-only: runs in the static build tools/ctgrind.sh makes"
+)]
 fn encrypt_does_not_branch_on_secrets() {
+    require_live_valgrind();
     let key = [0x5Au8; 32];
     let nonce = [0x3Cu8; NONCE_LEN];
     let aad = *b"poisoned aad";
@@ -304,7 +350,12 @@ fn encrypt_does_not_branch_on_secrets() {
 /// the key, nonce and AAD. The point is that authenticating must not branch on
 /// any of them beyond the unavoidable final decision.
 #[test]
+#[cfg_attr(
+    not(target_feature = "crt-static"),
+    ignore = "valgrind-only: runs in the static build tools/ctgrind.sh makes"
+)]
 fn decrypt_does_not_branch_on_secrets() {
+    require_live_valgrind();
     let key = [0x11u8; 32];
     let nonce = [0x22u8; NONCE_LEN];
     let aad = *b"aad";
@@ -380,7 +431,12 @@ fn decrypt_does_not_branch_on_secrets() {
 /// The detached encryption entry point, so the in-place XOR path is covered too
 /// (it takes a different code path through `chacha20_apply`).
 #[test]
+#[cfg_attr(
+    not(target_feature = "crt-static"),
+    ignore = "valgrind-only: runs in the static build tools/ctgrind.sh makes"
+)]
 fn encrypt_in_place_does_not_branch_on_secrets() {
+    require_live_valgrind();
     let key = [0x77u8; 32];
     let nonce = [0x88u8; NONCE_LEN];
     let aad = *b"in-place aad";
@@ -411,7 +467,12 @@ fn encrypt_in_place_does_not_branch_on_secrets() {
 /// situation in `decrypt`: the comparison must be branchless, and only the
 /// resulting decision may branch.
 #[test]
+#[cfg_attr(
+    not(target_feature = "crt-static"),
+    ignore = "valgrind-only: runs in the static build tools/ctgrind.sh makes"
+)]
 fn constant_time_eq_does_not_branch_on_operands() {
+    require_live_valgrind();
     let mut a = [0u8; TAG_LEN];
     let mut b = [0u8; TAG_LEN];
     for i in 0..TAG_LEN {

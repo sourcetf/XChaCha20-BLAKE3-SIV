@@ -10,6 +10,12 @@ cargo-fuzz = true
 [dependencies]
 libfuzzer-sys = "0.4"
 
+# There is no libFuzzer option key in this manifest: cargo-fuzz 0.13 has no
+# `[fuzz]`/`max_len` table (checked against its source), so `-max_len=8192` and the
+# other libFuzzer flags are passed on the command line -- the CI fuzz runs in
+# `.github/workflows/deep.yml` do exactly that. The target's header records what the
+# default 4096 cap leaves unreachable.
+
 [dependencies.xchacha20-blake3-siv]
 path = ".."
 

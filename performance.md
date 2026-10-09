@@ -5,7 +5,7 @@ out of [`README.md`](README.md) so the README stays about the construction and t
 security argument. The figures, the noise floor and the methodology are unchanged;
 the configuration and throughput figures that the README's tables cite resolve to a
 table here. (Some per-layer *costs* — the fold's 1.4 ns, the integrity tag's 42 ns,
-`mlock`'s ~7 µs, `scrub_stack`'s 16 KiB of stack — are stated on the README's layer
+`mlock`'s ~7 µs, `scrub_stack`'s 16 KiB frame — are stated on the README's layer
 rows themselves, because each is a property of one layer rather than a configuration
 measurement; those are not repeated here.)
 
@@ -35,9 +35,9 @@ per-message cost**, so the change shows at the small sizes and is inside the noi
 **Three `cargo bench` runs per configuration**, each pinned to one core (`taskset -c 3`), with
 the configuration order rotated between passes (`hardened, opt-out, ultra` then `ultra, opt-out,
 hardened` then `opt-out, ultra, hardened`) so no configuration is always measured first or last;
-the reported figure per cell is the **median of the three passes**. Criterion's median of 100
-samples per pass, `--warm-up-time 2 --measurement-time 4`, sizes 64 B to 1 MiB, shipped release
-profile. The benchmark also runs 700 B and 5000 B — the two non-power-of-two sizes that keep the
+the reported figure per cell is the **median of the three passes**. Criterion's point
+estimate over its 100 samples per pass, `--warm-up-time 2 --measurement-time 4`, sizes
+64 B to 1 MiB, shipped release profile. The benchmark also runs 700 B and 5000 B — the two non-power-of-two sizes that keep the
 SIMD tails visible — and they are not tabulated below; the seven sizes in the tables are the
 ones the noise floor was computed over.
 
@@ -90,7 +90,8 @@ Round trip (encrypt then decrypt, in place), same ratio:
 | 1 MiB | 1.34x | **1.35x** | 0.23x |
 
 Latency in microseconds at three sizes, the three configurations and the
-reference (median of the three passes, each criterion's median of 100 samples):
+reference (median of the three passes; each pass is criterion's point estimate over
+100 samples):
 
 | | opt-out | hardened | ultra | XChaCha20Poly1305 |
 | --- | --- | --- | --- | --- |
@@ -116,8 +117,8 @@ comparison, and both are the price of a defence rather than an accident:
   noise floor). Encryption pays nothing for it: 0.95 → 0.94 us.
 * **`ultra`'s witness is a per-byte cost on decrypt**, because it is a scalar
   re-implementation: **2.7x the default at 64 B, 4.0x at 1 KiB, 11.0x at 64 KiB,
-  12.4x at 1 MiB** (re-measured after the residue-wipe pass; the small sizes are at
-  or inside the campaign's own noise floor, the large ones are not) — which is why the
+  12.4x at 1 MiB** (re-measured after the residue-wipe pass, so read them against the
+  larger noise floor the note above describes) — which is why the
   round trip above ends near 0.23x. Its in-place *encryption* carries no witness, so the
   witness adds nothing there: the encrypt column is a tie from 16 KiB up (0.92-1.05x) and
   its small-size excess (1.28-1.50x) is the other `ultra` layers; the allocating
@@ -137,7 +138,8 @@ is at its best and BLAKE3 has little to batch. **Decryption at 64–256 bytes is
 the noise floor either way** (0.89x, 0.88x), and the small-message decrypt gap is what
 the `hardened` decision and the fixed `v0.3` cost add.
 
-**What the `ultra` layer costs, relative to the default configuration** — from the
+**What the `ultra` layer costs, relative to the default configuration** (decrypt and
+encrypt are the in-place APIs) — from the
 `ultra` campaign noted above, whose own noise floor is larger (median spread 12.7%), so
 a ratio within ~13% of 1.00 is a tie.
 This is the table the layer and fault rows cite, because a ratio against the
@@ -164,9 +166,9 @@ its own probe (process CPU time, five interleaved rounds, its own machine and it
 and got the same *directions* at larger magnitudes: `dual-mac` against the default at 1 KiB came
 out at 1.69x on in-place decryption and 1.81x allocating, where the README's layer row states
 +30% at 64 B and +40% at 1 KiB on this host; `ultra`'s allocating decryption at 1 KiB at 4.62x,
-where the table above says 3.96x; and `dual-mac`'s fixed encrypt-side cost at +43–44% (64 B),
-+40–42% (1 KiB) and +3–5% (16 KiB), which is the `scrub_stack` row's ~0.5–1 µs per call seen as
-a percentage. The audit does not attribute the difference to either side's figures, and the
+where the table above says 3.96x in place; and `dual-mac`'s fixed encrypt-side cost at
++43–44% (64 B), +40–42% (1 KiB) and +3–5% (16 KiB), which is the `scrub_stack` row's
+~0.5–1 µs per call seen as a percentage. The audit does not attribute the difference to either side's figures, and the
 *shape* each mechanism predicts is what the layer rows actually claim — a fixed per-call cost is
 largest at the small end and gone by 16 KiB, the second tag pass grows with the message, the
 witness is per byte — so read the constants here as one build's and the mechanisms as the claim.
@@ -191,7 +193,7 @@ follow from the construction rather than from this implementation:
   it and never returns it on failure, and why an application must not act on it
   until `decrypt` returns.
 
-The percentiles in the latency table are per *sample*, each averaging hundreds of
+The figures in the latency table are per *sample*, each averaging hundreds of
 calls, so they do not show per-call jitter: this host's clock costs ~35 ns per
 `Instant::now()`, which is exactly why each sample averages hundreds of calls -- and
 a genuine tail-latency measurement still needs bare metal, where the clock and the
@@ -199,22 +201,26 @@ scheduler are far quieter than in this container.
 
 The allocating `encrypt`/`decrypt` API costs more than the in-place one on a round
 trip, and by how much depends on the allocator: 4-7% in the criterion harness for the
-default build (re-measured 2026-10-03; up to 37% for `ultra` at 16 KiB), but up to
+default build (re-measured 2026-10-03; for `ultra` the table above gives its allocating
+round trip at 6.65x the default against 5.46x in place at 16 KiB), but up to
 **2.5x at 1 MiB in a standalone probe** (`examples/profile_probe.rs`: 2098 us against
 843 us per message). The extra
 work is real either way -- two 1 MiB allocations, the copies into them, and the
 wipe of the `Plaintext` that `decrypt` returns -- and the in-place path touches
 none of it. For large messages, use the in-place API.
 
-**Every number above is the default build.** `ultra` is a different trade and is
-measured separately in its own section: its independent second implementation costs
-2.7x at 64 bytes and 12.4x at 1 MiB on decryption, because it is scalar and re-runs
-the tag pass per byte (the figures are the "what the `ultra` layer costs" table in
-"The three configurations, measured"). Nothing above changes if you turn `ultra` on and then off again — the
-default build's machine code is untouched by the feature.
+**Every figure above for this crate is the default build's, except where a column or
+table is labelled `opt-out` or `ultra`.** `ultra` is a different trade, measured in
+the "what the `ultra` layer costs" table above: its independent second implementation
+costs 2.7x at 64 bytes and 12.4x at 1 MiB on decryption, because it is scalar and
+re-runs the tag pass per byte. Nothing above changes if you turn `ultra` on and then
+off again — the default build's machine code is untouched by the feature.
 
 **Where the remaining headroom is, and where it is not.** Measured, so that nobody
-has to rediscover it:
+has to rediscover it. The profile behind this list predates the two-level tag: `v0.3`
+adds one keyed-BLAKE3 call per direction to the 64-byte round trip the instruction
+shares are of (four calls per round trip became six), and those shares have not been
+re-measured — the decisions the bullets support do not turn on the exact percentage:
 
 * The ChaCha20 *tail* and the 64-byte key-material block stay scalar, even though a
   four-lane kernel cuts their instruction count by roughly two thirds. Tried:

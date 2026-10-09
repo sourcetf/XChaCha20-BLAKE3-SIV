@@ -15,7 +15,10 @@
 # Usage:
 #   ./check.sh                 provision, build, verify (fast stages only)
 #   ./check.sh --fast          skip all cross-target work (no cross targets are
-#                              installed; a --cross-exec request is dropped with a note)
+#                              installed; a --cross-exec request is dropped with a note).
+#                              With --all the remaining stages keep verify.sh's strict
+#                              bookkeeping: a stage that cannot run fails the run
+#                              instead of being skipped
 #   ./check.sh --cross-exec    also execute the aarch64/i686 suites under qemu,
 #                              plus big-endian powerpc64 via qemu-ppc64
 #   ./check.sh --kani          also run Kani bounded model checking (slow)
@@ -320,19 +323,19 @@ if [ ! -x ./verify.sh ]; then
 fi
 
 # `--fast` means "no cross-target work", so any cross-execution request has to be
-# dropped before delegating -- and nothing else may be.  `--all` is a single token to
-# `verify.sh` that sets a dozen switches, so under `--fast` it is expanded into the ones
-# that need no cross target (Kani runs natively; so do miri -- x86_64 and an
-# interpreted aarch64 target, no qemu -- and ctgrind, cargo-deny, fuzzing, TSAN and the
-# tool-level gates) rather than being replaced by `--kani`, which would have silently
-# dropped the rest.  miri used to be omitted here, so `--fast --all` quietly ran a
-# smaller set than `verify.sh --all` minus cross-exec.  Note what dropping `--all`'s
-# strict bookkeeping does **not** change: the names in the expansion are passed to
-# `verify.sh` as explicit requests, and a stage that was named and could not run is a
-# failure (exit 1), not a skip -- so `--fast --all` on a host without miri, valgrind or
-# Kani ends in a FAILED line that says which stage was missing, rather than in a
-# quieter success.  A comment here claimed the opposite (that an unavailable miri is a
-# skip under `--fast`); it never was, and an audit caught the difference.
+# dropped before delegating -- and nothing else may be.  `--all` is delegated as
+# `verify.sh --deep-no-cross-exec`: the same dozen switches as `--all` minus the
+# cross-architecture execution, *with* the strict bookkeeping (a stage that cannot run
+# fails the run instead of being skipped).  Expanding `--all` into the individual
+# switches, as this used to, forwarded the requests but dropped the strictness, so
+# stages 1-4 could skip while the run still called itself complete -- and `--fast
+# --all`'s help text calls it "every verification stage `verify.sh --all` has".  Kani
+# runs natively; so do miri (x86_64 and an interpreted aarch64 target, no qemu),
+# ctgrind, cargo-deny, fuzzing, TSAN and the tool-level gates.  One consequence is
+# deliberate: on a host with no cross target installed, stage 4's type-check skips are
+# strict failures under this flag, so `--fast --all` says what is missing instead of
+# ending in a quieter success.  Install the targets (or drop --fast) for the full
+# set; use a narrower verify for a host that has none.
 if [ "$FAST" -eq 1 ]; then
   FILTERED=()
   saw_all=0
@@ -345,7 +348,7 @@ if [ "$FAST" -eq 1 ]; then
     esac
   done
   if [ "$saw_all" -eq 1 ]; then
-    FILTERED+=(--kani --miri --ctgrind --deny --fuzz --tsan --tools)
+    FILTERED+=(--deep-no-cross-exec)
   fi
   VERIFY_ARGS=(${FILTERED[@]+"${FILTERED[@]}"})
   # Say it rather than dropping it silently: a request that quietly stops being a

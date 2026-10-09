@@ -92,6 +92,30 @@ open(manifest, "w").write(s)
 PY
 
 cd "$WORK/crate"
+# Before the type-check, the count: cargo's exit status says the crate compiles
+# *with* `--cfg kani`, and an emptied `src/proofs.rs` compiles exactly as well as a
+# full one (measured: `: > src/proofs.rs` -> PASS, RC=0, with the control below
+# satisfied because its plant lived in lib.rs). The count is taken from the same
+# source-derived parser the Formal matrix is planned with -- `tools/kani_shards.py
+# --count`, run on the copy -- rather than a second regex here, so a harness that
+# parser cannot see is a failure in this gate too. 13 is the committed count; a
+# change that removes harnesses has to update this number *and* the matrix.
+COMMITTED_HARNESSES=13
+harness_count="$(python3 tools/kani_shards.py --count 2>"$WORK/kani-count.err" || true)"
+case "$harness_count" in
+  ''|*[!0-9]*)
+    echo "FAIL: could not count the Kani harnesses in src/proofs.rs:" >&2
+    sed 's/^/      /' "$WORK/kani-count.err" >&2
+    exit 1 ;;
+esac
+if [ "$harness_count" -lt "$COMMITTED_HARNESSES" ]; then
+  echo "FAIL: src/proofs.rs contains $harness_count #[kani::proof] harness(es), fewer" >&2
+  echo "      than the $COMMITTED_HARNESSES this gate is written against. The crate" >&2
+  echo "      still type-checks, and the Formal job's matrix would silently shrink, so" >&2
+  echo "      a removed harness is judged here rather than nowhere." >&2
+  exit 1
+fi
+echo "harness count: $harness_count (>= the $COMMITTED_HARNESSES committed)"
 echo "type-checking #[cfg(kani)] harnesses against a no-op Kani shim..."
 # Judge by cargo's exit status, not by grepping its output. The first version of
 # this script piped cargo into `grep -E "^error"` inside an `if`, and `set -o
@@ -117,28 +141,28 @@ fi
 # were removed, nothing under `#[cfg(kani)]` would be compiled and this script would still
 # print PASS. An audit deleted `#[cfg(kani)] mod proofs;` from a copy and watched it stay
 # green. So the check is run once more against a copy with a deliberate type error planted
-# *inside* a `#[cfg(kani)]` item: that run must fail.
+# *inside* `src/proofs.rs` itself: that run must fail, which witnesses that that module's
+# contents are what the type-check above compiles. (The first version of this control
+# planted its error in `src/lib.rs`, next to the gate -- it proved the gate in lib.rs was
+# compiled, not that anything inside proofs.rs was.)
 CONTROL="$WORK/control"
 mkdir -p "$CONTROL"
 ( cd "$WORK/crate" && tar -cf - . ) | ( cd "$CONTROL" && tar -xf - )
-python3 - "$CONTROL/src/lib.rs" <<'PLANTEOF'
+python3 - "$CONTROL/src/proofs.rs" <<'PLANTEOF'
 import sys
 
 p = sys.argv[1]
 s = open(p).read()
-anchor = "#[cfg(kani)]\nmod proofs;"
-if anchor not in s:
-    sys.exit("the #[cfg(kani)] gate is not where this control expects it: %s" % p)
-plant = anchor + """
-
-#[cfg(kani)]
+plant = s + """
+// Planted by tools/check_kani_cfg.sh. This file is compiled only when lib.rs's
+// `#[cfg(kani)] mod proofs;` pulls it in, so a copy that fails to compile here is
+// the property the PASS above claims: the harnesses in this file are compiled.
 fn _kani_compile_control() -> u8 {
-    // Deliberately not a u8. Compiled only when `--cfg kani` reaches this file, which is
-    // the property the check above claims and can otherwise not see.
+    // Deliberately not a u8.
     "not a u8"
 }
 """
-open(p, "w").write(s.replace(anchor, plant, 1))
+open(p, "w").write(plant)
 PLANTEOF
 set +e
 ( cd "$CONTROL" && RUSTFLAGS="--cfg kani" cargo check --release --quiet >/dev/null 2>&1 )
@@ -150,5 +174,6 @@ if [ "$control_status" -eq 0 ]; then
   echo "      compiled at all -- it only says the crate compiles without them." >&2
   exit 1
 fi
-echo "PASS: the harnesses still fit the crate's internals (control: a planted"
-echo "      #[cfg(kani)] type error is caught, so they really are compiled here)."
+echo "PASS: the $harness_count harnesses still fit the crate's internals (control: a"
+echo "      type error planted in src/proofs.rs is caught, so that module really is"
+echo "      what is compiled here)."

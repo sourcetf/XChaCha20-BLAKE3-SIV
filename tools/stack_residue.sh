@@ -4,7 +4,9 @@
 # This is a *measurement*, not a gate, and it is wired in as an advisory: CI has a
 # `stack residue` job that runs it in both configurations under `continue-on-error`, and
 # `verify.sh`'s tool stage runs it and reports a change as ADVISORY rather than as a
-# failure. (The header used to say it was not wired into CI at all, which stopped being
+# failure in a narrow run -- under `--deep`/`--all` (`STRICT=1`) a finding fails the run,
+# because a strict run is the one place a measurement this noisy is worth gating on.
+# (The header used to say it was not wired into CI at all, which stopped being
 # true when that job was added.)
 # What it finds today is dominated by the `blake3` dependency: its XOF output
 # buffer sits in frames this crate cannot name, let alone wipe (the key itself is
@@ -16,10 +18,19 @@
 #   * a stack region is painted with a sentinel by a function that then returns,
 #     so the frames of the call under test land in memory this program has
 #     already written -- any secret found there is residue, not stale memory;
-#   * the region is then snapshotted to the HEAP with a minimal-stack copy and
-#     the search runs over the heap copy. Searching in place does not work: the
-#     analyser's own allocations land in the region being searched and overwrite
-#     the evidence, which produces hits that fail to re-verify.
+#   * the region is then searched **in place**, and that search is the first thing
+#     to run once the call under test returns, before anything allocates or calls
+#     again: every later call's frame is pushed into the top of the region, which
+#     is exactly where the shallowest call-chain frames -- the freshest residue --
+#     live. An earlier design snapshotted the region to the heap first; measured
+#     with a forced 32-byte key copy in the top frame, that snapshot saw at most 2
+#     bytes of it where the in-place read sees all 32, because the allocator's
+#     frames and the snapshot function's own frame had already overwritten the
+#     evidence.
+#     The search itself is reads only and every pattern it compares against is
+#     preallocated, so -- unlike the very first version, which allocated its
+#     output buffer and then searched through its own frames -- it cannot produce
+#     hits that fail to re-verify.
 #
 # Usage:  tools/stack_residue.sh [--pure | --ultra]
 set -euo pipefail
@@ -75,11 +86,6 @@ use xchacha20_blake3_siv::{
 const PAINT: usize = 1 << 20;
 const SENTINEL: u8 = 0x5A;
 
-/// Minimal stack: no allocation, so the snapshot cannot disturb its source.
-#[inline(never)]
-fn snapshot(src: *const u8, dst: *mut u8, len: usize) {
-    unsafe { core::ptr::copy_nonoverlapping(src, dst, len) };
-}
 #[inline(never)]
 fn paint() -> *const u8 {
     let mut buf = [SENTINEL; PAINT];
@@ -182,25 +188,38 @@ fn main() {
         let is_control = name.starts_with("blake3-only");
         let ptr = paint();
         f(&key, &nonce);
-        let mut snap = vec![0u8; PAINT];
-        snapshot(ptr, snap.as_mut_ptr(), PAINT);
-
-        let mut line = String::new();
-        for (label, pat) in known.iter() {
-            let mut best = 0usize;
-            let mut at = 0usize;
-            for r in 0..snap.len() {
+        // The region is read *in place*, as the first statement after `f` returns.
+        // Nothing between here and the three searches below may allocate or call
+        // anything: a call pushes its frame (plus a return address) into the top of
+        // the region, which is where a just-returned call leaves its shallowest --
+        // freshest -- residues. The snapshot this replaced did exactly that: the
+        // `vec![0u8; PAINT]` allocation and `snapshot`'s own frame ran before the
+        // copy, so a forced 32-byte key copy in the top frame read 32 bytes in place
+        // and at most 2 through the snapshot (measured). The searches are reads only,
+        // and `known` was built before `paint()` erased the region, so the analyser
+        // cannot overwrite what it is about to read. Results are collected first and
+        // formatted afterwards for the same reason: building `line` allocates.
+        let region: &[u8] = unsafe { core::slice::from_raw_parts(ptr, PAINT) };
+        let mut best = [0usize; 3];
+        let mut at = [0usize; 3];
+        for (k, (_label, pat)) in known.iter().enumerate() {
+            for r in 0..region.len() {
                 for s in 0..pat.len() {
                     let mut l = 0usize;
-                    while r + l < snap.len() && s + l < pat.len() && snap[r + l] == pat[s + l] {
+                    while r + l < region.len() && s + l < pat.len() && region[r + l] == pat[s + l] {
                         l += 1;
                     }
-                    if l > best {
-                        best = l;
-                        at = r;
+                    if l > best[k] {
+                        best[k] = l;
+                        at[k] = r;
                     }
                 }
             }
+        }
+
+        let mut line = String::new();
+        for (k, (label, _pat)) in known.iter().enumerate() {
+            let (best, at) = (best[k], at[k]);
             // The master key is the one thing this scan can check that matters: it
             // is the caller's secret, and it is supposed to reach the cipher only
             // through copies the crate wipes.  The `control` entry is a symbol that
@@ -208,16 +227,24 @@ fn main() {
             // positive and the scan cannot be trusted — it is counted as a failure
             // too, because the PASS text below claims exactly that control (and,
             // until this branch existed, claimed a check the code did not perform).
-            // The integrity tag is 8 bytes, so its threshold is 8.
+            //
+            // 8 bytes for every pattern, the 8-byte integrity tag included. The
+            // threshold used to be 16 for the 32-byte master key, so a 12-byte
+            // prefix *printed* as a `master: N B` line and contributed no failure:
+            // the verdict and the line disagreed, and a partial key spill read as
+            // clean.
+            // There is no false-positive case for 8: an accidental 8-byte run of a
+            // 32-byte random key has probability ~2^-64 per position, and the
+            // never-used control below is the check that would expose one.
+            const THRESHOLD: usize = 8;
             let tag_case = label.starts_with("locked integrity tag");
-            let threshold = if tag_case { 8 } else { 16 };
-            if label.starts_with("master KEY") && best >= threshold {
+            if label.starts_with("master KEY") && best >= THRESHOLD {
                 failures += 1;
                 line.push_str(&format!(" | KEY RESIDUE: {}-byte run @{}", best, at));
-            } else if label.starts_with("control") && best >= threshold {
+            } else if label.starts_with("control") && best >= THRESHOLD {
                 failures += 1;
                 line.push_str(&format!(" | CONTROL FALSE POSITIVE: {}-byte run @{}", best, at));
-            } else if tag_case && best >= threshold {
+            } else if tag_case && best >= THRESHOLD {
                 if is_control {
                     // The dependency itself leaves the pattern: record it, and exculpate
                     // the crate cases below.

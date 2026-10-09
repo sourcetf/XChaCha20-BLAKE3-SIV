@@ -37,9 +37,10 @@
 //! two leak screens in a separate job that is allowed to fail (visible in the
 //! checks list, but it does not gate the build); the calibration test alone is
 //! blocking, in the `timing-instrument` job. The strict run of all three is
-//! `./verify.sh --deep` on a quiet machine, where they report `t < 0.4`. The
-//! threshold itself is unchanged: the same test must still pass on hardware that
-//! can support the measurement. The three loops in this file are
+//! `./verify.sh` on a quiet machine — the timing screen is its stage 3c, run by
+//! the default invocation as well as `--deep`/`--all` — where they report
+//! `t < 0.4`. The threshold itself is unchanged: the same test must still pass on
+//! hardware that can support the measurement. The three loops in this file are
 //! serialised against each other (`TIMING_LOCK` below), because libtest runs them in
 //! parallel by default and that CPU contention would land in the numbers the tests
 //! attribute to the code.
@@ -227,6 +228,23 @@ fn resolution_ns(a: &[f64], b: &[f64]) -> f64 {
 /// byte at a time. `subtle::ConstantTimeEq` must make the two classes
 /// indistinguishable.
 ///
+/// # Why the message is empty
+///
+/// [`decrypt`] derives the decryption key from the **received tag**
+/// (`derive_enc(&enc_seed, tag, …)`), so with a non-empty ciphertext the
+/// recovered plaintext — and therefore the tag it is recomputed against —
+/// differs between the two classes. Both classes are then mixtures over the
+/// first-mismatch position of *that* recomputed tag, a position unrelated to
+/// the flipped byte, and a byte-at-a-time comparison has no contrast to show:
+/// an audit planted one in both decrypt gates and this screen passed 3/3. With
+/// an **empty** ciphertext the recovered plaintext is empty whatever the
+/// received tag is, so the recomputed tag is one fixed value; flipping byte 0
+/// in one class and byte `TAG_LEN - 1` in the other makes the comparison itself
+/// see a first mismatch at 0 versus at 64. The derivation still runs on both
+/// tags and does identical work for both (a keyed BLAKE3 XOF over a
+/// fixed-length input, then a zero-length keystream), so the comparison is the
+/// only place the classes differ.
+///
 /// Sensitivity, in the terms the test prints. A plain `==` on a 65-byte tag exits
 /// after the bytes that match, so the difference between a first-byte and a
 /// last-byte mismatch is tens of nanoseconds here; the resolution the screen
@@ -243,14 +261,26 @@ fn timing_tag_comparison_does_not_leak_position() {
     let _guard = timing_guard();
     let key = [0x42u8; 32];
     let nonce = [0x55u8; 24];
-    let pt = [0xABu8; 256];
-    let (ct, tag) = encrypt(&key, &nonce, b"aad", &pt).unwrap();
+    // Empty, so the recovered plaintext — and with it the recomputed tag — is
+    // the same for both classes, and the comparison's first mismatch is exactly
+    // the flipped byte. See the doc above: a non-empty message makes the two
+    // classes mixtures over an unrelated mismatch position and this screen
+    // cannot see the leak it names.
+    let (ct, tag) = encrypt(&key, &nonce, b"aad", b"").unwrap();
+    assert!(ct.is_empty());
 
     // Class A differs in the first tag byte; class B in the last.
     let mut tag_first = tag;
     tag_first[0] ^= 0xFF;
     let mut tag_last = tag;
     tag_last[TAG_LEN - 1] ^= 0xFF;
+
+    // Both are forgeries of a fixed recomputed tag, so the gate rejects both and
+    // the one permitted data-dependent branch (accept/reject) takes the same
+    // direction in both classes. Asserted once outside the timed loops, where
+    // the values are ordinary.
+    assert!(decrypt(&key, &nonce, b"aad", &ct, &tag_first).is_err());
+    assert!(decrypt(&key, &nonce, b"aad", &ct, &tag_last).is_err());
 
     // Interleave the classes within each sample so drift is shared.
     for _ in 0..OPS_PER_SAMPLE {

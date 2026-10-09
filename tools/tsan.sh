@@ -26,6 +26,12 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
+# A direct `tools/tsan.sh` has to find rustup/cargo itself; every sibling tool does
+# this, and without it a stock rustup install (`~/.cargo/bin` not on PATH) died with
+# "rustup is not on PATH" instead of running. Before the rustup checks below, because
+# it is those checks that fail on a rustup-installed toolchain.
+export PATH="$HOME/.cargo/bin:$PATH"
+
 # The nightly toolchain and *its* rust-src are what `-Zbuild-std` runs under; a bare
 # `rustup component list --installed` answers for the default toolchain and used to
 # turn "rustup is not on PATH" into "rust-src is not installed" (and would pass on a

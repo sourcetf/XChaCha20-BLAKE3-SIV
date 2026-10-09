@@ -339,7 +339,9 @@ jobs:
       # a miss in one is not a miss in the other.
       - uses: taiki-e/install-action@83ac0ad63c0167e6f06796fab0fce28db1bf3db0 # v2
         with:
-          tool: cargo-audit
+          # `tool@version` is install-action's pin syntax: an unpinned tool lets a
+          # new release change what a scheduled audit ran without a commit here.
+          tool: cargo-audit@0.22.2
       - name: audit the dependency tree
         run: cargo audit --deny warnings
 
@@ -362,7 +364,7 @@ jobs:
       # only shows up later as `no such command` in the step that needs it.
       - uses: taiki-e/install-action@83ac0ad63c0167e6f06796fab0fce28db1bf3db0 # v2
         with:
-          tool: cargo-deny
+          tool: cargo-deny@0.20.2
 
       # github.com is reachable from a runner, so the advisory database fetches
       # normally here — unlike on the development machine, where it had to be
@@ -456,7 +458,7 @@ jobs:
       # rediscovered.
       - uses: taiki-e/install-action@83ac0ad63c0167e6f06796fab0fce28db1bf3db0 # v2
         with:
-          tool: cargo-mutants
+          tool: cargo-mutants@27.1.0
 
       - name: fault-injection campaign
         # `timeout` so an overrun exits 124 (a failure) instead of letting the job hit
@@ -506,7 +508,8 @@ jobs:
         run: |
           set -euo pipefail
           # Keep the committed evidence aside first: the claim `tests/README.md` makes
-          # about `mutants.out/` is that it describes the *current* source, and until
+          # about `mutants.out/` is that its mutant -> outcome mapping describes the
+          # *current* source (not its recorded line numbers), and until
           # this step existed nothing checked it -- the directory rotted quietly, which
           # this repository has already been bitten by once (a committed run described
           # code that no longer existed).
@@ -602,7 +605,7 @@ jobs:
           shared-key: coverage
       - uses: taiki-e/install-action@83ac0ad63c0167e6f06796fab0fce28db1bf3db0 # v2
         with:
-          tool: cargo-llvm-cov
+          tool: cargo-llvm-cov@0.9.1
 
       - name: coverage over the suite, with the line floor
         run: |
@@ -647,12 +650,13 @@ jobs:
     name: wide audit (scheduled)
     runs-on: ubuntu-latest
     timeout-minutes: 300
-    # The checks that are too slow or too noisy to gate every push, run every night
-    # instead of never: the 4000-vector differential against the reference
-    # implementation, AddressSanitizer over the whole suite (the fuzz job only
-    # covers the fuzz target), and the full Miri suite under Tree Borrows -- the
-    # aliasing model that is *not* the default, so nothing else exercises it at
-    # this scale.
+    # The checks that are too slow or too noisy to gate every push, run on the
+    # weekly schedule (`cron: "0 4 * * 1"` above -- this said "every night", which
+    # the cron never did) instead of never: the 4000-vector differential against
+    # the reference implementation, AddressSanitizer over the whole suite (the fuzz
+    # job only covers the fuzz target), and the full Miri suite under Tree Borrows
+    # -- the aliasing model that is *not* the default, so nothing else exercises it
+    # at this scale.
     # Runs on the schedule *and* on a manual dispatch. The workflow header says
     # `workflow_dispatch` is there for "re-running the wide audit on demand", and this
     # condition used to be `== 'schedule'` alone — so dispatching the workflow ran every
@@ -669,7 +673,12 @@ jobs:
           shared-key: wide
 
       - name: install the blake3 module for the reference implementation
-        run: python3 -m pip install --quiet blake3
+        # Pinned like the tools above: Python's blake3 is what the 4000-vector
+        # differential trusts as the independent reference, so an unpinned wheel
+        # would let a new release change what the scheduled audit checks without a
+        # commit here. 1.0.9 is the version the tooling was validated against on
+        # this project's development host.
+        run: python3 -m pip install --quiet "blake3==1.0.9"
 
       # `examples/xsiv_stdin.rs` is the batch interface it drives, so this exercises
       # the crate's real encryption path over thousands of random inputs.
@@ -720,13 +729,36 @@ jobs:
           # "no such command: fuzz" until this was added -- the same failure mode the
           # dedicated fuzz job documents. The fallback matters because
           # `@cargo-fuzz` is not an install-action tool tag (it warns and exits 0).
-          command -v cargo-fuzz >/dev/null || cargo install --locked cargo-fuzz
+          # Pinned to the version the fuzz job below also names, so a new release
+          # cannot change what a scheduled audit ran without a commit here.
+          command -v cargo-fuzz >/dev/null || cargo install --locked cargo-fuzz --version 0.13.2
           workers="$(nproc)"
-          cargo +nightly fuzz run roundtrip --target x86_64-unknown-linux-gnu -- \
-            "-workers=$workers" "-jobs=$workers" -max_total_time=900 -print_final_stats=1
+          host="x86_64-unknown-linux-gnu"
+          # `-max_len=8192` for the reason the fuzz job below documents.
+          cargo +nightly fuzz run roundtrip --target "$host" -- \
+            "-workers=$workers" "-jobs=$workers" -max_len=8192 -max_total_time=900 -print_final_stats=1
+          # The ultra run below names a *dependency* feature. If it were silently
+          # dropped, this would be a second copy of the run above and nothing would say
+          # so -- so the build is repeated here and the binary has to actually contain
+          # the witness, exactly as the `fuzz` job below (which this workflow runs on
+          # every push to `main` as well as on the schedule) and `verify.sh --fuzz`
+          # guard theirs (the same failure the `timeout`-wrapped sweeps above guard
+          # against: a stage that can pass while checking nothing new). `grep -c`, not
+          # `nm | grep -q`: with `set -o pipefail`, `grep -q` stops at the first match,
+          # kills the writer with SIGPIPE and fails the pipeline on the binary that was
+          # correct.
+          cargo +nightly fuzz build roundtrip \
+            --features xchacha20-blake3-siv/ultra --target "$host"
+          symbols="$(nm -C "fuzz/target/$host/release/roundtrip" | grep -c 'witness::' || true)"
+          if [ "${symbols:-0}" -eq 0 ]; then
+            echo "FAIL: no witness symbols in the fuzz binary -- the ultra feature did" >&2
+            echo "      not apply, and this run would test nothing new" >&2
+            exit 1
+          fi
+          echo "witness symbols in the fuzz binary: $symbols"
           cargo +nightly fuzz run roundtrip --features xchacha20-blake3-siv/ultra \
-            --target x86_64-unknown-linux-gnu -- \
-            "-workers=$workers" "-jobs=$workers" -max_total_time=900 -print_final_stats=1
+            --target "$host" -- \
+            "-workers=$workers" "-jobs=$workers" -max_len=8192 -max_total_time=900 -print_final_stats=1
 
   arm64:
     name: real aarch64 hardware (dispatch only)
@@ -786,7 +818,7 @@ jobs:
       # a fallback so the fuzzer runs even if the action cannot provide it.
       - uses: taiki-e/install-action@83ac0ad63c0167e6f06796fab0fce28db1bf3db0 # v2
         with:
-          tool: cargo-fuzz
+          tool: cargo-fuzz@0.13.2
 
       # Bounded rather than indefinite: the scheduled run is the soak. The target
       # asserts round-trip correctness, rejection of every single-bit corruption,
@@ -803,11 +835,15 @@ jobs:
       - name: fuzz
         run: |
           set -euo pipefail
-          command -v cargo-fuzz >/dev/null || cargo install --locked cargo-fuzz
+          command -v cargo-fuzz >/dev/null || cargo install --locked cargo-fuzz --version 0.13.2
           host="$(rustc +nightly -vV | sed -n 's/^host: //p')"
           echo "fuzzing for host triple: $host"
+          # `-max_len=8192`: libFuzzer's default ceiling is 4096, and the target
+          # header names what that leaves out -- multi-KiB messages, including the
+          # two-byte AAD/plaintext split selector's region above 65535 bytes. 8192
+          # doubles the cap at a per-input cost the ASan build can afford.
           cargo +nightly fuzz run roundtrip --target "$host" \
-            -- -max_total_time=300 -print_final_stats=1
+            -- -max_len=8192 -max_total_time=300 -print_final_stats=1
 
       # The same target with `ultra` on, which is the only configuration that runs the
       # second implementation (`src/witness.rs`) over the key. It is new code on the
@@ -837,7 +873,7 @@ jobs:
           fi
           echo "witness symbols in the fuzz binary: $symbols"
           cargo +nightly fuzz run roundtrip --features xchacha20-blake3-siv/ultra \
-            --target "$host" -- -max_total_time=150 -print_final_stats=1
+            --target "$host" -- -max_len=8192 -max_total_time=150 -print_final_stats=1
 
       # A crashing input is written to fuzz/artifacts; upload it so the failure
       # is reproducible rather than just reported.

@@ -31,8 +31,11 @@ fuzz/fuzz-*.log
 /executables.txt
 
 # `cargo mutants` output. `mutants.out/` is committed *on purpose*: it is the record of
-# the run the CI mutation step performs, and tests/README.md documents it as evidence
-# that must match HEAD. `mutants.out.old/` is the tool's own snapshot of the previous
+# the run the CI mutation step performs, and tests/README.md documents the invariant that
+# is actually enforced -- the mutant -> outcome mapping must match a fresh run. Its
+# recorded line numbers are the run's own and drift as the source moves, so a reader
+# following them lands in the wrong place rather than at the mutant. `mutants.out.old/`
+# is the tool's own snapshot of the previous
 # run -- stale by construction, ~1 MB of diffs against line numbers from an older
 # revision, and never the thing being claimed.
 /mutants.out.old/

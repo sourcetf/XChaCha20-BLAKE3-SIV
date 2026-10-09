@@ -92,6 +92,8 @@ fn strip_comments(text: &str) -> String {
         Line,
         Block,
         Str,
+        /// Inside a raw string (`r"…"`, `r#"…"#`), whose contents are dropped.
+        RawStr(u8),
     }
     let b = text.as_bytes();
     let mut out = String::with_capacity(text.len());
@@ -107,6 +109,33 @@ fn strip_comments(text: &str) -> String {
                 } else if c == b'/' && b.get(i + 1) == Some(&b'*') {
                     mode = Mode::Block;
                     i += 2;
+                } else if let Some((prefix, hashes)) = raw_string_prefix(&b[i..]) {
+                    // A raw string (`r"…"`, `r#"…"#`, `br#"…"#`): its contents are
+                    // dropped like any other literal's, with the prefix and the closing
+                    // quotes kept. Without this the scanner re-enters code mode at the
+                    // first `"` inside the string, and the text between two quotes is
+                    // scanned as code — `let _ = r#"x" scrub_stack(); "x"#;` used to
+                    // satisfy a `scrub_stack();` count while the real call was spelled
+                    // with a space.
+                    for k in 0..=prefix {
+                        out.push(b[i + k] as char);
+                    }
+                    i += prefix + 1;
+                    mode = Mode::RawStr(hashes);
+                } else if c == b'\'' {
+                    // A char literal is opaque, and this must come before the `"` case:
+                    // `'"'` is a char literal whose *closing* quote would otherwise open
+                    // `Mode::Str` and swallow the rest of the scan. A lifetime (`&'a`)
+                    // and a lone apostrophe have no closing quote, so the look-ahead
+                    // tests for one of the two literal shapes and otherwise treats the
+                    // `'` as an ordinary byte.
+                    let escaped = b.get(i + 1) == Some(&b'\\') && b.get(i + 3) == Some(&b'\'');
+                    if escaped || b.get(i + 2) == Some(&b'\'') {
+                        i += if escaped { 4 } else { 3 };
+                    } else {
+                        out.push('\'');
+                        i += 1;
+                    }
                 } else if c == b'"' {
                     // Keep the opening quote; the contents are dropped in `Mode::Str`
                     // and the closing quote is kept there.
@@ -148,7 +177,88 @@ fn strip_comments(text: &str) -> String {
                     i += 1;
                 }
             }
+            Mode::RawStr(hashes) => {
+                let h = hashes as usize;
+                // The terminator is `"` followed by as many `#`s as opened the string;
+                // until then every byte (quotes included) is contents, so it is dropped.
+                // Newlines are kept so line positions stay comparable.
+                if c == b'"'
+                    && b.len() >= i + 1 + h
+                    && b[i + 1..i + 1 + h].iter().all(|&x| x == b'#')
+                {
+                    out.push('"');
+                    for _ in 0..h {
+                        out.push('#');
+                    }
+                    i += 1 + h;
+                    mode = Mode::Code;
+                } else {
+                    if c == b'\n' {
+                        out.push('\n');
+                    }
+                    i += 1;
+                }
+            }
         }
+    }
+    out
+}
+
+/// `(bytes before the opening quote, hash count)` when `b` starts a raw string literal
+/// (`r"…"`, `r#"…"#`, `br"…"`, `br#"…"#`); `None` otherwise.
+///
+/// A raw identifier (`r#name`) is not a string — the byte after its hashes is not a
+/// quote — and a plain `"…"` is handled by `Mode::Str`.
+fn raw_string_prefix(b: &[u8]) -> Option<(usize, u8)> {
+    let mut i = 0usize;
+    if b.get(i) == Some(&b'b') {
+        if b.get(i + 1) != Some(&b'r') {
+            return None;
+        }
+        i += 2;
+    } else if b.get(i) == Some(&b'r') {
+        i += 1;
+    } else {
+        return None;
+    }
+    let start = i;
+    while b.get(i) == Some(&b'#') {
+        i += 1;
+    }
+    if b.get(i) != Some(&b'"') {
+        return None;
+    }
+    // A raw string's hash count is tiny (the compiler caps it far below 256).
+    Some((i, (i - start) as u8))
+}
+
+/// Every brace-matched block in the non-test source that starts at `needle`,
+/// `needle` included. The same helper as `tests/decision_scope.rs`.
+fn brace_blocks(needle: &str) -> Vec<String> {
+    let text = non_test_source();
+    let mut out = Vec::new();
+    let mut rest = text.as_str();
+    while let Some(i) = rest.find(needle) {
+        let after = &rest[i..];
+        let open = after.find('{').expect("block without a body");
+        let mut depth = 0usize;
+        let mut end = None;
+        for (n, c) in after[open..].char_indices() {
+            match c {
+                '{' => depth += 1,
+                '}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        end = Some(open + n);
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        let end = end.expect("unbalanced braces");
+        out.push(after[..=end].to_string());
+        rest = &after[end + 1..];
     }
     out
 }
@@ -206,6 +316,38 @@ fn dual_mac_is_wired_into_both_decrypt_paths() {
         2,
         "`ultra`'s witness agreement must be ANDed into the second gate of both entry points"
     );
+    // And the agreement must be what its block *returns*: every count above witnesses
+    // that the comparison is written, none of them that its value is the one bound to
+    // `witness_ok`. An audit renamed the live binding dead, returned
+    // `subtle::Choice::from(1)` from both blocks, and left a witness whose tag ignores
+    // the AAD -- every assertion here and in `decision_scope.rs` stayed green. Pin the
+    // last non-empty line of each block, as `decision_scope.rs` does for `plain & also`.
+    let witness_blocks = brace_blocks("let witness_ok: subtle::Choice = {");
+    assert_eq!(
+        witness_blocks.len(),
+        2,
+        "one witness-agreement block per decrypt entry point"
+    );
+    for block in &witness_blocks {
+        let code = strip_comments(block);
+        // `let … = { … };`: strip the trailing `;` (the `}` comes before it), then the
+        // closing brace, then take the last non-empty line.
+        let trimmed = code.trim_end();
+        let trimmed = trimmed.strip_suffix(';').unwrap_or(trimmed).trim_end();
+        let last = trimmed
+            .strip_suffix('}')
+            .expect("each witness_ok block must end in a closing brace")
+            .lines()
+            .rev()
+            .find(|l| !l.trim().is_empty())
+            .map(str::trim)
+            .unwrap_or("");
+        assert_eq!(
+            last, "agree",
+            "the witness agreement must be the block's returned value rather than a \
+             comparison computed and discarded with a constant returned in its place:\n{block}"
+        );
+    }
     // Wiped like every other secret-derived copy in the function.
     assert_eq!(
         body.matches("zeroize_array(&mut recomputed_tag)").count(),

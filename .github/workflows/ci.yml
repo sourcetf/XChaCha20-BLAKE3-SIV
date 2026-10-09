@@ -183,6 +183,14 @@ jobs:
     # keeps the two screens from being vacuous. Blocking, because a screen whose
     # instrument has rotted is a green check that means nothing, which is the failure
     # mode this repository keeps finding in other gates.
+    #
+    # The two leak screens themselves are deliberately *not* run here: on a hosted VM
+    # their two classes are biased by ~0.8% with no possible cause (t = 10.96 release,
+    # 11.89 debug, against a threshold of 10), and the fix for that is a quieter host,
+    # not a weaker assertion. What is blocking is that they still *exist* in a release
+    # build -- see the presence step below. They run strict in `./verify.sh` (stage 3c,
+    # in the default invocation and under `--deep`/`--all`), and their advisory CI run
+    # is the `timing` job below.
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
@@ -191,8 +199,48 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           shared-key: timing
+      # A filter that matches nothing makes libtest print "test result: ok. 0 passed;
+      # ... N filtered out" and *exit 0*, so a renamed or `#[cfg]`-ed-out test would
+      # leave this step green while the instrument it gates was never exercised. This
+      # job is blocking and is in the `release` job's `needs`, so the count in the
+      # summary line is the only thing that says the filter matched; require it, the
+      # same way every filtered Miri step in deep.yml and verify.sh's `--miri` stage
+      # does.
       - name: the screen can detect a real difference
-        run: cargo test --release --test timing -- timing_screen_can_detect_a_real_difference
+        run: |
+          set -euo pipefail
+          work="${RUNNER_TEMP:-${TMPDIR:-/tmp}}"
+          cargo test --release --test timing -- timing_screen_can_detect_a_real_difference \
+            2>&1 | tee "$work/timing-instrument.log"
+          count="$(grep -E 'test result:' "$work/timing-instrument.log" | tail -1 \
+            | sed -n 's/.* \([0-9][0-9]*\) passed.*/\1/p' || true)"
+          if [ -z "$count" ] || [ "$count" -lt 1 ]; then
+            echo "::error::the timing-instrument filter matched ${count:-0} test(s); expected at least 1, so this step checked nothing"
+            exit 1
+          fi
+          echo "timing instrument ran $count test(s)"
+
+      # The two screens cannot be blocked on (see the job comment), but they can
+      # *disappear* without any job noticing: a rename, an `#[ignore]`, or a `#[cfg]`
+      # that compiles the release file down to the instrument alone turns the advisory
+      # run below into a green screen testing less, and `--skip timing` in the test
+      # matrix then skips nothing that matters. Listing is deterministic and costs one
+      # already-built binary invocation, so the presence of all three release tests is
+      # blocking here: one instrument and the two leak screens.
+      - name: the two leak screens still exist in a release build
+        run: |
+          set -euo pipefail
+          work="${RUNNER_TEMP:-${TMPDIR:-/tmp}}"
+          cargo test --release --test timing -- --list | tee "$work/timing-list.log"
+          for name in \
+            timing_tag_comparison_does_not_leak_position \
+            timing_does_not_depend_on_key_contents; do
+            if ! grep -q "^${name}: test$" "$work/timing-list.log"; then
+              echo "::error::${name} is no longer listed by 'cargo test --release --test timing': a renamed, ignored or cfg'd-out leak screen would leave the advisory job green while testing less"
+              exit 1
+            fi
+          done
+          echo "both leak screens are present in the release timing target"
 
   timing:
     name: timing screen (advisory)
@@ -211,7 +259,8 @@ jobs:
     # the instrument they rest on is blocked by `timing-instrument` above, the
     # deterministic constant-time evidence is `tools/ctgrind.sh` (and
     # `tools/cache_profile.sh`) in Deep checks, and these same tests run strictly in
-    # `./verify.sh --deep`, where they report t < 0.4.
+    # `./verify.sh` (its stage 3c, run by the default invocation as well as
+    # `--deep`/`--all`), where a quiet machine reports t < 0.4.
     continue-on-error: true
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7

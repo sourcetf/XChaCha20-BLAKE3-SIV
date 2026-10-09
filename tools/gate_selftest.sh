@@ -16,6 +16,22 @@
 # makes them see nothing, on a machine with or without a system valgrind. `HOME` is
 # hidden too, for the extracted-copy path they check first.
 #
+# The checks below also pin the guards that keep a stage from passing while checking
+# nothing -- each of them was deletable, or makeable always-true, without this file
+# noticing, measured in throwaway copies:
+#
+#   * `verify.sh`'s Miri ran-count wrapper (a stub `cargo` that succeeds and reports
+#     no test is what a filter matching nothing looks like; the run must fail);
+#   * `verify.sh`'s zero-test guard on the main test stages (the same stub, printing
+#     the `0 passed` line a gutted suite produces; the run must fail with the
+#     guard's message, not reach its summary);
+#   * `tools/stack_residue.sh`'s exit-3 mapping (a failing `cargo` must answer 3,
+#     not 0 or cargo's 101);
+#   * `tools/cache_profile.sh --trace`'s determinism control (a fake valgrind whose
+#     same-input runs differ must produce exit 3, not a PASS);
+#   * `tools/ctgrind.sh`'s suppression validator (a widened `fun:decrypt` entry in a
+#     scratch tree must be rejected before anything is built).
+#
 # Usage:  tools/gate_selftest.sh
 # Exit codes: 0 every gate honours the convention; 1 one of them does not; 3 the
 # recursion guard refused to run (XSIV_IN_GATE_SELFTEST was already set).
@@ -61,10 +77,28 @@ fail=0
 # earlier version of the two checks below did that and silently ran the real five-minute
 # campaign instead of the stub. Pointing `HOME` at this makes the stub win, which is what
 # "the toolchain cannot run" has to mean for these checks.
+#
+# For status 0 the stub also has to *look like* a successful `cargo test`, because
+# verify.sh's main test stages now require at least one passed test per invocation
+# (the guard check 8 pins); a stub that exited 0 printing nothing would trip that
+# guard before the stage the check under test is about. `test` is matched as a whole
+# argument (so `--all-targets` and `--test-threads` do not count), and `miri` is
+# matched first, because the Miri runs must NOT look like a successful test run --
+# check 4 is about what the stage does when they report nothing.
 make_fake_home() {  # <cargo exit status>
   local home="$WORK/home-$1"
   mkdir -p "$home/.cargo/bin"
-  printf '#!/bin/sh\nexit %s\n' "$1" > "$home/.cargo/bin/cargo"
+  {
+    printf '#!/bin/sh\n'
+    printf 'status=%s\n' "$1"
+    cat <<'STUB'
+case " $* " in
+  *" miri "*) exit "$status" ;;
+  *" test "*) printf '%s\n' 'test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s' ;;
+esac
+exit "$status"
+STUB
+  } > "$home/.cargo/bin/cargo"
   chmod +x "$home/.cargo/bin/cargo"
   printf '%s\n' "$home"
 }
@@ -171,8 +205,11 @@ fi
 
 # 2. A campaign that cannot run must not report itself complete. `tools/fi_check.sh` answers
 #    3 only for an *environmental* build failure (out of disk, or a build the kernel killed);
-#    a `cargo` that simply fails makes it exit 1, so the invariant here is "non-zero, and not
-#    the completion line", with a `cargo` that fails.
+#    a `cargo` that simply fails makes it exit 1, so the invariant here is "non-zero, not
+#    the completion line, and the tool's own build-failure reason". The reason is required
+#    because a bare non-zero exit does not distinguish the campaign refusing a build it
+#    could not run from *any* early failure -- an unconditional `exit 1` at the top of
+#    `tools/fi_check.sh` satisfied the old form of this check (an audit's point).
 HOME_FAIL="$(make_fake_home 1)"
 set +e
 fi_out="$(HOME="$HOME_FAIL" PATH="$HOME_FAIL/.cargo/bin:/usr/bin:/bin" \
@@ -184,6 +221,12 @@ if [ "$fi_rc" -eq 0 ] || [ "$fi_rc" -eq 124 ] \
   echo "FAIL: tools/fi_check.sh reported success (exit $fi_rc) with a cargo that fails." >&2
   echo "      A campaign that could not run must not answer 0 -- the same defect this file" >&2
   echo "      exists for, one tool further out." >&2
+  printf '%s\n' "$fi_out" | tail -5 | sed 's/^/      | /' >&2
+  fail=1
+elif ! printf '%s\n' "$fi_out" | grep -q 'does not build'; then
+  echo "FAIL: tools/fi_check.sh exited $fi_rc with a failing cargo but without its own" >&2
+  echo "      build-failure reason, so this is not the campaign refusing a build it" >&2
+  echo "      could not run: an early unconditional exit looks the same from here." >&2
   printf '%s\n' "$fi_out" | tail -5 | sed 's/^/      | /' >&2
   fail=1
 else
@@ -198,11 +241,13 @@ fi
 #    name filter that matched nothing produces, so the guard is the only thing
 #    between that log and a `pass` verdict. The campaign must fail *without judging
 #    a row*: an `  OK` or `  FAIL <row> expected ...` line means a zero-test log was
-#    read as a verdict, which is the vacuous pass the guard exists to stop.
-#    (Behavioural, not a text check: it pins "the campaign refuses zero-test
-#    evidence", so a rewrite that keeps the refusal keeps this green. With the
-#    row-path guard present the baseline call site is never reached under this
-#    stub, so it is not separately exercised.)
+#    read as a verdict, which is the vacuous pass the guard exists to stop. The exit
+#    status and the row scan are behavioural; on top of them the tool's own reason
+#    for refusing the log (`matched no tests`) is required, because an unconditional
+#    `exit 1` at the top of `tools/fi_check.sh` satisfies the first two (an audit's
+#    point) while proving nothing about `assert_tests_ran`. With the row-path guard
+#    present the baseline call site is never reached under this stub, so it is not
+#    separately exercised.
 HOME_ZERO="$(make_zero_test_home)"
 set +e
 zero_out="$(HOME="$HOME_ZERO" PATH="$HOME_ZERO/.cargo/bin:/usr/bin:/bin" \
@@ -227,8 +272,178 @@ elif printf '%s\n' "$zero_out" | grep -qE '^  (OK|FAIL) '; then
   echo "      log, so this is what deleting it looks like from here." >&2
   printf '%s\n' "$zero_out" | grep -E '^  (OK|FAIL) ' | head -3 | sed 's/^/      | /' >&2
   fail=1
+elif ! printf '%s\n' "$zero_out" | grep -qE 'matched no tests|no "test result" line'; then
+  echo "FAIL: tools/fi_check.sh exited $zero_rc on a zero-test log, but without the" >&2
+  echo "      zero-test guard's own reason, so this is not assert_tests_ran firing:" >&2
+  echo "      an unconditional exit 1 at the top of the tool reads the same from here." >&2
+  printf '%s\n' "$zero_out" | tail -5 | sed 's/^/      | /' >&2
+  fail=1
 else
   echo "  ok: tools/fi_check.sh -> exit $zero_rc on a zero-test log, before any row verdict"
+fi
+
+# 4. The Miri stage's ran-count guard must fire. Miri is slow and often absent, so
+#    the wrapper that reads libtest's `N passed` line is the only thing between a
+#    filter that matches nothing and a UB stage counted as run: libtest exits 0 on
+#    "0 passed". A `cargo` stub that succeeds and prints nothing is what a
+#    zero-match Miri run looks like from the caller's side, so this check needs no
+#    miri installation -- and if the wrapper is deleted, or made always-true, the
+#    run reaches its summary with the stage counted as passed.
+set +e
+miri_out="$(XSIV_IN_GATE_SELFTEST=1 \
+            PATH="$HOME_OK/.cargo/bin:$STUB:$CARGO_BIN_DIR:/usr/bin:/bin" HOME="$HOME_OK" \
+            timeout 300 bash ./verify.sh --miri 2>&1)"
+miri_rc=$?
+set -e
+if [ "$miri_rc" -eq 0 ] || [ "$miri_rc" -eq 124 ]; then
+  echo "FAIL: verify.sh exited $miri_rc for --miri with a cargo that succeeds and" >&2
+  echo "      reports no test run. A Miri filter that matches nothing must fail the" >&2
+  echo "      stage, not pass it (libtest exits 0 on '0 passed')." >&2
+  printf '%s\n' "$miri_out" | tail -5 | sed 's/^/      | /' >&2
+  fail=1
+elif ! printf '%s\n' "$miri_out" | grep -q 'reported no passed test'; then
+  echo "FAIL: verify.sh exited $miri_rc for --miri but not with the ran-count" >&2
+  echo "      guard's message, so it may be failing for an unrelated reason." >&2
+  printf '%s\n' "$miri_out" | tail -5 | sed 's/^/      | /' >&2
+  fail=1
+else
+  echo "  ok: verify.sh --miri -> exit $miri_rc when every filter matches nothing"
+fi
+
+# 5. `tools/stack_residue.sh`'s exit-3 mapping must stay. A build that cannot run
+#    is "could not run" (3), which verify.sh records as a skipped stage. Mapped to
+#    0, the caller cannot tell it from a measurement that ran and found nothing;
+#    mapped to cargo's own 101, it arrives at verify.sh's advisory branch as a
+#    compiler-layout change. A `cargo` stub that fails is the environmental case
+#    the mapping exists for.
+HOME_101="$(make_fake_home 101)"
+set +e
+sr_out="$(HOME="$HOME_101" PATH="$HOME_101/.cargo/bin:/usr/bin:/bin" \
+          timeout 300 bash tools/stack_residue.sh 2>&1)"
+sr_rc=$?
+set -e
+if [ "$sr_rc" -eq 0 ] || [ "$sr_rc" -eq 124 ]; then
+  echo "FAIL: tools/stack_residue.sh exited $sr_rc with a cargo that fails to build." >&2
+  echo "      'The measurement could not run' must be exit 3; 0 reads as 'measured," >&2
+  echo "      nothing found' and any other code as a finding or a raw error." >&2
+  printf '%s\n' "$sr_out" | tail -3 | sed 's/^/      | /' >&2
+  fail=1
+elif [ "$sr_rc" -ne 3 ]; then
+  echo "FAIL: tools/stack_residue.sh exited $sr_rc with a failing cargo, expected 3." >&2
+  printf '%s\n' "$sr_out" | tail -3 | sed 's/^/      | /' >&2
+  fail=1
+else
+  echo "  ok: tools/stack_residue.sh -> exit 3 when its build cannot run"
+fi
+
+# 6. `tools/cache_profile.sh --trace`'s determinism control must fire. The mode
+#    compares address traces, so two runs of the same input that differ mean the
+#    environment cannot hold a layout; without the control the mode compares two
+#    keys anyway and prints PASS. The fake valgrind below answers `--version` and
+#    emits a one-line lackey-format trace; the *third* invocation (the enc phase
+#    runs zero, ones, zero2 -- see the loop there) differs from the first, which is
+#    exactly the condition the control exists to catch. `setarch` is stubbed too,
+#    so the check does not depend on the host having it.
+FAKEVG="$WORK/fakevg"
+mkdir -p "$FAKEVG"
+cat > "$FAKEVG/valgrind" <<'FAKE'
+#!/bin/sh
+if [ "${1:-}" = "--version" ]; then echo "valgrind-3.22.0-fake"; exit 0; fi
+n=$(cat "$FAKE_VG_COUNTER" 2>/dev/null || echo 0)
+n=$((n + 1)); printf '%s\n' "$n" > "$FAKE_VG_COUNTER"
+printf 'I  400000,1\n'
+if [ "$n" -eq 3 ] || [ "$n" -eq 6 ]; then printf 'L  400101,4\n'; else printf 'L  400100,4\n'; fi
+FAKE
+cat > "$FAKEVG/setarch" <<'FAKE'
+#!/bin/sh
+shift   # --addr-no-randomize
+exec "$@"
+FAKE
+chmod +x "$FAKEVG/valgrind" "$FAKEVG/setarch"
+rm -f "$WORK/vgcount"
+set +e
+cp_out="$(HOME="$HOME_OK" PATH="$FAKEVG:$HOME_OK/.cargo/bin:/usr/bin:/bin" \
+          VALGRIND="$FAKEVG/valgrind" FAKE_VG_COUNTER="$WORK/vgcount" \
+          timeout 300 bash tools/cache_profile.sh --trace 4 2>&1)"
+cp_rc=$?
+set -e
+if [ "$cp_rc" -eq 0 ] || [ "$cp_rc" -eq 124 ]; then
+  echo "FAIL: cache_profile.sh --trace exited $cp_rc on an environment whose" >&2
+  echo "      same-input runs differ. The determinism control is what refuses a" >&2
+  echo "      verdict there; without it the false PASS reads as 'no leak'." >&2
+  printf '%s\n' "$cp_out" | tail -5 | sed 's/^/      | /' >&2
+  fail=1
+elif [ "$cp_rc" -ne 3 ] || ! printf '%s\n' "$cp_out" | grep -q 'not reproducible'; then
+  echo "FAIL: cache_profile.sh --trace exited $cp_rc, not 3 with the layout-not-" >&2
+  echo "      reproducible refusal, so this is not the determinism control." >&2
+  printf '%s\n' "$cp_out" | tail -5 | sed 's/^/      | /' >&2
+  fail=1
+else
+  echo "  ok: tools/cache_profile.sh --trace -> exit 3 when the layout is not reproducible"
+fi
+
+# 7. `tools/ctgrind.sh`'s suppression validator must reject an entry that names
+#    anything but the decision: a `fun:decrypt` entry is how a planted leak inside
+#    `decrypt` once passed the check. This runs a scratch tree with a widened entry
+#    and the same fake valgrind (it only needs to answer `--version`); the
+#    validator runs before the build, so nothing is compiled when it is present --
+#    and when it is deleted the run proceeds into the build, where the stub cargo
+#    leaves it failing for an unrelated reason, which the message check below
+#    distinguishes.
+VCOPY="$WORK/ctgrind-supp"
+mkdir -p "$VCOPY/tools" "$VCOPY/tests"
+cp tools/ctgrind.sh "$VCOPY/tools/"
+cat tests/ctgrind.supp > "$VCOPY/tests/ctgrind.supp"
+printf '\n# planted by tools/gate_selftest.sh: a frame that is not the decision\nfun:decrypt\n' \
+  >> "$VCOPY/tests/ctgrind.supp"
+set +e
+supp_out="$(HOME="$HOME_OK" PATH="$FAKEVG:$HOME_OK/.cargo/bin:/usr/bin:/bin" \
+            VALGRIND="$FAKEVG/valgrind" timeout 300 bash "$VCOPY/tools/ctgrind.sh" 2>&1)"
+supp_rc=$?
+set -e
+if [ "$supp_rc" -eq 0 ] || [ "$supp_rc" -eq 124 ]; then
+  echo "FAIL: tools/ctgrind.sh exited $supp_rc with a widened suppression entry." >&2
+  echo "      A frame naming anything but accept_or_reject permits every branch in" >&2
+  echo "      that function; the validator is what refuses it." >&2
+  printf '%s\n' "$supp_out" | tail -5 | sed 's/^/      | /' >&2
+  fail=1
+elif ! printf '%s\n' "$supp_out" | grep -q 'must suppress accept_or_reject and nothing else'; then
+  echo "FAIL: tools/ctgrind.sh exited $supp_rc for a widened suppression, but not" >&2
+  echo "      with the validator's message, so it may have failed for another reason." >&2
+  printf '%s\n' "$supp_out" | tail -5 | sed 's/^/      | /' >&2
+  fail=1
+else
+  echo "  ok: tools/ctgrind.sh -> exit $supp_rc on a suppression entry naming decrypt"
+fi
+
+# 8. The main test stages' zero-test guard must fire. `cargo test` exits 0 when every
+#    test target is empty or filtered out, printing "test result: ok. 0 passed" -- a
+#    vacuous green for the stage that carries the advertised unit + differential suite.
+#    The `cargo` stub that succeeds and prints exactly that line (`make_zero_test_home`)
+#    is what a suite whose tests were all deleted, emptied or `#![cfg]`-ed away looks
+#    like from the caller's side. `XSIV_IN_GATE_SELFTEST=1` keeps this check from
+#    re-running the gate self-test itself; the skip it records is not what fails the
+#    run here, the guard's `exit 1` is (the message check below says which fired).
+set +e
+zero_vs_out="$(XSIV_IN_GATE_SELFTEST=1 \
+               PATH="$HOME_ZERO/.cargo/bin:$STUB:$CARGO_BIN_DIR:/usr/bin:/bin" HOME="$HOME_ZERO" \
+               timeout 300 bash ./verify.sh 2>&1)"
+zero_vs_rc=$?
+set -e
+if [ "$zero_vs_rc" -eq 0 ] || [ "$zero_vs_rc" -eq 124 ]; then
+  echo "FAIL: verify.sh exited $zero_vs_rc with a cargo that succeeds and runs no" >&2
+  echo "      tests. The main test stages must require at least one passed test per" >&2
+  echo "      invocation: libtest exits 0 on '0 passed', so without the guard a" >&2
+  echo "      gutted test suite reports the stage as passed." >&2
+  printf '%s\n' "$zero_vs_out" | tail -5 | sed 's/^/      | /' >&2
+  fail=1
+elif ! printf '%s\n' "$zero_vs_out" | grep -q 'cargo test run for'; then
+  echo "FAIL: verify.sh exited $zero_vs_rc with no tests run, but not with the" >&2
+  echo "      zero-test guard's message, so it may be failing for another reason." >&2
+  printf '%s\n' "$zero_vs_out" | tail -5 | sed 's/^/      | /' >&2
+  fail=1
+else
+  echo "  ok: verify.sh -> exit $zero_vs_rc when the whole test run reports 0 passed"
 fi
 
 echo
@@ -236,7 +451,13 @@ if [ "$fail" -ne 0 ]; then
   echo "gate contract: FAILED" >&2
   exit 1
 fi
-echo "gate contract: the three tools checked here use exit 3 under"
-echo "               hidden tooling; verify.sh fails when a stage it was asked for is"
-echo "               skipped; a campaign that cannot run does not report completion;"
-echo "               and a campaign whose cargo runs no tests does not judge a row."
+echo "gate contract: the tools checked here answer exit 3 under hidden tooling;"
+echo "               verify.sh fails a stage it was asked for that did not run, and"
+echo "               its Miri ran-count guard fails a run that reports no passed"
+echo "               test; its main test stages fail a run in which the whole suite"
+echo "               reported 0 passed; stack_residue.sh answers 3 for a build that"
+echo "               cannot run; the cache-profile trace mode refuses a verdict on a"
+echo "               layout it cannot hold; the ctgrind suppression validator rejects"
+echo "               a widened entry; a campaign that cannot run does not report"
+echo "               completion; and a campaign whose cargo runs no tests does not"
+echo "               judge a row."

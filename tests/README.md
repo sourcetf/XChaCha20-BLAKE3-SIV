@@ -164,9 +164,9 @@ surprise:
   hunk headers in `mutants.out/diff/`, and the line numbers in `caught.txt` and
   `unviable.txt` are the coordinates of the revision the run was made against (that
   `a2a046d` tree, whose `accept_or_reject` starts at line 2428). They are **not** kept in
-  step with HEAD: at `ca5b8a8` that function starts at 2659 (+231), and it has moved
-  further with every commit since, so a reader who
-  follows a recorded line number lands in the wrong place. It is still worth refreshing
+  step with HEAD: at `ca5b8a8` that function starts at 2659 (+231) and at `e340df2` at 2690
+  (+262), and it has moved further since, so a reader who follows a recorded line number
+  lands in the wrong place. It is still worth refreshing
   by re-running the campaign, which is what re-syncs the coordinates — and refreshing is
   also how the `decrypt_bounded` bound mutants were found to be uncaught (the run named a
   test set that did not witness the new code), so treat "the diffs look old" as a
@@ -233,7 +233,8 @@ cargo deny --offline check
   identically by every backend with a committed runner: x86_64 with AVX2
   (native), aarch64 under `qemu-aarch64` (NEON), i686 under `qemu-i386` (no SIMD
   backend at all, pure scalar), riscv64 under `qemu-riscv64` (scalar-only, 64-bit
-  RISC-V) and s390x big-endian interpreted by Miri, so it is
+  RISC-V), powerpc64 under `qemu-ppc64` (big-endian, scalar) and s390x big-endian
+  interpreted by Miri, so it is
   a cross-implementation equivalence check rather than a known-answer test. The
   cross-execution CI job runs it on the aarch64, i686, powerpc64 and riscv64 targets, and the Deep
   Miri job (and `verify.sh --miri`) runs the s390x cross-interpretation. A

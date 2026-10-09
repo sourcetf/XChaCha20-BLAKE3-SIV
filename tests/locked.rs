@@ -87,7 +87,10 @@ static SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
 /// Returning early because the environment refuses to lock is indistinguishable, in a
 /// test report, from having verified the lock — both print `ok`. So a refusal is a
 /// *failure* unless `XSIV_ALLOW_UNLOCKED=1` says this host knowingly runs a `locked`
-/// build with nothing locked (the same convention `tests/ultra.rs` uses).
+/// build with nothing locked (the same convention `tests/ultra.rs` uses). When the
+/// escape hatch is used the skip is *printed*: six tests reach a return through this
+/// function or the identical branch in `unlocking_restores_core_dump_inclusion`, and a
+/// silent `ok` for all six was a measured finding.
 fn lock_or_skip() -> Option<LockedKey> {
     let allowed = std::env::var("XSIV_ALLOW_UNLOCKED").is_ok();
     if !SUPPORTED {
@@ -105,6 +108,16 @@ fn lock_or_skip() -> Option<LockedKey> {
                 allowed,
                 "the kernel refused to lock memory (errno {}): raise RLIMIT_MEMLOCK, or \
                  set XSIV_ALLOW_UNLOCKED=1 to record that this host runs unlocked.",
+                -e
+            );
+            // The allowed branch must not be silent. Every caller of this function returns
+            // `ok` without testing its lock, and libtest's summary line cannot tell that
+            // from a verified one -- the same failure mode the `XSIV_ALLOW_UNEXERCISED_
+            // REFUSAL` branches below avoid by printing. An audit measured this branch
+            // printing nothing at all.
+            eprintln!(
+                "SKIPPED (allowed by XSIV_ALLOW_UNLOCKED=1): the kernel refused to lock \
+                 memory (errno {}), so no locked key was available to test",
                 -e
             );
             None
@@ -567,6 +580,16 @@ fn unlocking_restores_core_dump_inclusion() {
                  XSIV_ALLOW_UNLOCKED=1 to record that this host runs unlocked",
                 -e
             );
+            // Silent until an audit measured it: the assert above records the refusal as
+            // an accepted one, and a returned test still prints `ok` in libtest's summary,
+            // so without this line nothing in the report says the dump advice was never
+            // observed. Same wording convention as the `XSIV_ALLOW_UNEXERCISED_REFUSAL`
+            // skips above.
+            eprintln!(
+                "SKIPPED (allowed by XSIV_ALLOW_UNLOCKED=1): the kernel refused to lock \
+                 memory (errno {}), so the effect of MADV_DODUMP was never observed",
+                -e
+            );
             return;
         }
     }
@@ -655,6 +678,8 @@ fn strip_comments(text: &str) -> String {
         Line,
         Block,
         Str,
+        /// Inside a raw string (`r"…"`, `r#"…"#`), whose contents are dropped.
+        RawStr(u8),
     }
     let b = text.as_bytes();
     let mut out = String::with_capacity(text.len());
@@ -670,6 +695,33 @@ fn strip_comments(text: &str) -> String {
                 } else if c == b'/' && b.get(i + 1) == Some(&b'*') {
                     mode = Mode::Block;
                     i += 2;
+                } else if let Some((prefix, hashes)) = raw_string_prefix(&b[i..]) {
+                    // A raw string (`r"…"`, `r#"…"#`, `br#"…"#`): its contents are
+                    // dropped like any other literal's, with the prefix and the closing
+                    // quotes kept. Without this the scanner re-enters code mode at the
+                    // first `"` inside the string, and the text between two quotes is
+                    // scanned as code — `let _ = r#"x" scrub_stack(); "x"#;` used to
+                    // satisfy a `scrub_stack();` count while the real call was spelled
+                    // with a space.
+                    for k in 0..=prefix {
+                        out.push(b[i + k] as char);
+                    }
+                    i += prefix + 1;
+                    mode = Mode::RawStr(hashes);
+                } else if c == b'\'' {
+                    // A char literal is opaque, and this must come before the `"` case:
+                    // `'"'` is a char literal whose *closing* quote would otherwise open
+                    // `Mode::Str` and swallow the rest of the scan. A lifetime (`&'a`)
+                    // and a lone apostrophe have no closing quote, so the look-ahead
+                    // tests for one of the two literal shapes and otherwise treats the
+                    // `'` as an ordinary byte.
+                    let escaped = b.get(i + 1) == Some(&b'\\') && b.get(i + 3) == Some(&b'\'');
+                    if escaped || b.get(i + 2) == Some(&b'\'') {
+                        i += if escaped { 4 } else { 3 };
+                    } else {
+                        out.push('\'');
+                        i += 1;
+                    }
                 } else if c == b'"' {
                     // Keep the opening quote; the contents are dropped in `Mode::Str`
                     // and the closing quote is kept there.
@@ -711,9 +763,59 @@ fn strip_comments(text: &str) -> String {
                     i += 1;
                 }
             }
+            Mode::RawStr(hashes) => {
+                let h = hashes as usize;
+                // The terminator is `"` followed by as many `#`s as opened the string;
+                // until then every byte (quotes included) is contents, so it is dropped.
+                // Newlines are kept so line positions stay comparable.
+                if c == b'"'
+                    && b.len() >= i + 1 + h
+                    && b[i + 1..i + 1 + h].iter().all(|&x| x == b'#')
+                {
+                    out.push('"');
+                    for _ in 0..h {
+                        out.push('#');
+                    }
+                    i += 1 + h;
+                    mode = Mode::Code;
+                } else {
+                    if c == b'\n' {
+                        out.push('\n');
+                    }
+                    i += 1;
+                }
+            }
         }
     }
     out
+}
+
+/// `(bytes before the opening quote, hash count)` when `b` starts a raw string literal
+/// (`r"…"`, `r#"…"#`, `br"…"`, `br#"…"#`); `None` otherwise.
+///
+/// A raw identifier (`r#name`) is not a string — the byte after its hashes is not a
+/// quote — and a plain `"…"` is handled by `Mode::Str`.
+fn raw_string_prefix(b: &[u8]) -> Option<(usize, u8)> {
+    let mut i = 0usize;
+    if b.get(i) == Some(&b'b') {
+        if b.get(i + 1) != Some(&b'r') {
+            return None;
+        }
+        i += 2;
+    } else if b.get(i) == Some(&b'r') {
+        i += 1;
+    } else {
+        return None;
+    }
+    let start = i;
+    while b.get(i) == Some(&b'#') {
+        i += 1;
+    }
+    if b.get(i) != Some(&b'"') {
+        return None;
+    }
+    // A raw string's hash count is tiny (the compiler caps it far below 256).
+    Some((i, (i - start) as u8))
 }
 
 /// Every brace-matched block in the non-test source that starts at `needle`, `needle`

@@ -19,16 +19,22 @@ Anything that breaks the properties claimed in `README.md`:
 - forging a tag, i.e. having a message accepted that the key holder did not produce;
 - breaking key or context commitment — two different `(key, nonce, aad, message)`
   tuples with the same tag;
-- a **secret-dependent branch or memory access in this crate's own code**. The
-  README documents exactly one tolerated decision — the SIV accept/reject, which
-  cannot be removed because SIV has to decrypt before it can verify — and it lives in a
-  function of its own (`accept_or_reject`), which `ultra`'s encrypt-side witness
-  cross-check also goes through rather than branching at its own call site.
-  `tools/ctgrind.sh` is the mechanical check for it, including for the claim that the
-  tolerance covers nothing else, which it verifies by planting a secret-dependent
-  branch inside `decrypt` and requiring the run to fail. It runs in three
-  configurations — default, `--no-default-features`, and `--features ultra` — and the
-  third is what caught the encrypt-side branch when it was written as an `if`;
+- a **secret-dependent branch or memory access in this crate's own code**. In the
+  **AEAD path** the README documents exactly one tolerated decision — the SIV
+  accept/reject, which cannot be removed because SIV has to decrypt before it can
+  verify — and it lives in a function of its own (`accept_or_reject`), which `ultra`'s
+  encrypt-side witness cross-check also goes through rather than branching at its own
+  call site. `tools/ctgrind.sh` is the mechanical check for it, including for the claim
+  that the tolerance covers nothing else *in the code ctgrind runs*, which it verifies
+  by planting a secret-dependent branch inside `decrypt` and requiring the run to fail.
+  It runs in three configurations — default, `--no-default-features`, and `--features
+  ultra` — and the third is what caught the encrypt-side branch when it was written as
+  an `if`. It does **not** exercise `locked`'s fail-stop: `LockedKey::as_bytes`
+  branches on an integrity tag of the stored key and panics when it differs
+  (`check_integrity`, `src/lib.rs`), and `tests/ctgrind.rs` drives only the AEAD entry
+  points with no `LockedKey` in sight. The crate header names that branch, alongside
+  the decision and the witness fold, as one of the three secret-dependent branches it
+  tolerates, and documents why it reveals no key bit under no-fault operation;
 - a reachable panic, or an unbounded allocation, from attacker-controlled input;
 - unsoundness in the `unsafe` blocks — see `README.md` for what Miri, Kani and the
   sanitizer runs cover, and note that every block carries a `// SAFETY:` comment

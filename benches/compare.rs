@@ -45,6 +45,34 @@ fn bench_encrypt(c: &mut Criterion) {
         let pt = vec![0xA5u8; size];
         group.throughput(Throughput::Bytes(size as u64));
 
+        // Correctness before timing, in every arm: the `.unwrap()`s below only exclude
+        // an implementation that returns `Err`. One that returns `Ok` of the wrong bytes
+        // -- a stub, or a decrypt that verifies but never writes -- would be timed as a
+        // throughput *win*, so each arm's outputs are round-tripped once here, outside
+        // the measured closures.
+        {
+            let (ct, tag) = encrypt(&key, &nonce24, aad, &pt).unwrap();
+            assert_eq!(
+                decrypt(&key, &nonce24, aad, &ct, &tag).unwrap().as_slice(),
+                &pt[..],
+                "xchacha20-blake3-siv round trip, size {size}"
+            );
+            let mut buf = pt.clone();
+            let tag = xcp
+                .encrypt_in_place_detached(&nonce24.into(), aad, &mut buf)
+                .unwrap();
+            xcp.decrypt_in_place_detached(&nonce24.into(), aad, &mut buf, &tag)
+                .unwrap();
+            assert_eq!(buf, pt, "xchacha20-poly1305 round trip, size {size}");
+            let mut buf = pt.clone();
+            let tag = cp
+                .encrypt_in_place_detached(&nonce12.into(), aad, &mut buf)
+                .unwrap();
+            cp.decrypt_in_place_detached(&nonce12.into(), aad, &mut buf, &tag)
+                .unwrap();
+            assert_eq!(buf, pt, "chacha20-poly1305 round trip, size {size}");
+        }
+
         group.bench_with_input(
             BenchmarkId::new("xchacha20-blake3-siv", size),
             &size,
@@ -130,6 +158,28 @@ fn bench_decrypt(c: &mut Criterion) {
             .encrypt_in_place_detached(&nonce12.into(), aad, &mut cp_ct)
             .unwrap();
 
+        // Correctness before timing, in every arm: each tag above must authenticate
+        // and recover `pt` exactly. `.unwrap()` alone would accept a decrypt that
+        // returned `Ok` without writing (or wrote garbage), which would then be timed
+        // as a win.
+        assert_eq!(
+            decrypt(&key, &nonce24, aad, &siv_ct, &siv_tag)
+                .unwrap()
+                .as_slice(),
+            &pt[..],
+            "xchacha20-blake3-siv tagged decrypt, size {size}"
+        );
+        {
+            let mut buf = xcp_ct.clone();
+            xcp.decrypt_in_place_detached(&nonce24.into(), aad, &mut buf, &xcp_tag)
+                .unwrap();
+            assert_eq!(buf, pt, "xchacha20-poly1305 decrypt, size {size}");
+            let mut buf = cp_ct.clone();
+            cp.decrypt_in_place_detached(&nonce12.into(), aad, &mut buf, &cp_tag)
+                .unwrap();
+            assert_eq!(buf, pt, "chacha20-poly1305 decrypt, size {size}");
+        }
+
         // `iter_batched` so the per-iteration reset to the ciphertext is *setup*,
         // not measured work: in-place decryption consumes its buffer, and charging
         // every side for the copy equally would hide exactly the difference above.
@@ -194,7 +244,37 @@ fn bench_roundtrip(c: &mut Criterion) {
     let mut group = c.benchmark_group("encrypt_then_decrypt");
     for size in SIZES {
         let pt = vec![0xA5u8; size];
-        group.throughput(Throughput::Bytes(size as u64));
+        // Each iteration encrypts *and* decrypts `size` bytes, so the honest byte
+        // count is `2 * size`: the old `Bytes(size)` label credited one direction
+        // only and read the reported MiB/s 2x too high (arm-to-arm ratios are
+        // unaffected, both sides pay the same).
+        group.throughput(Throughput::Bytes((2 * size) as u64));
+
+        // Correctness before timing, in every arm. A no-op (or wrong-`Ok`) decrypt
+        // would otherwise be timed as a throughput win, since `.unwrap()` only
+        // excludes one that returns `Err`.
+        {
+            let mut buf = pt.clone();
+            let tag = encrypt_in_place_detached(&key, &nonce, aad, &mut buf).unwrap();
+            decrypt_in_place_detached(&key, &nonce, aad, &mut buf, &tag).unwrap();
+            assert_eq!(
+                buf, pt,
+                "xchacha20-blake3-siv in-place round trip, size {size}"
+            );
+            let (ct, tag) = encrypt(&key, &nonce, aad, &pt).unwrap();
+            assert_eq!(
+                decrypt(&key, &nonce, aad, &ct, &tag).unwrap().as_slice(),
+                &pt[..],
+                "xchacha20-blake3-siv allocating round trip, size {size}"
+            );
+            let mut buf = pt.clone();
+            let tag = xcp
+                .encrypt_in_place_detached(&nonce.into(), aad, &mut buf)
+                .unwrap();
+            xcp.decrypt_in_place_detached(&nonce.into(), aad, &mut buf, &tag)
+                .unwrap();
+            assert_eq!(buf, pt, "xchacha20-poly1305 round trip, size {size}");
+        }
 
         // Both sides in place, with the per-iteration buffer reset as setup. A
         // round trip through this crate's *allocating* API would also pay two

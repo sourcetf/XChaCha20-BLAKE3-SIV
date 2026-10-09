@@ -639,17 +639,186 @@ fn decrypt_bounded_enforces_the_callers_limit() {
 /// property is not observable from outside: the failure needs an allocator refusal,
 /// and what it leaves behind is stack memory no test can reach. The same reasoning as
 /// `tests/decision_scope.rs` applies — the ordering is the fix, so the ordering is
-/// what is pinned.
+/// what is pinned — and the same hardening applies too: the searched text comes from
+/// `non_test_source()`, with comments and string-literal contents removed, so a comment
+/// or a dead literal cannot stand in for an allocation or an ordering.
+/// The shipped text of `src/lib.rs`, for the one source-shape test below.
+const LIB: &str = include_str!("../src/lib.rs");
+
+/// `LIB` with comments removed and string-literal contents blanked, cut at `mod tests {`.
+///
+/// Every text search in `every_allocation_happens_before_any_derivation` runs on this.
+/// The raw text made `body.contains("alloc_zeroed(")` and the ordering matches satisfiable
+/// by a comment or a dead string literal: an audit moved `encrypt`'s allocation below
+/// `derive_material` — the historical defect that test exists for, which returns through
+/// live key material on `AllocationFailed` — spelled it `alloc_zeroed (` with a space, and
+/// left the old call in a comment; the test stayed green with no allocation before the
+/// first derivation. `libtest` cannot share items between test binaries, so the scanner is
+/// copied from `tests/decision_scope.rs`, `tests/counter_range.rs`, `tests/ultra.rs` and
+/// `tests/locked.rs` rather than imported.
+fn non_test_source() -> String {
+    let cut = LIB.find("mod tests {").expect("the test module must exist");
+    strip_comments(&LIB[..cut])
+}
+
+/// See [`non_test_source`]: comments and string-literal contents are removed, with newlines
+/// kept so line positions stay comparable.
+fn strip_comments(text: &str) -> String {
+    #[derive(PartialEq)]
+    enum Mode {
+        Code,
+        Line,
+        Block,
+        Str,
+        /// Inside a raw string (`r"…"`, `r#"…"#`), whose contents are dropped.
+        RawStr(u8),
+    }
+    let b = text.as_bytes();
+    let mut out = String::with_capacity(text.len());
+    let mut mode = Mode::Code;
+    let mut i = 0usize;
+    while i < b.len() {
+        let c = b[i];
+        match mode {
+            Mode::Code => {
+                if c == b'/' && b.get(i + 1) == Some(&b'/') {
+                    mode = Mode::Line;
+                    i += 2;
+                } else if c == b'/' && b.get(i + 1) == Some(&b'*') {
+                    mode = Mode::Block;
+                    i += 2;
+                } else if let Some((prefix, hashes)) = raw_string_prefix(&b[i..]) {
+                    // A raw string (`r"…"`, `r#"…"#`, `br#"…"#`): its contents are
+                    // dropped like any other literal's, with the prefix and the closing
+                    // quotes kept. Without this the scanner re-enters code mode at the
+                    // first `"` inside the string, and the text between two quotes is
+                    // scanned as code — `let _ = r#"x" scrub_stack(); "x"#;` used to
+                    // satisfy a `scrub_stack();` count while the real call was spelled
+                    // with a space.
+                    for k in 0..=prefix {
+                        out.push(b[i + k] as char);
+                    }
+                    i += prefix + 1;
+                    mode = Mode::RawStr(hashes);
+                } else if c == b'\'' {
+                    // A char literal is opaque, and this must come before the `"` case:
+                    // `'"'` is a char literal whose *closing* quote would otherwise open
+                    // `Mode::Str` and swallow the rest of the scan. A lifetime (`&'a`)
+                    // and a lone apostrophe have no closing quote, so the look-ahead
+                    // tests for one of the two literal shapes and otherwise treats the
+                    // `'` as an ordinary byte.
+                    let escaped = b.get(i + 1) == Some(&b'\\') && b.get(i + 3) == Some(&b'\'');
+                    if escaped || b.get(i + 2) == Some(&b'\'') {
+                        i += if escaped { 4 } else { 3 };
+                    } else {
+                        out.push('\'');
+                        i += 1;
+                    }
+                } else if c == b'"' {
+                    // Keep the opening quote; the contents are dropped in `Mode::Str`
+                    // and the closing quote is kept there.
+                    out.push('"');
+                    mode = Mode::Str;
+                    i += 1;
+                } else {
+                    out.push(c as char);
+                    i += 1;
+                }
+            }
+            Mode::Line => {
+                if c == b'\n' {
+                    out.push('\n');
+                    mode = Mode::Code;
+                }
+                i += 1;
+            }
+            Mode::Block => {
+                if c == b'*' && b.get(i + 1) == Some(&b'/') {
+                    mode = Mode::Code;
+                    i += 2;
+                } else {
+                    if c == b'\n' {
+                        out.push('\n'); // keep line numbers aligned
+                    }
+                    i += 1;
+                }
+            }
+            Mode::Str => {
+                if c == b'\\' {
+                    i += 2; // skip the escaped byte (including `\"`)
+                } else if c == b'"' {
+                    out.push('"');
+                    mode = Mode::Code;
+                    i += 1;
+                } else {
+                    // Drop the contents so no byte inside a literal is scanned.
+                    i += 1;
+                }
+            }
+            Mode::RawStr(hashes) => {
+                let h = hashes as usize;
+                // The terminator is `"` followed by as many `#`s as opened the string;
+                // until then every byte (quotes included) is contents, so it is dropped.
+                // Newlines are kept so line positions stay comparable.
+                if c == b'"'
+                    && b.len() >= i + 1 + h
+                    && b[i + 1..i + 1 + h].iter().all(|&x| x == b'#')
+                {
+                    out.push('"');
+                    for _ in 0..h {
+                        out.push('#');
+                    }
+                    i += 1 + h;
+                    mode = Mode::Code;
+                } else {
+                    if c == b'\n' {
+                        out.push('\n');
+                    }
+                    i += 1;
+                }
+            }
+        }
+    }
+    out
+}
+
+/// `(bytes before the opening quote, hash count)` when `b` starts a raw string literal
+/// (`r"…"`, `r#"…"#`, `br"…"`, `br#"…"#`); `None` otherwise.
+///
+/// A raw identifier (`r#name`) is not a string — the byte after its hashes is not a
+/// quote — and a plain `"…"` is handled by `Mode::Str`.
+fn raw_string_prefix(b: &[u8]) -> Option<(usize, u8)> {
+    let mut i = 0usize;
+    if b.get(i) == Some(&b'b') {
+        if b.get(i + 1) != Some(&b'r') {
+            return None;
+        }
+        i += 2;
+    } else if b.get(i) == Some(&b'r') {
+        i += 1;
+    } else {
+        return None;
+    }
+    let start = i;
+    while b.get(i) == Some(&b'#') {
+        i += 1;
+    }
+    if b.get(i) != Some(&b'"') {
+        return None;
+    }
+    // A raw string's hash count is tiny (the compiler caps it far below 256).
+    Some((i, (i - start) as u8))
+}
+
 #[test]
 fn every_allocation_happens_before_any_derivation() {
-    const LIB: &str = include_str!("../src/lib.rs");
-
-    /// The body of `fn name(`, brace-matched.
+    /// The body of `fn name(`, brace-matched, on the comment-free source.
     fn body(name: &str) -> String {
-        let start = LIB
+        let source = non_test_source();
+        let start = source
             .find(&format!("pub fn {name}("))
             .unwrap_or_else(|| panic!("{name} not found"));
-        let after = &LIB[start..];
+        let after = &source[start..];
         let open = after.find('{').expect("block without a body");
         let mut depth = 0usize;
         for (i, c) in after[open..].char_indices() {
@@ -734,4 +903,69 @@ fn every_allocation_happens_before_any_derivation() {
         2,
         "both `ultra` allocation failures must zeroize the caller's buffer before returning"
     );
+
+    // Every named secret buffer must actually be wiped, per entry point. The ordering
+    // assertions above only compare *positions*: an audit deleted `encrypt`'s
+    // `zeroize_array(&mut enc_key);` -- one key left in the frame on the success path --
+    // and this file, the three sibling source-shape files and all 50 crate unit tests
+    // stayed green. The counts are exact, so deleting a wipe of a buffer that has more
+    // than one site (`encrypt`'s three `k_in` wipes) fails too rather than being covered
+    // by a surviving site.
+    for (name, buffers) in [
+        (
+            "encrypt",
+            &[
+                ("k_in", 3),
+                ("k_out", 3),
+                ("enc_seed", 3),
+                ("enc_key", 1),
+                ("enc_nonce", 1),
+            ][..],
+        ),
+        (
+            "encrypt_in_place_detached",
+            &[
+                ("k_in", 1),
+                ("k_out", 1),
+                ("enc_seed", 1),
+                ("enc_key", 1),
+                ("enc_nonce", 1),
+            ][..],
+        ),
+        (
+            "decrypt",
+            &[
+                ("k_in", 1),
+                ("k_out", 1),
+                ("enc_seed", 1),
+                ("enc_key", 1),
+                ("enc_nonce", 1),
+                ("computed_tag", 1),
+            ][..],
+        ),
+        (
+            "decrypt_in_place_detached",
+            &[
+                ("k_in", 1),
+                ("k_out", 1),
+                ("enc_seed", 1),
+                ("enc_key", 1),
+                ("enc_nonce", 1),
+                ("computed_tag", 1),
+            ][..],
+        ),
+    ] {
+        let body = body(name);
+        for (buffer, expected) in buffers {
+            let wipe = format!("zeroize_array(&mut {buffer});");
+            let found = body.matches(wipe.as_str()).count();
+            assert_eq!(
+                found, *expected,
+                "`{name}` wipes `{buffer}` {found} times, not {expected}: a deleted (or \
+                 added) wipe changes what survives on the stack, and the ordering \
+                 assertion above cannot see it -- it compares the position of the first \
+                 derivation with each allocation, never the wipes"
+            );
+        }
+    }
 }

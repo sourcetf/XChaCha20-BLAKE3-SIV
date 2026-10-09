@@ -23,17 +23,20 @@
 //! every harness here is shaped around them.  All figures are measured on a
 //! 16-core x86_64 machine:
 //!
-//! 1. **The permutation is expensive.** One concrete `chacha20_block` costs
-//!    ~320 s (the 20 rounds alone are ~62 s). Any harness that calls the real
-//!    permutation more than once cannot finish in a normal loop, and one that
-//!    makes the key or counter symbolic does not finish at all. Hence
+//! 1. **The permutation is expensive.** One concrete `chacha20_block` cost ~320 s
+//!    on the CBMC these bounds were shaped against (the 20 rounds alone ~62 s) — an
+//!    order of magnitude slower than today's toolchain, whose current figures the
+//!    design note in the ChaCha20-stream section carries. Any harness that calls
+//!    the real permutation more than once cannot finish in a normal loop, and one
+//!    that makes the key or counter symbolic does not finish at all. Hence
 //!    `kani::stub` for the permutation, and `hchacha20_matches_draft_vector` as
 //!    the single place the real rounds are run.
 //!
-//! 2. **Zeroization is expensive.** CBMC models each `write_volatile` separately,
-//!    at ~29 s per 64-byte wipe, so `chacha20_apply`'s per-block wipe dominates
-//!    any harness that reaches it. Hence the `zeroize_array` stub, with the real
-//!    implementation verified directly by the two `zeroize_*` harnesses below.
+//! 2. **Zeroization is expensive.** CBMC models each `write_volatile` separately —
+//!    ~29 s per 64-byte wipe under that same older tool — so `chacha20_apply`'s
+//!    per-block wipe dominates any harness that reaches it. Hence the
+//!    `zeroize_array` stub, with the real implementation verified directly by the
+//!    two `zeroize_*` harnesses below.
 //!
 //! 3. **`memcmp` inflates the unwind bound.** `assert_eq!` on slices lowers to
 //!    `memcmp`, whose internal loop needs an unwind bound proportional to the
@@ -56,7 +59,9 @@
 //! way either exhausts the solver or passes vacuously.  Those properties are
 //! covered by
 //!
-//! * the published test vectors (`standard.txt` §Test Vectors, draft-irtf-cfrg-xchacha §A),
+//! * the published test vectors (`standard.txt`'s draft-irtf-cfrg-xchacha-03 §2.2.1,
+//!   §A.2.1 and §A.3.1 vectors; `standard.txt`'s own §Test Vectors are the c2sp
+//!   construction's, which this crate is not interoperable with and does not replay),
 //! * differential testing against an independent reference implementation
 //!   (`tools/ref_impl.py` → `tests/vectors_differential.txt`, replayed by
 //!   `tests/differential_reference.rs`), and
@@ -208,13 +213,21 @@ fn stub_chacha20_block(key: &[u8; 32], counter: u32, nonce: &[u8; 12]) -> [u8; 6
 ///
 /// CBMC models each `write_volatile` individually, and the original note here
 /// charged ~29 s per 64-byte wipe (again an older-CBMC figure; today's toolchain is
-/// far faster, see the module head).  Whatever the constant, it lands once per block
-/// in any harness that calls `chacha20_apply`, and for a harness whose property has
-/// nothing to do with wiping that cost buys nothing — so it is stubbed out here.
+/// far faster, see the design note above).  Whatever the constant, it lands once per
+/// block in any harness that calls `chacha20_apply`, and for a harness whose property
+/// has nothing to do with wiping that cost buys nothing — so it is stubbed out here.
 ///
 /// Zeroization is *not* left unverified: `zeroize_slice_clears_all_bytes` and
 /// `zeroize_slice_clears_unaligned_window` below exercise the real
 /// implementation directly, on the small buffers where the cost is acceptable.
+///
+/// **What those two verify is `zeroize_slice`/`zeroize_raw`, not the generic
+/// `zeroize_array` wrapper itself**: no harness *asserts* anything about
+/// `zeroize_array`'s own `size_of`/pointer/slice arithmetic. The wrapper is executed
+/// for real, unasserted, by the one harness that does not stub it
+/// (`hchacha20_matches_draft_vector`, whose 64-byte wipe goes through it), and its
+/// behaviour is pinned on the test side by `test_zeroize_covers_unaligned_prefix` and
+/// the other zeroize tests in `lib.rs`.
 fn noop_zeroize_array<T>(_value: &mut T) {}
 
 /// Every block of the keystream must be produced from the counter immediately
@@ -721,16 +734,20 @@ fn model_blake3_keyed_multi(key: &[u8; 32], parts: &[&[u8]], out: &mut [u8]) {
     }
 }
 
-/// The tag must be the model evaluated on the **exact** two-level construction,
-/// over all `TAG_LEN` bytes:
+/// The tag must be **computed through the exact two-level construction** the model
+/// encodes: this harness pins the call graph and the input layout, plus that the stubbed
+/// hash is reached at all. The returned tag's *value* is compared against a
+/// reconstruction by `tag_matches_the_model_on_a_concrete_input` below — an earlier
+/// revision of this comment read as though this harness made that comparison, and it
+/// does not (see the paragraph on what its own assertion can and cannot do).
 ///
 /// ```text
 /// X   = BLAKE3_keyed(k_in,  DOM_PRE || N || le64(|A|) || le64(|M|) || A || M)
 /// tag = BLAKE3_keyed(k_out, DOM_TAG || X)
 /// ```
 ///
-/// `k_in`, `k_out` and `nonce` are symbolic, so this holds for every possible
-/// secret material.  The stub checks the shape of each call it receives — domain
+/// `k_in`, `k_out` and `nonce` are symbolic, so the *shape* claim holds for every
+/// possible secret material.  The stub checks the shape of each call it receives — domain
 /// prefixes, the head length, both encoded lengths against the actual parts, and
 /// the output widths — so a length, domain separator or digest dropped from
 /// either hash fails those assertions.  The nonce bytes themselves are not read
@@ -901,13 +918,16 @@ fn tag_matches_the_model_on_a_concrete_input() {
 
 /// A change to either derived key must change the tag.
 ///
+/// The perturbed byte position is **symbolic** in each key (every position in `0..32`),
+/// not fixed at byte 0: a fixed position would let an implementation that read only
+/// `k[0]` pass, which an audit noted of the earlier revision.
+///
 /// **What this does not establish**, despite what an earlier version of this doc
-/// claimed: it flips one key byte and asserts only that *some* tag byte moved, so
-/// an implementation that filled a prefix of the output and left the rest
-/// constant passes. The stronger "all 65 bytes move" form is not usable here —
-/// asking CBMC to unroll the model's positional fold over a whole field exceeded
-/// 18 minutes (measured, twice). The full-width property is covered instead by
-/// `test_tag_matches_blake3_over_the_documented_input` in `lib.rs`, which runs
+/// claimed: it asserts only that *some* tag byte moved, so an implementation that filled
+/// a prefix of the output and left the rest constant passes. The stronger "all 65 bytes
+/// move" form is not usable here — asking CBMC to unroll the model's positional fold over
+/// a whole field exceeded 18 minutes (measured, twice). The full-width property is covered
+/// instead by `test_tag_matches_blake3_over_the_documented_input` in `lib.rs`, which runs
 /// the **real** BLAKE3 and compares all 65 bytes, and by
 /// `tag_matches_the_model_on_a_concrete_input`. (`derive_enc_reads_every_tag_byte`
 /// below does *not* cover it: that harness never calls `derive_tag`.
@@ -921,15 +941,22 @@ fn tag_changes_when_the_key_changes() {
 
     let tag = derive_tag(&k_in, &k_out, &nonce, b"aad", b"msg");
 
-    // Flip one byte of each derived key, one at a time.  The assertion is
-    // deliberately one-sided ("some tag byte moved", not "all did") -- see the
-    // doc comment for why, and for where the full-width property is established.
+    // Flip one byte of each derived key, at a *symbolic* position, so every one of the 32
+    // bytes is covered rather than byte 0 only.  The index is symbolic into a 32-byte key,
+    // the same shape as `derive_enc_reads_every_tag_byte`'s `pos` -- not a symbolic index
+    // into the model's 65-byte accumulator, which is what inflates CBMC elsewhere.
+    // The assertion stays deliberately one-sided ("some tag byte moved", not "all did") --
+    // see the doc comment for why, and for where the full-width property is established.
+    let pos_in: usize = kani::any();
+    kani::assume(pos_in < 32);
     let mut k_in2 = k_in;
-    k_in2[0] ^= 0xff;
+    k_in2[pos_in] ^= 0xff;
     let tag_in = derive_tag(&k_in2, &k_out, &nonce, b"aad", b"msg");
 
+    let pos_out: usize = kani::any();
+    kani::assume(pos_out < 32);
     let mut k_out2 = k_out;
-    k_out2[0] ^= 0xff;
+    k_out2[pos_out] ^= 0xff;
     let tag_out = derive_tag(&k_in, &k_out2, &nonce, b"aad", b"msg");
 
     let mut moved_in = 0u32;
@@ -990,13 +1017,17 @@ fn derive_enc_reads_every_tag_byte() {
 }
 
 /// A change to the associated data or to the message must change the tag, for
-/// **every** byte position of either.
+/// **every** byte position of either — at a fixed input size.
 ///
 /// Complements `tag_is_keyed_hash_of_the_whole_context`, which pins the call
 /// layout and the output widths; this checks that no AAD or message byte is
-/// dropped on the way in.
-/// The four-byte AAD and four-byte message keep every position beyond a naive
-/// 1-byte prefix. (An earlier revision of this line said "three-byte and
+/// dropped on the way in. The four-byte AAD and four-byte message keep every
+/// position beyond a naive 1-byte prefix. **The lengths are part of the fixed
+/// domain**: a defect conditioned on a longer input (a byte dropped only when
+/// `len > 4`) is outside this symbolic harness, which is why the in-crate sweeps
+/// `test_tag_covers_every_aad_and_message_byte` (200-byte AAD, 300-byte message)
+/// and `test_tag_depends_on_every_aad_byte` (1100-byte AAD) run the real BLAKE3
+/// over every position. (An earlier revision of this line said "three-byte and
 /// four-byte inputs"; the three-byte inputs are in
 /// `tag_changes_when_the_key_changes`, not here.)
 #[kani::proof]
