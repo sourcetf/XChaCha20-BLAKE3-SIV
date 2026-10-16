@@ -87,6 +87,9 @@ def harnesses():
 
     names = []
     armed = False
+    # The attribute run directly above a harness, so a `cfg` that removes it from the
+    # build cannot be counted as if it were verified (see the check below).
+    attr_run = []
     for line in lines:
         stripped = line.strip()
         # Any line whose first token is the attribute starts a harness. The `fn` may share
@@ -104,6 +107,21 @@ def harnesses():
         # could notice). Measured before the fix: a file with one harness in each of the
         # three shapes reported a count of 1.
         if stripped.startswith("#[kani::proof]"):
+            # A `cfg` above the marker can take the harness out of the build while every
+            # count here stays: an audit put `#[cfg(any())]` above twelve of the thirteen
+            # and watched this parser report 13, `tools/check_kani_cfg.sh` print PASS and
+            # Kani verify **one** harness. No harness in `src/proofs.rs` carries a `cfg`
+            # today -- the whole module is `#[cfg(kani)]` in `lib.rs` -- so an occurrence
+            # is a deliberate edit that has to change this rule, not a shape to support.
+            gated = [a for a in attr_run if a.startswith("#[cfg(") or "cfg_attr(" in a]
+            if gated:
+                raise SystemExit(
+                    "error: #[kani::proof] is preceded by "
+                    + ", ".join(gated)
+                    + "; a harness whose `cfg` the Kani build may not set must not be"
+                    " counted as one that will be verified"
+                )
+            attr_run = []
             # Attributes and comments can share the line; drop them and look for the `fn`.
             rest = re.sub(r"#\[[^\]]*\]|//.*|/\*.*?\*/", " ", stripped[len("#[kani::proof]"):])
             m = re.match(r"\s*(?:pub\s+)?fn\s+([A-Za-z0-9_]+)", rest)
@@ -112,7 +130,11 @@ def harnesses():
             else:
                 armed = True
             continue
+        if stripped.startswith("#["):
+            attr_run.append(stripped)
+            continue
         if not armed:
+            attr_run = []
             continue
         # Skip further attributes and comments.
         if stripped.startswith("#[") or stripped.startswith("//") or not stripped:

@@ -196,6 +196,23 @@ find_qemu() {
 # misconfigured override is a hard failure, not a skipped stage: "no emulator
 # found" is an environment gap, while "your emulator is not an emulator" is a
 # broken invocation, and the one reading that must never come back is a pass.
+#
+# What this closes and what it does not. It closes the *misconfiguration* class --
+# measured, `/bin/true` and `/bin/false` overrides are rejected before any target
+# is built -- and it raises the bar for a careless stand-in, which must now answer
+# `--version` with QEMU's name and then produce libtest-shaped output (the
+# per-binary `test result:` grep below). It does **not** close an override that
+# *impersonates* an emulator: a wrapper whose basename is `qemu-x` and which
+# prints a QEMU-mentioning version and canned summaries passes this whole stage at
+# exit 0 (measured). Nothing cheap here can tell that from an emulator, because
+# the only evidence this stage reads is the guest's own stdout, and producing that
+# stdout is exactly what the wrapper fakes. A count cross-check against the host
+# build (each guest's reported total versus the tests cargo lists for the same
+# target on the host) is not sound for this crate either: its test sets are
+# `#[cfg(target_arch)]`-dependent (tests/locked.rs has x86_64-only and
+# aarch64-only tests), so host and guest counts legitimately differ. So the
+# residual is stated rather than claimed away: this check witnesses *identity of
+# the misconfiguration kind*, and impersonation is left open.
 qemu_identity_ok() {  # <path> <expected emulator name>
   local path="$1" name="$2" out
   case "$(basename "$path")" in
@@ -259,7 +276,7 @@ if [ "$KANI_ONLY" -eq 0 ]; then
     tools/gate_selftest.sh
   fi
 
-  # The five `cargo test` invocations below used to be judged by exit status alone.
+  # The six `cargo test` invocations below used to be judged by exit status alone.
   # libtest exits 0 when a name filter matches nothing and when every test in a
   # target was compiled away (`#![cfg]`), printing "test result: ok. 0 passed" --
   # so emptying a test file, or deleting a target, left these stages green while
@@ -600,9 +617,11 @@ if [ "$RUN_CROSS_EXEC" -eq 1 ]; then
       # that exits 0 without executing anything (the /bin/true override above)
       # makes every status look like success. libtest always prints
       # `test result:` for a test binary, even one whose tests are all filtered or
-      # ignored, so its absence means the guest never ran. `tee` keeps the output
-      # streaming; `pipefail` (top of file) makes a non-zero emulator or guest exit
-      # fail the `if`.
+      # ignored, so its absence means the guest never ran -- but a canned summary
+      # has that shape too, so this raises the bar to libtest-shaped output without
+      # closing the impersonation case; see the note at qemu_identity_ok.
+      # `tee` keeps the output streaming; `pipefail` (top of file) makes a non-zero
+      # emulator or guest exit fail the `if`.
       : > "$cross_log"
       if ! "$QEMU" "$bin" --test-threads=1 ${extra[@]+"${extra[@]}"} 2>&1 | tee "$cross_log"; then
         echo "FAILED: $(basename "$bin") exited non-zero under $QEMU" >&2
@@ -1083,18 +1102,27 @@ if [ "$RUN_KANI" -eq 1 ]; then
   # verifies one harness at a time, so the suite spends its life on a single
   # core. With it, the independent harnesses run concurrently.
   #
-  # The harness-count guard, taken *before* the run. Kani's own output is not a
-  # witness that anything was proved: with every `#[kani::proof]` gone from
-  # `src/proofs.rs` it prints "No proof harnesses ... were found to verify", exits 0,
-  # and this stage used to report that as a pass -- a request for the proof stage
-  # answered by a run that proved nothing. The requirement is cross-checked between
-  # the two places that carry it: the source itself, and the `COMMITTED_HARNESSES`
-  # floor `tools/check_kani_cfg.sh` is written against (that gate only runs under
-  # --tools/--deep). A disagreement is reported rather than resolved by picking one,
-  # because either number can be the stale one. A count below the requirement is
-  # "could not run" -- exit 3, which this script reports as a skipped stage -- unless
-  # Kani was named on the command line, where a skip is exactly the success report
-  # the caller asked not to get, so it is a hard failure there instead.
+  # The harness-count guard, taken *before* the run, is a cheap pre-check: it
+  # cannot witness the run. Kani's own output is not a witness that anything was
+  # proved: with every `#[kani::proof]` gone from `src/proofs.rs` it prints "No
+  # proof harnesses ... were found to verify", exits 0, and this stage used to
+  # report that as a pass -- a request for the proof stage answered by a run that
+  # proved nothing. But the source count is not the requirement either: a
+  # `#[cfg(any())]` above a harness leaves the count intact and removes the
+  # harness from the build, so with twelve of the thirteen attributes disabled
+  # Kani proves the one that survives and prints "Complete - 1 successfully
+  # verified harnesses, 0 failures, 1 total." at exit 0 (measured). The
+  # requirement is therefore anchored to the run below: Kani's own summary must
+  # report verified >= the committed count, total >= the committed count, and
+  # zero failures. The pre-check keeps the source-vs-committed cross-check
+  # (the two places that carry the number are the source itself and the
+  # `COMMITTED_HARNESSES` floor `tools/check_kani_cfg.sh` is written against;
+  # that gate only runs under --tools/--deep). A disagreement is reported rather
+  # than resolved by picking one, because either number can be the stale one. A
+  # count below the requirement is "could not run" -- exit 3, which this script
+  # reports as a skipped stage -- unless Kani was named on the command line,
+  # where a skip is exactly the success report the caller asked not to get, so it
+  # is a hard failure there instead.
   kani_named=0
   for want in ${EXPLICIT_KEYS[@]+"${EXPLICIT_KEYS[@]}"}; do
     if [ "$want" = kani ]; then kani_named=1; fi
@@ -1150,6 +1178,45 @@ if [ "$RUN_KANI" -eq 1 ]; then
       echo "FAILED: Kani reports that it found no proof harnesses to verify, although" >&2
       echo "        src/proofs.rs contains $kani_harnesses: they are not reaching the" >&2
       echo "        build (the #[cfg(kani)] module gate?), so this run proved nothing." >&2
+      exit 1
+    fi
+    # ...and the run itself, from Kani's own summary line, because neither the source
+    # count above nor the "no proof harnesses" grep can see a harness that is present
+    # in the source and absent from this particular run: `#[cfg(any())]` above a
+    # `#[kani::proof]` leaves the count at 13 while Kani builds and proves one, exits 0
+    # and prints "Complete - 1 successfully verified harnesses, 0 failures, 1 total."
+    # (measured on a scratch copy with twelve of the thirteen attributes disabled:
+    # without this block the stage prints the 13/13 source count and "all requested
+    # checks passed", exit 0).
+    # The summary is the independent witness of what was verified, so it must report at
+    # least the committed number of verified harnesses *and* of total harnesses, with
+    # no failures. Kani exits non-zero when a harness fails, so the failure count is a
+    # second witness rather than the first; the verified/total counts are the part no
+    # exit status carries.
+    kani_summary="$(grep -oE '[0-9]+ successfully verified harnesses?, [0-9]+ failures?, [0-9]+ total' "$kani_log" | tail -1 || true)"
+    if [ -z "$kani_summary" ]; then
+      echo "FAILED: Kani's log carries no '<N> successfully verified harnesses, <M>" >&2
+      echo "        failures, <T> total' summary line, so there is no evidence of what" >&2
+      echo "        this run verified -- and the source count is not a substitute for it." >&2
+      exit 1
+    fi
+    kani_verified="${kani_summary%% *}"
+    kani_failures="$(printf '%s\n' "$kani_summary" | sed -n 's/.* \([0-9][0-9]*\) failures\?.*/\1/p')"
+    kani_total="$(printf '%s\n' "$kani_summary" | sed -n 's/.* \([0-9][0-9]*\) total.*/\1/p')"
+    echo "kani summary: $kani_verified verified harness(es), $kani_failures failure(s)," \
+         "$kani_total total (requirement: $kani_required)"
+    if [ "${kani_failures:-?}" != 0 ]; then
+      echo "FAILED: Kani reports ${kani_failures:-an unreadable number of} failing" >&2
+      echo "        harness(es); a run with failures is not a pass, whatever the exit" >&2
+      echo "        status said." >&2
+      exit 1
+    fi
+    if [ "${kani_verified:-0}" -lt "$kani_required" ] || [ "${kani_total:-0}" -lt "$kani_required" ]; then
+      echo "FAILED: Kani verified $kani_verified of $kani_total harness(es), fewer than the" >&2
+      echo "        $kani_required committed. Harness source that is present but not built" >&2
+      echo "        (a #[cfg(any())] or similar above a #[kani::proof]) leaves the source" >&2
+      echo "        count intact while this run proves less than the gate promises; the run" >&2
+      echo "        is the witness, and it disagrees." >&2
       exit 1
     fi
   fi

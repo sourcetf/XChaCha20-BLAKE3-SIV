@@ -545,8 +545,8 @@ const SPREAD_LEN_CUTOFF: usize = 100_000;
 /// (18.4, 20.2, 22.6 s). (An earlier revision of this comment said "a 64-position
 /// spread over the 1 MiB row would add ~17 s": 17-18 s is the *21-position* sample,
 /// and a 64-position spread is ~51 s.) The spread positions the cap drops would have
-/// covered the middle of a
-/// >100 000-byte field, which the 100 000-byte row's uncapped spread still covers in
+/// covered the middle of a field above 100 000 bytes, which the 100 000-byte row's
+/// uncapped spread still covers in
 /// full, and which the property tests and the sampled differential probe at random.
 fn spread_for(msg_len: usize, field_len: usize) -> usize {
     if msg_len > SPREAD_LEN_CUTOFF {
@@ -617,14 +617,23 @@ struct SampledSweepCounts {
 /// differential fixture's rows, the digest for the large-size fixture's). The untampered
 /// checks then come first, as in the full sweeps above: under a broken tag every
 /// `is_err()` below would hold because the *untampered* row is rejected too.
+/// Which fields of a row the sampled sweep tampers. One value rather than two booleans:
+/// every call states a combination its loop has already decided, and the two flags pushed
+/// the argument list past clippy's limit without saying anything the enum does not.
+#[derive(Clone, Copy)]
+enum RowFields {
+    Message,
+    Aad,
+    Both,
+}
+
 fn sweep_sampled_positions(
     key: &[u8; 32],
     nonce: &[u8; 24],
     aad: &[u8],
     ct: &[u8],
     tag: &[u8; TAG_LEN],
-    sweep_message: bool,
-    sweep_aad: bool,
+    fields: RowFields,
     counts: &mut SampledSweepCounts,
 ) {
     let (msg_len, aad_len) = (ct.len(), aad.len());
@@ -640,7 +649,7 @@ fn sweep_sampled_positions(
         "the untampered row must round-trip (msg_len={msg_len}, aad_len={aad_len})"
     );
 
-    if sweep_message {
+    if matches!(fields, RowFields::Message | RowFields::Both) {
         let positions = sampled_positions(msg_len, msg_len);
         counts.message_rows += 1;
         counts.message_positions += positions.len();
@@ -657,7 +666,7 @@ fn sweep_sampled_positions(
             }
         }
     }
-    if sweep_aad {
+    if matches!(fields, RowFields::Aad | RowFields::Both) {
         let positions = sampled_positions(msg_len, aad_len);
         counts.aad_rows += 1;
         counts.aad_positions += positions.len();
@@ -723,11 +732,12 @@ fn differential_long_rows_sampled_positions_are_authenticated() {
     // anchored against the fixture first, so the sweep tampers reference output rather
     // than this crate's own.
     for (msg_len, aad_len, ct, tag) in &f.rows {
-        let sweep_message = *msg_len > 300;
-        let sweep_aad = *aad_len > 130;
-        if !sweep_message && !sweep_aad {
-            continue;
-        }
+        let fields = match (*msg_len > 300, *aad_len > 130) {
+            (true, true) => RowFields::Both,
+            (true, false) => RowFields::Message,
+            (false, true) => RowFields::Aad,
+            (false, false) => continue,
+        };
         let aad = aad_for(*aad_len);
         let (got_ct, got_tag) = encrypt(&f.key, &f.nonce, &aad, &pt_for(*msg_len)).unwrap();
         assert_eq!(
@@ -738,16 +748,7 @@ fn differential_long_rows_sampled_positions_are_authenticated() {
             &got_tag, tag,
             "tag mismatch at msg_len={msg_len} aad_len={aad_len}"
         );
-        sweep_sampled_positions(
-            &f.key,
-            &f.nonce,
-            &aad,
-            ct,
-            tag,
-            sweep_message,
-            sweep_aad,
-            &mut counts,
-        );
+        sweep_sampled_positions(&f.key, &f.nonce, &aad, ct, tag, fields, &mut counts);
     }
 
     // The large fixture, where rows long enough to reach byte 60000 live. Every row is
@@ -784,8 +785,11 @@ fn differential_long_rows_sampled_positions_are_authenticated() {
             &aad,
             &ct,
             &tag,
-            msg_len > 300,
-            aad_len > 0,
+            if aad_len > 0 {
+                RowFields::Both
+            } else {
+                RowFields::Message
+            },
             &mut counts,
         );
     }

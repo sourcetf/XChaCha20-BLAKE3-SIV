@@ -24,6 +24,14 @@
 #     `decrypt` and inside `decrypt_in_place_detached` in a throwaway copy and
 #     requires the run there to *fail*. Before it existed, an entry naming both
 #     entry points was quietly permitting every branch in them.
+#   * `--selftest` plants a second, separate branch: a secret-dependent loop inside
+#     an `#[inline(always)]` helper called from `accept_or_reject`, which must also
+#     make the planted run fail. That plant is the control for `-C debuginfo=2` in
+#     the builds below: without DWARF inline information the branch is attributed
+#     to `accept_or_reject` and the one permitted entry suppresses it silently,
+#     while with it the report names the helper and fires. The in-`decrypt` plant
+#     cannot witness the flag either way (its frame is `decrypt` with or without
+#     debuginfo), which is why this second shape is here.
 #
 # It is a separate script because it needs three things verify.sh should not
 # assume: valgrind, a statically linked test binary, and a suppression file.
@@ -369,13 +377,20 @@ fi
 # `setcc`/`cmov` forms memcheck ignores (see the measurements in tests/ctgrind.rs
 # and `secret_dependent_branch` there).
 #
-# The plant is a throwaway copy: the tree under test is never modified, and the
+# A second plant in an `#[inline(always)]` helper called from `accept_or_reject`
+# is the control for the build's DWARF inline information (`-C debuginfo=2`): the
+# report must name the helper, because without the inline information valgrind
+# attributes the branch to `accept_or_reject` -- the one function the suppression
+# permits -- and the leak vanishes. See the name check below for why the
+# count-based check cannot stand in for it.
+#
+# The plants are a throwaway copy: the tree under test is never modified, and the
 # copy is removed on exit. Without this stage a clean result would mean "no branch
 # in this crate is reported that is not covered by an entry", which is not the
 # same claim as "nothing outside the decision branches on secrets".
 if [ "$SELFTEST" -eq 1 ]; then
   echo
-  echo "--- self-test: a branch inside decrypt must be caught ---"
+  echo "--- self-test: planted branches (in decrypt, and inlined into the decision) must be caught ---"
   WORK="$(mktemp -d)"
   trap 'rm -rf "$WORK"' EXIT
   mkdir -p "$WORK/tree"
@@ -387,7 +402,11 @@ import sys
 
 p = sys.argv[1] + "/src/lib.rs"
 s = open(p).read()
-# Both decrypt entry points carry this line, so one patch covers both.
+# Plant 1: in both decrypt entry points (`decrypt_in_place_detached` carries this
+# line too), a data-dependent trip count. This is the shape an earlier revision of
+# the suppression file permitted -- its entries named `decrypt` and
+# `decrypt_in_place_detached` themselves -- and it is a branch in a *named symbol*
+# either way, so it does not depend on the debuginfo flag.
 old = "    let auth_ok = computed_tag.ct_eq(tag);\n"
 plant = old + """
     {
@@ -405,7 +424,44 @@ plant = old + """
 """
 if s.count(old) != 2:
     sys.exit("the anchor accounts for %d of 2 decrypt entry points" % s.count(old))
-open(p, "w").write(s.replace(old, plant))
+s = s.replace(old, plant)
+
+# Plant 2: a secret-dependent loop in an `#[inline(always)]` helper called from
+# `accept_or_reject`. This is the control for `-C debuginfo=2`: the branch is
+# inside the one function `tests/ctgrind.supp` permits, and only the DWARF inline
+# information makes valgrind name the helper (the innermost inline frame) instead
+# of collapsing it into `accept_or_reject`, which the suppression would then cover
+# silently. The gate is secret-derived in exactly the tests this self-test runs
+# (`computed_tag.ct_eq(tag)` feeds it), so this fires precisely when the flag does
+# its job.
+anchor_fn = "#[inline(never)]\nfn accept_or_reject("
+helper = """#[inline(always)]
+fn _selftest_inlined_secret_branch(gate: subtle::Choice) {
+    // Planted by tools/ctgrind.sh --selftest, and inlined into `accept_or_reject`
+    // below. The gate carries a secret-derived `Choice`, so the loop's back-edge
+    // is a conditional jump on secret data, and a variable trip count is not
+    // something the optimizer can turn into a `setcc`/`cmov`.
+    let n = (gate.unwrap_u8() & 3) as usize;
+    let mut i = 0usize;
+    while i < n {
+        core::hint::black_box(i);
+        i += 1;
+    }
+}
+
+#[inline(never)]
+fn accept_or_reject("""
+anchor_call = "    if bool::from(gate0) {"
+call_site = """    _selftest_inlined_secret_branch(gate0);
+
+    if bool::from(gate0) {"""
+if s.count(anchor_fn) != 1 or s.count(anchor_call) != 1:
+    sys.exit(
+        "the accept_or_reject anchors are not where this control expects them: "
+        "%d x definition, %d x gate0 branch" % (s.count(anchor_fn), s.count(anchor_call))
+    )
+s = s.replace(anchor_fn, helper, 1).replace(anchor_call, call_site, 1)
+open(p, "w").write(s)
 PLANT
   then
     echo "FAIL: the leak could not be planted (the anchor moved), so this" >&2
@@ -444,8 +500,36 @@ EOF
     printf '%s\n' "$planted_out" | grep -B2 -A12 'xchacha20_blake3_siv' | awk 'NR<=40' >&2
     exit 1
   fi
-  echo "ok: the planted leak was reported ($planted_in_crate report(s) inside"
-  echo "    this crate), so the suppression covers only the decision."
+  echo "ok: the planted leak in decrypt was reported ($planted_in_crate report(s)"
+  echo "    inside this crate), so the suppression covers only the decision."
+
+  # The second plant is checked by *name*, because the first check cannot see it: a
+  # branch inside an `#[inline(always)]` helper called from `accept_or_reject` is
+  # reported under the helper's frame only when the binary carries DWARF inline
+  # information (`-C debuginfo=2` on both build sites above). Without it valgrind
+  # collapses the frame into `accept_or_reject`, which tests/ctgrind.supp permits,
+  # and the report vanishes -- while the in-`decrypt` plant above still reports, so
+  # the count-based check stays green either way. Requiring the helper's name in
+  # the report is therefore what witnesses the flag; measured: with the flag
+  # deleted from both RUSTFLAGS, this grep's plant is silently suppressed and this
+  # check is the only failure.
+  helper_named=0
+  case "$planted_out" in
+    *_selftest_inlined_secret_branch*) helper_named=1 ;;
+  esac
+  if [ "$helper_named" -ne 1 ]; then
+    echo "FAIL: the secret-dependent branch planted in the #[inline(always)] helper" >&2
+    echo "      called from accept_or_reject was NOT reported under the helper's name." >&2
+    echo "      Without DWARF inline information (-C debuginfo=2 on both build sites" >&2
+    echo "      in this script) valgrind attributes the branch to accept_or_reject," >&2
+    echo "      which the one suppression entry covers silently -- so the one entry" >&2
+    echo "      would permit a branch outside the decision and nothing here would say" >&2
+    echo "      so. Restore the flag (or find where its effect went)." >&2
+    printf '%s\n' "$planted_out" | grep -B2 -A12 'xchacha20_blake3_siv' | awk 'NR<=40' >&2 || true
+    exit 1
+  fi
+  echo "ok: the inlined-helper plant was reported by name, so the built binary"
+  echo "    carries the inline information the one-entry suppression rests on."
 fi
 
 exit 0

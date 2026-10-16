@@ -68,10 +68,13 @@
 #        (--jobs defaults to the core count, capped at 16; the sweep shards across cores)
 # Exit codes: 0 = every layer is at least as good as the one below it; 1 = otherwise,
 #             or the machinery failed; 3 = the sweep could not run -- the scanned
-#             instruction set is empty or shorter than the covered ranges imply,
-#             which is a count problem, not a verdict (verify.sh reports 3 as a
-#             skipped stage). The `nop` model used to have no way to say that: with
-#             the offset list emptied it reported three zero rows and exited 0.
+#             instruction set is empty, or it is not exactly the byte set the symbol
+#             map describes (checked against an independent nm/objdump extraction the
+#             shards do not use), which is a count problem, not a verdict (verify.sh
+#             reports 3 as a skipped stage). The `nop` model used to have no way to
+#             say that: with the offset list emptied it reported three zero rows and
+#             exited 0, and with the ranges parsed wrong it reported a plausible
+#             smaller map.
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
@@ -206,6 +209,120 @@ PY
   echo "detector sensitivity control: the forced-accept copy is reported by the decision test"
 }
 
+# The driver's own extraction of the swept byte ranges, from the same two tools the
+# shards read (`nm -S`, `objdump -h`) but through a *different* path: shell field
+# splitting and `$((16#...))` arithmetic here, the shard's Python `int(x, 16)` there.
+# The two extractions are compared byte-for-byte before any count below is trusted,
+# so a parse change on either side is a could-not-run (3) rather than a plausible-
+# looking smaller map. Two measured mutations this exists for: replacing the symbol
+# size with a constant (`int(f[0],16), 4` in the shard's parse -- every range shrinks
+# to four bytes, the sweep stops covering the decision function, and the old
+# count-vs-count guard could not see it because both sides came from the same list),
+# and dropping the VMA->file-offset conversion (`addr - text_vaddr + text_off`
+# written as `addr` -- every range shifts by the ~4 KiB between `.text`'s VMA and its
+# file offset).
+#
+# Prints "<start> <size> <name>" per line, decimal file offsets, in `nm` order --
+# the same format and order the shard writes to its `.ranges` file, so the
+# comparison is `cmp` rather than a re-parse. Returns non-zero if the .text header
+# cannot be read.
+derive_ranges() {  # <binary> <quick?>
+  local bin="$1" quick="$2"
+  local hdr text_vaddr text_off
+  hdr="$(objdump -h "$bin" 2>/dev/null)" || return 1
+  # `objdump -h` columns are `Idx Name Size VMA LMA File off Algn`; the file offset is
+  # the fourth number after the name (see the shard's own note on the LMA trap).
+  text_vaddr="$(printf '%s\n' "$hdr" | awk '$2 == ".text" { print $4; exit }')"
+  text_off="$(printf '%s\n' "$hdr" | awk '$2 == ".text" { print $6; exit }')"
+  [ -n "$text_vaddr" ] && [ -n "$text_off" ] || return 1
+
+  local addr size typ sym rest start
+  while read -r addr size typ sym rest; do
+    # Only `<addr> <size> <type> <name>` lines: a symbol without a size puts its
+    # type where the size would be, and the shard's parser skips those too
+    # (`len(f) >= 4 and f[2] in ("t", "T")`).
+    case "$size" in ''|*[!0-9a-fA-F]*) continue ;; esac
+    case "$typ" in t|T) ;; *) continue ;; esac
+    case "$sym" in *decrypt*|*accept_or_reject*) ;; *) continue ;; esac
+    if [ "$quick" = "--quick" ]; then
+      case "$sym" in *accept_or_reject*) ;; *) continue ;; esac
+    fi
+    start=$((16#$addr - 16#$text_vaddr + 16#$text_off))
+    printf '%d %d %s\n' "$start" "$((16#$size))" "$sym"
+  done < <(nm -S "$bin" 2>/dev/null)
+}
+
+# The driver-side witness that the swept byte set is the one the symbol map describes,
+# in two parts, both from data extracted along a path the shards do not use:
+#
+#   1. every shard's `.ranges` file must equal `derive_ranges` byte-for-byte -- an
+#      independent nm/objdump extraction, not a recomputation of the shard's own;
+#   2. the union of the offsets the shards recorded must be exactly the union of the
+#      ranges: every offset inside some range, and every range every byte of it. A
+#      per-range count == size is the strongest form of the first-and-last-byte
+#      check: distinct offsets inside an interval of `size` integers number at most
+#      `size`, so equality means the first byte, the last byte and every byte between
+#      are all present. A stride > 1 (the one mutation the old guard *did* catch, by
+#      comparing two expansions of the same list) is still caught here, by the count
+#      falling short rather than by arithmetic on the stride.
+#
+# A mismatch is exit 3 ("could not run"), never a pass and never a verdict: the sweep
+# would have examined a different byte set than the map it prints.
+check_scan_witness() {  # <label> <expected-ranges> ; union of shard .scanned_offsets
+  local label="$1" expected="$2" union bad
+  union="$(mktemp)"
+  cat "$WORK"/shard-"$label"-*.bin.scanned_offsets 2>/dev/null | sort -n -u > "$union" || true
+  if [ ! -s "$union" ]; then
+    echo "FAILED: the sweep recorded no examined offset at all, so the map below would" >&2
+    echo "         describe a sweep that did not happen. That is a could-not-run (3), not" >&2
+    echo "         a verdict -- and zero accepting faults from a zero-instruction sweep is" >&2
+    echo "         the one reading that must never come back as a pass." >&2
+    rm -f "$union"
+    exit 3
+  fi
+  bad="$(awk '
+    # File 1: ranges ("<start> <size> <name>" in file-offset space). File 2: the union
+    # of the scanned offsets the shards recorded, decimal, sorted, unique.
+    FNR == NR { nr++; rs[nr] = $1 + 0; rl[nr] = $2 + 0; rn[nr] = $3; next }
+    { no++; off[no] = $1 + 0 }
+    END {
+      bad = 0
+      for (i = 1; i <= no; i++) {
+        inside = 0
+        for (j = 1; j <= nr; j++) {
+          if (off[i] >= rs[j] && off[i] < rs[j] + rl[j]) { inside = 1; break }
+        }
+        if (!inside) {
+          bad++
+          if (bad <= 4) printf "scanned offset %d lies outside every covered range\n", off[i]
+        }
+      }
+      for (j = 1; j <= nr; j++) {
+        count = 0
+        for (i = 1; i <= no; i++) {
+          if (off[i] >= rs[j] && off[i] < rs[j] + rl[j]) count++
+        }
+        if (count != rl[j]) {
+          bad++
+          if (bad <= 12) {
+            printf "range [%d..%d) (%s): %d of %d byte(s) scanned\n",
+                   rs[j], rs[j] + rl[j] - 1, rn[j], count, rl[j]
+          }
+        }
+      }
+      if (bad == 0) print "OK"
+    }' "$expected" "$union")"
+  rm -f "$union"
+  if [ "$bad" != "OK" ]; then
+    echo "FAILED: the scanned offsets do not cover the ranges the symbol map describes" >&2
+    echo "         (--quick narrows the ranges; it does not stride through them), so the" >&2
+    echo "         map below would describe a sweep that did not happen. That is a" >&2
+    echo "         could-not-run (3), not a verdict." >&2
+    printf '%s\n' "$bad" | sed 's/^/         /' >&2
+    exit 3
+  fi
+}
+
 scan() {  # label, features
   local label="$1" features="$2"
   local bin
@@ -241,6 +358,23 @@ scan() {  # label, features
     esac
   fi
 
+  # The driver's independent extraction of the ranges, taken before the shards run
+  # and compared with theirs after. If this cannot be computed the sweep has no
+  # witness, which is a could-not-run rather than a map to trust.
+  local expected_ranges="$WORK/$label.expected_ranges"
+  if ! derive_ranges "$bin" "$quick" > "$expected_ranges"; then
+    echo "FAILED: could not re-derive the swept ranges from nm/objdump directly, so" >&2
+    echo "         the sweep below would run without an independent witness of the byte" >&2
+    echo "         set it covers. That is a could-not-run (3), not a verdict." >&2
+    exit 3
+  fi
+  if [ ! -s "$expected_ranges" ]; then
+    echo "FAILED: the independent nm/objdump extraction found no decrypt or" >&2
+    echo "         accept_or_reject range at all, so it cannot witness what the shards" >&2
+    echo "         sweep. That is a could-not-run (3), not a verdict." >&2
+    exit 3
+  fi
+
   local shard pids=()
   for shard in $(seq 0 $((JOBS - 1))); do
     cp "$bin" "$WORK/shard-$label-$shard.bin"
@@ -270,31 +404,34 @@ scan() {  # label, features
   cat "$WORK"/shard-"$label"-*.bin.accepted 2>/dev/null | grep -c . > "$WORK/$label.count" || true
   cat "$WORK"/shard-"$label"-*.bin.accepted_decision 2>/dev/null | grep -c . \
     > "$WORK/$label.decision" || true
-  cat "$WORK"/shard-"$label"-0.bin.ranges > "$WORK/$label.ranges" 2>/dev/null || true
 
-  # And the same guard from the driver's side, independent of the shards' own
-  # arithmetic: the offsets actually examined (summed over shards) must cover the
-  # bytes the ranges file lists, one per byte (`--quick` narrows the ranges rather
-  # than striding through them, and the full sweep is stride 1). This is the check
-  # the `nop` model did not have: with the scanned set emptied it printed three
-  # zero rows and exited 0 (reproduced in a scratch copy: `offs = []`, rc=0, every
-  # row `0 total, 0 inside the decision`). The `bits` model catches that by
-  # accident -- its opt-out positive control is an accepting bit-flip -- but a run
-  # where the sweep examined nothing is a could-not-run for *both* models, not a
-  # clean result for one.
-  local ranges_offsets scanned_offsets
-  ranges_offsets="$(awk '{ s += $2 } END { print s + 0 }' "$WORK/$label.ranges" 2>/dev/null)"
-  scanned_offsets="$(cat "$WORK"/shard-"$label"-*.bin.scanned_offsets 2>/dev/null \
-    | awk '{ s += $1 } END { print s + 0 }')"
-  if [ "${scanned_offsets:-0}" -lt "${ranges_offsets:-0}" ] || [ "${scanned_offsets:-0}" -eq 0 ]; then
-    echo "FAILED: the sweep examined ${scanned_offsets:-0} instruction(s) against the" >&2
-    echo "         ${ranges_offsets:-0} its covered ranges contain (one offset per byte; --quick" >&2
-    echo "         narrows the ranges, it does not stride through them), so the map below" >&2
-    echo "         would describe a sweep that did not happen. That is a could-not-run, not" >&2
-    echo "         a verdict -- and zero accepting faults from a zero-instruction sweep is" >&2
-    echo "         the one reading that must never come back as a pass." >&2
-    exit 3
-  fi
+  # Independent witness #1: the ranges the shards swept must equal the driver's own
+  # extraction from nm/objdump, byte for byte. All shards parse the same binary, so a
+  # shard whose file disagrees with the driver's is sweeping (or reporting) a
+  # different byte set than the map describes -- the constant-size and dropped-
+  # conversion mutations land here, at exit 3 instead of a smaller plausible map.
+  local rfile
+  for shard in $(seq 0 $((JOBS - 1))); do
+    rfile="$WORK/shard-$label-$shard.bin.ranges"
+    if [ ! -f "$rfile" ] || ! cmp -s "$expected_ranges" "$rfile"; then
+      echo "FAILED: shard $((shard + 1))'s range list does not match an independent" >&2
+      echo "         nm/objdump extraction of the same binary (the driver's, in shell)," >&2
+      echo "         so the sweep and the symbol map it reports are not describing the" >&2
+      echo "         same bytes. That is a could-not-run (3), not a verdict." >&2
+      if [ -f "$rfile" ]; then
+        diff -u "$expected_ranges" "$rfile" 2>/dev/null | head -20 | sed 's/^/         /' >&2 || true
+      else
+        echo "         (the shard left no range file at all)" >&2
+      fi
+      exit 3
+    fi
+  done
+
+  # Independent witness #2: the offsets the shards actually recorded must be exactly
+  # the ranges (inside a range, and every byte of each range; see check_scan_witness).
+  # This is where a stride > 1 lands: the ranges still parse correctly, but the union
+  # of examined offsets no longer fills them.
+  check_scan_witness "$label" "$expected_ranges"
 }
 
 # The scanner, run once per shard with (binary, label, quick, model, shard, nshards):
@@ -458,38 +595,26 @@ def could_not_run(msg):
 # The fault, per model: `nop` writes 0x90 over a byte; `bits` flips one bit of it.
 accepted, crashed, untouched = [], 0, 0
 offs = [off + i for off, size, _n in covered for i in range(0, size, stride)]
-# The sweep's own count guard, before a single fault is written. The expected
-# offsets are recomputed from the covered ranges *independently of the list above*,
-# so an emptied or truncated scan set fails here instead of producing an all-zero
-# map: `offs = []` used to print three zero rows and exit 0 in the `nop` model --
-# zero accepting faults from zero faults swept. The `bits` model refuses that
-# reading only because its opt-out positive control also reads zero, which is an
-# accident of that model, not a guard; this makes both models answer "could not
-# run" (3).
-expected = sum(len(range(0, size, stride)) for _off, size, _n in covered)
-if not expected:
-    could_not_run("the covered ranges contain no instruction byte to sweep")
-if len(offs) != expected:
-    could_not_run(
-        f"the sweep would examine {len(offs)} of the {expected} instruction bytes "
-        f"its covered ranges contain; the scan set is not the one the symbol map "
-        f"describes"
-    )
+
 # This shard's slice of the offsets. Every fault is a self-contained run of the binary,
 # so the shards cannot interact; the union over shards is what the sequential scan
 # produced, and the caller sums the accepted sets.
-expected_mine = len(range(shard, expected, nshards))
 offs = offs[shard::nshards]
-if len(offs) != expected_mine:
-    could_not_run(
-        f"shard {shard + 1}/{nshards} holds {len(offs)} of the {expected_mine} "
-        f"offsets its slice of the {expected}-byte range implies"
-    )
-# Written before the sweep, so the driver can total what this shard set out to
-# examine even if it dies mid-run: a shard that examined nothing must not be
-# invisible in that sum.
+if not offs and total == 0:
+    # The covered range itself is empty, not merely this shard's slice of it: with
+    # --jobs above the number of offsets, empty slices are normal and must stay clean.
+    could_not_run("the covered ranges contain no instruction byte to sweep")
+
+# This shard's examined offsets, as the offsets themselves rather than as a count,
+# written before the sweep so the driver can check the byte set this shard set out
+# to cover even if it dies mid-run. The *witness* that the set is the one the symbol
+# map describes is the driver's, deliberately: it re-derives the ranges from
+# nm/objdump down a different path (shell arithmetic rather than this parse),
+# compares them byte-for-byte with this shard's `.ranges`, and then checks this
+# offset list against them. Guards here that recomputed `expected` from `covered`
+# only compared two expansions of the same list and could never fire.
 with open(sys.argv[1] + ".scanned_offsets", "w") as fh:
-    fh.write(f"{len(offs)}\n")
+    fh.write("".join(f"{off}\n" for off in offs))
 faults = (
     [(off, 0) for off in offs]
     if model == "nop"
@@ -556,7 +681,11 @@ with open(sys.argv[1] + ".accepted", "w") as fh:
 with open(sys.argv[1] + ".accepted_decision", "w") as fh:
     fh.write("".join(f"{x}\n" for x in accepted if "accept_or_reject" in symbol_of(x)))
 with open(sys.argv[1] + ".ranges", "w") as fh:
-    fh.write("\n".join(f"{n} {s}" for _a, s, n in ranges))
+    # The ranges as this shard handles them: file offsets (the same VMA->file-offset
+    # mapping the sweep uses), sizes and symbol names, in `nm` order and in the same
+    # text the driver's independent extraction prints, so the driver can `cmp` the
+    # two. Dropping the mapping here changes every line and the comparison fires.
+    fh.write("".join(f"{start} {size} {name}\n" for start, size, name in covered))
 PY
 }
 

@@ -274,31 +274,47 @@ fn main() {
     ];
 
     // The detection thresholds, and the arithmetic they were chosen with. The region
-    // is PAINT = 1 MiB, so there are 2^20 windows per case, and the three patterns
-    // are 32, 64 and 8 bytes ("master key", "control", "tag").
+    // is PAINT = 1 MiB, so there are 2^20 windows per case, the nine cases are the
+    // `cases` array below, and the three patterns are 32, 32 and 8 bytes ("master
+    // key", "control", "tag" -- the control is `deadbeef...`, 64 hex digits = 32
+    // bytes, not the 64 the earlier revision of this comment claimed).
+    //
+    // The model, stated so the numbers below can be recomputed: for a pattern of L
+    // bytes there are L-k+1 k-grams, a fixed window equals a given k-gram with
+    // probability 2^-8k, and the expected number of k-byte matches in one painted
+    // region is lambda_k = (L-k+1) * 2^20 / 2^8k; occurrences are treated as
+    // independent (Poisson), so a rule firing on >= 1 match has probability
+    // ~lambda and one firing on >= 2 has ~lambda^2/2. A spurious hit is a failure
+    // in the six non-planted cases (the ones the verdict greps for): the three
+    // planted cases expect their own pattern's hit, and a tag-pattern hit is
+    // attributed to `blake3` once the blake3-only case has run. The per-run rates
+    // below therefore sum the three patterns over those six cases (18
+    // pattern-cases, not the 21 this comment used to imply).
     //
     //   * SINGLE_RUN = 7 is the old 8-byte single-run threshold one byte lower, so
-    //     the 7-byte run the audit planted is caught. For the 32-byte key there are
-    //     26 7-grams, so a uniform-random window matches one with probability
-    //     ~26 * 2^-56; over 2^20 windows that is ~26 * 2^-36 ~ 4e-10 per
-    //     pattern-case, under 1e-8 over the 3 patterns x 7 cases. Effectively no
-    //     false positives from this rule at all.
+    //     the 7-byte run the audit planted is caught. For a 32-byte pattern there
+    //     are 26 7-grams: lambda_7 = 26 * 2^20 / 2^56 ~ 3.8e-10 per pattern-case
+    //     (2 * 2^-36 ~ 3e-11 for the 8-byte tag), i.e. ~2e-8 over the three
+    //     patterns and nine cases, and ~5e-9 over the six non-planted ones.
+    //     Effectively no false positives from this rule at all.
     //   * the split rule -- >= 2 disjoint runs of >= MIN_RUN = 4 bytes totalling
-    //     >= SPLIT_TOTAL = 8 -- catches a 4+4 split. A 4-byte match has ~29 * 2^-32
-    //     probability per window for the key, i.e. ~0.0071 expected matches over
-    //     2^20 windows; P(>= 2 matches) ~ 0.0071^2 / 2 ~ 2.5e-5 per pattern-case,
-    //     ~5e-4 over the 21 pattern-cases: one false alarm in ~2000 runs. A false
-    //     alarm on the never-used control pattern is itself *reported* as a
-    //     failure, so its price is a rare loud error, never a silent PASS.
+    //     >= SPLIT_TOTAL = 8 -- catches a 4+4 split. A 4-byte match has
+    //     lambda_4 = 29 * 2^20 / 2^32 ~ 0.0071 expected matches per pattern-case
+    //     for either 32-byte pattern (5 * 2^-12 ~ 0.0012 for the tag), so
+    //     P(>= 2 matches) ~ lambda^2/2 ~ 2.5e-5 per 32-byte pattern-case (~7e-7
+    //     for the tag); summed over the three patterns of the six non-planted
+    //     cases that is ~3.1e-4, one false alarm in ~3,200 runs. A false alarm on
+    //     the never-used control pattern is itself *reported* as a failure, so its
+    //     price is a rare loud error, never a silent PASS.
     //
     // A plain drop to a 4-byte single-run threshold was the simpler candidate and
     // was rejected on the same arithmetic, not on taste: at the 32 KiB frame the
     // audit's sketch assumed that rule would be quiet (~2^-17 per pattern-case),
-    // but this region is 1 MiB, 32x larger, and 0.0071 expected 4-byte matches per
-    // key-pattern-case means ~4% of runs would see a spurious match in one of the
-    // six non-planted cases and ~3% in the control pattern alone -- a false FAIL
-    // about once per 12 runs, doubled by CI's two configurations. Hence the split
-    // rule for the 4+4 shape and 7, not 4, for a single run.
+    // but this region is 1 MiB, 32x larger, and the same sum with P(>= 1) ~ lambda
+    // gives 6 * (2 * 0.0071 + 0.0012) ~ 9% of runs seeing a spurious match that
+    // counts as a failure -- a false FAIL about once per 11 runs, doubled by CI's
+    // two configurations. Hence the split rule for the 4+4 shape and 7, not 4, for
+    // a single run.
     const MIN_RUN: usize = 4;
     const SINGLE_RUN: usize = 7;
     const SPLIT_TOTAL: usize = 8;

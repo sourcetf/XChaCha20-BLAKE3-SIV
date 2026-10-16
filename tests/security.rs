@@ -1458,12 +1458,11 @@ fn attribute_finding_for(kind: CfgAttribute, args: &str) -> Option<String> {
 /// `#[`: the spelling an attribute has inside a `cfg_attr` list — if it is constant-gated.
 fn bare_attribute_finding(text: &str) -> Option<String> {
     let text = text.trim_start();
-    let (kind, rest) = if let Some(rest) = text.strip_prefix("cfg_attr") {
-        (CfgAttribute::CfgAttr, rest)
-    } else if let Some(rest) = text.strip_prefix("cfg") {
-        (CfgAttribute::Cfg, rest)
-    } else {
-        return None;
+    let (kind, rest) = match text.strip_prefix("cfg_attr") {
+        Some(rest) => (CfgAttribute::CfgAttr, rest),
+        // `cfg` is the shorter prefix and has to be tried second, hence the `?` rather
+        // than a second `if let`: anything else is not this function's business.
+        None => (CfgAttribute::Cfg, text.strip_prefix("cfg")?),
     };
     let rest = rest.trim_start();
     if !rest.starts_with('(') {
