@@ -194,6 +194,26 @@ before 1.0 would be a revision bump, not a silent one.
 bounded by the key's entropy, so with a 256-bit key it cannot exceed 256 bits.
 A longer tag does not raise it.
 
+**On the primitives: four of the seven cryptographic uses are ChaCha20, three are
+BLAKE3, and they do not hold the same properties.** (The inventory is
+`SECURITY-ANALYSIS.md` §4.10.) The ChaCha20 family is the root — `HChaCha20(K, N₁)`, the
+two derivation blocks under it, and the message keystream — so a break of *it* is a break
+of everything. **Authenticity rests on keyed BLAKE3 alone** — the inner digest, the tag,
+and the tag-keyed KDF that produces the message key — so what a BLAKE3 break costs depends
+on which property goes first: a *collision* break (historically the first to fall) costs
+the multi-use and misuse guarantees — the `2^128` state birthday, the two-time-pad event
+of §3's Corollary, and the attacker-chosen commitment routes — but not single-message
+forgery; a break of it *as a keyed PRF* costs forgery and both commitment properties;
+predicting the KDF's output costs confidentiality too, since that is where the message key
+comes from. Nothing here claims primitive *diversity*: BLAKE's round function is ChaCha's
+quarter round with two message-word injections and a different permutation, so the two are
+relatives rather than independent bets, and a general break of the ARX round would reach
+both halves. That is a property of every XChaCha20 + BLAKE3 combination and not of this
+one, and it is why §2.1's assumption table names the three PRF conjectures explicitly
+instead of leaning on the primitives' standing. A second *implementation* — `ultra`'s
+witness — is not a hedge against any of this: it defends against faults in this crate's
+code, not against cryptanalysis of the primitives (see "What the witness is").
+
 **On commitment: this table said `2^260`, and that was wrong twice.** The reasoning was
 "commitment is a collision property, so an `n`-bit tag caps it at `2^(n/2)`, and 65 bytes
 gives `2^260`". First, the *target* form of commitment is not a birthday problem at all: an
