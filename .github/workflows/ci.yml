@@ -601,7 +601,11 @@ jobs:
           set -e
           case "$rc" in
             0) echo "default build: no run of the master key at or above the tool's thresholds" ;;
-            1) echo "::warning::stack_residue.sh reported residue in the default build (expected: which frames survive is the compiler's choice). $(grep -E 'KEY RESIDUE|positive control' "$RUNNER_TEMP/residue-default.log" | head -3 | tr '\n' ' ')" ;;
+            1) if grep -qE '^FAIL: the .*positive control' "$RUNNER_TEMP/residue-default.log"; then
+                 echo "::warning::stack_residue.sh's own positive control did not take (a tool problem, not a finding about the crate): $(grep -E '^FAIL' "$RUNNER_TEMP/residue-default.log" | head -2 | tr '\n' ' ')"
+               else
+                 echo "::warning::stack_residue.sh reported residue in the default build (expected: which frames survive is the compiler's choice). $(grep -E ' \| KEY RESIDUE: ' "$RUNNER_TEMP/residue-default.log" | head -3 | tr '\n' ' ')"
+               fi ;;
             3) echo "::warning::stack_residue.sh could not run in the default build (see the log)" ;;
             *) echo "::error::stack_residue.sh exited $rc: neither a measurement nor a skip"; exit "$rc" ;;
           esac
@@ -618,7 +622,11 @@ jobs:
           set -e
           case "$rc" in
             0) echo "ultra build: no run of the master key at or above the tool's thresholds" ;;
-            1) echo "::warning::stack_residue.sh reported residue in the ultra build (where scrub_stack is expected to erase it). $(grep -E 'KEY RESIDUE|positive control' "$RUNNER_TEMP/residue-ultra.log" | head -3 | tr '\n' ' ')" ;;
+            1) if grep -qE '^FAIL: the .*positive control' "$RUNNER_TEMP/residue-ultra.log"; then
+                 echo "::warning::stack_residue.sh's own positive control did not take (a tool problem, not a finding about the crate): $(grep -E '^FAIL' "$RUNNER_TEMP/residue-ultra.log" | head -2 | tr '\n' ' ')"
+               else
+                 echo "::warning::stack_residue.sh reported residue in the ultra build (where scrub_stack is expected to erase it). $(grep -E ' \| KEY RESIDUE: ' "$RUNNER_TEMP/residue-ultra.log" | head -3 | tr '\n' ' ')"
+               fi ;;
             3) echo "::warning::stack_residue.sh could not run in the ultra build (see the log)" ;;
             *) echo "::error::stack_residue.sh exited $rc: neither a measurement nor a skip"; exit "$rc" ;;
           esac

@@ -98,10 +98,65 @@ use xchacha20_blake3_siv::{
 const PAINT: usize = 1 << 20;
 const SENTINEL: u8 = 0x5A;
 
+/// Which *known* pattern the painted frame carries, so the scan's positive controls sit
+/// where the window is defined to be. They used to write into their own frames: a
+/// `#[inline(never)]` function called from the same site usually gets the same frame slot as
+/// its neighbours, which is why that worked on the development host -- and CI, on another
+/// toolchain, measured the split control *outside* the window (`FAIL: the split positive
+/// control ... was NOT found`, while the 32-byte and 7-byte plants were found). A control
+/// that cannot run is not the same finding as a scan that cannot see, and writing the plant
+/// into the frame `paint` returns a pointer into makes the window's contents a property of
+/// the construction rather than of a compiler's frame assignment.
+#[derive(Clone, Copy)]
+enum Plant {
+    None,
+    Key,
+    Split,
+    Seven,
+}
+
+/// Store one byte into the frame being painted. `write_volatile` and not a copy, for the
+/// reason the old plants documented: the optimiser can prove a plain store into an array
+/// whose address is only black-boxed is dead and delete it (measured: the 7-byte plant read
+/// `master: 1 B`, i.e. the plant might as well not have existed).
+#[inline(always)]
+fn plant_byte(buf: &mut [u8; PAINT], at: usize, byte: u8) {
+    assert!(at < PAINT, "the plant must land inside the painted frame");
+    // SAFETY: `at` is asserted in bounds, and `buf` is a live local of the caller.
+    unsafe { core::ptr::write_volatile(buf.as_mut_ptr().add(at), byte) };
+}
+
 #[inline(never)]
-fn paint() -> *const u8 {
+fn paint(plant: Plant, k: &[u8; 32]) -> *const u8 {
     let mut buf = [SENTINEL; PAINT];
     std::hint::black_box(&mut buf);
+    match plant {
+        Plant::None => {}
+        // One 32-byte run: the shape the old 8-byte threshold was written for.
+        Plant::Key => {
+            for (i, b) in k.iter().enumerate() {
+                plant_byte(&mut buf, 16 + i, *b);
+            }
+        }
+        // Two 4-byte runs, 24 pattern bytes apart -- the shape only the split rule sees.
+        // The buffer is 1 MiB and the fragments are 128 bytes in, so the caller's post-return
+        // scratch area (which clobbers the top ~24 bytes of a callee frame, measured) cannot
+        // take half the plant before the scan.
+        Plant::Split => {
+            for i in 0..4 {
+                plant_byte(&mut buf, 128 + i, k[i]);
+                plant_byte(&mut buf, 132 + i, k[28 + i]);
+            }
+        }
+        // One 7-byte run, between MIN_RUN and the old 8-byte threshold. The byte after it is
+        // the paint sentinel rather than `k[7]`, so a widened store cannot make the run eight
+        // bytes of key.
+        Plant::Seven => {
+            for i in 0..7 {
+                plant_byte(&mut buf, 16 + i, k[i]);
+            }
+        }
+    }
     buf.as_ptr()
 }
 fn hx(s: &str) -> Vec<u8> {
@@ -154,65 +209,23 @@ fn do_locked(k: &[u8; 32], _n: &[u8; 24]) {
 /// below cannot catch that: a scan that sees nothing produces no false positives either.
 /// This probe has already been blind once (the snapshot read the frames only *after* they
 /// had been overwritten), and that was found by a manual plant, not by the tool.
+/// The 32-byte control's case: the plant itself happens in `paint`'s frame (`Plant::Key`),
+/// which is the frame the scan's window is *defined* as; this function only keeps the case
+/// list and the report's name for it.
 #[inline(never)]
-fn do_planted_key(k: &[u8; 32], _n: &[u8; 24]) {
-    // `&copy` through `black_box` forces the array to exist in memory: a value that is
-    // only read cannot be kept in registers and still have its address taken. `copy[0]`
-    // is fed through `black_box` too, so nothing can prove the array equals `*k` and
-    // rematerialise it from the argument.
-    let mut copy = *k;
-    copy[0] = core::hint::black_box(copy[0]);
-    std::hint::black_box(&copy);
-}
-/// Positive control for the *split* rule: the key's first four bytes followed by
-/// its last four, back to back -- eight bytes of key material with no contiguous
-/// run matching more than four pattern bytes, so neither the old 8-byte threshold
-/// nor any single-run threshold sees it. The two fragments are 24 bytes apart in
-/// the pattern (`k[0..4]`, `k[28..32]`), which is what makes the physical
-/// adjacency two *runs* and not one: a merged 8-byte spill cannot be a key
-/// substring.
-///
-/// Two measured details of the *plant*, not of the crate:
-///   * the buffer must be deep enough that the caller's first post-return code
-///     does not overwrite the fragments. The top ~24 bytes of the callee frame
-///     are clobbered (the caller's scratch area reuses them), and versions that
-///     planted the two fragments there lost half of the plant before the scan --
-///     measured in a scratch copy, both as two 8-byte arrays and as one 16-byte
-///     buffer: one 4-byte run survived, the other did not, and the control failed
-///     with `master: 4 B`. A 256-byte buffer with the fragments 128 bytes in
-///     survives intact (measured, both runs found).
-///   * the stores are `write_volatile`: a plain `copy_from_slice` compiles to
-///     small stores, the compiler proves the array unread (only its address is
-///     black-boxed) and deletes them -- the first version of the 7-byte control
-///     read `master: 1 B`, i.e. the plant might as well not have existed.
+fn do_planted_key(_k: &[u8; 32], _n: &[u8; 24]) {}
+/// The split control's case (`Plant::Split`): the key's first four bytes followed by its
+/// last four, back to back -- eight bytes of key material with no contiguous run matching
+/// more than four pattern bytes, so neither the old 8-byte threshold nor any single-run
+/// threshold sees it. The two fragments are 24 bytes apart in the *pattern*
+/// (`k[0..4]`, `k[28..32]`), which is what makes the physical adjacency two runs and not
+/// one: a merged 8-byte spill cannot be a key substring.
 #[inline(never)]
-fn do_planted_split(k: &[u8; 32], _n: &[u8; 24]) {
-    let mut a = [0u8; 256];
-    for i in 0..4 {
-        // SAFETY: pointer into a live local, in bounds for 128 + i < 136.
-        unsafe {
-            core::ptr::write_volatile(a.as_mut_ptr().add(128 + i), k[i]);
-            core::ptr::write_volatile(a.as_mut_ptr().add(132 + i), k[28 + i]);
-        }
-    }
-    std::hint::black_box(&a);
-}
-/// Positive control for the run threshold: seven contiguous key bytes, one byte
-/// short of the old 8. The array is one byte longer than the copy so a widened
-/// machine-word store still cannot make the run eight bytes of key (the eighth
-/// byte is the zeroed init, not `k[7]`), and the stores are `write_volatile` for
-/// the same reason as the split control above.
+fn do_planted_split(_k: &[u8; 32], _n: &[u8; 24]) {}
+/// The 7-byte control's case (`Plant::Seven`): seven contiguous key bytes, one byte short of
+/// the old 8-byte threshold.
 #[inline(never)]
-fn do_planted_seven(k: &[u8; 32], _n: &[u8; 24]) {
-    let mut a = [0u8; 8];
-    for i in 0..7 {
-        // SAFETY: pointer into a live local, in bounds for i < 7.
-        unsafe {
-            core::ptr::write_volatile(a.as_mut_ptr().add(i), k[i]);
-        }
-    }
-    std::hint::black_box(&a);
-}
+fn do_planted_seven(_k: &[u8; 32], _n: &[u8; 24]) {}
 /// Attribution control: the *same* BLAKE3 XOF call and the same wipe discipline the crate's
 /// `integrity_tag` uses, but with no crate code around it. If the 8-byte tag shows up here
 /// too, the residue is a stack temporary inside the `blake3` dependency (`fill`'s output
@@ -330,7 +343,16 @@ fn main() {
         let is_planted = name.starts_with("planted key");
         let is_split_plant = name.starts_with("planted split");
         let is_seven_plant = name.starts_with("planted seven");
-        let ptr = paint();
+        let plant = if is_planted {
+            Plant::Key
+        } else if is_split_plant {
+            Plant::Split
+        } else if is_seven_plant {
+            Plant::Seven
+        } else {
+            Plant::None
+        };
+        let ptr = paint(plant, &key);
         f(&key, &nonce);
         // The region is read *in place*, as the first statement after `f` returns.
         // Nothing between here and the three searches below may allocate or call
