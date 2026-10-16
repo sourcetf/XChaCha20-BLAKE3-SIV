@@ -156,6 +156,15 @@ jobs:
             args: --release --features rng
           - profile: release, no default features with rng
             args: --release --no-default-features --features rng
+          # `dual-mac` with the defaults *off*, which is the only configuration in which the
+          # layer's invariant is observable: `dual-mac` must imply `hardened` (Cargo.toml's
+          # edge), and `--features dual-mac` gets `hardened` from `default` whether that edge
+          # is there or not, so a hand-edit that drops the edge is invisible from there.
+          # `src/lib.rs` carries the matching `compile_error!`. Today the two spellings
+          # resolve to the same feature set, which is why this row costs a build and
+          # changes nothing else.
+          - profile: release, no default features with dual-mac
+            args: --release --no-default-features --features dual-mac
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable

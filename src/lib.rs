@@ -359,6 +359,30 @@ const _: () = {
     );
 };
 
+// The fault-model layers are a bundle, and the bundle is declared in `Cargo.toml`'s feature
+// edges (`dual-mac = ["hardened"]`, `ultra = [... "hardened" ... "dual-mac" ...]`), not in
+// this file. A *user* cannot violate them — Cargo resolves features additively, so
+// `--no-default-features --features dual-mac` turns `hardened` on — which is exactly what
+// makes the invariant easy to lose in a *hand-edit*: drop `"hardened"` from one of those
+// lists and the layer compiles against a build with the gates absent, where it does nothing,
+// while every job that only builds `--features ultra` stays green (it gets `hardened` from
+// `default` whether the edge is there or not). `Cargo.toml` records that this happened once
+// and was measured — the degraded build "compared it against nothing, and warned that the
+// comparison was dead code". This turns that state into a compile error in the one
+// configuration that can reach it: the CI matrix builds
+// `--no-default-features --features dual-mac`, which is the same feature set as
+// `--features dual-mac` today and stops being so the moment an edge goes missing.
+#[cfg(all(
+    any(feature = "dual-mac", feature = "ultra"),
+    not(feature = "hardened")
+))]
+compile_error!(
+    "`dual-mac` and `ultra` must imply `hardened`: their gates live in the `hardened` \
+     decision, so a build with them on and `hardened` off silently compiles the layer \
+     against a decision that does not contain it. Check the `[features]` edges in \
+     Cargo.toml."
+);
+
 /// ChaCha20 block size (64 bytes).
 const CHACHA20_BLOCK: usize = 64;
 
