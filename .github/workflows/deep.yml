@@ -19,15 +19,6 @@ on:
   # someone deciding to spend the time -- the real-hardware ARM job, and re-running
   # the wide audit on demand. Neither is gated on every push.
   workflow_dispatch:
-    inputs:
-      # The scheduled sweep covers the decision region only -- see the step's comment for
-      # the measurement that forced it. This input runs the whole symbol-mapped region
-      # instead, which is the shape that found six accepting faults in `decrypt`, and it
-      # needs most of the job's five-hour budget.
-      full_sweep:
-        description: "Instruction sweep over every symbol-mapped byte, not just the decision region"
-        type: boolean
-        default: false
   push:
     branches: [main]
   pull_request:
@@ -719,33 +710,80 @@ jobs:
           RUSTFLAGS="-Zsanitizer=address" cargo +nightly test --release --features pure \
             --target x86_64-unknown-linux-gnu --tests
 
-      # Instruction-level faults: bytes of the compiled code are NOPed in turn, in all
-      # three configurations, and the decision test has to keep rejecting forgeries.
-      #
-      # **The schedule runs the decision region, not every byte, and the reason is a
-      # measurement.** The comment this replaced called the sweep "a ~30 minute job"
-      # because that is what it is on fast cores (98 seconds for three configurations on a
-      # 16-core host, measured). On a hosted runner it is not: the full sweep had not
-      # finished after **2 h 47 min** and was killed with the job at five hours (`Deep
-      # checks` #183, the run that started this line of work), while `--quick` -- the
-      # decision region alone -- measures 80 s on two local cores. So the schedule runs
-      # `--quick`, and the full region is one dispatch input away.
-      #
-      # The full region is worth dispatching for: the finding that motivated this sweep
-      # (six single-byte faults in `decrypt` that skipped the call and accepted a forgery)
-      # came from *outside* the decision. `full_sweep: true` runs it here, needs most of
-      # the job's budget, and should be watched.
-      #
-      # The `bits` model is not run in full here either (eight times the faults of this
-      # one); it runs `--quick` on every push in the mutation job above, and in full
-      # locally via `tools/fi_instruction.sh --bits`.
-      - name: instruction-level faults (decision region; dispatch with full_sweep for every byte)
-        if: ${{ !inputs.full_sweep }}
-        run: ./tools/fi_instruction.sh --quick
+      # Instruction-level faults: bytes of the compiled code are NOPed in turn, in all three
+      # configurations, and the decision test has to keep rejecting forgeries. It runs in the
+      # `wide-sweep` job below, sharded across six jobs -- **every symbol-mapped byte, not a
+      # subset**: the finding this sweep exists for (six single-byte faults in `decrypt` that
+      # skipped the call and accepted a forgery) came from *outside* the decision, so the
+      # region is not negotiable and the budget is what moves. `wide-verdict` proves that the
+      # six shards are a complete, disjoint sweep before applying the verdict, and a missing
+      # shard fails there rather than reading as less work.
+      # The `bits` model is not run in full here (eight times the faults of this one); it runs
+      # `--quick` on every push in the mutation job above, and in full locally via
+      # `tools/fi_instruction.sh --bits`.
 
-      - name: instruction-level faults (every symbol-mapped byte; dispatched full_sweep)
-        if: ${{ inputs.full_sweep }}
-        run: ./tools/fi_instruction.sh
+  # The shards and their verdict, split from the differential and the sanitizer above so that
+  # each job's budget holds only its own work: the full sweep measures about five hours on a
+  # hosted runner (`Deep checks` #183's sweep step ran 2 h 47 min and was killed with the job
+  # at five hours), which is why it is six jobs and not one.
+  wide-sweep:
+    name: wide audit (sweep shard ${{ matrix.shard }}/6)
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4, 5, 6]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          shared-key: wide-sweep
+
+      - name: instruction-level faults (every symbol-mapped byte; shard ${{ matrix.shard }} of 6)
+        run: |
+          set -euo pipefail
+          ./tools/fi_instruction.sh --shard "${{ matrix.shard }}/6" \
+            --report "$RUNNER_TEMP/sweep-shard-${{ matrix.shard }}.json"
+
+      # `if: always()`: a shard that failed still uploads its numbers, so the verdict job can
+      # say *why* the sweep is incomplete instead of only that an artifact is missing.
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: sweep-shard-${{ matrix.shard }}
+          path: ${{ runner.temp }}/sweep-shard-${{ matrix.shard }}.json
+
+  wide-verdict:
+    name: wide audit (sweep verdict)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    needs: [wide-sweep]
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    permissions:
+      contents: read
+      actions: read  # `gh run download` reads this run's artifacts
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: collect the shards' reports
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          mkdir -p reports
+          gh run download "${{ github.run_id }}" -D reports
+          find reports -name '*.json' | sort
+
+      - name: verdict (the tool's own reading, over the shards)
+        run: |
+          set -euo pipefail
+          python3 tools/fi_instruction_verdict.py --shards 6 \
+            $(find reports -name 'sweep-shard-*.json' | sort)
 
   # The Miri and fuzz halves of the scheduled audit live in their own job, with their
   # own `timeout-minutes`, because one budget could not hold both: the instruction

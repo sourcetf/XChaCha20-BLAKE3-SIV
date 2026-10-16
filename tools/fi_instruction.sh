@@ -97,14 +97,23 @@ export CARGO_TARGET_DIR="$WORK/target"
 quick=""
 MODEL="nop"
 JOBS=""
+SHARD=""
+REPORT=""
 for arg in "$@"; do
   case "$arg" in
     --quick) quick="--quick" ;;
     --bits) MODEL="bits" ;;
     --jobs) JOBS="next" ;;
     --jobs=*) JOBS="${arg#--jobs=}" ;;
+    --shard) SHARD="next" ;;
+    --shard=*) SHARD="${arg#--shard=}" ;;
+    --report) REPORT="next" ;;
+    --report=*) REPORT="${arg#--report=}" ;;
     *)
-      if [ "$JOBS" = "next" ]; then JOBS="$arg"; else
+      if [ "$JOBS" = "next" ]; then JOBS="$arg"
+      elif [ "$SHARD" = "next" ]; then SHARD="$arg"
+      elif [ "$REPORT" = "next" ]; then REPORT="$arg"
+      else
         echo "FAIL: unknown argument $arg" >&2; exit 1
       fi ;;
   esac
@@ -120,6 +129,38 @@ if [ -z "$JOBS" ]; then
 fi
 case "$JOBS" in (*[!0-9]*|"") echo "FAIL: --jobs wants a number, got '$JOBS'" >&2; exit 1 ;; esac
 [ "$JOBS" -ge 1 ] || { echo "FAIL: --jobs wants a positive number" >&2; exit 1; }
+
+# `--shard I/N` splits the sweep across *jobs* instead of across cores. The work of all
+# three configurations is partitioned into `JOBS * N` slices and this invocation runs the
+# slices `I-1, I-1+N, I-1+2N, ...` -- exactly 1/N of every configuration's bytes, disjoint
+# from the other shards' and, together with them, the whole region. It exists because the
+# scheduled job measured about five hours for the full sweep on a hosted runner (the sweep
+# step of `Deep checks` #183 ran 2 h 47 min and was killed with the job at five hours), and
+# there were exactly two ways to fit a budget: shard the work, or cut the region. The
+# region is not negotiable -- the finding the sweep exists for (six single-byte faults in
+# `decrypt` that skipped the call and accepted a forgery) came from *outside* the decision
+# -- so the work is sharded, and a shard that is missing is a failure rather than a smaller
+# sweep.
+#
+# Each shard writes a JSON report (`--report`, required with `--shard`) that
+# `tools/fi_instruction_verdict.py` combines into the same verdict this script prints when
+# run unsharded. A shard checks only what it can check alone: that it swept exactly its own
+# slice, and that the builds which must never accept a forgery (hardened, ultra) have no
+# accepting fault inside the decision in that slice.
+shard_i=""; shard_n=""
+if [ -n "$SHARD" ]; then
+  shard_i="${SHARD%%/*}"; shard_n="${SHARD##*/}"
+  case "$shard_i$shard_n" in (*[!0-9]*|"")
+    echo "FAIL: --shard wants I/N, got '$SHARD'" >&2; exit 1 ;; esac
+  if [ "$shard_n" -lt 1 ] || [ "$shard_i" -lt 1 ] || [ "$shard_i" -gt "$shard_n" ]; then
+    echo "FAIL: --shard wants 1 <= I <= N, got '$SHARD'" >&2; exit 1
+  fi
+  if [ -z "$REPORT" ] || [ "$REPORT" = "next" ]; then
+    echo "FAIL: --shard requires --report FILE: the verdict job reads the shards' reports," >&2
+    echo "      and a shard whose numbers reach nobody is a sweep nobody checks." >&2
+    exit 1
+  fi
+fi
 
 # The test executable cargo just built, taken from its own JSON stream rather than from a
 # glob over the deps directory. The glob version (`ls -t …/decision-* | head -1`) picked the
@@ -268,6 +309,69 @@ derive_ranges() {  # <binary> <quick?>
 #
 # A mismatch is exit 3 ("could not run"), never a pass and never a verdict: the sweep
 # would have examined a different byte set than the map it prints.
+# The same witness as `check_scan_witness`, for an invocation that owns only some of the
+# slices: every recorded offset must (a) lie inside a covered range and (b) belong to one of
+# this invocation's slices, and each range must have yielded exactly the offsets this
+# invocation owns. Unsharded, every index is owned and this reduces to the original check;
+# sharded, it is what stops a shard from sweeping someone else's bytes, skipping its own, or
+# sweeping a stride the map does not have.
+check_scan_witness_shard() {  # <label> <expected-ranges> <nshards> <owned indices...>
+  local label="$1" expected="$2" nshards="$3"; shift 3
+  local owned="$*" union bad
+  union="$(mktemp)"
+  cat "$WORK"/shard-"$label"-*.bin.scanned_offsets 2>/dev/null | sort -n -u > "$union" || true
+  if [ ! -s "$union" ]; then
+    echo "FAILED: the sweep recorded no examined offset at all, so the map below would" >&2
+    echo "         describe a sweep that did not happen. That is a could-not-run (3), not" >&2
+    echo "         a verdict -- and zero accepting faults from a zero-instruction sweep is" >&2
+    echo "         the one reading that must never come back as a pass." >&2
+    rm -f "$union"; exit 3
+  fi
+  if ! bad="$(awk -v nshards="$nshards" -v owned="$owned" '
+    BEGIN { nm = split(owned, m, " "); for (k = 1; k <= nm; k++) mine[m[k]] = 1 }
+    # File 1: ranges ("<start> <size> <name>", file-offset space, in the order the shards
+    # enumerated them). File 2: the union of the scanned offsets this invocation recorded.
+    FNR == NR {
+      nr++; rs[nr] = $1 + 0; rl[nr] = $2 + 0; rn[nr] = $3
+      base[nr] = (nr > 1) ? base[nr-1] + rl[nr-1] : 0
+      next
+    }
+    { no++; off[no] = $1 + 0 }
+    END {
+      bad = 0
+      for (i = 1; i <= no; i++) {
+        inside = 0
+        for (j = 1; j <= nr; j++) {
+          if (off[i] >= rs[j] && off[i] < rs[j] + rl[j]) {
+            if (!(((base[j] + (off[i] - rs[j])) % nshards) in mine)) {
+              bad++
+              if (bad <= 4) printf "scanned offset %d belongs to slice %d, which this invocation does not own (%d shards)\n", off[i], (base[j] + (off[i] - rs[j])) % nshards, nshards
+            }
+            inside = 1; break
+          }
+        }
+        if (!inside) { bad++; if (bad <= 4) printf "scanned offset %d lies outside every covered range\n", off[i] }
+      }
+      for (j = 1; j <= nr; j++) {
+        want = 0
+        for (l = 0; l < rl[j]; l++) if (((base[j] + l) % nshards) in mine) want++
+        count = 0
+        for (i = 1; i <= no; i++) if (off[i] >= rs[j] && off[i] < rs[j] + rl[j]) count++
+        if (count != want) {
+          bad++
+          if (bad <= 4) printf "range %s: %d offsets examined, %d owned by this invocation\n", rn[j], count, want
+        }
+      }
+      if (bad) { printf "%d problem(s)\n", bad; exit 1 }
+    }' "$expected" "$union")"; then
+    echo "FAILED: the examined offsets are not this invocation's slice of the map: $bad" >&2
+    echo "         (tools/fi_instruction.sh's --shard comment says what that means.) That" >&2
+    echo "         is a could-not-run (3), not a verdict." >&2
+    rm -f "$union"; exit 3
+  fi
+  rm -f "$union"
+}
+
 check_scan_witness() {  # <label> <expected-ranges> ; union of shard .scanned_offsets
   local label="$1" expected="$2" union bad
   union="$(mktemp)"
@@ -376,9 +480,19 @@ scan() {  # label, features
   fi
 
   local shard pids=()
-  for shard in $(seq 0 $((JOBS - 1))); do
+  # Which core-slices this invocation runs: all of them, or -- with `--shard I/N` -- every
+  # N-th one. The union over I = 1..N is the full worker set, hence the whole byte set with
+  # each byte swept once; see the `--shard` comment above.
+  local nshards="$JOBS" my_shards
+  if [ -n "$shard_i" ]; then
+    nshards=$((JOBS * shard_n))
+    my_shards="$(seq $((shard_i - 1)) "$shard_n" $((nshards - 1)))"
+  else
+    my_shards="$(seq 0 $((JOBS - 1)))"
+  fi
+  for shard in $my_shards; do
     cp "$bin" "$WORK/shard-$label-$shard.bin"
-    scan_shard "$WORK/shard-$label-$shard.bin" "$label" "$quick" "$MODEL" "$shard" "$JOBS" &
+    scan_shard "$WORK/shard-$label-$shard.bin" "$label" "$quick" "$MODEL" "$shard" "$nshards" &
     pids+=("$!")
   done
   # A shard answers 3 for "the sweep could not run" (its count guard fired: the
@@ -411,7 +525,7 @@ scan() {  # label, features
   # different byte set than the map describes -- the constant-size and dropped-
   # conversion mutations land here, at exit 3 instead of a smaller plausible map.
   local rfile
-  for shard in $(seq 0 $((JOBS - 1))); do
+  for shard in $my_shards; do
     rfile="$WORK/shard-$label-$shard.bin.ranges"
     if [ ! -f "$rfile" ] || ! cmp -s "$expected_ranges" "$rfile"; then
       echo "FAILED: shard $((shard + 1))'s range list does not match an independent" >&2
@@ -430,8 +544,19 @@ scan() {  # label, features
   # Independent witness #2: the offsets the shards actually recorded must be exactly
   # the ranges (inside a range, and every byte of each range; see check_scan_witness).
   # This is where a stride > 1 lands: the ranges still parse correctly, but the union
-  # of examined offsets no longer fills them.
-  check_scan_witness "$label" "$expected_ranges"
+  # of examined offsets no longer fills them. With `--shard`, "exactly the ranges"
+  # becomes "exactly this invocation's slice of them" (check_scan_witness_shard).
+  if [ -n "$shard_i" ]; then
+    check_scan_witness_shard "$label" "$expected_ranges" "$nshards" $my_shards
+  else
+    check_scan_witness "$label" "$expected_ranges"
+  fi
+  # What this invocation swept, and what the whole region holds: the verdict job needs
+  # both to prove that the shards' coverage is exhaustive and disjoint (a missing shard
+  # must fail there rather than look like less work).
+  cat "$WORK"/shard-"$label"-*.bin.scanned_offsets 2>/dev/null | sort -n -u | grep -c . \
+    > "$WORK/$label.scanned" || true
+  awk '{ s += $2 } END { print s + 0 }' "$expected_ranges" > "$WORK/$label.covered_total"
 }
 
 # The scanner, run once per shard with (binary, label, quick, model, shard, nshards):
@@ -698,6 +823,48 @@ scan "hardened (default)"   "--features hardened"
 # is where that shows up as a number -- the mechanism the accepting sites live in
 # (decoder desynchronisation in shared code) is exactly the code the witness does not share.
 scan "ultra"                "--features ultra"
+
+# ── Shard mode: report this slice and stop ──
+# The cross-configuration verdict needs all three configurations' totals *and* the whole
+# region, so it cannot be computed from one slice: `tools/fi_instruction_verdict.py` does it
+# from the shards' reports. What a slice *can* check alone is the condition that must never
+# hold in any of them -- an accepting fault inside the decision of a build that must not
+# accept a forged tag -- and that runs before the report is written, so a slice carrying
+# such a fault fails its own job rather than waiting for the aggregation.
+if [ -n "$shard_i" ]; then
+  shard_hardened_d="$(cat "$WORK/hardened (default).decision")"
+  shard_ultra_d="$(cat "$WORK/ultra.decision")"
+  shard_bad=0
+  if [ "$shard_hardened_d" -ne 0 ] || [ "$shard_ultra_d" -ne 0 ]; then
+    echo "FAIL: shard $shard_i/$shard_n found $shard_hardened_d accepting fault(s) inside" >&2
+    echo "      the decision in the hardened build and $shard_ultra_d in the ultra one." >&2
+    echo "      Neither build may accept a forged tag." >&2
+    shard_bad=1
+  fi
+  python3 - "$REPORT" "$shard_i" "$shard_n" "$MODEL" "$WORK" <<'PY'
+import json, os, sys
+report, i, n, model, work = sys.argv[1], int(sys.argv[2]), int(sys.argv[3]), sys.argv[4], sys.argv[5]
+def read(name):
+    try:
+        return int(open(os.path.join(work, name)).read().strip() or "0")
+    except OSError:
+        return 0
+configs = {}
+for label in ("plain (no hardened)", "hardened (default)", "ultra"):
+    configs[label] = {
+        "scanned": read(label + ".scanned"),
+        "covered_total": read(label + ".covered_total"),
+        "accepting_total": read(label + ".count"),
+        "accepting_inside_decision": read(label + ".decision"),
+    }
+with open(report, "w") as fh:
+    json.dump({"shard": i, "n": n, "model": model, "configs": configs}, fh, indent=1, sort_keys=True)
+print(f"shard {i}/{n} ({model} model): report written to {report}")
+PY
+  [ "$shard_bad" -eq 0 ] || exit 1
+  echo "shard $shard_i/$shard_n: this slice is clean; the verdict is the aggregation job's"
+  exit 0
+fi
 
 default_n="$(cat "$WORK/plain (no hardened).count")"
 hardened_n="$(cat "$WORK/hardened (default).count")"

@@ -8,6 +8,14 @@ green push to `main` — which are build artefacts of that job, not construction
 
 ## Unreleased
 
+### The instruction sweep is sharded across jobs, because the region is not negotiable
+
+A previous revision of this job ran `--quick` — the decision region alone — to fit a hosted runner's budget. The measurement behind it was real (the sweep step of `Deep checks` #183 ran 2 h 47 min and was killed with the job at five hours; the full region measures about five hours on such a runner) and the conclusion was not: cutting the region removes exactly the evidence the sweep exists for, because its motivating finding — six single-byte faults in `decrypt` that skipped the call and accepted a forgery — came from *outside* the decision. Coverage is not a knob; the budget was the thing to change.
+
+So the work is sharded instead. `tools/fi_instruction.sh --shard I/N --report FILE` sweeps 1/N of every configuration's bytes (core-slices `I-1, I-1+N, …` of the `JOBS*N` the run would otherwise use), and a shard-aware form of the tool's own witness checks each slice: every offset recorded must lie in a covered range and belong to a slice the invocation owns, and each range must have yielded exactly the offsets it owns — a shard cannot sweep another's bytes, skip its own, or sweep a stride the map does not have. `tools/fi_instruction_verdict.py` then reproduces the unsharded verdict from the shards' reports and **refuses an incomplete sweep**: one report per shard exactly, every shard agreeing on the region's size, the summed scanned counts equal to it, no accepting fault inside the decision in `hardened`/`ultra`, and each layer at least as good as the one below. A missing shard is a failure, not a smaller sweep. `Deep checks` runs it as a six-way matrix (`wide-sweep`), each shard uploading its numbers, with `wide-verdict` doing the arithmetic.
+
+Measured locally: an unsharded `--quick` run and the three shards of `N = 3` agree exactly — 9+8+8 = 25 of 25 bytes per hardened configuration and 6+6+6 = 18 of 18 for the opt-out build, each shard's witness clean; the verdict passes on all three reports, fails on two of three with the missing-shard hint, and fails on a report carrying an accepting fault inside the decision. A full-mode shard (`1/6`) sweeps exactly a sixth of each configuration (hardened 1074 of 6442, plain 833 of 4995, ultra 1935 of 11609) and the unsharded `--quick --bits` path is unchanged.
+
 ### The residue control had to move into the frame it measures, and the exit codes needed the repository's reading
 
 CI's `stack residue (advisory, ultra)` job went red on the commit that lowered the tool's thresholds, and both causes were the reading of a control rather than a finding about the crate:
