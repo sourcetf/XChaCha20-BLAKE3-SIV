@@ -19,6 +19,15 @@ on:
   # someone deciding to spend the time -- the real-hardware ARM job, and re-running
   # the wide audit on demand. Neither is gated on every push.
   workflow_dispatch:
+    inputs:
+      # The scheduled sweep covers the decision region only -- see the step's comment for
+      # the measurement that forced it. This input runs the whole symbol-mapped region
+      # instead, which is the shape that found six accepting faults in `decrypt`, and it
+      # needs most of the job's five-hour budget.
+      full_sweep:
+        description: "Instruction sweep over every symbol-mapped byte, not just the decision region"
+        type: boolean
+        default: false
   push:
     branches: [main]
   pull_request:
@@ -710,22 +719,32 @@ jobs:
           RUSTFLAGS="-Zsanitizer=address" cargo +nightly test --release --features pure \
             --target x86_64-unknown-linux-gnu --tests
 
-      # Byte-by-byte corruption of the compiled decision code, in both builds. It
-      # rewrites the binary once per byte and re-runs the decision test, so it is a
-      # ~30 minute job -- which is why it lives here and not on every push.
-      # Instruction-level faults: every byte of the compiled decision code is NOPed in
-      # turn, in all three configurations, and the decision test has to keep rejecting
-      # forgeries. It was measured at about seven minutes on a development machine for
-      # two configurations, and then hit the 30-minute budget of the per-push job on a
-      # runner -- which is why it lives here, and why the tool now shards the sweep
-      # across the runner's cores (`--jobs`, default the core count capped at 16): the
-      # three-configuration sweep measures 98 seconds on a 16-core host.
+      # Instruction-level faults: bytes of the compiled code are NOPed in turn, in all
+      # three configurations, and the decision test has to keep rejecting forgeries.
       #
-      # The `bits` model is not run in full here (eight times the faults of this one, so
-      # it would be the job's whole budget); it runs `--quick` on every push in the
-      # mutation job above, and in full locally via
-      # `tools/fi_instruction.sh --bits`.
-      - name: instruction-level faults (every byte of the decision)
+      # **The schedule runs the decision region, not every byte, and the reason is a
+      # measurement.** The comment this replaced called the sweep "a ~30 minute job"
+      # because that is what it is on fast cores (98 seconds for three configurations on a
+      # 16-core host, measured). On a hosted runner it is not: the full sweep had not
+      # finished after **2 h 47 min** and was killed with the job at five hours (`Deep
+      # checks` #183, the run that started this line of work), while `--quick` -- the
+      # decision region alone -- measures 80 s on two local cores. So the schedule runs
+      # `--quick`, and the full region is one dispatch input away.
+      #
+      # The full region is worth dispatching for: the finding that motivated this sweep
+      # (six single-byte faults in `decrypt` that skipped the call and accepted a forgery)
+      # came from *outside* the decision. `full_sweep: true` runs it here, needs most of
+      # the job's budget, and should be watched.
+      #
+      # The `bits` model is not run in full here either (eight times the faults of this
+      # one); it runs `--quick` on every push in the mutation job above, and in full
+      # locally via `tools/fi_instruction.sh --bits`.
+      - name: instruction-level faults (decision region; dispatch with full_sweep for every byte)
+        if: ${{ !inputs.full_sweep }}
+        run: ./tools/fi_instruction.sh --quick
+
+      - name: instruction-level faults (every symbol-mapped byte; dispatched full_sweep)
+        if: ${{ inputs.full_sweep }}
         run: ./tools/fi_instruction.sh
 
   # The Miri and fuzz halves of the scheduled audit live in their own job, with their
