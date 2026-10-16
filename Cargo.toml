@@ -11,10 +11,12 @@ rust-version = "1.85"
 keywords = ["cryptography", "aead", "xchacha20", "blake3", "siv"]
 categories = ["cryptography", "no-std"]
 # What the published `.crate` contains. Without this, `cargo package` ships every
-# tracked file: the CI workflows, `tools/`, `tests/`, and (worst) `mutants.out/`,
-# whose logs carry developer host paths -- 108 files, most of them not part of the
-# library a consumer builds. The allow list below is the crate plus the documents
-# `README.md` links to; run `cargo package --list` to verify it stays that way.
+# tracked, non-dotfile file: the CI workflows, `tools/`, `tests/`, and (worst)
+# `mutants.out/`, whose logs carry developer host paths -- 101 files of the 110 this
+# tree tracks (the 7 dotfiles/dotdirs and the nested `fuzz/` package's 4 are skipped,
+# and cargo adds its own two), most of them not part of the library a consumer
+# builds. The allow list below is the crate plus the documents `README.md` links to;
+# run `cargo package --list` to verify it stays that way.
 #
 # `Cargo.toml` and the `readme` file are not listed: cargo always includes them.
 # Naming `README.md` here would also sweep in `tests/README.md` -- include globs
@@ -174,8 +176,11 @@ hardened = []
 #
 # `ultra` implies `rng`, so it needs an OS entropy source and does NOT build on
 # bare-metal `no_std` targets (`--features ultra --target thumbv7em-none-eabihf`
-# fails inside `getrandom`); a `no_std` caller should use the equivalent list
-# `--features hardened,dual-mac,locked` instead.
+# fails inside `getrandom`); a `no_std` caller should use the list
+# `--features hardened,dual-mac,locked` instead -- which is `ultra` **minus the
+# witness**: the `witness` module is gated on the `ultra` feature *name*, not on the
+# four features it implies, and there is no `witness` feature, so a target where
+# `ultra` cannot build cannot turn that layer on at all.
 #
 # `pure` is deliberately *not* here: it forces BLAKE3's portable Rust backends, which
 # costs 24-32% (see the `pure` comment below) and buys no security -- the C/assembly

@@ -1467,7 +1467,8 @@ missing later (L3.6, §2.1).
   dependency's by-value temporaries rather than in a frame this crate can name, and the
   largest survivor — the `blake3` dependency's XOF
   output buffer (16 of the 44 bytes of `enc_key ‖ enc_nonce`; a frame this crate does not own),
-  `k_out` under the `pure` Rust-backend build (4 of 32 bytes on the default build), and the
+  `k_out` under the `pure` Rust-backend build (~16 of 32 bytes there, against 4 of 32 on the
+  default build), and the
   *return temporaries* of functions
   that return an aggregate by value (which is why `derive_material`/`derive_enc` write through
   caller slices). Under `ultra`, `dual-mac`'s `scrub_stack` overwrites the derivation region

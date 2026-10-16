@@ -52,7 +52,9 @@ linker = "rust-lld"
 # reason it is excluded on every cross target: it shells out to valgrind, which
 # cannot run under qemu.  The executed set includes
 # `tests/ultra.rs` (8/8, the one that used to hang) and `tests/locked.rs`
-# (10/10, skipping the locking cases as unsupported on this architecture).  One
+# (11/11 at this revision -- the two source-shape scans run everywhere, and a
+# locking case only *skips* where the platform refuses a lock, printing a
+# `SKIPPED [<test>]` line; it never reports a pass).  One
 # more flag is required because of a weak-symbol interaction, and it is the reason
 # the earlier revision of this comment reported a hang instead:
 #

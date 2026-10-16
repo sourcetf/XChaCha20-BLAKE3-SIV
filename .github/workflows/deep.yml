@@ -569,15 +569,19 @@ jobs:
     # not editable that way: it falls when code is added that nothing runs, which is
     # the change worth stopping.
     #
-    # 95 is deliberately loose against what this command measures -- 96.5-96.7% of
-    # *lines* across the tool versions tried, and ~97.7% of *regions*. No exact figure
-    # is quoted here on purpose: two audits and this repository's own runs each got a
-    # different one from the same source (96.51%, 96.66%, 96.71%; regions 97.71% vs
-    # 97.92%), because the totals move when `cargo-llvm-cov` changes what it counts --
-    # an earlier revision of this comment quoted 97.89% (113/5353), before that
-    # 97.46% (1458/1496), and the counts it paired with a later percentage did not
-    # reproduce it either. The gate is the 95 floor; the measured figure is printed by
-    # the coverage job, which is where a reader should take it from.
+    # 95 is a floor this command now comes *close* to, and that is worth knowing:
+    # measured at this revision with the tool version pinned above, one run reports
+    # 95.07% of *lines* (2739/2881 -- `src/lib.rs` 2148/2290 = 93.80%,
+    # `src/witness.rs` 591/591 = 100%) and 97.14% of functions, i.e. about **two lines
+    # of margin**, so a single newly uncovered branch flips this gate -- a gate with no
+    # slack, not "deliberately loose". Earlier runs and two audits read 96.5-96.7% of
+    # *lines* and ~97.7-97.9% of *regions* from the same source (96.51%, 96.66%, 96.71%;
+    # regions 97.71% vs 97.92%), because the totals move when `cargo-llvm-cov` changes
+    # what it counts -- an earlier revision of this comment quoted 97.89% (113/5353),
+    # before that 97.46% (1458/1496), and the counts it paired with a later percentage
+    # did not reproduce it either. So no figure is quoted here as *the* one: the 95
+    # floor is the gate, and the coverage job prints the measured figure, which is where
+    # a reader should take it from.
     # `--fail-under-lines` compares against the line figure.
     # The `report`-side *function* column carries llvm-cov's own
     # "N functions have mismatched data" warning, so a function count quoted from it

@@ -1363,7 +1363,11 @@ experiment against `tools/ref_impl.py` confirms what the route actually gives:
   `T = tag(K₂, N, A, C ⊕ KS₂(T))` — the completion §4.5 already recorded as circular — and the
   cheapest route to it we can see is the `2^520` search over the tag space (about one fixed point
   per key pair, if the map behaves as a random function). That is not a proof that no cheaper
-  route exists, and the document says so rather than claiming one.
+  route exists, and the document says so rather than claiming one. (**Superseded on its price:**
+  the round at the top of this file constructs a cheaper route — equal `k_out` first, then a
+  chosen message that *picks* the tag, leaving a 256-bit inner-digest equality at ≈`2^256` —
+  and calls the `2^520` figure an overestimate by `2^264`. The "not a proof that no cheaper
+  route exists" half of this bullet is the part that turned out to be load-bearing.)
 - **A second `2^128` route, and its completion is not circular either.** The same review's second
   pass priced the *context* half: with one key and one message, two chosen contexts (a different
   AAD or nonce) whose inner digests `X = B3(k_in, DOM_PRE ‖ N ‖ le64|A| ‖ …)` collide give equal

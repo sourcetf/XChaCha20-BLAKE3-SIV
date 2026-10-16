@@ -61,16 +61,20 @@ surprise:
   and `differential_every_aad_bit_is_authenticated`: the `msg_len > 300` and
   `aad_len > 130` filters. Earlier revisions of this row quoted line numbers, which
   drifted twice; the test names are the stable reference). Every position — all eight
-  bits of every ciphertext and tag byte — within those sizes is tried. Above them the
-  coverage is a *deterministic sample*, not random:
-  `differential_long_rows_sampled_positions_are_authenticated` sweeps all eight bits at
-  the first two and last two bytes of each field, up to 16 evenly spaced positions, and
-  bytes 60000/60001 where the field is long enough, over the 16 rows above the caps
-  (297 positions, 2376 single-bit comparisons), each row anchored against the reference
-  and required to round-trip untampered. The 1 MiB row is excluded from that sweep (one
-  position is ~100 ms in a debug build, ~17 s for its eight bits) and is pinned by its
-  reference digest instead, as are the sizes that matter most (the SIMD widths, the
-  2000/65488 pair that straddles the tag's contiguous-buffer switch). An exhaustive
+  bits of every ciphertext and tag byte — within those sizes is tried. What the caps
+  leave out is a *deterministic sample*, not random sampling:
+  `differential_long_rows_sampled_positions_are_authenticated` carries two per-field
+  rules — all eight bits at the first two and last two bytes of the field, up to 16
+  evenly spaced positions, and bytes 60000/60001 where the field is long enough. The
+  **message** rule covers the 18 rows with `msg_len > 300` (298 positions, 2384
+  single-bit comparisons); the **AAD** rule covers the 12 rows the exhaustive AAD sweep
+  cannot reach, which includes the nine rows whose AAD no other sweep touches (72
+  positions, 576 comparisons). Every sampled row is anchored against the reference and
+  must round-trip untampered; rows above 100 000 bytes keep only the end anchors, since
+  one comparison there is a full 1 000 000-byte decryption (~115 ms in a debug build).
+  The sizes that matter most for other reasons are pinned by their reference digests
+  (the SIMD widths, the 2000/65488 pair that straddles the tag's contiguous-buffer
+  switch). An exhaustive
   scan at 1 MiB would be 2^20 signature verifications per position class, which is why
   the fixture holds digests for the large sizes instead.
 - **The differential fixture is 58 vectors** (49 full + 9 digests). It is a lock, not a

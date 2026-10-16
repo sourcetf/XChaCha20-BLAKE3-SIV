@@ -13,22 +13,30 @@
 //! boundaries where stream-cipher wrappers and buffered hashes actually break.
 //!
 //! **Bounds on the coverage, stated here rather than assumed.** The *full-byte*
-//! sweeps below stop at `msg_len <= 300` and `aad_len <= 130`
-//! (`differential_every_position_is_authenticated` and
-//! `differential_every_aad_bit_is_authenticated` say why). Every row above the
-//! message cap — the fixture's own long rows and the large-size fixture's rows up to
-//! 100 000 bytes, where byte 60000 first exists — is swept by
-//! `differential_long_rows_sampled_positions_are_authenticated`: all eight bits at a
-//! deterministic, documented *sample* of message and AAD positions (first and last
-//! two, up to 16 evenly spaced, plus `60000`/`60001` on every row long enough). That
-//! test exists because a single-bit gap at a long-message offset is invisible to the
-//! full sweep's cap and to random sampling; the sample is not exhaustive, and at
-//! sizes beyond 100 000 bytes the coverage is still the sampled differential
-//! (`tools/broad_differential.py`) and the fuzzer. The large-size fixture replays
-//! both call shapes against its digests — the allocating `encrypt`/`decrypt` pair and
-//! the detached in-place pair — at the sizes where the tag's concatenation window
-//! changes; the tamper sweep leaves out that fixture's 1 MiB row alone, for the
-//! wall-clock bound its size sets.
+//! sweeps below are capped per field, and each says which rows it scans:
+//! `differential_every_position_is_authenticated` takes every ciphertext+tag bit of
+//! every row with `msg_len <= 300` (40 of the 49 rows — including nine whose AADs are
+//! longer than the *other* sweep's cap), and `differential_every_aad_bit_is_authenticated`
+//! takes every AAD bit of every row with `aad_len <= 130`. Nothing in either field is
+//! then left outside a deterministic tamper sweep:
+//! `differential_long_rows_sampled_positions_are_authenticated` covers, per field,
+//! every row with `msg_len > 300` (the fixture's nine long rows and all nine
+//! large-size rows, the two ~1 MiB rows included) and every row with `aad_len > 130`,
+//! plus the large fixture's other non-empty AADs, which the full AAD sweep never
+//! iterates. For each such row it flips all eight bits at a deterministic, documented
+//! *sample* of positions: first and last two, up to 16 evenly spaced, plus
+//! `60000`/`60001` wherever the field holds them — the two ~1 MiB rows take the end
+//! anchors and the 60000 pair but no spread on either field, for their measured wall
+//! clock.
+//! That test exists because a single-bit gap at a long-message offset is invisible to
+//! the full sweeps' caps and to random sampling, which reaches byte 60000 with
+//! probability ~6e-5 per case; the sample is not exhaustive, and for positions
+//! outside it — and for the long rows' tag bytes, which no sweep tampers — the
+//! coverage is the replay against the reference here (untampered, but byte-for-byte),
+//! the sampled differential (`tools/broad_differential.py`) and the fuzzer. The
+//! large-size fixture replays both call shapes against its digests — the allocating
+//! `encrypt`/`decrypt` pair and the detached in-place pair — at the sizes where the
+//! tag's concatenation window changes.
 
 use xchacha20_blake3_siv::{decrypt, encrypt, TAG_LEN};
 
@@ -318,9 +326,12 @@ fn differential_every_position_is_authenticated() {
 /// The AAD must be authenticated in full: flipping any AAD bit must be rejected, at
 /// every position — all eight bits of every AAD byte — of every fixture row with
 /// `aad_len <= 130`, including positions beyond a 16-byte and a 64-byte boundary.
-/// The rows above that cap have their AAD swept at a deterministic sample of positions
-/// by `differential_long_rows_sampled_positions_are_authenticated` below; the cap is a
-/// cost bound, not this test's coverage of "any AAD bit anywhere".
+/// Ten rows (including the nine whose AADs exceed the cap while their messages stay
+/// below the message sweep's) have larger AADs; theirs are swept at a deterministic
+/// sample of positions by `differential_long_rows_sampled_positions_are_authenticated`
+/// below, and the large fixture's non-empty AADs — which this sweep never iterates —
+/// are sampled there too. The cap is a cost bound, not this test's coverage of "any
+/// AAD bit anywhere".
 #[test]
 fn differential_every_aad_bit_is_authenticated() {
     let f = parse_fixture();
@@ -330,7 +341,9 @@ fn differential_every_aad_bit_is_authenticated() {
     // *below* this cap is 65, so **ten** of the twenty-six non-empty rows are outside it
     // (seven *distinct lengths*: 191, 192, 193, 255, 256, 257, 300 -- the first version of
     // this sentence said "seven ... rows", which is the distinct-length count, not the row
-    // count).
+    // count). Those ten are exactly the AAD set of the sampled sweep below, so their AAD
+    // fields are tampered there rather than here; nine of them have `msg_len <= 300` and
+    // reach no message sweep either.
     // (This said "go up to 130", which was never true of the fixture; an audit parsed
     // it.) The cap is a cost bound, not the file's coverage boundary: every row is still
     // checked by the whole-fixture test above, and the rows above the cap have their AAD
@@ -504,47 +517,74 @@ fn differential_large_vectors_match_reference() {
     }
 }
 
-/// The spread of the long-row tamper sample: at most this many evenly spaced
-/// positions, in addition to the four end anchors. See [`sampled_positions`] for the
-/// cost bound this cap is (and why it is not 64).
+/// The spread of the long-row tamper sample: at most this many evenly spaced positions,
+/// in addition to the four end anchors. See [`spread_for`] for the cost bound this cap
+/// is, and for the further cap the ~1 MiB rows take.
 const SPREAD_POSITIONS: usize = 16;
 
-/// The deterministic position sample the long-row sweep tampers: the first two and
-/// last two bytes of a field, up to [`SPREAD_POSITIONS`] further positions evenly
-/// spaced over it, and `60000`/`60001` whenever the field is long enough to hold them.
+/// No spread at all on rows whose message exceeds this length: every sampled position
+/// of such a row — message *or* AAD — costs a full `msg_len`-byte decryption, so the
+/// row's whole sample is reduced to its four end anchors and the `60000`/`60001` pair.
+/// See [`spread_for`] for the measured numbers.
+const SPREAD_LEN_CUTOFF: usize = 100_000;
+
+/// The number of evenly spaced positions [`sampled_positions`] adds to one field of a
+/// row: zero when the row's message exceeds [`SPREAD_LEN_CUTOFF`] bytes, otherwise
+/// `field_len / 64`, at least one and at most [`SPREAD_POSITIONS`].
 ///
-/// The sketch was "every `len / 64`-th position plus the first and last two", and the
-/// small rows get exactly that (`len / 64` spread positions while `len < 16 * 64`);
-/// above that the spread is capped at 16, because each swept position costs eight full
-/// decryptions (one per bit) and a decryption is milliseconds at these sizes in a
-/// debug build — measured here: 6.3 ms at 65 489 bytes, 9.6 ms at 100 000, ~100 ms at
-/// 1 MiB. Without the cap a 64-position spread over the 1 MiB row would add ~17 s to
-/// this file on its own. With it the whole sample is 297 positions / 2376 comparisons
-/// (the test asserts the exact numbers).
+/// Both bounds are wall-clock bounds, because each sampled position costs eight full
+/// decryptions (one per bit) and a decryption is milliseconds at these sizes in a debug
+/// build — measured in this profile with `profile_probe` (allocating round trips, so
+/// half per direction): 0.49 ms at 2 000 bytes, 14.8 ms at 65 489, 22.5 ms at 100 000,
+/// 261 ms at 1 MiB; one comparison in the sweep's shape — clone plus allocating
+/// `decrypt` — measures 7.1 / 10.9 / 115 ms at 65 489 / 100 000 / 1 MiB.
+/// One sampled position on a 1 MiB row therefore costs ~0.9 s. Measured, admitting the
+/// fixture's two ~1 MiB rows uncapped — 21 message positions each plus 19 AAD positions
+/// on `(1 000 000, 12 345)`, 488 comparisons — takes this test from 6.0 s to 64.7 s
+/// (debug, single test); with the row cap it takes 18-23 s across three runs
+/// (18.4, 20.2, 22.6 s). (An earlier revision of this comment said "a 64-position
+/// spread over the 1 MiB row would add ~17 s": 17-18 s is the *21-position* sample,
+/// and a 64-position spread is ~51 s.) The spread positions the cap drops would have
+/// covered the middle of a
+/// >100 000-byte field, which the 100 000-byte row's uncapped spread still covers in
+/// full, and which the property tests and the sampled differential probe at random.
+fn spread_for(msg_len: usize, field_len: usize) -> usize {
+    if msg_len > SPREAD_LEN_CUTOFF {
+        0
+    } else {
+        (field_len / 64).clamp(1, SPREAD_POSITIONS)
+    }
+}
+
+/// The deterministic position sample the long-row sweep tampers for one field of a row
+/// whose message is `msg_len` bytes: the first two and last two bytes of the field,
+/// [`spread_for`] further positions evenly spaced over it, and `60000`/`60001` whenever
+/// the field is long enough to hold them.
 ///
-/// Nothing here is random: the set is a function of `len` alone, so a failure
-/// reproduces exactly and a regenerated fixture keeps the same coverage. The audit's
-/// "ignore bit 4 of `ct[60000]`" is the reason for the 60000 pair: `pt_for(60000)`
-/// (= `(60000 * 37 + 11) % 256` = 235 = `0b1110_1011`) has bit 4 *clear*, so a defect
-/// that ignores that bit does not move the large fixture's digests either — the
-/// exhaustive sweep has to visit the position itself.
-fn sampled_positions(len: usize) -> Vec<usize> {
-    if len == 0 {
+/// Nothing here is random: the set is a function of `(msg_len, field_len)` alone, so a
+/// failure reproduces exactly and a regenerated fixture keeps the same coverage. The
+/// audit's "ignore bit 4 of `ct[60000]`" is the reason for the 60000 pair:
+/// `pt_for(60000)` (= `(60000 * 37 + 11) % 256` = 235 = `0b1110_1011`) has bit 4
+/// *clear*, and the encryption does not move it, so a defect that ignores that bit does
+/// not change the large fixture's digests either — the tamper sweep has to visit the
+/// position itself.
+fn sampled_positions(msg_len: usize, field_len: usize) -> Vec<usize> {
+    if field_len == 0 {
         return Vec::new();
     }
-    let mut positions = vec![0, len - 1];
-    if len > 1 {
+    let mut positions = vec![0, field_len - 1];
+    if field_len > 1 {
         positions.push(1);
-        positions.push(len - 2);
+        positions.push(field_len - 2);
     }
-    let spread = (len / 64).clamp(1, SPREAD_POSITIONS);
+    let spread = spread_for(msg_len, field_len);
     for k in 0..spread {
-        positions.push(k * len / spread);
+        positions.push(k * field_len / spread);
     }
-    if len > 60000 {
+    if field_len > 60000 {
         positions.push(60000);
     }
-    if len > 60001 {
+    if field_len > 60001 {
         positions.push(60001);
     }
     positions.sort_unstable();
@@ -552,98 +592,140 @@ fn sampled_positions(len: usize) -> Vec<usize> {
     positions
 }
 
-/// Tamper-sweep one **already-authenticated** row at [`sampled_positions`]: every bit
-/// of every sampled message and AAD position must be rejected. Returns
-/// `(positions, comparisons)`, where each comparison is one `decrypt` call expected to
-/// reject — so a caller counting a sweep counts what actually ran.
+/// What the sampled sweep actually tampered, split by field. Exact counts, not floors:
+/// the point of counting is that each sample rule's *set* is pinned, so a regenerated
+/// fixture or a moved cap fails the test's assertions deliberately instead of shrinking
+/// the sweep.
+#[derive(Default)]
+struct SampledSweepCounts {
+    message_rows: usize,
+    message_positions: usize,
+    message_comparisons: usize,
+    aad_rows: usize,
+    aad_positions: usize,
+    aad_comparisons: usize,
+}
+
+/// Tamper-sweep one **already-anchored** row over the sampled positions of the requested
+/// fields: every bit of every sampled message and AAD position must be rejected.
+/// `counts` accumulates what ran, so a caller counting a sweep counts what actually
+/// happened. `sweep_message` applies [`sampled_positions`] to `ct`;
+/// `sweep_aad` applies it to `aad`; a row may need either, both, or (the full sweeps
+/// having taken it) neither.
 ///
-/// The untampered checks come first, as in the full sweep above: under a broken tag
-/// every `is_err()` below would hold because the *untampered* row is rejected too.
+/// The caller anchors the row against the reference first (the fixture tag for the
+/// differential fixture's rows, the digest for the large-size fixture's). The untampered
+/// checks then come first, as in the full sweeps above: under a broken tag every
+/// `is_err()` below would hold because the *untampered* row is rejected too.
 fn sweep_sampled_positions(
     key: &[u8; 32],
     nonce: &[u8; 24],
     aad: &[u8],
     ct: &[u8],
     tag: &[u8; TAG_LEN],
-) -> (usize, usize) {
+    sweep_message: bool,
+    sweep_aad: bool,
+    counts: &mut SampledSweepCounts,
+) {
+    let (msg_len, aad_len) = (ct.len(), aad.len());
     let back = decrypt(key, nonce, aad, ct, tag).unwrap_or_else(|_| {
         panic!(
             "the untampered row must authenticate before its tampers can mean anything \
-             (msg_len={}, aad_len={})",
-            ct.len(),
-            aad.len()
+             (msg_len={msg_len}, aad_len={aad_len})"
         )
     });
     assert_eq!(
         back.as_slice(),
-        pt_for(ct.len()).as_slice(),
-        "the untampered row must round-trip (msg_len={}, aad_len={})",
-        ct.len(),
-        aad.len()
+        pt_for(msg_len).as_slice(),
+        "the untampered row must round-trip (msg_len={msg_len}, aad_len={aad_len})"
     );
 
-    let mut positions = 0usize;
-    let mut comparisons = 0usize;
-    for pos in sampled_positions(ct.len()) {
-        positions += 1;
-        for bit in 0..8 {
-            comparisons += 1;
-            let mut bad = ct.to_vec();
-            bad[pos] ^= 1u8 << bit;
-            assert!(
-                decrypt(key, nonce, aad, &bad, tag).is_err(),
-                "sampled ciphertext byte {pos} bit {bit} not authenticated \
-                 (msg_len={}, aad_len={})",
-                ct.len(),
-                aad.len()
-            );
+    if sweep_message {
+        let positions = sampled_positions(msg_len, msg_len);
+        counts.message_rows += 1;
+        counts.message_positions += positions.len();
+        for pos in positions {
+            for bit in 0..8 {
+                counts.message_comparisons += 1;
+                let mut bad = ct.to_vec();
+                bad[pos] ^= 1u8 << bit;
+                assert!(
+                    decrypt(key, nonce, aad, &bad, tag).is_err(),
+                    "sampled ciphertext byte {pos} bit {bit} not authenticated \
+                     (msg_len={msg_len}, aad_len={aad_len})"
+                );
+            }
         }
     }
-    for pos in sampled_positions(aad.len()) {
-        positions += 1;
-        for bit in 0..8 {
-            comparisons += 1;
-            let mut bad = aad.to_vec();
-            bad[pos] ^= 1u8 << bit;
-            assert!(
-                decrypt(key, nonce, &bad, ct, tag).is_err(),
-                "sampled aad byte {pos} bit {bit} not authenticated \
-                 (msg_len={}, aad_len={})",
-                ct.len(),
-                aad.len()
-            );
+    if sweep_aad {
+        let positions = sampled_positions(msg_len, aad_len);
+        counts.aad_rows += 1;
+        counts.aad_positions += positions.len();
+        for pos in positions {
+            for bit in 0..8 {
+                counts.aad_comparisons += 1;
+                let mut bad = aad.to_vec();
+                bad[pos] ^= 1u8 << bit;
+                assert!(
+                    decrypt(key, nonce, &bad, ct, tag).is_err(),
+                    "sampled aad byte {pos} bit {bit} not authenticated \
+                     (msg_len={msg_len}, aad_len={aad_len})"
+                );
+            }
         }
     }
-    (positions, comparisons)
 }
 
-/// The tamper property of `differential_every_position_is_authenticated` for the rows
-/// that test's size cap excludes: all eight bits of a deterministic sample of message
-/// and AAD positions (see [`sampled_positions`]) on every fixture row above
-/// `msg_len = 300`, and on the large fixture's rows up to 100 000 bytes — the sizes at
-/// and beyond 60000 that the audit's "ignore bit 4 of `ct[60000]`" injection hid
-/// behind. The full-byte sweep cannot reach those rows (a 1 MiB row is 2^23 positions)
-/// and random sampling reaches byte 60000 with probability ~6e-5 per case, so this
-/// sample is the coverage that is deterministic instead.
+/// The tamper property of `differential_every_position_is_authenticated` for the rows and
+/// fields the full-byte sweeps cannot reach, **per field** — the two rules are separate
+/// on purpose, because the fixture's caps have different row sets:
 ///
-/// The large fixture's **1 MiB row is deliberately excluded**: one position there is a
-/// full 1 MiB decryption (measured ~100 ms in this debug profile), so its 21-position
-/// sample would add ~17 s to this file alone, for a tag path — the three-part
-/// incremental `update` shape above `TAG_CONCAT_LIMIT` — that the 100 000-byte row
-/// exercises at ~1/10 the cost. That row's digests and round-trip stay covered by
-/// `differential_large_vectors_match_reference` above.
+/// * **Message field**, every row with `msg_len > 300`: the differential fixture's nine
+///   long rows `(511, 0) … (2049, 0)`, and **all nine** large-fixture rows, the two
+///   ~1 MiB rows `(1 000 000, 12 345)` and `(1 048 576, 0)` included — their spread is
+///   capped by [`spread_for`] for the measured wall clock, but their end anchors and
+///   the `60000`/`60001` pair are swept like every other long row's.
+/// * **AAD field**, every row the full AAD sweep cannot reach: the differential
+///   fixture's ten rows with `aad_len > 130` — **nine of them have `msg_len <= 300`**,
+///   so they are in no message sweep, and the tenth is the long row `(1025, 300)` —
+///   plus the large fixture's two non-empty AADs, `(100 000, 64)` and
+///   `(1 000 000, 12 345)`, because `differential_every_aad_bit_is_authenticated` only
+///   iterates the differential fixture. The ~1 MiB row's AAD sample is capped with its
+///   message: every sampled position there costs a full 1 MiB decryption whatever
+///   field it tampers.
+///
+/// Each row is anchored against the independent reference before tampering: the
+/// differential fixture byte-for-byte (ciphertext and tag), the large fixture by its
+/// `BLAKE3(ct || tag)` digest. The row set each field's rule covers, the exact-position
+/// counts and the comparisons are asserted at the end.
+///
+/// What the deterministic sweeps do *not* touch, and what is therefore covered only by
+/// the untampered replays above (`differential_encrypt_matches_reference`,
+/// `differential_detached_matches_reference`, `differential_large_vectors_match_reference`)
+/// and by the property tests and fuzzer: the **tag bytes** of every row with
+/// `msg_len > 300` (the full sweep owns the tag only below its cap; this one tampers
+/// long rows' message and AAD fields), the positions outside the capped sample on the
+/// two ~1 MiB rows (message and AAD alike), and every other position outside a sample
+/// on a long field.
+///
+/// The sample is deterministic — a function of `(msg_len, field_len)` alone, see
+/// [`sampled_positions`] — because the audit's "ignore bit 4 of `ct[60000]`" injection
+/// hid behind exactly the gap a random sampler leaves: it reaches byte 60000 with
+/// probability ~6e-5 per case. Re-running that injection in a scratch copy still fails
+/// this test, and an AAD injection at a sampled position of one of the nine rows
+/// (which no sweep touched before the AAD rule above existed) fails it too.
 #[test]
 fn differential_long_rows_sampled_positions_are_authenticated() {
     let f = parse_fixture();
-    let mut swept_rows = 0usize;
-    let mut swept_positions = 0usize;
-    let mut tamper_comparisons = 0usize;
+    let mut counts = SampledSweepCounts::default();
 
-    // The differential fixture's own rows above the full sweep's cap. Their bytes are
-    // the reference's, checked first, so the sweep below tampers reference output
-    // rather than this crate's own.
+    // The differential fixture's rows with a field above the full sweeps' caps. Each is
+    // anchored against the fixture first, so the sweep tampers reference output rather
+    // than this crate's own.
     for (msg_len, aad_len, ct, tag) in &f.rows {
-        if *msg_len <= 300 {
+        let sweep_message = *msg_len > 300;
+        let sweep_aad = *aad_len > 130;
+        if !sweep_message && !sweep_aad {
             continue;
         }
         let aad = aad_for(*aad_len);
@@ -656,15 +738,24 @@ fn differential_long_rows_sampled_positions_are_authenticated() {
             &got_tag, tag,
             "tag mismatch at msg_len={msg_len} aad_len={aad_len}"
         );
-        swept_rows += 1;
-        let (positions, comparisons) = sweep_sampled_positions(&f.key, &f.nonce, &aad, ct, tag);
-        swept_positions += positions;
-        tamper_comparisons += comparisons;
+        sweep_sampled_positions(
+            &f.key,
+            &f.nonce,
+            &aad,
+            ct,
+            tag,
+            sweep_message,
+            sweep_aad,
+            &mut counts,
+        );
     }
 
-    // The large fixture, where rows long enough to reach byte 60000 live. Its expected
-    // output is a digest rather than bytes, so the anchor is the digest: a row is
-    // swept only once its encryption reproduces the independent reference's digest.
+    // The large fixture, where rows long enough to reach byte 60000 live. Every row is
+    // above the message sweep's cap, so all of them get the message sample; an AAD is
+    // sampled whenever it is non-empty, because no full sweep iterates this fixture.
+    // Its expected output is a digest rather than bytes, so the anchor is the digest: a
+    // row is swept only once its encryption reproduces the independent reference's
+    // digest.
     let text = include_str!("vectors_differential_large.txt");
     let (key, nonce) = header(text);
     for line in text.lines() {
@@ -676,11 +767,6 @@ fn differential_long_rows_sampled_positions_are_authenticated() {
         let msg_len: usize = it.next().expect("msg len").parse().expect("int");
         let aad_len: usize = it.next().expect("aad len").parse().expect("int");
         let want = hex_decode(it.next().expect("digest"));
-        // Below the cap the full sweep above owns the sizes; above 100 000 the 1 MiB
-        // row is excluded for the measured cost on the test's docstring.
-        if msg_len <= 300 || msg_len > 100_000 {
-            continue;
-        }
         let pt = pt_for(msg_len);
         let aad = aad_for(aad_len);
         let (ct, tag) = encrypt(&key, &nonce, &aad, &pt).unwrap();
@@ -692,32 +778,61 @@ fn differential_long_rows_sampled_positions_are_authenticated() {
             want.as_slice(),
             "digest mismatch at msg_len={msg_len} aad_len={aad_len}"
         );
-        swept_rows += 1;
-        let (positions, comparisons) = sweep_sampled_positions(&key, &nonce, &aad, &ct, &tag);
-        swept_positions += positions;
-        tamper_comparisons += comparisons;
+        sweep_sampled_positions(
+            &key,
+            &nonce,
+            &aad,
+            &ct,
+            &tag,
+            msg_len > 300,
+            aad_len > 0,
+            &mut counts,
+        );
     }
 
-    // Exact, not a floor: `> 0` would be satisfied by a sample that had shrunk to one
-    // row, and the point of counting is that the audit's `ct[60000]` position is in
-    // the swept set (on the four rows long enough to hold it). The numbers come from
-    // the checked-in fixtures under the rule above: 16 rows (9 from `vectors_
-    // differential.txt` above the cap + 7 from the large fixture above 300 and up to
-    // 100 000 bytes), 297 positions, 2376 single-bit comparisons. No random input is
-    // involved, so a fixture regeneration or a sample change should fail here and be
-    // updated deliberately.
+    // The audit's byte 60000 must stay in the sample wherever it exists, the capped
+    // ~1 MiB rows included; that pair is why this test exists.
     assert!(
-        swept_positions >= 8
-            && (60000..60002).all(|p| sampled_positions(100_000).contains(&p))
-            && sampled_positions(65_489).contains(&60000),
-        "the sample stopped covering the long-message positions: {swept_positions} \
-         positions; this test exists for byte 60000"
+        (60000..60002).all(|p| sampled_positions(65_489, 65_489).contains(&p))
+            && (60000..60002).all(|p| sampled_positions(100_000, 100_000).contains(&p))
+            && (60000..60002).all(|p| sampled_positions(1_000_000, 1_000_000).contains(&p))
+            && (60000..60002).all(|p| sampled_positions(1_048_576, 1_048_576).contains(&p)),
+        "the sample stopped covering the long-message positions: this test exists for \
+         byte 60000"
+    );
+    // Exact, not a floor: `> 0` would survive the sample shrinking to one row, and the
+    // point of counting is that every rule's row set is pinned. The numbers come from
+    // the checked-in fixtures under the rules above.
+    //   Message: 9 fixture rows above 300 bytes (145 positions) + all 9 large rows
+    //   (153 positions, the two ~1 MiB rows at 6 each after the row cap) = 18 rows.
+    //   AAD: 10 fixture rows above 130 bytes (64 positions; the nine with msg_len <= 300
+    //   contribute 57 of them) + the large fixture's two non-empty AADs (8 positions;
+    //   the 100 000-byte row's 4-position spread is the rule's floor, the ~1 MiB row's
+    //   is capped with its message) = 12 rows.
+    assert_eq!(
+        (
+            counts.message_rows,
+            counts.message_positions,
+            counts.message_comparisons
+        ),
+        (18, 298, 2384),
+        "the message sample changed ({} rows, {} positions, {} comparisons): the rule, \
+         the fixture or the spread cap moved, so update these numbers deliberately",
+        counts.message_rows,
+        counts.message_positions,
+        counts.message_comparisons
     );
     assert_eq!(
-        (swept_rows, swept_positions, tamper_comparisons),
-        (16, 297, 2376),
-        "the long-row sweep's set changed ({swept_rows} rows, {swept_positions} \
-         positions, {tamper_comparisons} comparisons): the sample rule, the fixture or \
-         the exclusions moved, so update these numbers deliberately"
+        (
+            counts.aad_rows,
+            counts.aad_positions,
+            counts.aad_comparisons
+        ),
+        (12, 72, 576),
+        "the AAD sample changed ({} rows, {} positions, {} comparisons): the rule, the \
+         fixture or the spread cap moved, so update these numbers deliberately",
+        counts.aad_rows,
+        counts.aad_positions,
+        counts.aad_comparisons
     );
 }

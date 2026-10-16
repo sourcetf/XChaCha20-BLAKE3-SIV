@@ -410,16 +410,20 @@ side degrades to rejection rather than to forgery, because the tag is computed o
 the plaintext (see the SIV property above), so a corrupted keystream, a corrupted
 key derivation or a corrupted tag can only produce a message the receiver refuses.
 The data path is held to that empirically — the exhaustive sweeps flip **all eight bits**
-of every position of the below-cap rows (`msg_len <= 300`, `aad_len <= 130`): 40 of the
-fixture's 49 rows and 5871
-ciphertext-plus-tag positions, plus the 16 non-empty AAD rows below the cap. The rows
-above the cap are not left to sampling either: `differential_long_rows_sampled_positions_are_authenticated`
-sweeps all eight bits at a deterministic position set on every such row — the first two
-and last two bytes, up to 16 evenly spaced positions, and bytes 60000/60001 wherever the
-row holds them — 16 rows, 297 positions, 2376 single-bit comparisons, each row anchored
-against the reference first and required to round-trip untampered (the 1 MiB row is out
-of that sweep: one position costs ~17 s in a debug build, and the 100 000-byte row
-exercises the same three-part tag path). The
+of every position they reach: every ciphertext and tag byte of the 40 rows with
+`msg_len <= 300` (5871 positions, 40 of the fixture's 49 rows), and every AAD byte of the
+rows with `aad_len <= 130` (the 16 non-empty rows below that cap). What the caps leave
+out is not left to random sampling either: `differential_long_rows_sampled_positions_are_authenticated`
+runs two explicit per-field rules, all eight bits at the first two and last two bytes,
+up to 16 evenly spaced positions, and bytes 60000/60001 wherever the field holds them —
+the **message** field of every row with `msg_len > 300` (18 rows: the 9 above that cap
+plus the 9 large-fixture rows: 298 positions, 2384 comparisons) and the **AAD** field of
+every row the exhaustive AAD sweep cannot reach (12 rows — the 10 with `aad_len > 130`,
+including the nine whose AAD no other sweep touches, plus the large fixture's two
+non-empty AADs: 72 positions, 576 comparisons). Each sampled row is anchored against the
+reference first and required to round-trip untampered; rows above 100 000 bytes get the
+end anchors only, because one comparison there costs a full 1 000 000-byte decryption
+(measured, ~115 ms in a debug build). The
 property tests and the fuzzer *sample* the same space rather than exhausting it (one
 `(pos, bit)` per case, their comments say "statistical, not exhaustive"), and every
 fuzz run recorded in CI has found no acceptance — but those are *non-physical*
@@ -558,8 +562,12 @@ carries the `git` line that works today.)
 `ultra` includes `rng`, which pulls in `getrandom` and therefore needs an OS entropy
 source. It **does not build on bare-metal `no_std` targets** (e.g. `--features ultra
 --target thumbv7em-none-eabihf` fails with `getrandom`'s "target is not supported");
-a `no_std` caller that wants the same defences without OS randomness should spell them
-out as `features = ["hardened", "dual-mac", "locked"]`.
+a `no_std` caller that wants those defences without OS randomness should spell them
+out as `features = ["hardened", "dual-mac", "locked"]` — knowing that the list is
+`ultra` **minus the witness**: the `witness` module hangs off the `ultra` feature
+*name* rather than off the four features it implies, and there is no `witness`
+feature, so on a target where `ultra` cannot build there is no way to turn the
+second implementation on ("What the witness is" prices that loss).
 
 | Layer | What it defends | Cost (measured, this host) |
 | --- | --- | --- |

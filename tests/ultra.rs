@@ -87,10 +87,19 @@ const LIB: &str = include_str!("../src/lib.rs");
 ///
 /// This finds the module on the stripped text, requires it to carry `#[cfg(test)]`,
 /// brace-matches its body (braces inside comments and string literals are already gone,
-/// so they cannot unbalance the count), and removes exactly the body — blanking those
-/// lines rather than deleting them, so line numbers in the scans' failure messages keep
-/// pointing at the source. Everything else, before *and* after the module, is what the
-/// scans read.
+/// so they cannot unbalance the count), and removes exactly the body and the module's own
+/// `#[cfg(test)]` attribute — blanking those lines rather than deleting them, so line
+/// numbers in the scans' failure messages keep pointing at the source. Everything else,
+/// before *and* after the module, is what the scans read.
+///
+/// What the scans read is then further restricted to source a consumer's build compiles:
+/// [`blank_cfg_test_items`] blanks every remaining `#[cfg(test)]`-attributed item, and
+/// [`non_test_source_of`] asserts no `#[cfg(test)]` survives. That invariant falls out of
+/// this function's own definition — everything left is non-test source — and it closes
+/// the second-module planting: a `#[cfg(test)] mod planting { … }` beside the real test
+/// module, with the real `zeroize_slice(&mut witness_ciphertext);` deleted, was measured
+/// satisfying this file's count of the planted call, because the planted text lies outside
+/// the one module body this cut removed.
 ///
 /// [`non_test_source_of`] is the same cut for `src/witness.rs`, which
 /// `the_witness_shares_only_the_specification_with_the_crate` scans.
@@ -111,11 +120,15 @@ fn non_test_source_of(text: &str) -> String {
         "the scanned file holds more than one `mod tests {{`: which one is the test \
          module, and what the scan cut, would be ambiguous"
     );
+    let before = stripped[..at].trim_end();
     assert!(
-        stripped[..at].trim_end().ends_with("#[cfg(test)]"),
+        before.ends_with("#[cfg(test)]"),
         "the scanned `mod tests {{` is not `#[cfg(test)]`: it is production code being \
          mistaken for the test module, so the scan would skip it"
     );
+    // The attribute goes with the body: it is `#[cfg(test)]`, so it is not text a
+    // consumer's build compiles either, and keeping it would trip the invariant below.
+    let attr_start = before.len() - "#[cfg(test)]".len();
     let open = at + "mod tests {".len() - 1;
     let mut depth = 0usize;
     let mut close = None;
@@ -134,12 +147,163 @@ fn non_test_source_of(text: &str) -> String {
     }
     let close = close.expect("the test module's body is unterminated");
     let mut out = String::with_capacity(stripped.len());
-    out.push_str(&stripped[..at]);
-    for _ in 0..stripped[at..=close].matches('\n').count() {
+    out.push_str(&stripped[..attr_start]);
+    for _ in 0..stripped[attr_start..=close].matches('\n').count() {
         out.push('\n');
     }
     out.push_str(&stripped[close + 1..]);
+    // Everything left must be non-test source. The crate's *other* `#[cfg(test)]` items
+    // (`test_counters`, `extern crate std`, the `flip_byte_for_test` impl, the counter
+    // call in `derive_tag`) do not ship either, and a test-gated item left in the scan is
+    // exactly the planting surface.
+    let out = blank_cfg_test_items(&out);
+    match find_cfg_test_attribute(&out, 0) {
+        None => {}
+        Some((at, _, false)) => panic!(
+            "a `#[cfg(test)]` at byte {at} of the cut source survived the blanking pass; \
+             the cut is no longer non-test source and the counts below cannot be trusted"
+        ),
+        Some((at, _, true)) => panic!(
+            "the scanned file carries an inner `#![cfg(test)]` at byte {at}: it gates the \
+             enclosing block rather than an item, so this scanner cannot blank the right \
+             span; rewrite it as `#[cfg(test)]` on the item it gates"
+        ),
+    }
     out
+}
+
+/// The next `#[cfg(test)]` (or `#![cfg(test)]`) at or after `from`, as
+/// `(index of the `#`, index just past the `]`, inner?)`. Whitespace is allowed between
+/// the tokens, because `#[ cfg ( test ) ]` is the same attribute.
+fn find_cfg_test_attribute(source: &str, from: usize) -> Option<(usize, usize, bool)> {
+    let b = source.as_bytes();
+    let mut i = from;
+    while i < b.len() {
+        if b[i] == b'#' {
+            let mut j = i + 1;
+            let inner = b.get(j) == Some(&b'!');
+            if inner {
+                j += 1;
+            }
+            if b.get(j) == Some(&b'[') {
+                j += 1;
+                while j < b.len() && b[j].is_ascii_whitespace() {
+                    j += 1;
+                }
+                if b[j..].starts_with(b"cfg") {
+                    j += 3;
+                    while j < b.len() && b[j].is_ascii_whitespace() {
+                        j += 1;
+                    }
+                    if b.get(j) == Some(&b'(') {
+                        j += 1;
+                        while j < b.len() && b[j].is_ascii_whitespace() {
+                            j += 1;
+                        }
+                        if b[j..].starts_with(b"test") {
+                            let mut k = j + 4;
+                            while k < b.len() && b[k].is_ascii_whitespace() {
+                                k += 1;
+                            }
+                            if b.get(k) == Some(&b')') {
+                                k += 1;
+                                while k < b.len() && b[k].is_ascii_whitespace() {
+                                    k += 1;
+                                }
+                                if b.get(k) == Some(&b']') {
+                                    return Some((i, k + 1, inner));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        i += 1;
+    }
+    None
+}
+
+/// `source` with every `#[cfg(test)]`-attributed **item** blanked to spaces (newlines
+/// kept, so line numbers stay comparable): the test-only text that lies outside the one
+/// `mod tests` module.
+///
+/// The item's extent is found by skipping any further attributes, then taking the first
+/// `{` (brace-matched, so a `;` inside the item's body cannot end it) or the first `;`
+/// outside parentheses and brackets. What this does **not** cover is spelled out where the
+/// result is asserted: only the plain `test` predicate is matched (`all(test, …)`,
+/// `cfg_attr(test, …)` are not), and the item must end in a brace block or a `;`. A shape
+/// this cannot blank is not silently kept: the caller's assertion rejects any surviving
+/// `#[cfg(test)]`, and an item whose extent cannot be found is a panic, not a skip.
+fn blank_cfg_test_items(source: &str) -> String {
+    let mut out = source.as_bytes().to_vec();
+    let mut from = 0usize;
+    while let Some((start, close, inner)) = find_cfg_test_attribute(source, from) {
+        if inner {
+            // An inner attribute gates its enclosing block, so there is no item span to
+            // blank; the caller rejects the source rather than cutting the wrong thing.
+            break;
+        }
+        let end = cfg_test_item_end(source, close);
+        for byte in &mut out[start..end] {
+            if *byte != b'\n' {
+                *byte = b' ';
+            }
+        }
+        from = end;
+    }
+    String::from_utf8(out).expect("blanking whole spans between ASCII tokens keeps valid UTF-8")
+}
+
+/// The byte just past the item the `#[cfg(test)]` attribute ending at `close` applies to:
+/// the matching `}` of its body, or its terminating `;`.
+fn cfg_test_item_end(source: &str, close: usize) -> usize {
+    let mut at = close;
+    // Further attributes can sit between this one and the item (`#[cfg(test)] #[inline]
+    // fn …`).
+    loop {
+        let rest = &source[at..];
+        let trimmed = rest.trim_start();
+        at += rest.len() - trimmed.len();
+        if trimmed.starts_with("#[") || trimmed.starts_with("#![") {
+            let open = source[at..].find('[').map_or(at, |n| at + n + 1);
+            at = source[open..].find(']').map_or(open, |n| open + n + 1);
+        } else {
+            break;
+        }
+    }
+    let mut depth = 0i64;
+    for (n, c) in source[at..].char_indices() {
+        match c {
+            '(' | '[' => depth += 1,
+            ')' | ']' => depth -= 1,
+            '{' if depth == 0 => {
+                // The item's body: brace-match it.
+                let open = at + n;
+                let mut inner = 0i64;
+                for (m, c) in source[open..].char_indices() {
+                    match c {
+                        '{' => inner += 1,
+                        '}' => {
+                            inner -= 1;
+                            if inner == 0 {
+                                return open + m + 1;
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                panic!("the `#[cfg(test)]` item at byte {at} has an unterminated body");
+            }
+            ';' if depth == 0 => return at + n + 1,
+            _ => {}
+        }
+    }
+    panic!(
+        "the `#[cfg(test)]` attribute ending at byte {close} has no `{{` or `;` \
+         terminating the item it attributes, so this scanner cannot blank that item; a \
+         test-gated item left in the scan is text a consumer's build never compiles"
+    );
 }
 
 /// See [`non_test_source`]: comments and string-literal contents are removed, with newlines
@@ -150,12 +314,19 @@ fn non_test_source_of(text: &str) -> String {
 /// count — and a `/* … */` block was scanned as code. Literal contents are dropped (the
 /// quotes remain, so a literal becomes `""`), so a *string* carrying the text cannot stand
 /// in for a statement either; a bare `"…"` is not an occurrence of a call.
+///
+/// Block comments are tracked with their **nesting depth**: Rust nests them, and a scanner
+/// that exits at the first `*/` reads the rest of the comment as code. Measured before this
+/// depth was tracked: `/* /* */ zeroize_slice(&mut witness_ciphertext); /* */ */` was a
+/// comment to rustc and a call site to the counts here — the witness wipe could be
+/// commented out of the shipped library while this file stayed green.
 fn strip_comments(text: &str) -> String {
     #[derive(PartialEq)]
     enum Mode {
         Code,
         Line,
-        Block,
+        /// Inside a block comment, with its **nesting depth**. See the doc above.
+        Block(usize),
         Str,
         /// Inside a raw string (`r"…"`, `r#"…"#`), whose contents are dropped.
         RawStr(u8),
@@ -172,7 +343,7 @@ fn strip_comments(text: &str) -> String {
                     mode = Mode::Line;
                     i += 2;
                 } else if c == b'/' && b.get(i + 1) == Some(&b'*') {
-                    mode = Mode::Block;
+                    mode = Mode::Block(1);
                     i += 2;
                 } else if let Some((prefix, hashes)) = raw_string_prefix(&b[i..]) {
                     // A raw string (`r"…"`, `r#"…"#`, `br#"…"#`): its contents are
@@ -219,9 +390,17 @@ fn strip_comments(text: &str) -> String {
                 }
                 i += 1;
             }
-            Mode::Block => {
-                if c == b'*' && b.get(i + 1) == Some(&b'/') {
-                    mode = Mode::Code;
+            Mode::Block(depth) => {
+                if c == b'/' && b.get(i + 1) == Some(&b'*') {
+                    // A nested comment: Rust counts these, so the scanner must too.
+                    mode = Mode::Block(depth + 1);
+                    i += 2;
+                } else if c == b'*' && b.get(i + 1) == Some(&b'/') {
+                    mode = if depth == 1 {
+                        Mode::Code
+                    } else {
+                        Mode::Block(depth - 1)
+                    };
                     i += 2;
                 } else {
                     if c == b'\n' {

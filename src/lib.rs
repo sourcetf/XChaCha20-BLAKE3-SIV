@@ -839,7 +839,10 @@ impl Key {
     ///
     /// Gated on `rng` because that is the only caller: without the feature nothing
     /// generates a key, and an ungated method would be dead code under
-    /// `--no-default-features`, which CI builds with `-D warnings`.
+    /// `--no-default-features` — a configuration CI checks
+    /// (`cargo check --no-default-features --all-targets`, in the lint job; the two
+    /// `clippy` legs that do pass `-D warnings` run the default and `--all-features`
+    /// sets, so there the warning would be printed rather than denied).
     #[cfg(feature = "rng")]
     #[inline]
     fn as_bytes_mut(&mut self) -> &mut [u8; KEY_LEN] {
@@ -2135,8 +2138,10 @@ unsafe fn zeroize_raw(ptr: *mut u8, len: usize) {
 /// `k_in`**, left by the dependency's by-value temporaries (the `Hasher::new_keyed`
 /// return and the `ChunkState` built from the key — the copies the comment on
 /// `blake3_keyed_multi` names), and the `blake3` dependency's XOF output block, whose frames
-/// hold a run of `enc_key ‖ enc_nonce` (16 of the 44 bytes on the committed
-/// 4,096-byte scan; `k_out` adds ~16 under `pure`).  This crate cannot name those
+/// hold a run of `enc_key ‖ enc_nonce` (16 of the 44 bytes, and 4 of `k_out`'s 32, on the
+/// 4,096-byte derived-value scan an audit ran — *not* a committed one: `tools/stack_residue.sh`
+/// searches 1 MiB for the master key and `locked`'s tag only, because the derived values are
+/// unreachable from the public API; `k_out` runs to ~16 bytes under `pure`).  This crate cannot name those
 /// frames, let alone zeroize them — `k_in` it does name and wipe, and the wipe does
 /// not reach the copy the compiler left behind.
 ///
