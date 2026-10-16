@@ -126,36 +126,50 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # `cache` exists because `rust-cache` validates its key and refuses one
+          # containing a comma, while `profile` reads `release, default features`:
+          # measured, nine `ValidationError: Key Validation Error: v0-rust-test-release,
+          # default features-Linux-x64-… cannot contain commas` annotations across the
+          # legs of one run. The key is built from this field, never from the display
+          # name, so the two can move independently.
           - profile: release, default features
             args: --release
+            cache: release-default
           - profile: release, all features
             args: --release --all-features
+            cache: release-all
           # Debug matters here beyond the usual reasons: `subtle`'s constant-time
           # guarantees are release-only (its Choice runs invariant checks in
           # debug), and this crate's own assertions and debug paths are only
           # exercised in a debug build.
           - profile: debug, all features
             args: --all-features
+            cache: debug-all
           # `ultra` is a first-class configuration, not a combination that happens to be
           # covered by `--all-features`: it must build and pass on its own, because that
           # is how a user enables it and how a regression in its feature wiring shows up.
           - profile: release, ultra
             args: --release --features ultra
+            cache: release-ultra
           # The opt-out build, so the single-gate configuration keeps its own witness.
           - profile: release, no default features
             args: --release --no-default-features
+            cache: release-none
           # `locked` is a feature a caller can turn on by itself, and it used to gate
           # nothing at all: the module was under `ultra`, so `--features locked` compiled
           # an empty feature. This entry is what keeps that from happening again.
           - profile: release, locked alone
             args: --release --features locked
+            cache: release-locked
           # `rng` alone, and the `no_std` shape of it (`--no-default-features --features
           # rng`): the feature adds a module and a dependency, and neither combination was
           # built anywhere.
           - profile: release, rng alone
             args: --release --features rng
+            cache: release-rng
           - profile: release, no default features with rng
             args: --release --no-default-features --features rng
+            cache: release-none-rng
           # `dual-mac` with the defaults *off*, which is the only configuration in which the
           # layer's invariant is observable: `dual-mac` must imply `hardened` (Cargo.toml's
           # edge), and `--features dual-mac` gets `hardened` from `default` whether that edge
@@ -165,6 +179,7 @@ jobs:
           # changes nothing else.
           - profile: release, no default features with dual-mac
             args: --release --no-default-features --features dual-mac
+            cache: release-none-dualmac
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
@@ -172,7 +187,10 @@ jobs:
           toolchain: stable
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
-          shared-key: test-${{ matrix.profile }}
+          # From `matrix.cache`, not from `matrix.profile`: the display name contains
+          # commas and `rust-cache` refuses a key that does (the measurement is in the
+          # matrix comment above).
+          shared-key: test-${{ matrix.cache }}
 
       # `--skip timing` keeps `tests/timing.rs` out of the blocking run: on a
       # shared runner that screen cannot separate a real effect from a spurious
