@@ -231,7 +231,17 @@ opt-level = 3
 strip = true
 
 [workspace]
-resolver = "2"
+# Resolver 3 is the MSRV-aware one: it makes cargo prefer dependency versions whose
+# `rust-version` is compatible with this crate's, instead of the newest version available.
+# That is what stops a routine `cargo update` — and Dependabot's, which runs the same
+# resolution — from proposing a bump this crate cannot build on its declared MSRV.
+# Measured before changing it: `cargo update -p proptest` under resolver 2 moved `proptest`
+# to 1.12.0, which requires rustc 1.88, dragging in its new `borsh`/`bytes` tree — exactly
+# what the Dependabot group PR proposed and what the CI MSRV job rejected. The same command
+# under resolver 3 leaves `proptest` at 1.11.0. It needs Cargo 1.84+, which the declared
+# MSRV (1.85) satisfies. The MSRV job remains the enforcement; this only stops the
+# incompatible bump from being proposed in the first place.
+resolver = "3"
 # `cargo-fuzz` builds its target against the nightly sanitizer runtime, with its
 # own manifest; it must not be part of this workspace or the two disagree about
 # who owns the profile.

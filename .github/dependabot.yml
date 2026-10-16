@@ -79,6 +79,20 @@ updates:
       # commit where the numbers are re-measured anyway.
       - dependency-name: chacha20poly1305
       - dependency-name: aead
+      # `proptest 1.12.0` declares `rust-version = "1.88"` while this crate declares 1.85, so
+      # the bump cannot be built on the MSRV the CI job pins — and that job is what rejected
+      # the group PR carrying it. Measured: `cargo +1.85.0 check --all-targets --locked` on
+      # that PR's lockfile reports "proptest@1.12.0 requires rustc 1.88", while holding
+      # proptest at 1.11.0 lets every other bump in the same PR build on 1.85 (every crate
+      # it drags in — `bit-set`/`bit-vec`/`borsh`/`hashbrown`/`rand` — declares 1.85 or
+      # lower, so none of them is the blocker). It is a dev-dependency, the property-test
+      # harness, so nothing shipped depends on the version.
+      #
+      # `Cargo.toml` now sets `resolver = "3"`, which makes resolution MSRV-aware and should
+      # stop this being proposed at all; this entry is the belt to that pair of braces,
+      # because Dependabot's own cargo is not ours to pin. Remove it when `rust-version`
+      # moves to 1.88 or beyond — the same commit that moves the MSRV job's pin.
+      - dependency-name: proptest
 
   # `Cargo.toml` excludes `fuzz` from the workspace, so `fuzz/Cargo.toml` (and its own
   # committed `fuzz/Cargo.lock`) are a second dependency set that the `directory: "/"`
