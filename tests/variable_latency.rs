@@ -160,8 +160,16 @@ const DIVISION_METHODS: &[&str] = &[
 /// buffer and AAD lengths, and it exists so the documented "on failure the buffer is
 /// zeroized" is unconditional (an audit found the length arm returning without the wipe
 /// every other failure path performed).
+///
+/// `if` 38 -> 39 when `x86_simd::has_avx2` stopped reading CPUID leaf 7 before leaf 0's
+/// maximum basic leaf had been checked: the new branch tests a **CPU fact** — the highest
+/// basic CPUID leaf the CPU implements — the same class as the feature-bit tests beside
+/// it, and it is never reached with secret data in hand. On a CPU with AVX but no leaf 7
+/// (Sandy/Ivy Bridge), `CPUID.(EAX=7)` returns the highest supported leaf's data instead
+/// of the leaf-7 feature bits, so reading bit 5 there claimed AVX2 and the first kernel
+/// call took SIGILL — an availability defect, not a wrong answer.
 const CONTROL_FLOW: &[(&str, usize)] = &[
-    ("if", 38),
+    ("if", 39),
     ("while", 10),
     ("for", 26),
     ("loop", 0),
@@ -251,6 +259,70 @@ fn has_division(line: &str) -> bool {
     false
 }
 
+/// The non-test source of `text`: everything outside the body of its `#[cfg(test)] mod
+/// tests` module, wherever that module sits in the file.
+///
+/// The obvious way to get this — truncate at the first `mod tests {` — hides code that is
+/// textually *after* the module, because the cut is at the module's first line, not at its
+/// closing brace: a production function appended below the test module (legal Rust, compiled
+/// in normal builds) is skipped entirely. Measured: one production helper appended *after*
+/// the test module, carrying a division, a method-form division and an `if` and reached
+/// through `core::hint::black_box` (`pub`, so it is not dead code), left all three scans here
+/// green — the `/`/`%` inventory, the `DIVISION_METHODS` tripwire and the control-flow
+/// table. It also hid a `mod tests {` *mentioned in a comment* before the real one, since
+/// the old `find` ran on the raw text; stripping comments and literals first removes that.
+///
+/// This finds the module on the stripped text, requires it to carry `#[cfg(test)]`,
+/// brace-matches its body (braces inside comments and string literals are already gone,
+/// so they cannot unbalance the count), and removes exactly the body — blanking those
+/// lines rather than deleting them, so line numbers in the scans' failure messages keep
+/// pointing at the source. Everything else, before *and* after the module, is what the
+/// scans read.
+///
+/// Takes `text` rather than reading `src/lib.rs` directly because this file scans both
+/// `src/lib.rs` and `src/witness.rs`.
+fn non_test_source_of(text: &str) -> String {
+    let stripped = strip_comments(text);
+    let at = stripped
+        .find("mod tests {")
+        .expect("the scanned file's test module must exist (`mod tests {`)");
+    assert_eq!(
+        stripped.matches("mod tests {").count(),
+        1,
+        "the scanned file holds more than one `mod tests {{`: which one is the test \
+         module, and what the scan cut, would be ambiguous"
+    );
+    assert!(
+        stripped[..at].trim_end().ends_with("#[cfg(test)]"),
+        "the scanned `mod tests {{` is not `#[cfg(test)]`: it is production code being \
+         mistaken for the test module, so the scan would skip it"
+    );
+    let open = at + "mod tests {".len() - 1;
+    let mut depth = 0usize;
+    let mut close = None;
+    for (i, c) in stripped[open..].char_indices() {
+        match c {
+            '{' => depth += 1,
+            '}' => {
+                depth -= 1;
+                if depth == 0 {
+                    close = Some(open + i);
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+    let close = close.expect("the test module's body is unterminated");
+    let mut out = String::with_capacity(stripped.len());
+    out.push_str(&stripped[..at]);
+    for _ in 0..stripped[at..=close].matches('\n').count() {
+        out.push('\n');
+    }
+    out.push_str(&stripped[close + 1..]);
+    out
+}
+
 /// `text` with `//` line comments and `/* … */` block comments removed, and string-literal
 /// contents blanked so nothing inside one is scanned.
 ///
@@ -259,7 +331,8 @@ fn has_division(line: &str) -> bool {
 /// line in the inventory. Removing comments (and blanking literal contents) before the
 /// per-line scans closes that. `libtest` cannot share items between test binaries, so the
 /// scanner is copied from `tests/decision_scope.rs`, `tests/counter_range.rs`,
-/// `tests/ultra.rs` and `tests/locked.rs` rather than imported.
+/// `tests/ultra.rs` and `tests/locked.rs` rather than imported. [`non_test_source_of`]
+/// above uses it the same way those files' cut helpers do.
 fn strip_comments(text: &str) -> String {
     #[derive(PartialEq)]
     enum Mode {
@@ -439,8 +512,7 @@ fn variable_latency_operations_are_inventoried() {
     // green — the same guard-satisfied-by-a-comment shape the other files pin down.
     let mut found: BTreeSet<String> = BTreeSet::new();
     for (_, src) in sources {
-        let cut = src.find("mod tests {").unwrap_or(src.len());
-        let body = strip_comments(&src[..cut]);
+        let body = non_test_source_of(src);
         for l in body.lines() {
             if has_division(l) {
                 found.insert(l.trim().to_string());
@@ -473,8 +545,7 @@ fn division_spelled_as_a_method_cannot_hide_from_the_inventory() {
     ];
     let mut found: Vec<String> = Vec::new();
     for (name, src) in sources {
-        let cut = src.find("mod tests {").unwrap_or(src.len());
-        let body = strip_comments(&src[..cut]);
+        let body = non_test_source_of(src);
         for l in body.lines() {
             for method in DIVISION_METHODS {
                 if l.contains(method) {
@@ -603,12 +674,12 @@ fn control_flow_is_inventoried() {
             "{name}'s control-flow table must carry exactly the {KEYWORDS:?} rows, in that \
              order: a missing row is a keyword nothing counts"
         );
-        let cut = src.find("mod tests {").unwrap_or(src.len());
         // Comments stripped (see `variable_latency_operations_are_inventoried`): a branch
         // wrapped in `/* … */` and replaced by an equivalent `let … else` used to keep its
         // keyword counted, so a removed `if` was invisible to the table it is supposed to
-        // trip.
-        let body = strip_comments(&src[..cut]);
+        // trip. The test module — and nothing before or after it — is removed by
+        // `non_test_source_of`, not by a cut at its first line.
+        let body = non_test_source_of(src);
 
         let mut drifted = Vec::new();
         let mut report = String::new();

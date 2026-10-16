@@ -27,15 +27,35 @@
 //! literals are stripped first (a `//` inside a string used to cut a line short, and a
 //! `/* … */` block was scanned as code), calls may be spelled with whitespace before
 //! the `(` and may span lines, `use … as …` aliases of a scanned name are rejected
-//! outright, and the call count is asserted **exactly** rather than as a floor — a
-//! floor let a renamed `chacha20_block` drop the count from 13 to 11 and still pass.
+//! outright, a name that appears *without* a call after it is rejected rather than
+//! skipped — `let f = chacha20_keystream;` carries the call past a text census — and
+//! the call count is asserted **exactly** rather than as a floor — a floor let a
+//! renamed `chacha20_block` drop the count from 13 to 11 and still pass. The counter
+//! *arithmetic* is pinned as an ordered sequence of lines, not only as a count per
+//! spelling: a count cannot see a step move between kernels, and lane zero of each
+//! kernel is spelled as the bare `counter`, which no count named.
 //!
-//! Scope, because "whole call graph" is wider than the mechanism: the scan reads
-//! `src/lib.rs`, the module that owns these keystream entry points. `src/witness.rs`
-//! has its own ChaCha20 counter loop (`keystream_xor`) but makes no call to the names
-//! below, and `src/proofs.rs` is `#[cfg(kani)]`; a call *moved* into either file would
-//! leave this census unchanged. Within `src/lib.rs` the count is exact, which is what
-//! makes a new call site here fail rather than hide under a floor.
+//! Scope, because "whole call graph" is wider than the mechanism:
+//!
+//! * The scan reads `src/lib.rs` only. `src/witness.rs` has its own ChaCha20 counter
+//!   loop (`keystream_xor`) but makes no call to the names below, and `src/proofs.rs`
+//!   is `#[cfg(kani)]`; a call *moved* into either file would leave this census
+//!   unchanged. That split is named here rather than pretended away; the counters
+//!   living in those files are outside this file's remit.
+//! * Within `src/lib.rs` the scan covers everything outside the `#[cfg(test)] mod
+//!   tests` **body**, found by brace matching wherever the module sits — not the text
+//!   before its first line, which misses production code appended below the module.
+//! * "Handled" is text handling: the scan matches source text, not the compiler's
+//!   view. A counter variable *renamed* away from `counter`/`ctr` (say a new
+//!   `ctr2.wrapping_add(1)`) is not recognised as a counter step; it is caught only
+//!   by the exact total count of `.wrapping_add(` occurrences, which any new
+//!   arithmetic trips. Arithmetic that never spells `.wrapping_add(` (a
+//!   `u32::wrapping_add(ctr, 1)` free-function call, or a bare `+`) is outside the
+//!   step scan altogether; its effect is caught at the next census'd call site only
+//!   if it changes that call's counter argument. That is the residual this scan has,
+//!   stated rather than implied.
+//! * Code behind `#[cfg]` is scanned whatever the host compiles, deliberately: the
+//!   aarch64 lane offsets are pinned on an x86_64 host too.
 
 use xchacha20_blake3_siv::MAX_MSG_SIZE;
 
@@ -121,16 +141,14 @@ fn the_limit_is_exactly_the_block_counters_capacity() {
 /// second parameter, which is what the call-site check below assumes.
 #[test]
 fn the_counter_is_the_second_parameter() {
-    // Comments and string-literal contents stripped (`strip_comments` below), and cut at
-    // `mod tests {`. The raw text let a *doc comment* carrying the old signature satisfy the
-    // `find` while the real second parameter had been widened to `u64` — exactly the drift
-    // this test exists to catch, because the call-site check below reads arguments by
-    // position and would still see `0` in the second slot.
-    let source = strip_comments(include_str!("../src/lib.rs"));
-    let cut = source
-        .find("mod tests {")
-        .expect("the test module must exist");
-    let src = &source[..cut];
+    // Comments and string-literal contents stripped, and the `#[cfg(test)] mod tests`
+    // *body* removed (`non_test_source` below), not merely the text before the module's
+    // first line: code after the module is production code and stays in the scan. The raw
+    // text let a *doc comment* carrying the old signature satisfy the `find` while the real
+    // second parameter had been widened to `u64` — exactly the drift this test exists to
+    // catch, because the call-site check below reads arguments by position and would still
+    // see `0` in the second slot.
+    let src = non_test_source();
     for (name, signature) in [
         ("chacha20_keystream", "fn chacha20_keystream("),
         ("chacha20_apply", "fn chacha20_apply("),
@@ -139,7 +157,7 @@ fn the_counter_is_the_second_parameter() {
             panic!("{name} is gone: the counter check below would be checking nothing")
         });
         let open = at + signature.len() - 1;
-        let (first, second) = first_two_parameters(src, open);
+        let (first, second) = first_two_parameters(&src, open);
         assert!(
             second.contains("counter: u32") || second.contains("ctr: u32"),
             "{name}'s second parameter is no longer the counter, so the call-site check \
@@ -167,9 +185,7 @@ fn the_counter_is_the_second_parameter() {
 /// the last block to counter `2^32` and wrap) is still rejected.
 #[test]
 fn every_keystream_call_site_starts_the_counter_at_zero() {
-    let src = include_str!("../src/lib.rs");
-    let cut = src.find("mod tests {").expect("the test module must exist");
-    let body = strip_comments(&src[..cut]);
+    let body = non_test_source();
 
     // The line range of `derive_material`'s body, so the one literal-1 allowance can be
     // scoped to it. Brace-matched; a missing function is itself a failure, because the
@@ -222,15 +238,39 @@ fn every_keystream_call_site_starts_the_counter_at_zero() {
         while let Some(rel) = body[from..].find(bare) {
             let at = from + rel;
             from = at + bare.len();
+            // Whole-identifier occurrences only: `chacha20_keystream` is a substring of
+            // `chacha20_keystream_raw`, whose call sites this census counts under the
+            // longer name. Treating the substring itself as an occurrence — or as a
+            // mention — would both be wrong.
+            let ident = |c: char| c == '_' || c.is_alphanumeric();
+            if body[..at].chars().next_back().is_some_and(ident)
+                || body[from..].chars().next().is_some_and(ident)
+            {
+                continue;
+            }
             // The call's `(`, allowing whitespace between the name and it.
             let after = &body[at + bare.len()..];
             let open = at + bare.len() + after.find(|c: char| !c.is_whitespace()).unwrap_or(0);
-            if body.as_bytes().get(open) != Some(&b'(') {
-                continue; // a mention, not a call (e.g. a `use` or a doc reference)
-            }
             let line_start = body[..at].rfind('\n').map_or(0, |i| i + 1);
             let line = body[line_start..].lines().next().unwrap_or("");
             let line_no = body[..at].matches('\n').count() + 1;
+            // A standalone mention is an evasion, not a line to skip. Taking the name's
+            // address (`let f = chacha20_keystream;`, `&chacha20_keystream`) routes the
+            // call through something this text scan cannot follow: the census stays at its
+            // expected count while a live call site with any counter exists. Measured: a
+            // production helper holding `let f = chacha20_keystream;` and calling
+            // `f(key, 7, nonce, …)`, wired into `encrypt`, left this file 4/4 green. The
+            // `{bare} as ` check above stays as an explicitly named case even though this
+            // panics on that spelling too: it is the one an editor is most likely to reach
+            // for, and its message says what an alias means.
+            if body.as_bytes().get(open) != Some(&b'(') {
+                panic!(
+                    "src/lib.rs:{line_no} mentions `{bare}` without calling it: {line}\n\
+                     A function pointer, a reference or an alias carries the call past this \
+                     scan, so the census below would report its expected count while the \
+                     real call site stays invisible"
+                );
+            }
             // Skip the *definition of the searched function*, and only that: the line
             // `fn chacha20_keystream(` carries the name without being a call. The old
             // rule skipped any line carrying `fn ` anywhere before the name, so a
@@ -339,9 +379,7 @@ fn every_keystream_call_site_starts_the_counter_at_zero() {
 /// carries. See [`COUNTER_STEPS`].
 #[test]
 fn the_counter_steps_are_the_block_arithmetic() {
-    let src = include_str!("../src/lib.rs");
-    let cut = src.find("mod tests {").expect("the test module must exist");
-    let body = strip_comments(&src[..cut]);
+    let body = non_test_source();
 
     let mut report = String::new();
     for (step, expected) in COUNTER_STEPS {
@@ -360,6 +398,153 @@ fn the_counter_steps_are_the_block_arithmetic() {
              the kernel widths before updating this table."
         );
     }
+
+    // The table above pins each form's *count*. A count cannot see position, and three
+    // placements that keep every count intact were measured against it (the audit's
+    // normalizations):
+    //
+    //   * the increment folded into the counter's initialisation — `s[12] = counter;`
+    //     written as `s[12] = counter.wrapping_add(1);` — which adds arithmetic lines no
+    //     entry names and shifts every scalar block by one: the last block of a
+    //     maximum-length message then wraps onto block 0, the reuse this file exists to
+    //     prevent;
+    //   * a kernel's lane-zero offset rewritten as `counter.wrapping_add(N)` — the one
+    //     offset the table never pins, because both kernels and the NEON lane array write
+    //     lane 0 as the bare `counter`/`counter,`, so lane 0 repeats a block another
+    //     lane (or the next iteration) uses;
+    //   * two pinned forms swapped between kernels, which leaves every count unchanged.
+    //
+    // So the whole *sequence* of counter-arithmetic lines is pinned below, whitespace
+    // removed so formatting cannot hide a step, in file order because order is scope:
+    // lane `k` of a kernel is the line that follows lane `k + 1`, and the callers'
+    // advances come after the kernels they advance. A step moved to another kernel is a
+    // different step even when it is spelled the same.
+    let flat = |s: &str| -> String { s.split_whitespace().collect() };
+    let counter_lines: Vec<String> = body
+        .lines()
+        .map(flat)
+        .filter(|l| l.contains("ctr.wrapping_add(") || l.contains("counter.wrapping_add("))
+        .collect();
+    let expected_counter_lines: Vec<&str> = vec![
+        // x86_simd::blocks4, SIMD lane 3 -> lane 0; lane `k` must carry counter + k.
+        "counter.wrapping_add(3)asi32,",
+        "counter.wrapping_add(2)asi32,",
+        "counter.wrapping_add(1)asi32,",
+        // x86_simd::blocks8, lane 7 -> lane 0.
+        "counter.wrapping_add(7)asi32,",
+        "counter.wrapping_add(6)asi32,",
+        "counter.wrapping_add(5)asi32,",
+        "counter.wrapping_add(4)asi32,",
+        "counter.wrapping_add(3)asi32,",
+        "counter.wrapping_add(2)asi32,",
+        "counter.wrapping_add(1)asi32,",
+        // aarch64_simd::blocks4's four-lane counter array, lane 1 -> lane 3.
+        "counter.wrapping_add(1),",
+        "counter.wrapping_add(2),",
+        "counter.wrapping_add(3),",
+        // The callers' advances, in dispatch order: AVX2 (8 blocks), SSE2 (4), NEON (4),
+        // then the scalar tail (1).
+        "ctr=ctr.wrapping_add(8);",
+        "ctr=ctr.wrapping_add(4);",
+        "ctr=ctr.wrapping_add(4);",
+        "ctr=ctr.wrapping_add(1);",
+    ];
+    assert_eq!(
+        counter_lines
+            .iter()
+            .map(String::as_str)
+            .collect::<Vec<&str>>(),
+        expected_counter_lines,
+        "the counter-arithmetic lines changed, or changed order. This is not the \
+         per-form count table above — that stayed green (measured) for a lane-zero \
+         offset rewritten as `counter.wrapping_add(N)` and for the increment folded \
+         into the counter's initialisation. Every line carrying counter arithmetic is \
+         pinned here, in file order, because which kernel a step belongs to and where a \
+         lane sits in it is what makes the blocks distinct. Re-derive the sequence \
+         against the kernel widths and MAX_MSG_SIZE before updating it."
+    );
+
+    // And every `.wrapping_add(` in the non-test source is accounted for, so a counter
+    // step *renamed* away from `ctr`/`counter` (say a new `ctr2.wrapping_add(1)`) still
+    // trips this test: the sequence above matches only those two names; this total counts
+    // any arithmetic spelled that way. The counter arithmetic contributes 17 (the
+    // sequence above), and the six non-counter occurrences are the four adds of the
+    // scalar quarter round `qr`, the feed-forward add in `chacha20_block`, and the
+    // pointer-alignment add in the unaligned-fill helper. Exact, not a floor, for the
+    // same reason as the table: a floor survives arithmetic being removed.
+    let occurrences: usize = body
+        .split_whitespace()
+        .collect::<String>()
+        .matches(".wrapping_add(")
+        .count();
+    assert_eq!(
+        occurrences, 23,
+        "the number of `.wrapping_add(` occurrences in the non-test source changed \
+         ({occurrences}, pinned at 23): the counter steps are pinned by name *and* order \
+         above, so this count is what catches arithmetic under a renamed variable or at a \
+         new site. Work out which occurrence appeared or disappeared before updating the \
+         number."
+    );
+}
+
+/// The non-test source of `src/lib.rs`: everything outside the body of its
+/// `#[cfg(test)] mod tests` module, wherever that module sits in the file.
+///
+/// The obvious way to get this — truncate at the first `mod tests {` — hides code that
+/// is textually *after* the module, because the cut is at the module's first line, not
+/// at its closing brace: a production function appended below the test module (legal
+/// Rust, compiled in normal builds) is skipped entirely. Measured: a helper holding
+/// `chacha20_keystream(key, 7, nonce, …)` appended after the test module and called
+/// from `encrypt` left this file 4/4 green. It also hid a `mod tests {{` *mentioned in a
+/// comment* before the real one, since the old `find` ran on the raw text; stripping
+/// comments and literals first removes that.
+///
+/// This finds the module on the stripped text, requires it to carry `#[cfg(test)]`,
+/// brace-matches its body (braces inside comments and string literals are already gone,
+/// so they cannot unbalance the count), and removes exactly the body — blanking those
+/// lines rather than deleting them, so line numbers in the scans' failure messages keep
+/// pointing at the source. Everything else, before *and* after the module, is what the
+/// scans read.
+fn non_test_source() -> String {
+    let stripped = strip_comments(include_str!("../src/lib.rs"));
+    let at = stripped
+        .find("mod tests {")
+        .expect("the test module must exist (`mod tests {`)");
+    assert_eq!(
+        stripped.matches("mod tests {").count(),
+        1,
+        "src/lib.rs holds more than one `mod tests {{`: which one is the test module, and \
+         what the scan cut, would be ambiguous"
+    );
+    assert!(
+        stripped[..at].trim_end().ends_with("#[cfg(test)]"),
+        "the scanned `mod tests {{` is not `#[cfg(test)]`: it is production code being \
+         mistaken for the test module, so the scan would skip it"
+    );
+    let open = at + "mod tests {".len() - 1;
+    let mut depth = 0usize;
+    let mut close = None;
+    for (i, c) in stripped[open..].char_indices() {
+        match c {
+            '{' => depth += 1,
+            '}' => {
+                depth -= 1;
+                if depth == 0 {
+                    close = Some(open + i);
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+    let close = close.expect("the test module's body is unterminated");
+    let mut out = String::with_capacity(stripped.len());
+    out.push_str(&stripped[..at]);
+    for _ in 0..stripped[at..=close].matches('\n').count() {
+        out.push('\n');
+    }
+    out.push_str(&stripped[close + 1..]);
+    out
 }
 
 /// `text` with `//` line comments and `/* … */` block comments removed, and string

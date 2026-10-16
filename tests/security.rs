@@ -722,7 +722,8 @@ fn decrypt_bounded_enforces_the_callers_limit() {
 /// The shipped text of `src/lib.rs`, for the one source-shape test below.
 const LIB: &str = include_str!("../src/lib.rs");
 
-/// `LIB` with comments removed and string-literal contents blanked, cut at `mod tests {`.
+/// The non-test source of `LIB`: everything outside the body of its `#[cfg(test)]
+/// mod tests` module, wherever that module sits in the file.
 ///
 /// Every text search in `every_allocation_happens_before_any_derivation` runs on this.
 /// The raw text made `body.contains("alloc_zeroed(")` and the ordering matches satisfiable
@@ -733,9 +734,73 @@ const LIB: &str = include_str!("../src/lib.rs");
 /// first derivation. `libtest` cannot share items between test binaries, so the scanner is
 /// copied from `tests/decision_scope.rs`, `tests/counter_range.rs`, `tests/ultra.rs` and
 /// `tests/locked.rs` rather than imported.
+///
+/// The obvious way to get the cut — truncate at the first `mod tests {` — hides code
+/// that is textually *after* the module, because the cut is at the module's first
+/// line, not at its closing brace: a production function appended below the test
+/// module (legal Rust, compiled in normal builds) is skipped entirely. Measured: a
+/// helper carrying a `#[cfg(any())]` and a `zeroize_slice` call appended after the
+/// test module left this file's suite green, although
+/// `no_constant_cfg_attribute_can_deaden_the_crypto_source` exists to reject exactly
+/// that attribute. It also hid a `mod tests {` *mentioned in a comment* before the
+/// real one, since the old `find` ran on the raw text; stripping comments and
+/// literals first removes that.
+///
+/// This finds the module on the stripped text, requires it to carry `#[cfg(test)]`,
+/// brace-matches its body (braces inside comments and string literals are already gone,
+/// so they cannot unbalance the count), and removes exactly the body — blanking those
+/// lines rather than deleting them, so line numbers in the scans' failure messages keep
+/// pointing at the source. Everything else, before *and* after the module, is what the
+/// scans read.
+///
+/// [`non_test_source_of`] is the same cut for `src/witness.rs`, the other file
+/// `no_constant_cfg_attribute_can_deaden_the_crypto_source` scans.
 fn non_test_source() -> String {
-    let cut = LIB.find("mod tests {").expect("the test module must exist");
-    strip_comments(&LIB[..cut])
+    non_test_source_of(LIB)
+}
+
+/// See [`non_test_source`]: the same cut applied to `text` rather than to `LIB`, for
+/// the two files `no_constant_cfg_attribute_can_deaden_the_crypto_source` scans.
+fn non_test_source_of(text: &str) -> String {
+    let stripped = strip_comments(text);
+    let at = stripped
+        .find("mod tests {")
+        .expect("the scanned file's test module must exist (`mod tests {`)");
+    assert_eq!(
+        stripped.matches("mod tests {").count(),
+        1,
+        "the scanned file holds more than one `mod tests {{`: which one is the test \
+         module, and what the scan cut, would be ambiguous"
+    );
+    assert!(
+        stripped[..at].trim_end().ends_with("#[cfg(test)]"),
+        "the scanned `mod tests {{` is not `#[cfg(test)]`: it is production code being \
+         mistaken for the test module, so the scan would skip it"
+    );
+    let open = at + "mod tests {".len() - 1;
+    let mut depth = 0usize;
+    let mut close = None;
+    for (i, c) in stripped[open..].char_indices() {
+        match c {
+            '{' => depth += 1,
+            '}' => {
+                depth -= 1;
+                if depth == 0 {
+                    close = Some(open + i);
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+    let close = close.expect("the test module's body is unterminated");
+    let mut out = String::with_capacity(stripped.len());
+    out.push_str(&stripped[..at]);
+    for _ in 0..stripped[at..=close].matches('\n').count() {
+        out.push('\n');
+    }
+    out.push_str(&stripped[close + 1..]);
+    out
 }
 
 /// See [`non_test_source`]: comments and string-literal contents are removed, with newlines
@@ -885,6 +950,246 @@ fn raw_string_prefix(b: &[u8]) -> Option<(usize, u8)> {
     }
     // A raw string's hash count is tiny (the compiler caps it far below 256).
     Some((i, (i - start) as u8))
+}
+
+/// `pred` evaluated **as a constant** if it is one, ignoring the actual configuration:
+/// `Some(b)` means the predicate is `b` in every configuration; `None` means it depends on
+/// the configuration. Only `any` / `all` / `not` are interpreted; every other token is a
+/// configuration atom (`feature = "…"`, `target_arch = "…"`, `test`, `kani`, …).
+///
+/// This is what makes the blanket rejection below honest rather than a list of spellings:
+/// `any()`, `all()`, `not(any())`, `not(all())` and any nesting of them (`any(all())`)
+/// evaluate to a definite value, and a predicate that is definite is not a configuration
+/// gate — it compiles its scope in or out everywhere. Whitespace is normalised away first,
+/// because `#[ cfg ( any ( ) ) ]` is the same attribute written to evade a byte scan.
+fn constant_cfg_value(pred: &str) -> Option<bool> {
+    let normalized: String = pred.chars().filter(|c| !c.is_whitespace()).collect();
+    let p = normalized.as_str();
+    if let Some(inner) = p.strip_prefix("any(").and_then(|s| s.strip_suffix(')')) {
+        let args = split_cfg_args(inner);
+        if args.is_empty() {
+            return Some(false); // `any()` matches nothing
+        }
+        let mut unknown = false;
+        for a in &args {
+            match constant_cfg_value(a) {
+                Some(true) => return Some(true),
+                Some(false) => {}
+                None => unknown = true,
+            }
+        }
+        return if unknown { None } else { Some(false) };
+    }
+    if let Some(inner) = p.strip_prefix("all(").and_then(|s| s.strip_suffix(')')) {
+        let args = split_cfg_args(inner);
+        if args.is_empty() {
+            return Some(true); // `all()` matches everything
+        }
+        let mut unknown = false;
+        for a in &args {
+            match constant_cfg_value(a) {
+                Some(false) => return Some(false),
+                Some(true) => {}
+                None => unknown = true,
+            }
+        }
+        return if unknown { None } else { Some(true) };
+    }
+    if let Some(inner) = p.strip_prefix("not(").and_then(|s| s.strip_suffix(')')) {
+        return constant_cfg_value(inner).map(|b| !b);
+    }
+    None
+}
+
+/// `inner` split at its **top-level** commas (`all(a, any(b, c))` -> `["a", "any(b, c)"]`).
+fn split_cfg_args(inner: &str) -> Vec<&str> {
+    let mut out = Vec::new();
+    let mut depth = 0usize;
+    let mut start = 0usize;
+    for (i, c) in inner.char_indices() {
+        match c {
+            '(' => depth += 1,
+            ')' => depth = depth.saturating_sub(1),
+            ',' if depth == 0 => {
+                out.push(&inner[start..i]);
+                start = i + 1;
+            }
+            _ => {}
+        }
+    }
+    let last = &inner[start..];
+    if !out.is_empty() || !last.trim().is_empty() {
+        out.push(last);
+    }
+    out
+}
+
+/// The next `#[cfg(…)]` attribute at or after `from`, as
+/// `(index of the `#[`, index of the `(` after `cfg`)`.
+///
+/// Whitespace is allowed between the tokens — `#[ cfg (any())]` is the same attribute, and
+/// a scanner that requires the literal `#[cfg(` is one space away from being evaded — and
+/// `#[cfg_attr(` does not match, because the character after `cfg` is `_` and not `(`
+/// (whitespace aside).
+fn find_cfg_attribute(source: &str, from: usize) -> Option<(usize, usize)> {
+    let b = source.as_bytes();
+    let mut i = from;
+    while i + 2 < b.len() {
+        if b[i] == b'#' && b[i + 1] == b'[' {
+            let mut j = i + 2;
+            while j < b.len() && b[j].is_ascii_whitespace() {
+                j += 1;
+            }
+            if b[j..].starts_with(b"cfg") {
+                let mut k = j + 3;
+                while k < b.len() && b[k].is_ascii_whitespace() {
+                    k += 1;
+                }
+                if b.get(k) == Some(&b'(') {
+                    return Some((i, k));
+                }
+            }
+        }
+        i += 1;
+    }
+    None
+}
+
+/// The predicate of the attribute that opens at `open` (the `(` after `cfg`), bracket
+/// matched, and where it closes.
+fn cfg_predicate_at(source: &str, open: usize) -> (String, usize) {
+    let mut depth = 0usize;
+    let mut close = None;
+    for (n, c) in source[open..].char_indices() {
+        match c {
+            '(' => depth += 1,
+            ')' => {
+                depth -= 1;
+                if depth == 0 {
+                    close = Some(open + n);
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+    let close = close.expect("unbalanced `cfg(` in the source");
+    (source[open + 1..close].to_string(), close)
+}
+
+/// Every `#[cfg(…)]` attribute in `source` whose predicate is constant, as
+/// `(line number, attribute text with its constant value)`.
+///
+/// `source` must be comment-free (and string-blanked) — the callers use
+/// [`strip_comments`] — so a `#[cfg(any())]` written only in prose is not a finding.
+fn constant_cfg_attributes(source: &str) -> Vec<(usize, String)> {
+    let mut out = Vec::new();
+    let mut from = 0usize;
+    while let Some((start, open)) = find_cfg_attribute(source, from) {
+        let (pred, close) = cfg_predicate_at(source, open);
+        if let Some(value) = constant_cfg_value(&pred) {
+            let line = source[..start].matches('\n').count() + 1;
+            out.push((line, format!("#[cfg({pred})] (constant {value})")));
+        }
+        from = close + 1;
+    }
+    out
+}
+
+/// The attribute lines **directly above** byte `at` in `body`, nearest first, stopping at
+/// the first line that is not an attribute. Blank lines end the run, so an attribute that
+/// belongs to an earlier statement is not attributed to this one; the same-line form
+/// (`#[cfg(any())] zeroize_array(…);`) is seen because the text before `at` then ends with
+/// the attribute itself.
+fn preceding_attributes(body: &str, at: usize) -> Vec<&str> {
+    let mut out = Vec::new();
+    let mut text = body[..at].trim_end();
+    loop {
+        let start = text.rfind('\n').map_or(0, |n| n + 1);
+        let line = text[start..].trim();
+        if line.starts_with("#[") {
+            out.push(line);
+            if start == 0 {
+                break;
+            }
+            text = &text[..start - 1];
+        } else {
+            break;
+        }
+    }
+    out
+}
+
+/// The constant value of the first `cfg(…)` predicate in the attribute line `attr`, or
+/// `None` when the line carries no `cfg` (e.g. `#[allow(…)]` — note `cfg_attr(` is not
+/// matched either) or the predicate depends on the configuration.
+fn cfg_attribute_value(attr: &str) -> Option<bool> {
+    let (_, open) = find_cfg_attribute(attr, 0)?;
+    let (pred, _) = cfg_predicate_at(attr, open);
+    constant_cfg_value(&pred)
+}
+
+/// The wipe sites the counts below rely on must not be deadened by a `cfg` attribute.
+///
+/// `#[cfg(any())] { zeroize_array(&mut enc_key); }` keeps the wipe's text — and therefore
+/// every count in this file — exactly as it was while compiling the statement out. An
+/// auditor measured that form surviving the whole default suite (96/96, the `encrypt`
+/// success-path wipe) and the same attribute wrapping `zeroize_array(&mut tag)` surviving
+/// the whole `ultra` suite (128/128): a count cannot tell a wiped frame from a compiled-out
+/// one. Each occurrence is checked against the attribute lines directly above it; a `cfg`
+/// predicate among them with a constant value is a failure.
+fn assert_wipes_are_not_deadened(name: &str, body: &str, wipe: &str) {
+    let mut base = 0usize;
+    while let Some(i) = body[base..].find(wipe) {
+        let at = base + i;
+        for attr in preceding_attributes(body, at) {
+            if let Some(value) = cfg_attribute_value(attr) {
+                panic!(
+                    "`{name}`'s wipe `{wipe}` is directly preceded by `{attr}`, whose `cfg` \
+                     predicate is constant ({value}): an always-false attribute compiles \
+                     the wipe out while leaving the text this file counts unchanged, and \
+                     `#[cfg(any())] {{ {wipe} }}` survived the whole suite before this \
+                     check existed. Delete the attribute — a constant predicate is not a \
+                     configuration gate."
+                );
+            }
+        }
+        base = at + wipe.len();
+    }
+}
+
+/// No constant `cfg` predicate may appear anywhere in the crypto source.
+///
+/// This is the blanket half of [`assert_wipes_are_not_deadened`]: the per-site check only
+/// covers the wipes named in the table below, and the attribute form can deaden anything
+/// (a `scrub_stack()` call, an integrity check). A constant predicate has no legitimate
+/// use — it compiles its scope in or out in *every* configuration — so the rejection is
+/// the whole shape rather than a list of spellings. Checked before this guard was written:
+/// `src/lib.rs` and `src/witness.rs` contain no `cfg(any())`, `cfg(all())`,
+/// `cfg(not(any()))` or `cfg(not(all()))` anywhere, so there is nothing to carve out; the
+/// scan is what keeps that true. (The `if cfg!(any())` form is not an attribute; it is
+/// already caught by `tests/variable_latency.rs`'s control-flow inventory, because it is
+/// an `if`.)
+#[test]
+fn no_constant_cfg_attribute_can_deaden_the_crypto_source() {
+    for (name, src) in [
+        ("src/lib.rs", LIB),
+        ("src/witness.rs", include_str!("../src/witness.rs")),
+    ] {
+        // The brace-matched cut, not `src.find("mod tests {")`: production code appended
+        // after either file's test module is scanned here too (a constant `#[cfg(…)]`
+        // appended below `mod tests` in `src/lib.rs` left this test green).
+        let body = non_test_source_of(src);
+        let found = constant_cfg_attributes(&body);
+        assert!(
+            found.is_empty(),
+            "{name} carries constant `cfg` attribute(s) {found:?}. `#[cfg(any())]` compiles \
+             its scope *out* while leaving the text intact — a wipe protects nothing if it \
+             is never executed, and no text count in this file can see the difference — \
+             and `all()` / `not(any())` / `not(all())` are the same shape with the other \
+             constant value. Write a real predicate or delete the code."
+        );
+    }
 }
 
 #[test]
@@ -1087,6 +1392,11 @@ fn every_allocation_happens_before_any_derivation() {
                  assertion above cannot see it -- it compares the position of the first \
                  derivation with each allocation, never the wipes"
             );
+            // The count is text, and text survives being compiled out: the same wipe
+            // wrapped in `#[cfg(any())] { … }` (or prefixed with `#[cfg(any())]`) is
+            // counted exactly as before while never running. Pin the live shape at each
+            // site the count just found.
+            assert_wipes_are_not_deadened(name, &body, &wipe);
         }
     }
 }

@@ -67,7 +67,11 @@
 # Usage: tools/fi_instruction.sh [--quick] [--bits] [--jobs N]
 #        (--jobs defaults to the core count, capped at 16; the sweep shards across cores)
 # Exit codes: 0 = every layer is at least as good as the one below it; 1 = otherwise,
-#             or the machinery failed.
+#             or the machinery failed; 3 = the sweep could not run -- the scanned
+#             instruction set is empty or shorter than the covered ranges imply,
+#             which is a count problem, not a verdict (verify.sh reports 3 as a
+#             skipped stage). The `nop` model used to have no way to say that: with
+#             the offset list emptied it reported three zero rows and exited 0.
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
@@ -243,11 +247,22 @@ scan() {  # label, features
     scan_shard "$WORK/shard-$label-$shard.bin" "$label" "$quick" "$MODEL" "$shard" "$JOBS" &
     pids+=("$!")
   done
-  local pid failed=0
+  # A shard answers 3 for "the sweep could not run" (its count guard fired: the
+  # scan set is empty or shorter than the ranges imply). That is not a failed
+  # verdict, so it must not be flattened into the exit-1 branch below -- verify.sh
+  # reports 3 as a skipped stage and 1 as a finding.
+  local pid rc failed=0 could_not_run=0
   for pid in "${pids[@]}"; do
-    wait "$pid" || failed=1
+    rc=0
+    wait "$pid" || rc=$?
+    if [ "$rc" -eq 3 ]; then
+      could_not_run=1
+    elif [ "$rc" -ne 0 ]; then
+      failed=1
+    fi
   done
   [ "$failed" -eq 0 ] || { echo "FAIL: a sweep shard failed" >&2; exit 1; }
+  [ "$could_not_run" -eq 0 ] || { echo "SKIPPED: a sweep shard could not run (see above)" >&2; exit 3; }
   # The counts are the union over shards; the shards are disjoint by construction, so
   # summing distinct offsets is the same set the sequential scan would have produced.
   # Two counts per configuration: every accepting byte, and the subset inside
@@ -256,6 +271,30 @@ scan() {  # label, features
   cat "$WORK"/shard-"$label"-*.bin.accepted_decision 2>/dev/null | grep -c . \
     > "$WORK/$label.decision" || true
   cat "$WORK"/shard-"$label"-0.bin.ranges > "$WORK/$label.ranges" 2>/dev/null || true
+
+  # And the same guard from the driver's side, independent of the shards' own
+  # arithmetic: the offsets actually examined (summed over shards) must cover the
+  # bytes the ranges file lists, one per byte (`--quick` narrows the ranges rather
+  # than striding through them, and the full sweep is stride 1). This is the check
+  # the `nop` model did not have: with the scanned set emptied it printed three
+  # zero rows and exited 0 (reproduced in a scratch copy: `offs = []`, rc=0, every
+  # row `0 total, 0 inside the decision`). The `bits` model catches that by
+  # accident -- its opt-out positive control is an accepting bit-flip -- but a run
+  # where the sweep examined nothing is a could-not-run for *both* models, not a
+  # clean result for one.
+  local ranges_offsets scanned_offsets
+  ranges_offsets="$(awk '{ s += $2 } END { print s + 0 }' "$WORK/$label.ranges" 2>/dev/null)"
+  scanned_offsets="$(cat "$WORK"/shard-"$label"-*.bin.scanned_offsets 2>/dev/null \
+    | awk '{ s += $1 } END { print s + 0 }')"
+  if [ "${scanned_offsets:-0}" -lt "${ranges_offsets:-0}" ] || [ "${scanned_offsets:-0}" -eq 0 ]; then
+    echo "FAILED: the sweep examined ${scanned_offsets:-0} instruction(s) against the" >&2
+    echo "         ${ranges_offsets:-0} its covered ranges contain (one offset per byte; --quick" >&2
+    echo "         narrows the ranges, it does not stride through them), so the map below" >&2
+    echo "         would describe a sweep that did not happen. That is a could-not-run, not" >&2
+    echo "         a verdict -- and zero accepting faults from a zero-instruction sweep is" >&2
+    echo "         the one reading that must never come back as a pass." >&2
+    exit 3
+  fi
 }
 
 # The scanner, run once per shard with (binary, label, quick, model, shard, nshards):
@@ -407,13 +446,50 @@ base = run()
 if base != "rejected":
     sys.exit(f"FAIL: the unpatched binary reports {base}, so nothing below is meaningful")
 
+
+def could_not_run(msg):
+    """Exit 3: the sweep could not run. That is not a verdict -- verify.sh records
+    3 as a skipped stage -- and it is the only honest answer for a scan set that
+    does not cover what the symbol map says it should."""
+    print(f"FAIL: {msg}", file=sys.stderr)
+    sys.exit(3)
+
+
 # The fault, per model: `nop` writes 0x90 over a byte; `bits` flips one bit of it.
 accepted, crashed, untouched = [], 0, 0
 offs = [off + i for off, size, _n in covered for i in range(0, size, stride)]
+# The sweep's own count guard, before a single fault is written. The expected
+# offsets are recomputed from the covered ranges *independently of the list above*,
+# so an emptied or truncated scan set fails here instead of producing an all-zero
+# map: `offs = []` used to print three zero rows and exit 0 in the `nop` model --
+# zero accepting faults from zero faults swept. The `bits` model refuses that
+# reading only because its opt-out positive control also reads zero, which is an
+# accident of that model, not a guard; this makes both models answer "could not
+# run" (3).
+expected = sum(len(range(0, size, stride)) for _off, size, _n in covered)
+if not expected:
+    could_not_run("the covered ranges contain no instruction byte to sweep")
+if len(offs) != expected:
+    could_not_run(
+        f"the sweep would examine {len(offs)} of the {expected} instruction bytes "
+        f"its covered ranges contain; the scan set is not the one the symbol map "
+        f"describes"
+    )
 # This shard's slice of the offsets. Every fault is a self-contained run of the binary,
 # so the shards cannot interact; the union over shards is what the sequential scan
 # produced, and the caller sums the accepted sets.
+expected_mine = len(range(shard, expected, nshards))
 offs = offs[shard::nshards]
+if len(offs) != expected_mine:
+    could_not_run(
+        f"shard {shard + 1}/{nshards} holds {len(offs)} of the {expected_mine} "
+        f"offsets its slice of the {expected}-byte range implies"
+    )
+# Written before the sweep, so the driver can total what this shard set out to
+# examine even if it dies mid-run: a shard that examined nothing must not be
+# invisible in that sum.
+with open(sys.argv[1] + ".scanned_offsets", "w") as fh:
+    fh.write(f"{len(offs)}\n")
 faults = (
     [(off, 0) for off in offs]
     if model == "nop"

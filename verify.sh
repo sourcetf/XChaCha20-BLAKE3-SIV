@@ -150,15 +150,20 @@ skip() {
 # instead, and this list is what the narrow-run summary reads.
 ADVISORIES=()
 
-# Log files the output-parsing wrappers write and read back. One EXIT trap for both,
-# so every exit path -- including the early `exit 1`s those wrappers take -- removes
-# them. `miri_log` is filled in only by the Miri stage; `TEST_LOG` only by the test
-# stages' wrapper.
+# Log files the output-parsing wrappers write and read back. One EXIT trap for all of
+# them, so every exit path -- including the early `exit 1`s those wrappers take --
+# removes them. `miri_log` is filled in only by the Miri stage; `TEST_LOG` only by the
+# test stages' wrapper; `kani_log` only by the Kani stage's output check; `cross_log`
+# only by the cross-execution stage, per executed binary.
 TEST_LOG=""
 miri_log=""
+kani_log=""
+cross_log=""
 cleanup_logs() {
   if [ -n "$TEST_LOG" ]; then rm -f "$TEST_LOG"; fi
   if [ -n "$miri_log" ]; then rm -f "$miri_log"; fi
+  if [ -n "$kani_log" ]; then rm -f "$kani_log"; fi
+  if [ -n "$cross_log" ]; then rm -f "$cross_log"; fi
   return 0
 }
 trap cleanup_logs EXIT
@@ -177,6 +182,43 @@ find_qemu() {
     if [ -n "$c" ] && [ -x "$c" ]; then echo "$c"; return 0; fi
   done
   return 1
+}
+
+# ...and an executable at that path is not necessarily an emulator. The stage
+# cannot tell by exit status: `QEMU_AARCH64=/bin/true` satisfied `find_qemu` (it
+# is executable), every `"$QEMU" "$bin"` call returned 0 without executing the
+# guest, and the stage printed "executed N <target> test binaries under qemu" four
+# times and went green (reproduced: all four `QEMU_<ARCH>` variables pointed at
+# /bin/true, exit 0, nothing executed). So a candidate must identify itself before
+# any target is built for it: the basename is `qemu-*` (both `find_qemu` and the
+# `$QEMU_<ARCH>` hint name the binary that way) and `--version` mentions QEMU,
+# which `/bin/true`, `/bin/false` and a wrapper that merely exits 0 do not. A
+# misconfigured override is a hard failure, not a skipped stage: "no emulator
+# found" is an environment gap, while "your emulator is not an emulator" is a
+# broken invocation, and the one reading that must never come back is a pass.
+qemu_identity_ok() {  # <path> <expected emulator name>
+  local path="$1" name="$2" out
+  case "$(basename "$path")" in
+    qemu-*) ;;
+    *)
+      echo "FAILED: $name resolves to $path, whose basename is not qemu-* -- that is" >&2
+      echo "        not an emulator. Point QEMU_<ARCH> (or \$PATH) at $name itself," >&2
+      echo "        or unset the override to let the usual discovery find it." >&2
+      return 1 ;;
+  esac
+  if ! out="$("$path" --version 2>&1)"; then
+    echo "FAILED: $name ($path) does not even answer --version; not an emulator." >&2
+    return 1
+  fi
+  case "$out" in
+    *[Qq][Ee][Mm][Uu]*) ;;
+    *)
+      echo "FAILED: $name ($path) does not identify as QEMU in its --version output." >&2
+      echo "        A binary that merely exits 0 cannot execute the guest, and this" >&2
+      echo "        stage would have reported its no-op as a pass." >&2
+      return 1 ;;
+  esac
+  return 0
 }
 
 if [ "$KANI_ONLY" -eq 0 ]; then
@@ -221,36 +263,112 @@ if [ "$KANI_ONLY" -eq 0 ]; then
   # libtest exits 0 when a name filter matches nothing and when every test in a
   # target was compiled away (`#![cfg]`), printing "test result: ok. 0 passed" --
   # so emptying a test file, or deleting a target, left these stages green while
-  # checking nothing. The Miri stage (6b) already carries this guard; this wrapper
-  # gives the main suite the same one. The count is summed over the whole
-  # invocation, not required per target: one `cargo test` run covers several
-  # targets and some are legitimately empty under some feature sets
-  # (`tests/locked.rs` without `locked`, `tests/ultra.rs` without `ultra`,
-  # `tests/timing.rs` in a debug build), but a total of zero means the invocation
-  # ran nothing at all.
+  # checking nothing. The first guard that fixed that summed the passed counts over
+  # the whole invocation, and that was one target short of a check: with
+  # `tests/decision.rs` emptied, the other targets still total thousands of passed
+  # tests, so the emptied file was absorbed by the sum (reproduced on a scratch
+  # copy: the file reduced to a comment, and the stage printed the totals and the
+  # run finished "all requested checks passed"). So the guard is per test binary
+  # now: every target the invocation *promises* to run is named at its call site,
+  # and the run must report that target's own non-zero passed count. A target that
+  # is legitimately empty in a given configuration must therefore *not* be named
+  # there (`tests/timing.rs` under `--skip timing_`; the valgrind-only `#[ignore]`s
+  # in `tests/ctgrind.rs`; `tests/locked.rs` and `tests/ultra.rs` when their
+  # feature is off). A promise list rather than "every target cargo happens to run"
+  # is what catches a *deleted* file: no binary is built, so no `Running` line and
+  # no `test result:` line exist to be judged, and only an expected name can turn
+  # that silence into a failure.
   #
   # A literal `ok.` is not matched: CI sets CARGO_TERM_COLOR=always and libtest
   # then wraps the word in colour codes (the `test result:` prefix and the count
-  # stay unpainted), the same reason the Miri wrapper parses the count instead.
-  # `tee` rather than capturing in a variable, so the test output keeps streaming.
+  # stay unpainted); the parser strips ANSI codes for the same reason, and reads
+  # the `Running ... (path)` header cargo prints before each test binary, so each
+  # count is attributed to its own target. `tee` rather than capturing in a
+  # variable, so the test output keeps streaming.
   TEST_LOG="$(mktemp)"
-  cargo_test() {  # <description> <cargo args...>
-    local what="$1"; shift
+  test_target_counts() {  # reads $TEST_LOG; prints "<target> <passed>" per binary
+    sed 's/\x1b\[[0-9;]*m//g' "$TEST_LOG" | awk '
+      /^[[:space:]]*Running / {
+        t = $0
+        sub(/^[[:space:]]*Running /, "", t)
+        sub(/[[:space:]]*\(.*$/, "", t)
+        if (t ~ /^tests\//)         { sub(/^tests\//, "", t); sub(/\.rs$/, "", t) }
+        else if (t ~ /^unittests /) { t = "lib" }
+        target = t
+        next
+      }
+      /^[[:space:]]*Doc-tests / { target = "doc"; next }
+      /test result:/ {
+        n = 0
+        for (i = 1; i < NF; i++) if ($(i + 1) ~ /^passed/) { n = $i + 0; break }
+        # `?` for a summary with no preceding `Running` header, so the count stays
+        # in field 2 for the unattributed-total fallback in cargo_test.
+        print (target == "" ? "?" : target), n
+      }'
+  }
+  cargo_test() {  # <description> <required targets, space-separated> <cargo args...>
+    local what="$1" required="$2"; shift 2
     if ! cargo "$@" 2>&1 | tee "$TEST_LOG"; then
       echo "FAIL: cargo test for $what exited non-zero" >&2
       exit 1
     fi
-    local passed
-    passed="$(sed -n '/test result:/{s/.* \([0-9][0-9]*\) passed.*/\1/p}' "$TEST_LOG" \
-      | awk '{ total += $1 } END { print total + 0 }')"
-    if [ "${passed:-0}" -lt 1 ]; then
-      echo "FAIL: the cargo test run for $what reported no passed test, so every" >&2
-      echo "      target was empty, filtered out or compiled away and this stage" >&2
-      echo "      checked nothing (libtest exits 0 on '0 passed')." >&2
+    local counts target passed total headers missing="" empty=""
+    counts="$(test_target_counts)"
+    # Counts can only be attributed per target when cargo names the binaries, and a
+    # real `cargo test` prints one `Running ...` header per test binary. A cargo
+    # test double that prints a bare summary -- what tools/gate_selftest.sh drives
+    # this script with, deliberately, to test the stages after this one without
+    # running the suite -- gives no attribution, so there the summed guard (at
+    # least one passed test in the invocation) is the best available. It cannot
+    # absorb the defect the per-target check exists for: deleting or emptying one
+    # test file leaves every other target's header in place, so a real run never
+    # takes this branch. `grep -c`, not `grep -q` (which exits at the first match
+    # and SIGPIPEs `sed` -- under `set -o pipefail` that failure would flip this
+    # branch the wrong way on exactly the large logs it is meant to check; the
+    # same trap the fuzz witness guard documents).
+    headers="$(sed 's/\x1b\[[0-9;]*m//g' "$TEST_LOG" | grep -c '^[[:space:]]*Running ' || true)"
+    if [ "${headers:-0}" -eq 0 ]; then
+      total="$(printf '%s\n' "$counts" | awk '{ s += $2 } END { print s + 0 }')"
+      if [ "${total:-0}" -lt 1 ]; then
+        echo "FAIL: the cargo test run for $what reported no passed test, so every" >&2
+        echo "      target was empty, filtered out or compiled away and this stage" >&2
+        echo "      checked nothing (libtest exits 0 on '0 passed')." >&2
+        exit 1
+      fi
+      return 0
+    fi
+    for target in $required; do
+      passed="$(printf '%s\n' "$counts" | awk -v t="$target" '$1 == t { print $2 }' | tail -1)"
+      if [ -z "$passed" ]; then
+        missing="$missing $target"
+      elif [ "$passed" -lt 1 ]; then
+        empty="$empty $target"
+      fi
+    done
+    if [ -n "$missing" ] || [ -n "$empty" ]; then
+      echo "FAIL: the cargo test run for $what did not report every test target it promises:" >&2
+      if [ -n "$missing" ]; then
+        echo "      no \"test result\" line at all for:$missing -- the test file was" >&2
+        echo "      deleted or renamed, or the target list changed." >&2
+      fi
+      if [ -n "$empty" ]; then
+        echo "      zero tests passed for:$empty -- libtest exits 0 on '0 passed', so an" >&2
+        echo "      emptied test file would otherwise be absorbed by the other targets." >&2
+      fi
       exit 1
     fi
   }
 
+  # The per-invocation promise lists, next to the invocations they belong to. `lib`
+  # is cargo's `Running unittests src/lib.rs`; the rest are `tests/<name>.rs`. Not
+  # listed: `timing` (filtered out here with `--skip timing_`, and required by its
+  # own stage 3c instead), `ctgrind` (all of its tests are `#[ignore]`d outside the
+  # static valgrind build, so a plain run reports `0 passed; 5 ignored` on a
+  # healthy tree -- an emptied file would look identical, which is why the ctgrind
+  # stage's own tool, not this list, is what covers it), and `locked`/`ultra`
+  # (whole files `#![cfg(feature = ...)]`-gated off when the feature is not on).
+  suite_targets="lib construction_inventory counter_range decision decision_scope \
+differential_reference mac_commitment security threads variable_latency"
   step "3. test suite"
   # The timing screen is its own target (step 3c) and runs exactly once, there.
   # `cargo test --release` runs every target -- including tests/timing.rs -- and so do
@@ -258,25 +376,25 @@ if [ "$KANI_ONLY" -eq 0 ]; then
   # four times, three of them in parallel with the rest of the suite (an interference
   # source the screen's own header discusses). `--skip timing_` keeps it in 3c; no
   # other test name contains `timing_`.
-  cargo_test "the default-feature suite" test --release -- --skip timing_
+  cargo_test "the default-feature suite" "$suite_targets" test --release -- --skip timing_
   # `rng` gates the `random` module and its tests.
-  cargo_test "the rng suite" test --release --features rng -- --skip timing_
+  cargo_test "the rng suite" "$suite_targets" test --release --features rng -- --skip timing_
   # `locked` gates the mlock'd-key type and its in-crate integrity test. The audit
   # found no host-side entry for it (the cross-target job only runs `cargo check`
   # and qemu), so a machine where mlock is refused would never have said so here.
   # The test itself reports a skip to stderr when the platform refuses to lock.
-  cargo_test "the locked suite" test --release --features locked -- --skip timing_
+  cargo_test "the locked suite" "$suite_targets locked" test --release --features locked -- --skip timing_
 
   # The security tests are in `tests/security.rs` and run with the rest above,
   # but they are called out because one of them is a fuzz loop -- if it starts
   # failing, this line says which area to look at.
   step "3b. security tests (property, fuzz)"
-  cargo_test "the security tests" test --release --test security
+  cargo_test "the security tests" "security" test --release --test security
 
   # The timing screen is its own target, gated `#![cfg(not(debug_assertions))]`,
   # so a release build is what runs it.
   step "3c. timing screen (release builds only)"
-  cargo_test "the timing screen" test --release --test timing
+  cargo_test "the timing screen" "timing" test --release --test timing
 
   # `--no-default-features` is how a `no_std` user consumes this crate.
   step "3d. no-default-features build"
@@ -342,6 +460,7 @@ if [ "$RUN_CROSS_EXEC" -eq 1 ]; then
   # `--aarch64-exec` is accepted as an alias of `--cross-exec`.
   pair_list="aarch64-unknown-linux-musl:qemu-aarch64 i686-unknown-linux-musl:qemu-i386 powerpc64-unknown-linux-musl:qemu-ppc64 riscv64gc-unknown-linux-musl:qemu-riscv64"
   total=0
+  cross_log="$(mktemp)"   # removed by the global EXIT trap at the top
   for pair in $pair_list; do
     target="${pair%%:*}"
     emulator="${pair##*:}"
@@ -359,6 +478,8 @@ if [ "$RUN_CROSS_EXEC" -eq 1 ]; then
     echo
     echo "--- $target ---"
     echo "using emulator: $QEMU"
+    # Whatever `find_qemu` returned must be an emulator, not merely executable.
+    qemu_identity_ok "$QEMU" "$emulator" || exit 1
 
     # `--features pure`: BLAKE3 needs a *target* C toolchain for its C kernels on
     # x86_64/aarch64, and this stage exists to execute *this crate's* SIMD code,
@@ -464,7 +585,26 @@ if [ "$RUN_CROSS_EXEC" -eq 1 ]; then
       extra=()
       case "$(basename "$bin")" in security-*) extra=(--skip timing) ;; esac
       echo "--- $(basename "$bin") ---"
-      "$QEMU" "$bin" --test-threads=1 ${extra[@]+"${extra[@]}"}
+      # The run must show the *program's own* output, not just an exit status: the
+      # claim this stage makes is that the target code was executed, and a wrapper
+      # that exits 0 without executing anything (the /bin/true override above)
+      # makes every status look like success. libtest always prints
+      # `test result:` for a test binary, even one whose tests are all filtered or
+      # ignored, so its absence means the guest never ran. `tee` keeps the output
+      # streaming; `pipefail` (top of file) makes a non-zero emulator or guest exit
+      # fail the `if`.
+      : > "$cross_log"
+      if ! "$QEMU" "$bin" --test-threads=1 ${extra[@]+"${extra[@]}"} 2>&1 | tee "$cross_log"; then
+        echo "FAILED: $(basename "$bin") exited non-zero under $QEMU" >&2
+        exit 1
+      fi
+      if ! grep -q 'test result:' "$cross_log"; then
+        echo "FAILED: $(basename "$bin") produced no libtest summary under $QEMU, so the" >&2
+        echo "        test binary was not executed: an exit status of 0 from the emulator" >&2
+        echo "        is not evidence that anything ran, and this stage exists to execute" >&2
+        echo "        the target's code." >&2
+        exit 1
+      fi
       ran=$((ran + 1))
     done
     [ "$ran" -gt 0 ] || { echo "no $target test binaries were executed under qemu (the built set was empty, or every binary was excluded)" >&2; exit 1; }
@@ -742,7 +882,9 @@ if [ "$RUN_TOOLS" -eq 1 ]; then
   # The tools that answer 3 for "could not run" are reported as skipped stages (the
   # convention `tools/gate_selftest.sh` checks). `fi_check.sh` answers 3 only for an
   # environmental build failure and 1 for a patch it cannot apply; `fi_instruction.sh`
-  # and `check_kani_cfg.sh` have no exit-3 path at all, and all three fail loudly when
+  # answers 3 when its sweep examined no instructions (its scan-count guard -- the
+  # `nop` model used to print three zero rows and exit 0 with the scan set emptied);
+  # `check_kani_cfg.sh` has no exit-3 path at all, and all of them fail loudly when
   # the toolchain is missing rather than exiting 0 -- which is what the gate self-test
   # asserts for `fi_check.sh`. This stage is where the convention is exercised: the
   # tools were all wired into CI before any of them were wired into this script.
@@ -930,14 +1072,76 @@ if [ "$RUN_KANI" -eq 1 ]; then
   # `-j` (the thread pool's default width) is not cosmetic: without it Kani
   # verifies one harness at a time, so the suite spends its life on a single
   # core. With it, the independent harnesses run concurrently.
+  #
+  # The harness-count guard, taken *before* the run. Kani's own output is not a
+  # witness that anything was proved: with every `#[kani::proof]` gone from
+  # `src/proofs.rs` it prints "No proof harnesses ... were found to verify", exits 0,
+  # and this stage used to report that as a pass -- a request for the proof stage
+  # answered by a run that proved nothing. The requirement is cross-checked between
+  # the two places that carry it: the source itself, and the `COMMITTED_HARNESSES`
+  # floor `tools/check_kani_cfg.sh` is written against (that gate only runs under
+  # --tools/--deep). A disagreement is reported rather than resolved by picking one,
+  # because either number can be the stale one. A count below the requirement is
+  # "could not run" -- exit 3, which this script reports as a skipped stage -- unless
+  # Kani was named on the command line, where a skip is exactly the success report
+  # the caller asked not to get, so it is a hard failure there instead.
+  kani_named=0
+  for want in ${EXPLICIT_KEYS[@]+"${EXPLICIT_KEYS[@]}"}; do
+    if [ "$want" = kani ]; then kani_named=1; fi
+  done
+  kani_count_guard() {  # <one-line reason>
+    if [ "$kani_named" -eq 1 ]; then
+      echo "FAILED: the Kani stage was named on the command line, but it cannot run" >&2
+      echo "        meaningfully: $1" >&2
+      exit 1
+    fi
+    skip "Kani" "$1"
+    exit 3
+  }
+  # `grep -c` prints 0 and exits 1 when it matches nothing, hence `|| true`; a
+  # missing or unreadable file leaves the variable empty, and an empty string is
+  # reported as unparseable below rather than read as a count of zero.
+  kani_harnesses="$(grep -c '^[[:space:]]*#\[kani::proof\]' src/proofs.rs 2>/dev/null || true)"
+  kani_required="$(sed -n 's/^COMMITTED_HARNESSES=\([0-9][0-9]*\)$/\1/p' tools/check_kani_cfg.sh 2>/dev/null)"
+  echo "harness count: ${kani_harnesses:-?} #[kani::proof] attribute(s) in src/proofs.rs;" \
+       "requirement: ${kani_required:-?} (tools/check_kani_cfg.sh)"
+  case "$kani_harnesses" in
+    ''|*[!0-9]*) kani_count_guard "src/proofs.rs could not be counted (missing or unreadable)" ;;
+  esac
+  case "$kani_required" in
+    ''|*[!0-9]*) kani_count_guard "tools/check_kani_cfg.sh carries no readable COMMITTED_HARNESSES= line, so there is no committed count to require" ;;
+  esac
+  if [ "$kani_harnesses" -lt "$kani_required" ]; then
+    kani_count_guard "src/proofs.rs contains $kani_harnesses #[kani::proof] harness(es), fewer than the $kani_required tools/check_kani_cfg.sh commits; Kani would print 'No proof harnesses ... found' and prove nothing"
+  elif [ "$kani_harnesses" -ne "$kani_required" ]; then
+    kani_count_guard "src/proofs.rs contains $kani_harnesses #[kani::proof] harness(es) but tools/check_kani_cfg.sh commits $kani_required; the two counts disagree, so the requirement cannot be taken from either without guessing (update the gate in the same change that adds a harness)"
+  fi
   if ! command -v cargo-kani >/dev/null 2>&1; then
     # Without this, `cargo kani` exits 101 (no such subcommand) and `set -e` fails the whole
     # run -- a request for an optional stage turning into a hard failure, instead of the
     # skipped stage the convention and check.sh's help describe.
     skip "Kani" "cargo-kani is not installed (cargo install --locked kani-verifier && cargo-kani setup)"
   else
-    cargo kani -j --output-format=terse --features pure -Z stubbing -Z unstable-options \
-      --extra-pointer-checks
+    kani_log="$(mktemp)"   # removed by the global EXIT trap at the top
+    # `tee` so the output still streams (Kani is slow) while the summary is read back;
+    # `set -o pipefail` (top of file) makes a non-zero `cargo kani` fail the pipeline,
+    # which the `if !` sees.
+    if ! cargo kani -j --output-format=terse --features pure -Z stubbing -Z unstable-options \
+         --extra-pointer-checks 2>&1 | tee "$kani_log"; then
+      echo "FAILED: cargo kani exited non-zero" >&2
+      exit 1
+    fi
+    # The count above says the source contains harnesses; this says Kani *saw* them.
+    # Kani exits 0 with "No proof harnesses ... were found to verify", and the count
+    # cannot rule out every way the harnesses fail to reach the build (the module's
+    # `#[cfg(kani)]` gate in lib.rs is one). Without this, a zero-harness Kani run
+    # would still be reported as a pass.
+    if grep -qi 'no proof harnesses' "$kani_log"; then
+      echo "FAILED: Kani reports that it found no proof harnesses to verify, although" >&2
+      echo "        src/proofs.rs contains $kani_harnesses: they are not reaching the" >&2
+      echo "        build (the #[cfg(kani)] module gate?), so this run proved nothing." >&2
+      exit 1
+    fi
   fi
 fi
 

@@ -84,21 +84,67 @@ fn flags_at(ptr: usize) -> Option<String> {
 /// `the_key_itself_is_locked`) is immune to it; a counter delta is not.
 static SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+/// Whether `XSIV_ALLOW_UNLOCKED` *affirmatively* says this host knowingly runs a
+/// `locked` build with nothing locked.
+///
+/// Only `1`, `true` and `yes` (case-insensitive) count. `0`, `false`, `no`, the empty
+/// string and an unset variable all mean "do not allow", so a kernel refusal is then a
+/// *failure* — the old `is_ok()` parse made `XSIV_ALLOW_UNLOCKED=0` and an empty value
+/// behave exactly like `=1`, i.e. the "refuse" setting could not be requested at all. A
+/// value that is neither affirmative nor one of those recognisable denials is printed and
+/// then treated as "do not allow": refusing to reinterpret a typo silently is the same
+/// rule the `SKIPPED` lines below follow — a skip or an override must be recorded, never
+/// inferred.
+fn allow_unlocked() -> bool {
+    match std::env::var("XSIV_ALLOW_UNLOCKED") {
+        Ok(v)
+            if ["1", "true", "yes"]
+                .iter()
+                .any(|a| v.eq_ignore_ascii_case(a)) =>
+        {
+            true
+        }
+        Ok(v)
+            if ["0", "false", "no", ""]
+                .iter()
+                .any(|n| v.eq_ignore_ascii_case(n)) =>
+        {
+            false
+        }
+        Ok(v) => {
+            eprintln!(
+                "NOTE: XSIV_ALLOW_UNLOCKED={v:?} is neither an affirmative value \
+                 (1/true/yes) nor a recognised denial (0/false/no/empty), so it is treated \
+                 as *not* allowing an unlocked `locked` build: a kernel refusal will fail \
+                 the tests that meet it."
+            );
+            false
+        }
+        Err(_) => false,
+    }
+}
+
 /// Returning early because the environment refuses to lock is indistinguishable, in a
 /// test report, from having verified the lock — both print `ok`. So a refusal is a
 /// *failure* unless `XSIV_ALLOW_UNLOCKED=1` says this host knowingly runs a `locked`
 /// build with nothing locked (the same convention `tests/ultra.rs` uses). When the
-/// escape hatch is used the skip is *printed*: six tests reach a return through this
-/// function or the identical branch in `unlocking_restores_core_dump_inclusion`, and a
-/// silent `ok` for all six was a measured finding.
-fn lock_or_skip() -> Option<LockedKey> {
-    let allowed = std::env::var("XSIV_ALLOW_UNLOCKED").is_ok();
+/// escape hatch is used the skip is *printed*, with the test's own name: six tests reach
+/// a return through this function or the identical branch in
+/// `unlocking_restores_core_dump_inclusion`, and a silent `ok` for all six was a measured
+/// finding.
+fn lock_or_skip(test: &str) -> Option<LockedKey> {
+    let allowed = allow_unlocked();
     if !SUPPORTED {
         // `SUPPORTED == false` is a *compile-time* property of the target, not a failure:
         // this crate only wires the syscalls for Linux x86_64/aarch64, the README says so,
         // and CI runs this file on i686 where it is always false. Failing here would make
         // the i686 job red for a documented platform limit.
-        eprintln!("SKIPPED: memory locking is unsupported on this target/architecture");
+        eprintln!(
+            "SKIPPED [{test}]: memory locking is unsupported on this target/architecture \
+             (`locked::SUPPORTED == false` is a compile-time property). This is not a pass; \
+             no environment variable can exercise it on this target — on a supported target \
+             the test runs, and XSIV_ALLOW_UNLOCKED=1 records a kernel refusal there."
+        );
         return None;
     }
     match LockedKey::new(&KEY) {
@@ -107,7 +153,8 @@ fn lock_or_skip() -> Option<LockedKey> {
             assert!(
                 allowed,
                 "the kernel refused to lock memory (errno {}): raise RLIMIT_MEMLOCK, or \
-                 set XSIV_ALLOW_UNLOCKED=1 to record that this host runs unlocked.",
+                 set XSIV_ALLOW_UNLOCKED=1 to record that this host runs unlocked. \
+                 [test: {test}]",
                 -e
             );
             // The allowed branch must not be silent. Every caller of this function returns
@@ -116,8 +163,10 @@ fn lock_or_skip() -> Option<LockedKey> {
             // REFUSAL` branches below avoid by printing. An audit measured this branch
             // printing nothing at all.
             eprintln!(
-                "SKIPPED (allowed by XSIV_ALLOW_UNLOCKED=1): the kernel refused to lock \
-                 memory (errno {}), so no locked key was available to test",
+                "SKIPPED [{test}]: the kernel refused to lock memory (errno {}), so no \
+                 locked key was available to test. This is NOT a pass: it was reached only \
+                 because XSIV_ALLOW_UNLOCKED=1 records that this host knowingly runs a \
+                 `locked` build unlocked.",
                 -e
             );
             None
@@ -132,7 +181,9 @@ fn the_key_itself_is_locked() {
     // The lock is created *inside* the measurement, so the process-wide delta is
     // attributable to this key rather than to whatever ran before it.
     let before = LockedKey::locked_bytes();
-    let Some(key) = lock_or_skip() else { return };
+    let Some(key) = lock_or_skip("the_key_itself_is_locked") else {
+        return;
+    };
     let after = LockedKey::locked_bytes();
     let ptr = key.as_bytes().as_ptr() as usize;
 
@@ -211,7 +262,9 @@ fn smaps_reports_locks() -> bool {
 #[test]
 fn a_locked_key_encrypts_and_decrypts() {
     let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
-    let Some(key) = lock_or_skip() else { return };
+    let Some(key) = lock_or_skip("a_locked_key_encrypts_and_decrypts") else {
+        return;
+    };
     let (ct, tag) = encrypt(&key, &NONCE, b"aad", b"message").unwrap();
     assert_eq!(
         decrypt(&key, &NONCE, b"aad", &ct, &tag).unwrap(),
@@ -224,7 +277,9 @@ fn a_locked_key_encrypts_and_decrypts() {
 #[test]
 fn debug_prints_nothing_derived_from_the_key() {
     let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
-    let Some(key) = lock_or_skip() else { return };
+    let Some(key) = lock_or_skip("debug_prints_nothing_derived_from_the_key") else {
+        return;
+    };
     let shown = format!("{key:?}");
     // The key is `[0x11; 32]`, so a leak can spell its bytes as `11` (hex, with or
     // without a `0x` prefix) or as `17` (decimal). The earlier heuristic checked only
@@ -245,7 +300,9 @@ fn debug_prints_nothing_derived_from_the_key() {
 #[test]
 fn dropping_releases_the_lock() {
     let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
-    let Some(key) = lock_or_skip() else { return };
+    let Some(key) = lock_or_skip("dropping_releases_the_lock") else {
+        return;
+    };
     let held = LockedKey::locked_bytes().expect("VmLck is readable on Linux");
     drop(key);
     let released = LockedKey::locked_bytes().expect("VmLck is readable on Linux");
@@ -296,9 +353,42 @@ fn memlock_limit_bytes() -> Option<u64> {
 /// prints `ok` for a returned test whether or not it got there. A host whose allowance is too
 /// large to exhaust (or is unlimited) cannot reach the arm, so returning vacuously is a
 /// failure unless the operator says otherwise — the same convention `XSIV_ALLOW_UNLOCKED`
-/// uses for a host that cannot lock at all.
+/// uses for a host that cannot lock at all, and the same parse: only an affirmative value
+/// counts, so `=0` here means *refuse* rather than being read as consent by `is_ok()` (the
+/// defect `allow_unlocked` above records for the sibling variable).
 fn allow_unexercised_refusal() -> bool {
-    std::env::var("XSIV_ALLOW_UNEXERCISED_REFUSAL").is_ok()
+    affirmative("XSIV_ALLOW_UNEXERCISED_REFUSAL")
+}
+
+/// The shared parse for both `XSIV_ALLOW_*` escapes: `1`, `true` or `yes` (case-insensitive)
+/// is consent, everything else — including `0`, an empty value and an unrecognised one — is
+/// not, and an unrecognised value says so rather than being silently reinterpreted.
+fn affirmative(name: &str) -> bool {
+    match std::env::var(name) {
+        Ok(v)
+            if v.eq_ignore_ascii_case("1")
+                || v.eq_ignore_ascii_case("true")
+                || v.eq_ignore_ascii_case("yes") =>
+        {
+            true
+        }
+        Ok(v)
+            if ["0", "false", "no", ""]
+                .iter()
+                .any(|n| v.eq_ignore_ascii_case(n)) =>
+        {
+            false
+        }
+        Ok(v) => {
+            eprintln!(
+                "NOTE: {name}={v:?} is neither an affirmative value (1/true/yes) nor a \
+                 recognised denial (0/false/no/empty), so it is treated as *not* set: the \
+                 test that reads it will refuse rather than skip."
+            );
+            false
+        }
+        Err(_) => false,
+    }
 }
 
 /// A refused lock must be **reported**, and it must not consume the allowance.
@@ -333,7 +423,12 @@ fn a_refused_lock_is_reported_and_returns_the_allowance() {
     let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
 
     if !SUPPORTED {
-        eprintln!("SKIPPED: memory locking is unsupported on this target/architecture");
+        eprintln!(
+            "SKIPPED [a_refused_lock_is_reported_and_returns_the_allowance]: memory locking \
+             is unsupported on this target/architecture (`locked::SUPPORTED == false` is a \
+             compile-time property). This is not a pass; no environment variable can \
+             exercise it on this target."
+        );
         return;
     }
     // The soft limit in bytes. `None` covers "unlimited" (nothing to exhaust) and
@@ -350,9 +445,11 @@ fn a_refused_lock_is_reported_and_returns_the_allowance() {
              host knowingly leaves the refusal path untested"
         );
         eprintln!(
-            "SKIPPED (allowed by XSIV_ALLOW_UNEXERCISED_REFUSAL=1): RLIMIT_MEMLOCK is \
-             unlimited (or /proc/self/limits is unreadable), so this test cannot exhaust \
-             it to reach the refusal path"
+            "SKIPPED [a_refused_lock_is_reported_and_returns_the_allowance]: RLIMIT_MEMLOCK \
+             is unlimited (or /proc/self/limits is unreadable), so this test cannot exhaust \
+             it to reach the refusal path. This is NOT a pass: it was reached only because \
+             XSIV_ALLOW_UNEXERCISED_REFUSAL=1 records that this host knowingly leaves the \
+             refusal path untested."
         );
         return;
     };
@@ -379,8 +476,9 @@ fn a_refused_lock_is_reported_and_returns_the_allowance() {
             assert_eq!(after, before, "a refused lock leaked a file descriptor");
         }
         eprintln!(
-            "note: RLIMIT_MEMLOCK is zero on this host, so the EPERM shape of the refusal \
-             was asserted rather than the ENOMEM one"
+            "note [a_refused_lock_is_reported_and_returns_the_allowance]: RLIMIT_MEMLOCK is \
+             zero on this host, so the EPERM shape of the refusal was asserted rather than \
+             the ENOMEM one"
         );
         return;
     }
@@ -403,9 +501,11 @@ fn a_refused_lock_is_reported_and_returns_the_allowance() {
                  host knowingly leaves the refusal path untested"
             );
             eprintln!(
-                "SKIPPED (allowed by XSIV_ALLOW_UNEXERCISED_REFUSAL=1): a single lock already \
-                 fails (baseline {baseline} bytes against a {limit_bytes} byte allowance), so \
-                 there is no headroom to exhaust here"
+                "SKIPPED [a_refused_lock_is_reported_and_returns_the_allowance]: a single \
+                 lock already fails (baseline {baseline} bytes against a {limit_bytes} byte \
+                 allowance), so there is no headroom to exhaust here. This is NOT a pass: it \
+                 was reached only because XSIV_ALLOW_UNEXERCISED_REFUSAL=1 records that this \
+                 host knowingly leaves the refusal path untested."
             );
             return;
         };
@@ -469,9 +569,11 @@ fn a_refused_lock_is_reported_and_returns_the_allowance() {
             held.len()
         );
         eprintln!(
-            "SKIPPED (allowed by XSIV_ALLOW_UNEXERCISED_REFUSAL=1): {} keys ({} bytes \
-             charged each) were locked with no refusal, so the allowance here is not \
-             exhaustible the way this test assumes",
+            "SKIPPED [a_refused_lock_is_reported_and_returns_the_allowance]: {} keys ({} \
+             bytes charged each) were locked with no refusal, so the allowance here is not \
+             exhaustible the way this test assumes. This is NOT a pass: it was reached only \
+             because XSIV_ALLOW_UNEXERCISED_REFUSAL=1 records that this host knowingly \
+             leaves the refusal path untested.",
             held.len(),
             per_key
         );
@@ -550,7 +652,12 @@ fn unlocking_restores_core_dump_inclusion() {
         // not Linux x86_64/aarch64), so `lock_range` here returns `-ENOSYS` by construction
         // and asserting on it would make the i686 and big-endian jobs red for a documented
         // platform limit. Measured: they were, before this branch existed.
-        eprintln!("SKIPPED: memory locking is unsupported on this target/architecture");
+        eprintln!(
+            "SKIPPED [unlocking_restores_core_dump_inclusion]: memory locking is unsupported \
+             on this target/architecture (`locked::SUPPORTED == false` is a compile-time \
+             property). This is not a pass; no environment variable can exercise it on this \
+             target."
+        );
         return;
     }
 
@@ -562,7 +669,13 @@ fn unlocking_restores_core_dump_inclusion() {
     let ptr = buf.as_ptr() as usize;
 
     let Some(before) = flags_at(ptr) else {
-        eprintln!("SKIPPED: /proc/self/smaps is not readable here");
+        eprintln!(
+            "SKIPPED [unlocking_restores_core_dump_inclusion]: /proc/self/smaps is not \
+             readable here, so the kernel's view of the dump flags cannot be read. This is \
+             not a pass; no environment variable enables smaps, and the MADV_DODUMP call \
+             itself is pinned at source level by \
+             `the_dump_advice_is_issued_on_the_right_range`."
+        );
         return;
     };
     assert!(
@@ -575,9 +688,10 @@ fn unlocking_restores_core_dump_inclusion() {
         Ok(()) => {}
         Err(e) => {
             assert!(
-                std::env::var("XSIV_ALLOW_UNLOCKED").is_ok(),
+                allow_unlocked(),
                 "the kernel refused to lock memory (errno {}); raise RLIMIT_MEMLOCK or set \
-                 XSIV_ALLOW_UNLOCKED=1 to record that this host runs unlocked",
+                 XSIV_ALLOW_UNLOCKED=1 to record that this host runs unlocked. \
+                 [test: unlocking_restores_core_dump_inclusion]",
                 -e
             );
             // Silent until an audit measured it: the assert above records the refusal as
@@ -586,8 +700,10 @@ fn unlocking_restores_core_dump_inclusion() {
             // observed. Same wording convention as the `XSIV_ALLOW_UNEXERCISED_REFUSAL`
             // skips above.
             eprintln!(
-                "SKIPPED (allowed by XSIV_ALLOW_UNLOCKED=1): the kernel refused to lock \
-                 memory (errno {}), so the effect of MADV_DODUMP was never observed",
+                "SKIPPED [unlocking_restores_core_dump_inclusion]: the kernel refused to \
+                 lock memory (errno {}), so the effect of MADV_DODUMP was never observed. \
+                 This is NOT a pass: it was reached only because XSIV_ALLOW_UNLOCKED=1 \
+                 records that this host knowingly runs a `locked` build unlocked.",
                 -e
             );
             return;
@@ -612,10 +728,12 @@ fn unlocking_restores_core_dump_inclusion() {
         // *effect*, and saying so is the point of printing this.
         xchacha20_blake3_siv::locked::unlock_range(buf.as_ptr(), buf.len());
         eprintln!(
-            "SKIPPED: VmFlags does not report `lo` for the mapping that holds the buffer, so \
-             this environment does not reflect the guest's memory advice here (qemu-user does \
-             not); the effect of MADV_DODUMP is then unobservable, and the call is checked at \
-             source level instead. flags: {locked}"
+            "SKIPPED [unlocking_restores_core_dump_inclusion]: VmFlags does not report `lo` \
+             for the mapping that holds the buffer, so this environment does not reflect the \
+             guest's memory advice here (qemu-user does not); the effect of MADV_DODUMP is \
+             then unobservable, and the call is checked at source level by \
+             `the_dump_advice_is_issued_on_the_right_range` instead. This is not a pass; no \
+             environment variable makes smaps reflect the advice. flags: {locked}"
         );
         return;
     }
@@ -650,7 +768,8 @@ fn unlocking_restores_core_dump_inclusion() {
 /// rather than about a copy that can drift.
 const LIB: &str = include_str!("../src/lib.rs");
 
-/// `LIB` with comments removed and string-literal contents blanked, cut at `mod tests {`.
+/// The non-test source of `LIB`: everything outside the body of its `#[cfg(test)]
+/// mod tests` module, wherever that module sits in the file.
 ///
 /// Every source-shape assertion below runs on this rather than on the raw file. The raw text
 /// made each `contains` satisfiable without the code: an audit replaced the guarded
@@ -659,9 +778,64 @@ const LIB: &str = include_str!("../src/lib.rs");
 /// green — the exact regression that test exists to catch. `libtest` cannot share items
 /// between test binaries, so the scanner is copied from `tests/decision_scope.rs` and
 /// `tests/counter_range.rs` rather than imported.
+///
+/// The obvious way to get the cut — truncate at the first `mod tests {` — hides code
+/// that is textually *after* the module, because the cut is at the module's first
+/// line, not at its closing brace: a production function appended below the test
+/// module (legal Rust, compiled in normal builds) is skipped entirely. Measured: a
+/// second syscall-backed `pub fn lock_range(` carrying `NR_MLOCK`, appended after the
+/// test module, left this file's suite green, though
+/// `the_dump_advice_is_issued_on_the_right_range` asserts there is exactly one such
+/// definition. It also hid a `mod tests {` *mentioned in a comment* before the real
+/// one, since the old `find` ran on the raw text; stripping comments and literals
+/// first removes that.
+///
+/// This finds the module on the stripped text, requires it to carry `#[cfg(test)]`,
+/// brace-matches its body (braces inside comments and string literals are already gone,
+/// so they cannot unbalance the count), and removes exactly the body — blanking those
+/// lines rather than deleting them, so line numbers in the scans' failure messages keep
+/// pointing at the source. Everything else, before *and* after the module, is what the
+/// scans read.
 fn non_test_source() -> String {
-    let cut = LIB.find("mod tests {").expect("the test module must exist");
-    strip_comments(&LIB[..cut])
+    let stripped = strip_comments(LIB);
+    let at = stripped
+        .find("mod tests {")
+        .expect("the test module must exist (`mod tests {`)");
+    assert_eq!(
+        stripped.matches("mod tests {").count(),
+        1,
+        "src/lib.rs holds more than one `mod tests {{`: which one is the test module, and \
+         what the scan cut, would be ambiguous"
+    );
+    assert!(
+        stripped[..at].trim_end().ends_with("#[cfg(test)]"),
+        "the scanned `mod tests {{` is not `#[cfg(test)]`: it is production code being \
+         mistaken for the test module, so the scan would skip it"
+    );
+    let open = at + "mod tests {".len() - 1;
+    let mut depth = 0usize;
+    let mut close = None;
+    for (i, c) in stripped[open..].char_indices() {
+        match c {
+            '{' => depth += 1,
+            '}' => {
+                depth -= 1;
+                if depth == 0 {
+                    close = Some(open + i);
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+    let close = close.expect("the test module's body is unterminated");
+    let mut out = String::with_capacity(stripped.len());
+    out.push_str(&stripped[..at]);
+    for _ in 0..stripped[at..=close].matches('\n').count() {
+        out.push('\n');
+    }
+    out.push_str(&stripped[close + 1..]);
+    out
 }
 
 /// See [`non_test_source`]: comments and string-literal contents are removed, with newlines
@@ -855,6 +1029,66 @@ fn brace_blocks(needle: &str) -> Vec<String> {
     out
 }
 
+/// The brace-nesting depth at byte `at` in `body`: the number of `{` opened and not yet
+/// closed before it. A statement at the top level of a function body is depth 1 (the
+/// body's own `{`); one wrapped in any block — `if … { … }`, `while`, `match`, a closure
+/// — is deeper. `body` comes from [`non_test_source`], whose literal contents are blanked
+/// and comments removed, so no `{` inside a string or a comment can move the count.
+fn brace_depth_at(body: &str, at: usize) -> usize {
+    let mut depth = 0usize;
+    for (i, c) in body.char_indices() {
+        if i >= at {
+            break;
+        }
+        match c {
+            '{' => depth += 1,
+            '}' => depth = depth.saturating_sub(1),
+            _ => {}
+        }
+    }
+    depth
+}
+
+/// A wipe that a text count (or an ordering assertion) can see must also be a *live*
+/// top-level statement of its function, not deadened code.
+///
+/// This exists because `if core::hint::black_box(false) { crate::zeroize_array(&mut tag); }`
+/// leaves every `find`/`matches` assertion in this file green — the call is still text —
+/// while the wipe never executes, and a wiped stack local has no behavioural signature
+/// that could notice. Two ways to deaden a statement without removing it are rejected:
+/// * enclosing it in a block (`if black_box(false) { … }`, depth 2), which the depth
+///   check catches for *any* conditional or other unreachable-looking construct; and
+/// * attaching an attribute to it (`#[cfg(any())] …`, or `#[cfg(any())] { … }`), which
+///   the directly-preceding-line check catches. The blanket always-false-`cfg` scan over
+///   the crypto source lives in `tests/security.rs`; this is the per-site pin.
+fn assert_wipe_is_live(caller: &str, body: &str, wipe: &str) {
+    let at = body
+        .find(wipe)
+        .unwrap_or_else(|| panic!("`{caller}` no longer contains the wipe `{wipe}`"));
+    assert_eq!(
+        body.matches(wipe).count(),
+        1,
+        "`{caller}` contains the wipe `{wipe}` more than once, so the depth check below \
+         would be about an arbitrary one of them"
+    );
+    let depth = brace_depth_at(body, at);
+    assert_eq!(
+        depth, 1,
+        "the wipe `{wipe}` in `{caller}` is nested inside a block (brace depth {depth}, \
+         top level is 1): `if core::hint::black_box(false) {{ {wipe} }}` — or any other \
+         conditional construct — keeps every count in this file green while the wipe never \
+         runs. The wipe must be an unconditional top-level statement."
+    );
+    let before = body[..at].trim_end();
+    let last_line = before.lines().last().unwrap_or("").trim();
+    assert!(
+        !last_line.starts_with("#["),
+        "the wipe `{wipe}` in `{caller}` is immediately preceded by the attribute line \
+         `{last_line}`, which can deaden it (`#[cfg(any())] {wipe}`) without changing any \
+         text this file counts. Remove the attribute or move the wipe out of its scope."
+    );
+}
+
 /// The `BLAKE3(key)` integrity tag is wiped in **both** callers, before any early exit.
 ///
 /// The value is a hash of the key — key material by this crate's own classification — and
@@ -905,6 +1139,97 @@ fn the_integrity_tag_is_wiped_in_both_callers() {
     assert!(
         wipe < branch,
         "the wipe must precede the `if`, or the panic path leaves the tag in the frame"
+    );
+
+    // Both wipes are live statements, not deadened code. The counts above cannot see the
+    // difference: `if core::hint::black_box(false) { crate::zeroize_array(&mut tag); }`
+    // and `#[cfg(any())] { crate::zeroize_array(&mut expected); }` both keep the text —
+    // and the ordering relative to `lock_range`/the branch — exactly as they were, while
+    // the compiler removes the wipe. A wiped stack local is not observable from a test,
+    // which is why this pin is a shape and not an assertion about bytes.
+    assert_wipe_is_live("LockedKey::new", new, "crate::zeroize_array(&mut tag);");
+    assert_wipe_is_live(
+        "LockedKey::check_integrity",
+        check,
+        "crate::zeroize_array(&mut expected);",
+    );
+}
+
+/// The integrity check those wipes belong to is **live**, observed from outside the crate.
+///
+/// The wipes themselves have no behavioural signature — they clear stack locals no test
+/// can name (which is why the test above is a source-shape guard). What is observable is
+/// the check they serve: `as_bytes` must recompute the page's tag and fail stop when the
+/// page no longer holds the key that was put there. This test injects that corruption the
+/// way the fault model does — a write through `/proc/self/mem`, so no API of this crate
+/// is involved — and requires the panic to name the integrity failure. The healthy page
+/// is read and checked against the key first, so the corruption is the only thing the
+/// panic can be about.
+#[test]
+fn the_integrity_check_fails_stop_on_a_corrupted_page() {
+    let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    let Some(key) = lock_or_skip("the_integrity_check_fails_stop_on_a_corrupted_page") else {
+        return;
+    };
+
+    // Healthy page: the check passes and returns the key (the assertion `as_bytes` would
+    // otherwise have nothing to compare against).
+    assert_eq!(
+        key.as_bytes(),
+        &KEY,
+        "an intact key must read back unchanged"
+    );
+    let ptr = key.as_bytes().as_ptr() as usize;
+
+    // `Seek` + `Write` rather than `std::os::unix::fs::FileExt`, so this file still
+    // *compiles* on a non-unix target; there the open below fails and the skip is printed.
+    use std::io::{Seek, SeekFrom, Write};
+    let mut mem = match std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open("/proc/self/mem")
+    {
+        Ok(f) => f,
+        Err(e) => {
+            eprintln!(
+                "SKIPPED [the_integrity_check_fails_stop_on_a_corrupted_page]: \
+                 /proc/self/mem is not writable here ({e}), so a byte in the live page \
+                 cannot be corrupted and the integrity check cannot be observed. This is \
+                 not a pass; no environment variable enables it — the check's call sites \
+                 stay pinned by `the_integrity_tag_is_wiped_in_both_callers` and the \
+                 in-crate `a_corrupted_locked_page_is_detected_on_use`."
+            );
+            return;
+        }
+    };
+    // Flip one byte of the key in the live page, exactly like a hardware fault: the write
+    // goes through the kernel, not through any `&mut` this crate hands out.
+    let flipped = [KEY[7] ^ 0x01];
+    if let Err(e) = mem
+        .seek(SeekFrom::Start((ptr + 7) as u64))
+        .and_then(|_| mem.write_all(&flipped))
+    {
+        eprintln!(
+            "SKIPPED [the_integrity_check_fails_stop_on_a_corrupted_page]: writing to \
+             /proc/self/mem failed ({e}), so the page could not be corrupted. This is not \
+             a pass; no environment variable enables it."
+        );
+        return;
+    }
+
+    let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _ = key.as_bytes();
+    }))
+    .expect_err("a corrupted key page must make `as_bytes` fail stop, not return the key");
+    let message = panicked
+        .downcast_ref::<String>()
+        .map(String::as_str)
+        .or_else(|| panicked.downcast_ref::<&str>().copied())
+        .unwrap_or("");
+    assert!(
+        message.contains("no longer holds the key"),
+        "the panic must name the integrity failure (\"...no longer holds the key...\"), \
+         not some other condition: {message}"
     );
 }
 
@@ -1032,7 +1357,7 @@ fn a_locked_key_can_move_to_another_thread() {
     fn assert_send_sync<T: Send + Sync>() {}
     assert_send_sync::<LockedKey>();
 
-    let Some(key) = lock_or_skip() else {
+    let Some(key) = lock_or_skip("a_locked_key_can_move_to_another_thread") else {
         return;
     };
 
@@ -1068,7 +1393,12 @@ fn deny_debugging_is_enforced_by_the_kernel_and_reversible() {
     let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
 
     if !SUPPORTED {
-        eprintln!("SKIPPED: prctl is not wired for this target/architecture");
+        eprintln!(
+            "SKIPPED [deny_debugging_is_enforced_by_the_kernel_and_reversible]: prctl is not \
+             wired for this target/architecture (`locked::SUPPORTED == false` is a \
+             compile-time property). This is not a pass; no environment variable can \
+             exercise it on this target."
+        );
         return;
     }
 
@@ -1078,18 +1408,21 @@ fn deny_debugging_is_enforced_by_the_kernel_and_reversible() {
     // `SKIPPED` line and libtest reported `ok`. They are therefore refusals by default, on
     // the same terms as `lock_or_skip`'s: `XSIV_ALLOW_UNLOCKED=1` is the recorded way to say
     // this host knowingly leaves the `locked` layer's kernel behaviour untested.
-    let allow_unlocked = std::env::var("XSIV_ALLOW_UNLOCKED").is_ok();
+    let allow_unlocked = allow_unlocked();
 
     let Some(before) = is_dumpable() else {
         assert!(
             allow_unlocked,
             "the kernel would not report the dumpable flag (PR_GET_DUMPABLE), so this test \
              cannot observe `deny_debugging`. Set XSIV_ALLOW_UNLOCKED=1 to record that this \
-             host knowingly leaves `deny_debugging` untested"
+             host knowingly leaves `deny_debugging` untested. [test: \
+             deny_debugging_is_enforced_by_the_kernel_and_reversible]"
         );
         eprintln!(
-            "SKIPPED (allowed by XSIV_ALLOW_UNLOCKED=1): the kernel would not report the \
-             dumpable flag here"
+            "SKIPPED [deny_debugging_is_enforced_by_the_kernel_and_reversible]: the kernel \
+             would not report the dumpable flag here. This is NOT a pass: it was reached \
+             only because XSIV_ALLOW_UNLOCKED=1 records that this host knowingly leaves \
+             `deny_debugging` untested."
         );
         return;
     };
@@ -1102,11 +1435,14 @@ fn deny_debugging_is_enforced_by_the_kernel_and_reversible() {
             "the process was already non-dumpable before the test (something in the \
              environment set the flag), so the 1 -> 0 transition `deny_debugging` performs \
              cannot be observed. Set XSIV_ALLOW_UNLOCKED=1 to record that this host \
-             knowingly leaves `deny_debugging` untested"
+             knowingly leaves `deny_debugging` untested. [test: \
+             deny_debugging_is_enforced_by_the_kernel_and_reversible]"
         );
         eprintln!(
-            "SKIPPED (allowed by XSIV_ALLOW_UNLOCKED=1): the process was already \
-             non-dumpable, so the transition was not observed"
+            "SKIPPED [deny_debugging_is_enforced_by_the_kernel_and_reversible]: the process \
+             was already non-dumpable, so the 1 -> 0 transition was not observed. This is \
+             NOT a pass: it was reached only because XSIV_ALLOW_UNLOCKED=1 records that this \
+             host knowingly leaves `deny_debugging` untested."
         );
         return;
     }
@@ -1120,12 +1456,16 @@ fn deny_debugging_is_enforced_by_the_kernel_and_reversible() {
                  file's `SUPPORTED` is true: the kernel-side half of `deny_debugging` is \
                  absent here, and a returned `ok` would report that as a pass. Set \
                  XSIV_ALLOW_UNLOCKED=1 to record that this host knowingly leaves \
-                 `deny_debugging` untested",
+                 `deny_debugging` untested. [test: \
+                 deny_debugging_is_enforced_by_the_kernel_and_reversible]",
                 -e
             );
             eprintln!(
-                "SKIPPED (allowed by XSIV_ALLOW_UNLOCKED=1): prctl(PR_SET_DUMPABLE, 0) \
-                 refused with errno {}",
+                "SKIPPED [deny_debugging_is_enforced_by_the_kernel_and_reversible]: \
+                 prctl(PR_SET_DUMPABLE, 0) was refused with errno {}, so the kernel-side half \
+                 was not observed. This is NOT a pass: it was reached only because \
+                 XSIV_ALLOW_UNLOCKED=1 records that this host knowingly leaves \
+                 `deny_debugging` untested.",
                 -e
             );
             return;

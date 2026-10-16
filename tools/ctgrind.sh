@@ -67,7 +67,13 @@ valgrind is not installable here without root (sudo needs a password), but it
 runs fine from an extracted package. libc6-dbg supplies the debug symbols that
 valgrind needs to redirect `strcmp` in the dynamic linker — which is why the
 test binary below is built *statically* instead: a static binary has no dynamic
-linker to redirect, so the debuginfo is not needed.
+linker to redirect, so those symbols are not needed here. The test binary's own
+debuginfo is a different matter: it is built with `-C debuginfo=2` because
+suppression matching uses the innermost frame, and without DWARF inline
+information a branch inside a helper inlined into `accept_or_reject` is
+attributed to `accept_or_reject`, which the entry in tests/ctgrind.supp then
+covers silently. The cost is a larger binary and a marginally slower valgrind
+run, not a behaviour change.
 
     apt-get download valgrind libc6-dbg
     dpkg-deb -x valgrind_*.deb   ~/valgrind
@@ -189,6 +195,14 @@ echo "suppressions: $SUPP_COUNT entry/entries, all naming accept_or_reject"
 # valgrind prints `???` for every frame, and every suppression here matches on
 # function names, so the file silently stops suppressing anything.
 #
+# `-C debuginfo=2` makes the binary carry the DWARF inline information valgrind
+# needs to name the function an inlined branch was inlined *from*: suppression
+# matching uses the innermost frame, so without it a branch in a helper inlined
+# into `accept_or_reject` is attributed to `accept_or_reject` and the one
+# permitted entry covers it silently. As a side effect it also gives readable
+# stacks in the reports that do fire. Cost: a larger binary and a marginally
+# slower valgrind run, not a behaviour change.
+#
 # The executable is taken from cargo's own JSON stream rather than from a glob over
 # the deps directory. Two reasons, both measured:
 #
@@ -224,7 +238,7 @@ echo "building a static test binary..."
 # the source unchanged cargo would call the target Fresh and hand that file back.
 # Deleting it costs one relink (measured ~5 s) and heals such a tree.
 rm -f "$DEPS_DIR"/ctgrind-*
-BIN="$(RUSTFLAGS="-C target-feature=+crt-static -C strip=none" \
+BIN="$(RUSTFLAGS="-C target-feature=+crt-static -C strip=none -C debuginfo=2" \
   cargo test --release --target "$TARGET" --test ctgrind --no-run --message-format=json \
     "${CARGO_ARGS[@]+"${CARGO_ARGS[@]}"}" 2>/dev/null | cargo_ctgrind_executable)"
 [ -n "$BIN" ] || {
@@ -406,7 +420,7 @@ PLANT
     # name) and the next run, whose build cargo called Fresh, ran it. The planted
     # binary is located by asking cargo now, so sharing a directory is not needed.
     export CARGO_TARGET_DIR="$WORK/tree/target"
-    RUSTFLAGS="-C target-feature=+crt-static -C strip=none" \
+    RUSTFLAGS="-C target-feature=+crt-static -C strip=none -C debuginfo=2" \
       cargo test --release --target "$TARGET" --test ctgrind --no-run --message-format=json \
       "${CARGO_ARGS[@]+"${CARGO_ARGS[@]}"}" >"$WORK/planted-build.json" 2>/dev/null )
   planted_bin="$(cargo_ctgrind_executable < "$WORK/planted-build.json")"

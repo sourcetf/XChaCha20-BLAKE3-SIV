@@ -32,6 +32,18 @@ include = [
     "LICENSE-MIT",
     "LICENSE-APACHE",
 ]
+
+# docs.rs builds with the default features alone, and the default is `hardened`:
+# measured with `cargo doc --no-deps`, a default build renders neither `locked` nor
+# `random` (the `rng` feature's module), so half of this crate's public API -- the
+# opt-in layers, which are the point of the `ultra` section in README.md -- would be
+# invisible in the published docs. `ultra` implies the other two
+# (`ultra = ["hardened", "rng", "dual-mac", "locked"]`), so naming it builds every
+# module docs.rs can build on Linux without listing the layers one by one, where the
+# list could drift out of step with `[features]`.
+[package.metadata.docs.rs]
+features = ["ultra"]
+
 [dependencies]
 # subtle provides constant-time comparison
 subtle = { version = "2.6.1", default-features = false }

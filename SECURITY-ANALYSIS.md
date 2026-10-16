@@ -579,11 +579,12 @@ they are stated separately:
   of that coupling as well.) This is the *invisible-salamander* class of attack — one ciphertext
   that opens under two keys — made infeasible **in the target setting, where the adversary attacks
   a ciphertext it is *given***. The literature's commitment games (**CMT-1/CMT-3**) are
-  *attacker-chosen*: there the adversary outputs the whole tuple, so there is no fixed tag to hit,
-  `2^520` does not describe that game, and **its bound is not derived here** — §4.5, "The two
-  commitment games", keeps the two apart and names the gap. What keeps a *chosen*-key search from
-  being cheaper **is not** the width of the derived material, and an earlier revision of this
-  document said it was. The route is a search over keys the adversary chooses for two that agree
+  *attacker-chosen*: there the adversary outputs the whole tuple, so there is no fixed tag to hit
+  and `2^520` does not describe that game. **Its bound is not derived here** — §4.5, "The two
+  commitment games", keeps the two apart and prices the salamander's cheapest known construction
+  at the key-search level (`≈ 2^256`): a construction, not a bound. What keeps a *chosen*-key
+  search from being cheaper **is not** the width of the derived material, and an earlier revision
+  of this document said it was. The route is a search over keys the adversary chooses for two that agree
   on the **whole** derived material (`k_in`, `k_out`, `enc_seed`), which gives equal tags and equal
   keystreams — one ciphertext opening under both, to the *same* plaintext (the bullet below is
   about exactly that qualification). Through `v0.2` the single-level tag defeated that
@@ -601,14 +602,23 @@ they are stated separately:
   sense, which requires the two openings to be *different* messages `M₁ ≠ M₂`. That form needs
   `KS₁(T) ≠ KS₂(T)`, hence *different* derived material, which is exactly what this route rules
   out: it forces `KS₁ = KS₂` and therefore `M₁ = M₂`. The different-message form is the completion
-  §4.5 already records as circular — `T = tag(K₂, N, A, C ⊕ KS₂(T))` — and the cheapest route to
-  it we can see is the fixed-point search over the 520-bit tag space, `≈ 2^520`, not `2^128`.
-  (That is where the search lands if the map behaves as a random function on 520 bits: about one
-  fixed point per `(K₁, K₂)`, found in `2^520` evaluations. It is not a proof that no cheaper
-  route exists, and this document does not claim one.) So `v0.2`'s `K`-in-input had closed the
+  §4.5 already records as circular — `T = tag(K₂, N, A, C ⊕ KS₂(T))` — and its price is the
+  **key-search level, `≈ 2^256`, not `2^520`**: the cheapest construction this document can find
+  never searches the tag space. Fix `k_out₁ = k_out₂` first (a birthday over ≈`2^128.5` sampled
+  keys), then choose the message: for a candidate `M₁`, the first opening
+  is satisfied *by construction* — `T = tag(K₁, N, A, M₁)` and `C = M₁ ⊕ KS₁(T)` — and the second
+  equation becomes `X(k_in₂, C ⊕ KS₂(T)) = X(k_in₁, M₁)`. Equal tag keys make the second tag
+  `G(k_out, X(k_in₂, M₂))`, so equal tags reduce to equal **256-bit inner digests**; each
+  candidate hits that with probability `2^-256`, ≈`2^256` candidates find one, and `KS₁ ≠ KS₂`
+  generically gives `M₁ ≠ M₂`. An earlier revision of this bullet *searched* the 520-bit tag
+  space for the fixed point, `≈ 2^520` — an overestimate by `2^264`, because choosing the message
+  chooses the tag: only the digest is searched. It is not a proof that `2^256` is optimal, and
+  this document does not claim one; what it establishes is that the salamander's object is the
+  same 256-bit digest as every other route here, so the route sits at the key-search level. So
+  `v0.2`'s `K`-in-input had closed the
   key-commitment break, `v0.3` reopens it at `2^128`, and the salamander half is not reached at
-  `2^128` at all. `2^128` is infeasible today, and the attacker-chosen games are ones this document
-  does not price, so the *target* commitment — the property this crate actually claims, `≈ 2^-256`
+  `2^128` at all. `2^128` is infeasible today, and the attacker-chosen games are priced by route,
+  not by a bound (§4.5), so the *target* commitment — the property this crate actually claims, `≈ 2^-256`
   per candidate key, key-search level — is a different game and is untouched by that break; its
   *object* did move with the same revision (from the 520-bit tag to the `subkey`, as the correction
   at the head of this bullet records), so the trade for removing L3.6 is real and is recorded here
@@ -633,7 +643,8 @@ they are stated separately:
     contexts and decrypts to the **same plaintext**: the completion is *immediate*, with no
     fixed point and no second key. So the context half of the attacker-chosen game is broken at
     `2^128` exactly as the key half is, and with the same identical-plaintext qualification;
-    what remains unpriced is only the half that needs two *different* messages.
+    the half that needs two *different* messages is priced by construction at the key-search
+    level in §4.5, with no *bound* derived.
 
 ### Theorem 3 (per-tag key separation, and keystream binding)
 
@@ -879,8 +890,8 @@ Two things do *not* follow that factor, and one that does is worth naming separa
   is a statement about *that* pair of keys; a break for one key says nothing about another, so `Q`
   does not enter the `≈ 2^-256` target bound at all (it enters as "there are `Q` keys to *try* to
   attack", which is the next point). The `Q` factor below is the per-key union bound the theorems
-  carry; the *attacker-chosen* commitment game of §4.5, which this document does not derive, is a
-  separate open obligation named there.
+  carry; the *attacker-chosen* commitment game of §4.5 is a separate obligation named there — its
+  salamander route is priced by construction there, and what is not derived is a bound on it.
 * **the collision events do not cross keys.** Two tags that collide under *different* keys derive
   *different* keystreams (the KDF is keyed by that key's `enc_seed`), so the two-time-pad event of
   §3's Corollary is per key, and the `Q` factor above is a union bound over independent events,
@@ -1028,13 +1039,13 @@ margin** (the model-dependent BHT row below is the one exception, at ≈`2^85`).
 | Derived `(key, nonce)` collision over `q` queries | `q² / 2^257` — see below: the tag term dominates it, and the KDF's own birthday is over a 328-bit state (256-bit chain value plus the 72-bit tail block), not the 352-bit output |
 | A tag agreeing with a *given* tag (forgery, second open, commitment **against a given ciphertext**) | the object to hit is 256-bit in every case: forgery is `min(2^256 key search, 2^520 tag guess)`, and a second key reproduces the 256-bit `subkey` at `≈ 2^-256` per candidate — `≈ 1` second key over the key space. The pure tag collision is `2^-520` per candidate and dominated |
 | Forgery (one decryption query) | `≈ 2^-256` — a query computed offline under a guessed key, the same 256-bit `subkey` event as the commitment row above — plus the fresh-*tag*-guess route `2^-520`, which it dominates, and the tag-collision terms. **Forgery *strength* is `min(2^256 key search, 2^520 tag guess) = 2^256`** — this row is the per-query acceptance probability, not the strength; §8.1 writes the minimum out |
-| **Attacker-chosen commitment game** (CMT-1/CMT-3 as the literature writes them — the adversary *outputs* both keys, both messages and `(C,T)`) | **two of its three routes are priced at `2^128`, both with identical plaintexts**: the *key* route (a `subkey` collision gives equal `k_in`/`k_out`/`enc_seed`) and the *context* route (an inner-digest collision gives equal `T`, and the KDF takes `T` rather than the context, so equal keystreams too). Both completions are immediate. The **different-message** route — the salamander — is **not analysed**: it needs `KS₁ ≠ KS₂`, so two keys, and its object is the fixed point `T = tag(K₂, N, A, C ⊕ KS₂(T))` over the 520-bit tag space. See "The two commitment games" below |
+| **Attacker-chosen commitment game** (CMT-1/CMT-3 as the literature writes them — the adversary *outputs* both keys, both messages and `(C,T)`) | **two of its three routes are priced at `2^128`, both with identical plaintexts**: the *key* route (a `subkey` collision gives equal `k_in`/`k_out`/`enc_seed`) and the *context* route (an inner-digest collision gives equal `T`, and the KDF takes `T` rather than the context, so equal keystreams too). Both completions are immediate. The **different-message** route — the salamander — is **priced by construction at the key-search level, `≈ 2^256`, with no bound derived**: it needs `KS₁ ≠ KS₂`, so two keys, but the cheapest construction this document can find never searches the tag space — equal `k_out` first (a birthday over ≈`2^128.5` sampled keys), then a chosen-message search for the 256-bit inner-digest equality `X(k_in₂, C ⊕ KS₂(T)) = X(k_in₁, M₁)`, which ≈`2^256` candidates hit. See "The two commitment games" below |
 | Exhaustive key search | `2^256` |
 | Quantum: Grover on the key | `2^128` |
 | Quantum: BHT collision finding on the 256-bit state | ≈`2^85` — model-dependent (it needs large quantum memory), and a property of *any* 256-bit state, SHA-256's collisions included; see the note below |
 
-**The two commitment games, kept apart — and the one whose bound is not derived here.** Two
-different games are both called "commitment", and they do not share a number. An
+**The two commitment games, kept apart — and the one priced by construction rather than by a
+bound.** Two different games are both called "commitment", and they do not share a number. An
 earlier revision of this document put the literature's names (`CMT-1`/`CMT-3`, invisible
 salamanders) next to a `2^520` and left the reader to assume the number belonged to the named
 game. It does not — and, as the first bullet below now records, `2^520` is not the *target*
@@ -1055,39 +1066,48 @@ game's number either.
   **not** "given a ciphertext": the adversary *outputs the entire tuple* — two keys (or two
   contexts), two messages, and the `(C, T)` — and wins if the one `(C, T)` validates under both.
   There is no fixed value to hit, so a target bound does not describe it, and this document does
-  **not** have the single number that covers it. Two of its three routes are priced just below,
-  both at `2^128` and both with identical plaintexts; the third is the one that is not.
+  **not** have the single number that covers it. All three of its routes are priced just below:
+  two at `2^128` with identical plaintexts, and the third by construction at the key-search
+  level; what is missing is a *bound*, not a price.
 
 **Why the two cannot be swapped, in one sentence each.** In the attacker-chosen game the adversary
 is free to collect tags for `q` inputs *it chooses* and look for a **collision** among them, which
 is `q²/2^257` with birthday point **`2^128`** — the chaining-value birthday of the table's first
 row, not a 520-bit target. So the collision route that the target bound does not price is exactly
-the route the attacker-chosen game offers, at `2^128`. **What is not derived is the rest of that
-attack, and "the rest" is narrower than an earlier revision of this section said.** The completion
-depends on which route is being completed, and there are three:
+the route the attacker-chosen game offers, at `2^128`. **What is not derived is a bound on the
+completions; each route is priced, and "the rest" is narrower than an earlier revision of this
+section said.** The completion depends on which route is being completed, and there are three:
 
 * **Two keys whose derived material agrees** (a `subkey` collision). Tags and keystreams agree,
   so the completion is *immediate*: one `(C, T)` opens under both keys to the *same* plaintext.
 * **Two contexts under one key whose inner digests agree.** The tag is the same, and the KDF takes
   the tag rather than the context, so the keystream is the same; the completion is *immediate*
   again — one plaintext under two contexts.
-* **Two *different* messages.** This is the only circular case: it needs two keys with different
-  keystreams, and then an adversary who knows both keys would set `M₂ = M₁ ⊕ KS₁ ⊕ KS₂`, but `KS₂`
-  is derived from `T₂ = T₁` — the colliding tag — so the message it must exhibit to finish is the
-  message it was trying to choose, making the completion a fixed point of the tag/keystream
-  coupling. (This is the same `T* = F_C(T*)` shape the acyclicity lemma in §3 isolates for the
-  *verifier*, where it is benign because `T*` is an input; here `T*` is what the attacker is
-  trying to fix, and it is two-sided.)
+* **Two *different* messages.** This is the only circular-looking case: it needs two keys with
+  different keystreams, and then an adversary who knows both keys would set
+  `M₂ = M₁ ⊕ KS₁ ⊕ KS₂`, but `KS₂` is derived from `T₂ = T₁` — the shared tag — so the message it
+  must exhibit to finish is the message it was trying to choose, making the completion look like a
+  fixed point of the tag/keystream coupling. (This is the same `T* = F_C(T*)` shape the acyclicity
+  lemma in §3 isolates for the *verifier*, where it is benign because `T*` is an input; here `T*`
+  is what the attacker is trying to fix.) The construction below prices it without searching the
+  tag space: fix `k_out₁ = k_out₂` first, then *choose* `M₁` — the tag is then
+  `T = tag(K₁, N, A, M₁)` by construction, not a value to search — and the coupling collapses to
+  a 256-bit inner-digest equality, `X(k_in₂, C ⊕ KS₂(T)) = X(k_in₁, M₁)`, which ≈`2^256`
+  candidates satisfy.
 
-Whether that last case blocks the completion, and at what cost, is **not worked out here**. So the
+Whether that last case blocks the completion, and at what cost, is **answered for the route this
+document can construct — it does not block at the key-search level.** Fix `k_out₁ = k_out₂` (a
+birthday over ≈`2^128.5` sampled keys), then *choose* the message: `M₁` fixes
+`T = tag(K₁, N, A, M₁)` and `C = M₁ ⊕ KS₁(T)`, and the second opening needs
+`X(k_in₂, C ⊕ KS₂(T)) = X(k_in₁, M₁)` — a `2^-256` event per candidate, ≈`2^256` candidates for a
+hit, and `KS₁ ≠ KS₂` generically gives `M₁ ≠ M₂`. So the
 honest statement is: *the target bound is `≈ 2^-256` per candidate key — the `subkey` preimage,
 not a tag hit — and is proved; the attacker-chosen game's key
 and context routes are broken at `2^128`, both with identical plaintexts; its different-message
-route is **not derived** — the `2^128` collision is the cost of the one step this document can
-price (a lower bound on the search that starts the attack, not a bound on the attack), and the
-construction's commitment in that case rests on the design argument above rather than on a
-computed probability.* §5 row 17 records this as an open obligation, which is where a reader
-looking for "what would settle it" should go.
+route is **priced by construction at the key-search level (`≈ 2^256`)**, with no bound derived.*
+The `2^128` birthday that starts the construction is the price of one step, not a bound on the
+attack, and no claim that `2^256` is optimal is made here. §5 row 17 records the missing bound,
+which is where a reader looking for "what would settle it" should go.
 
 **Five consequences, stated plainly.**
 
@@ -1332,19 +1352,22 @@ refutation, and the status of the attempt.
 | 14 | U2/U5 share counter 0 (§4.1) | The key-material block equals the message keystream for one `(K,N,M)` | **Tested** for a spread of inputs (`the_key_material_block_is_not_the_message_keystream`); a real collision needs the master key to compute, so it is a probability statement (`≈2^-352`) rather than an attack |
 | 15 | **L3.6** [REMOVED in `v0.3`]: the tag was a PRF in the master key even though the master key was also in the tag's input (§2.1) | Through `v0.2`: a distinguisher for `K ↦ B3(D(K), … ‖ K ‖ …)` that is not a distinguisher for `x ↦ B3(k, x)` at a fixed input | **No longer a claim.** The two-level tag has no hash message containing `K`, so there is nothing to refute; the row records the removal rather than an attempt. (The `v0.2` evidence was: not attemptable by test — a statement about a primitive's internal structure — supported by BLAKE3's design, a separation showing the black-box reduction cannot exist, and the fact that every `H(k ‖ m)`-shaped MAC rests on the same assumption. `v0.3` removed the assumption instead of arguing it.) |
 | 16 | The tag-collision birthday is `2^128`, not `2^260` (§4.5) | An argument that some state other than the 256-bit chain value binds the tag; or a collision search cheaper than `2^128` | **Derived here, not tested**: it is a bound on computation. What the harnesses do pin is the premise — that the tag is exactly the root XOF of the encoded input — through the published keyed-BLAKE3 KATs, the differential reference implementation, and `src/witness.rs` under `ultra` |
-| 17 | **Commitment in the attacker-chosen games (CMT-1/CMT-3)** — the adversary outputs both keys (or contexts), both messages and `(C,T)` and wins if one `(C,T)` opens under both (§4.5) | A worked-out attack in that game, or a completed derivation of its probability | **Two of its three routes are priced, both same-plaintext breaks; the third is not derived.** (a) *Key route*: a `subkey` collision at `2^128` gives two keys with identical derived material, hence identical tags *and keystreams*; the two decryptions are byte-identical (Thm 2's commitment bullet). Closed in `v0.2` by the `K`-in-input step, **not** closed by the two-level tag — the honest record of that trade. (b) *Context route*: two chosen contexts (a different AAD, with the key, nonce and message held fixed — a nonce change moves `k_in`/`k_out` *and* `enc_seed`, so equal inner digests would not even give equal tags or keystreams: the cross-key search is still a `2^128` birthday, it just does not complete) whose inner digests `X` collide at `2^128` give the same tag, and the KDF takes the tag rather than the context, so the same keystream follows; one `(C,T)` validates under both contexts with the same plaintext and no fixed point (Thm 2's context bullet). (c) *Different-message route* — the salamander: needs two keys with `KS₁ ≠ KS₂`, so it is the fixed point `T = tag(K₂, N, A, C ⊕ KS₂(T))`, whose cheapest route known to this document is `≈ 2^520`. The target bound (`≈ 2^-256` per candidate key, the `subkey` preimage) does not describe any of the three. A proof (or a break) of (c) would settle what is left; `2^128` is infeasible, and the *target* game is untouched |
+| 17 | **Commitment in the attacker-chosen games (CMT-1/CMT-3)** — the adversary outputs both keys (or contexts), both messages and `(C,T)` and wins if one `(C,T)` opens under both (§4.5) | A worked-out attack in that game, or a completed derivation of its probability | **Two of its three routes are priced as same-plaintext breaks at `2^128`; the third is priced by construction at the key-search level, with no bound derived.** (a) *Key route*: a `subkey` collision at `2^128` gives two keys with identical derived material, hence identical tags *and keystreams*; the two decryptions are byte-identical (Thm 2's commitment bullet). Closed in `v0.2` by the `K`-in-input step, **not** closed by the two-level tag — the honest record of that trade. (b) *Context route*: two chosen contexts (a different AAD, with the key, nonce and message held fixed — a nonce change moves `k_in`/`k_out` *and* `enc_seed`, so equal inner digests would not even give equal tags or keystreams: the cross-key search is still a `2^128` birthday, it just does not complete) whose inner digests `X` collide at `2^128` give the same tag, and the KDF takes the tag rather than the context, so the same keystream follows; one `(C,T)` validates under both contexts with the same plaintext and no fixed point (Thm 2's context bullet). (c) *Different-message route* — the salamander: needs two keys with `KS₁ ≠ KS₂`. The cheapest construction this document can find never searches the tag space: fix `k_out₁ = k_out₂` (a birthday over ≈`2^128.5` sampled keys), *choose* `M₁` so the first opening is satisfied by construction (`T = tag(K₁, N, A, M₁)`, `C = M₁ ⊕ KS₁(T)`), then search for a second opening whose 256-bit inner digest agrees, `X(k_in₂, C ⊕ KS₂(T)) = X(k_in₁, M₁)` — ≈`2^256` candidates — which generically gives `M₁ ≠ M₂`; the price is the key-search level, `≈ 2^256`, not `2^520`, and it is a construction, not a bound. The target bound (`≈ 2^-256` per candidate key, the `subkey` preimage) does not describe any of the three. A proof (or a break) of (c) would settle what is left: the route is priced, the bound is not; `2^128` is infeasible, and the *target* game is untouched |
 
 Rows 1, 16 and 17 are the honest boundary: **no test in this repository, and none that could be
 written, falsifies or establishes them.** Row 1 is the standing bet that every
 symmetric scheme makes; row 16 is a bound derived by hand, and the
 tests around it check the premises of the derivation rather than the number; row 17 is not a bound
-at all — it is the place this document *declines* to put a number, and says so. (Row 15, the
+at all — it is the place this document prices the route by construction but *declines* to put a
+bound on it, and says so. (Row 15, the
 `v0.2` `K`-in-input assumption L3.6, is marked removed above: `v0.3`'s two-level tag no longer
-takes that step, so it is no longer part of the boundary. Row 17 now has two priced routes and one
-unpriced one: a `subkey` collision at `2^128` breaks the *key* route completely and an
+takes that step, so it is no longer part of the boundary. Row 17 now has all three routes priced:
+a `subkey` collision at `2^128` breaks the *key* route completely and an
 inner-digest collision between two chosen contexts breaks the *context* route equally completely,
 both with the two openings sharing a plaintext, while the *different-message* route (the
-salamander proper) is still the unanalysed fixed point — that distinction is recorded there and
+salamander proper) is priced by construction at the key-search level — fix `k_out₁ = k_out₂`,
+choose `M₁`, search ≈`2^256` candidates for the 256-bit inner-digest equality — with no optimality
+claim; that distinction is recorded there and
 in §4.5, and an earlier revision of this sentence called the whole row "a complete completion",
 which it is not.)
 
@@ -1439,9 +1462,13 @@ missing later (L3.6, §2.1).
   and the ciphertext length equals the message length. Both are properties of the mode, not
   defects, and both are documented in `README.md`.
 * **Stack residue, and the limit of what `scrub_stack` proves.** The crate wipes every
-  key-bearing local it can *name*, but three things it cannot are measured to survive in the
-  call-chain stack: the `blake3` dependency's XOF output buffer (a frame this crate does not
-  own), `k_out` under the `pure` Rust-backend build, and the *return temporaries* of functions
+  key-bearing local it can *name*, but four things it cannot reach are measured to survive in the
+  call-chain stack: the **whole 32-byte `k_in`** — a derived *key*, left by the
+  dependency's by-value temporaries rather than in a frame this crate can name, and the
+  largest survivor — the `blake3` dependency's XOF
+  output buffer (16 of the 44 bytes of `enc_key ‖ enc_nonce`; a frame this crate does not own),
+  `k_out` under the `pure` Rust-backend build (4 of 32 bytes on the default build), and the
+  *return temporaries* of functions
   that return an aggregate by value (which is why `derive_material`/`derive_enc` write through
   caller slices). Under `ultra`, `dual-mac`'s `scrub_stack` overwrites the derivation region
   afterwards, which is why the `ultra` stack scan reports clean — but that is a **frame-layout
@@ -1451,7 +1478,9 @@ missing later (L3.6, §2.1).
   re-runs the half of them reachable from the public API — the master key and `locked`'s tag;
   the derived-value scans need crate internals, as the tool's own closing note says. This is in
   the residual list because it is the one hygiene claim that rests on
-  something other than a wipe the code names.
+  something other than a wipe the code names, and because the largest survivor is a whole derived
+  key rather than a buffer tail: a reader must not read "the crate wipes what it names" as
+  "nothing derived survives the call".
 * **Beyond the model.** Side channels, fault injection, a debugger, cold boot, a hostile
   hypervisor: out of scope here and covered where they belong.
 * **What "no unknown problem" can and cannot mean.** A break of this construction must be a
@@ -1550,7 +1579,7 @@ target bounds are §4.5's, and each harness named in the last column is describe
 | Commitment **against a given ciphertext** (the target game) | a ciphertext that opens under two keys, with the ciphertext *given* | **`≈ 2^-256` per candidate key** — the candidate has to reproduce the 256-bit `subkey = HC(K′, N₁)`, which fixes the tag, the derived key pair and the recovered message alike, so enumerating the whole key space expects **`≈ 1` second key** (existence `≈ 0.63`; a one-output game `≈ 0.368`): a target, not a birthday, at key-search level. It is *not* `2^-520` per candidate / `≈ 2^-264` over the space — that is the *pure tag-collision* route, which the `subkey` route dominates — and it is not key recovery either: a `subkey` has no unique preimage — the real key is one, and a sweep of the key space expects **one more** — so in expectation the sweep finds as many second keys as real ones, which is what makes this a second opening rather than a recovery. The wide tag does **not** set this (Thm 2, §4.5) |
 | Commitment in the **attacker-chosen** games — the **key-commitment** half (one `(C,T)` valid under two keys) | a ciphertext the *adversary* chooses, opening under two keys it also chooses | **`2^128`** — a `subkey` collision (all three derived values are functions of the 256-bit `subkey`) gives two keys with identical material, tags *and* keystreams, so both keys decrypt to the **same plaintext** and the completion is immediate. This was closed in `v0.2` by `K`-in-input and is **not** closed by the two-level tag: the honest record of that trade. §4.5, "The two commitment games", and §5 row 17 |
 | Commitment to the **context** (nonce/AAD) — for a key-holder, and in the attacker-chosen game | a ciphertext that opens under a second context, with the ciphertext *given* (key-holder) or chosen | **`≈ 2^256` target / `2^128` attacker-chosen**, and the 65-byte width does not set either: the context enters the tag's hash input `X`, so a second context reproducing a given `X` is a preimage of BLAKE3's 256-bit chaining value, and two *chosen* contexts collide in `X` at a `2^128` birthday — after which the tag, the KDF output and the keystream are all equal, so the completion is immediate and the plaintext is the same. The AAD's byte components are what this exposes; a length re-split has too few candidates to reach a 256-bit preimage. §4.5, Thm 2's context bullet, §5 rows 3 and 17 |
-| Commitment in the **attacker-chosen** games — the **salamander** route (one `(C,T)` opening to two *different* messages) | the same, but the two openings must differ: `M₁ ≠ M₂` | **not derived here, and not reached by the `2^128` route**: identical derived material forces `KS₁ = KS₂` and hence `M₁ = M₂`, so two messages need the fixed point `T = tag(K₂, N, A, C ⊕ KS₂(T))`, whose cheapest known route is the `2^520` search over the tag space. §4.5, Thm 2's commitment bullet |
+| Commitment in the **attacker-chosen** games — the **salamander** route (one `(C,T)` opening to two *different* messages) | the same, but the two openings must differ: `M₁ ≠ M₂` | **priced by construction at the key-search level, `≈ 2^256` — no bound derived, and not reached by the `2^128` same-plaintext route**: identical derived material forces `KS₁ = KS₂` and hence `M₁ = M₂`, so two messages need a construction that does not search the tag space — fix `k_out₁ = k_out₂` (a birthday over ≈`2^128.5` sampled keys), choose `M₁` (which fixes `T = tag(K₁, N, A, M₁)` and `C`), and search ≈`2^256` candidates for a second opening that collides in the 256-bit inner digest; `KS₁ ≠ KS₂` generically gives `M₁ ≠ M₂`. §4.5, Thm 2's commitment bullet |
 | Forgery (tag guess, second preimage) | the tag | `min(2^256 key search, 2^520 tag guess)` = the key search; the fault-assisted variants are §8.2's subject |
 | Two-time pad | a tag collision between two messages | the same `2^128` event; when it happens the observer pays nothing (§3's Corollary) |
 | Nonce misuse (related nonce, IV reuse) | SIV's misuse model | **by design**: reuse degrades to equality plus the collision term above; a keystream derived from `(K, N)` alone would leak `M₁ ⊕ M₂` always (`nonce_reuse_does_not_reuse_the_keystream`) |

@@ -242,7 +242,7 @@ jobs:
           work="${RUNNER_TEMP:-${TMPDIR:-/tmp}}"
           cargo test --release --test timing -- --list | tee "$work/timing-list.log"
           for name in \
-            timing_tag_comparison_does_not_leak_position \
+            timing_tag_position_screen_finds_no_gross_difference \
             timing_does_not_depend_on_key_contents; do
             if ! grep -q "^${name}: test$" "$work/timing-list.log"; then
               echo "::error::${name} is no longer listed by 'cargo test --release --test timing': a renamed, ignored or cfg'd-out leak screen would leave the advisory job green while testing less"

@@ -8,6 +8,134 @@ green push to `main` — which are build artefacts of that job, not construction
 
 ## Unreleased
 
+### A fifth third-party pass, line by line over `92c85ad`: seventeen findings adopted, two answered, and four the round found by itself
+
+The report (a fifth, independent, line-by-line pass, delivered as
+`XChaCha20-BLAKE3-SIV_独立逐行审计报告_92c85ad.md`) came back with the cryptography
+clean by its own independent measurements — 5,411 differential comparisons against a self-written
+reference across three configurations with **0 mismatches**, the witness's independence confirmed, 13/13
+Kani harnesses with no vacuity — and one release blocker, seven HIGH items and eleven MEDIUM ones in the
+verification apparatus and the documents. Every item was reproduced here before it was accepted, and
+every fix was verified in both directions: the mutation must fail, the clean tree must pass. **No item
+changed a byte of the wire format, and none was a defect in the construction.**
+
+**Verification devices that were weaker than their claims — all reproduced, all closed**
+
+* **ctgrind could not see a branch inlined into the decision** (HIGH). The suppression file matches on
+  the innermost frame by symbol, and `tools/ctgrind.sh` built without debuginfo: a secret-dependent
+  branch in a helper marked `#[inline(always)]` and called from `accept_or_reject` was attributed to
+  `accept_or_reject` and suppressed, so the tool printed PASS. Reproduced, then fixed with
+  `-C debuginfo=2` in both build sites (the flags are otherwise unchanged): the same probe now exits 99
+  and names the inlined helper, the same tree without the flag passes again, and the clean tree reports
+  the same single suppressed decision as before. This was the round's most important item — that recipe
+  is this repository's principal mechanical constant-time evidence.
+* **The `ultra` witness's agreement could be made vacuous by overwriting its operands** (HIGH). Inserting
+  `witness_tag.copy_from_slice(&computed_tag);` before both comparisons left the whole `ultra` suite
+  green at 128/0/7. A new source-shape guard requires that the binding the witness result arrives in is
+  *mentioned nowhere* between the witness call's terminating `;` and the agreement — a write of any
+  spelling has to name its target, so "mentioned nowhere" is the deterministic form of "never written".
+  Three adjacent variants were silent too (`computed_tag.copy_from_slice(&witness_tag)`,
+  `witness_plaintext.copy_from_slice(...)`, and the third agreement site in `encrypt`, which the report
+  did not name); all four now fail the guard.
+* **`verify.sh --kani-only` passed with zero harnesses** (HIGH). Emptying `src/proofs.rs` made Kani print
+  "No proof harnesses … found", exit 0, and the stage report a pass. The Kani stage now counts
+  `#[kani::proof]` in the source, cross-checks that count against `tools/check_kani_cfg.sh`'s
+  `COMMITTED_HARNESSES` (a disagreement is reported, not resolved), and greps Kani's own output for the
+  zero-harness sentence. Explicitly requested → exit 1; implicit → exit 3, "could not run"; real run
+  unchanged: `harness count: 13 … requirement: 13`, 13 verified, rc 0.
+* **The tamper sweeps were exhaustive only up to 300 bytes** (HIGH). The report's injection — a
+  branchless mask that clears `ct[60000]`'s bit 4 in `derive_tag` — reproduced exactly: that bit's
+  tamper is *accepted* and the whole default suite stays green, and the reason is sharper than the
+  report states: the only rows reaching byte 60000 are the large fixture's, and
+  `pt_for(60000) = 235 = 0b1110_1011` has bit 4 **clear**, so masking it moves nothing (clearing bit 0
+  instead is caught). The rows above the caps are now swept by
+  `differential_long_rows_sampled_positions_are_authenticated` — all eight bits at the first two and
+  last two bytes of each field, up to 16 evenly spaced positions, and bytes 60000/60001 where the field
+  holds them, over 16 rows: 297 positions, 2,376 single-bit comparisons, each row anchored against the
+  reference and required to round-trip untampered (+4.0 s in debug; the 1 MiB row stays out and is named
+  in the docstring, one position costing ~17 s in a debug build). The docstrings and `README.md` /
+  `tests/README.md` now state exactly that coverage instead of "every position".
+* **The timing position screen could not fail for the leak it named** (HIGH). Its resolution (~24 ns/op
+  on the reference host, at `|t| = 10`) is the same order as the tens-of-nanoseconds effect a
+  byte-at-a-time comparison would produce: an injected early-exit comparison passes it, and the screen's
+  own docstring already said so after an earlier round. The name and the opening claim were what
+  remained: renamed to `timing_tag_position_screen_finds_no_gross_difference`, its docstring now leads
+  with what the screen can and cannot establish, and `.github/workflows/ci.yml`'s blocking
+  existence-check follows the new name. *Not* adopted: making the screen blocking. The CI job's own
+  comment carries the measurement — two runs with no possible cause reported `t = 10.96` on a hosted
+  runner — so sharpening this screen makes it unusable rather than stronger; the property is held by the
+  clock-free gates (ctgrind above, `tools/fi_instruction.sh`, the source-shape pins).
+* **A shadow constant made the comparison fold tautological** (MEDIUM), **`XSIV_ALLOW_UNLOCKED` could not
+  be set to "no"** (MEDIUM), **`stack_residue.sh`'s threshold missed split and 7-byte residue** (MEDIUM),
+  **`fi_instruction.sh`'s `nop` model had no scan-count guard** (MEDIUM), **cross-execution trusted the
+  emulator's exit status** (MEDIUM), **the zero-test guard summed over the whole invocation** (MEDIUM),
+  **`#[cfg(any())]`-deadened wipes survived** (MEDIUM), **the primitive census could be evaded with a
+  function pointer** (MEDIUM), **`detect_avx2` read CPUID leaf 7 without checking the maximum basic leaf**
+  (MEDIUM, a SIGILL on Sandy/Ivy Bridge, not a silent wrong answer). Each was reproduced as a mutation
+  that left the suite green, and each now fails a named guard: `the_fold_accumulator_is_the_compared_value`,
+  an `allow_unlocked()` that accepts only `1`/`true`/`yes` and prints `SKIPPED [<test>]` for every skip
+  (matrix: unset/`1`/`0`/empty/`TRUE`/`maybe`), a split rule (two runs totalling ≥8 bytes) plus 7-byte and
+  split positive controls — a global 4-byte threshold was measured at ~1 false FAIL per 12 runs over the
+  1 MiB paint region and rejected in the comment — per-shard and driver-level scan-count guards, an
+  emulator identity check (basename `qemu-*` **and** a QEMU-mentioning `--version`) plus a per-binary
+  `test result:` requirement, per-target counts for every suite invocation, a recursive constant-`cfg`
+  rejection over `src/lib.rs` and `src/witness.rs`, a census that requires every counted primitive to be
+  *called* (never taken as a value), and the standard CPUID maximum-leaf guard.
+
+**Documents that said something false**
+
+* **The stack-residue list omitted the whole 32-byte `k_in`** (HIGH). Measured again here (4,096-byte
+  round trip, default build): `k_in` 32/32 bytes, `enc_key` 16/32, `enc_key ‖ enc_nonce` 16/44, `k_out`
+  4/32; under `pure`, `k_out` 16/32; `ultra`/`dual-mac` clean. The README bullet, `SECURITY-ANALYSIS.md`'s
+  residual entry and `scrub_stack`'s own rustdoc now list the whole derived key — attributed as
+  `src/lib.rs`'s `blake3_keyed_multi` comment already attributed it (the dependency's by-value
+  temporaries, not a frame this crate can name), which the first draft of this correction got wrong. The
+  README also said "a full 44-byte `enc_key ‖ enc_nonce`"; it is a run, 16 of 44 on that scan, and the
+  quoted crate claim is now scoped to the copies the crate can *name* rather than reading as "nothing
+  derived survives".
+* **The salamander was priced `2^264` too high** (HIGH). "The cheapest route we can see is the `2^520`
+  search over the tag space" is wrong: equal `k_out` first (a ≈`2^128.5`-key birthday) reduces the
+  different-message completion to a **256-bit inner-digest equality** — choose `M₁`, which *chooses* the
+  tag by construction, so only the digest is searched, at ≈`2^256` candidates: the key-search level, the
+  same 256-bit object as every other route in these documents. Corrected at every live site
+  (`SECURITY-ANALYSIS.md`'s Thm 2 bullet, §4.5's two table rows, §5 row 17, §8.1, the preambles and
+  closings; `README.md`'s table row, its prose bullet and its security-level summary; `AUDIT-RESPONSE.md`
+  §1.C/§2/§4; `src/lib.rs`'s four rustdoc sites). The distinction kept throughout: this is a priced
+  *route*, not a proven *bound* — the row said "not analysed", and it now says what is missing is a
+  bound. Every remaining `2^520` in the tree is a tag-guess/forgery number and stays.
+
+**The one release item was documentation, not a defect** — the crate is not on crates.io (404, re-checked),
+so the README's two `version = "0.1"` snippets pointed at nothing. Both now say so and give the `git`
+line that works today, and `[package.metadata.docs.rs] features = ["ultra"]` was added because a default
+`cargo doc` renders neither `locked` nor `random` (measured both ways). Publishing to a registry is an
+irreversible outward-facing step that belongs to the maintainer, not to CI; the release job already
+attaches the `.crate` to a GitHub Release per green push.
+
+**What this round found by itself, beyond the report**
+
+* **`non_test_source()` truncated at the first line of `mod tests {` in six test files** — so production
+  code appended *after* the test module (legal Rust, compiled in normal builds) was invisible to every
+  scan those helpers feed: a helper holding `chacha20_keystream(key, 7, nonce, …)` and called from
+  `encrypt` left `tests/security.rs` 4/4 green. All six now brace-match the module's body and blank it
+  rather than deleting lines (so failure messages keep pointing at real lines); `decision_scope.rs:952`,
+  `security.rs:1184`, `construction_inventory.rs:335`, `ultra.rs:416` and `locked.rs:1242` each fail on an
+  appended probe that every one of them used to miss, with the old cut as the control. The same
+  truncation survived in `tests/variable_latency.rs`'s three inventories and was closed there too.
+* **`src/lib.rs`'s `refuse_skip` still read `XSIV_ALLOW_UNLOCKED` with `is_ok()`** after the test-side
+  parser was fixed — the same "the refusal cannot be requested" defect the report opened, one file over.
+* **The control-flow census drifted 38 → 39** when the CPUID guard went in; the table and
+  `tests/README.md`'s row were moved together, which is what that table is for.
+
+**Verified here**: `check.sh --fast` rc 0 (83 s) and, with `--ctgrind --tools --kani`,
+`verify.sh` — stages 1–4, Kani 13/13 with the new count guard, ctgrind, the mutation campaign (all
+mutations caught) and the fault-injection campaign, plus the tool gates — the suites green in each
+configuration the guards are compiled under (lib 50, security 16, differential 7, decision_scope 7,
+locked 11, ultra 8, counter_range 4, variable_latency 3). Each adopted item carries the two-direction
+experiment in this entry. **Not run here**: the 4000-vector wide differential, the Miri Tree-Borrows
+sweep, the fuzz soak and the cross-execution matrix (all part of `Deep checks`, whose dispatched run is
+still in its instruction-level sweep at the time of writing: ten of eleven jobs green, the ASan step that
+used to fail among them).
+
 ### Deep checks was failing on the one job that only the schedule runs, and a doctest was why
 
 The weekly scheduled audit — `wide audit (scheduled)`, the job behind the Monday cron — has been
@@ -83,7 +211,10 @@ describe were not re-run):
 
 - `tests/differential_reference.rs`, `tests/decision.rs`, `tests/mac_commitment.rs`: the
   tamper sweeps now flip **all eight bits** of every position rather than one fixed bit per
-  byte (the docstrings claimed the exhaustive form; the sweep was one bit in eight), and
+  byte (the docstrings claimed the exhaustive form; the sweep was one bit in eight) — of the
+  rows below the size caps this entry left in place, which the round at the top of this file
+  then closed with a deterministic long-row sweep (the rows above the caps were left to
+  random sampling here, and the third-party report on `92c85ad` priced that gap) — and
   `tests/security.rs` asserts per-byte forgeries and adds a **counting global allocator** so
   `decrypt_bounded`'s "the bound is checked before the allocation" is observable rather than
   inferred from the error variant.

@@ -54,7 +54,8 @@
 //!   because identical material means identical keystreams.  That is the
 //!   **key-commitment** half of the *attacker-chosen* game; the different-message
 //!   (salamander) half needs `KS₁ ≠ KS₂` and so is the fixed point
-//!   `SECURITY-ANALYSIS.md` §4.5 records as unanalysed.  The *target* bound — a given
+//!   `T = tag(K₂, N, A, C ⊕ KS₂(T))` that `SECURITY-ANALYSIS.md` §4.5 prices *by
+//!   construction* at the key-search level, `≈ 2^256` — a route, not a proven bound.  The *target* bound — a given
 //!   ciphertext, `≈ 2^-256` per candidate key, the 256-bit `subkey` preimage — is
 //!   unchanged either way.)
 //! * **Both lengths are encoded and every field is fixed width.**  BLAKE3 is not
@@ -94,7 +95,8 @@
 //! - 520-bit tag (65 bytes), committing **against a given ciphertext** (the *target*
 //!   game; the literature's CMT-1/CMT-3 are *attacker-chosen*, a different game whose key
 //!   and context routes are priced at `2^128` in the table below and whose different-message
-//!   route is not assigned a number): an attacker must reproduce a *fixed* value, but
+//!   route is priced at the key-search level by construction (`≈ 2^256`, §4.5; no bound is
+//!   proven)): an attacker must reproduce a *fixed* value, but
 //!   that value is the 256-bit `subkey = HC(K′, N₁)`, not the 520-bit tag — an event of
 //!   probability `≈ 2^-256` per candidate key, so a full sweep of the key space expects
 //!   `≈ 1` second key (success `≈ 0.63`), i.e. key-search level.  The width does **not**
@@ -132,7 +134,7 @@
 //! | Forgery resistance | **256-bit** | BLAKE3 keyed mode as a PRF over a 256-bit key |
 //! | Key commitment against a given ciphertext | **`≈ 2^-256` per candidate key** — `≈ 1` second key over the whole key space (the *target* game) | the 256-bit `subkey` the tag and the keystream are both derived from, **not** the tag's width |
 //! | Context commitment (the AAD; the nonce also enters `k_in`/`k_out`/`enc_seed`, so a context route holds it fixed) | **`≈ 2^256`** target / **`2^128`** attacker-chosen | the 256-bit inner digest the context feeds, not the tag's width |
-//! | Attacker-chosen commitment (the literature's CMT-1/CMT-3) | **key route `2^128`, context route `2^128`** — both with identical plaintexts; the different-message salamander is not assigned a number | the `subkey` collision and the inner-digest collision, each a birthday |
+//! | Attacker-chosen commitment (the literature's CMT-1/CMT-3) | **key route `2^128`, context route `2^128`** — both with identical plaintexts; the different-message salamander is priced at the key-search level (`≈ 2^256`, §4.5) by construction, not by a bound | the `subkey` collision and the inner-digest collision, each a birthday |
 //! | Collision resistance of the tag | **2^128** | the 256-bit chaining value the tag is a function of, not the tag's width |
 //!
 //! **Forgery: 256 bits is the ceiling, not a choice.**  Forgery resistance is
@@ -2116,8 +2118,14 @@ unsafe fn zeroize_raw(ptr: *mut u8, len: usize) {
 ///
 /// Every named local in this crate is wiped, and `tools/stack_residue.sh` confirms
 /// that the master key never survives in the call-chain stack region.  What *does*
-/// survive is the `blake3` dependency's XOF output block: its frames hold a full
-/// `enc_key ‖ enc_nonce`, and this crate cannot name them, let alone zeroize them.
+/// survive is derived material in frames a wipe does not reach: the **whole 32-byte
+/// `k_in`**, left by the dependency's by-value temporaries (the `Hasher::new_keyed`
+/// return and the `ChunkState` built from the key — the copies the comment on
+/// `blake3_keyed_multi` names), and the `blake3` dependency's XOF output block, whose frames
+/// hold a run of `enc_key ‖ enc_nonce` (16 of the 44 bytes on the committed
+/// 4,096-byte scan; `k_out` adds ~16 under `pure`).  This crate cannot name those
+/// frames, let alone zeroize them — `k_in` it does name and wipe, and the wipe does
+/// not reach the copy the compiler left behind.
 ///
 /// Those frames can, however, be **overwritten**, because they sit below this
 /// function's own frame and are about to be reused anyway.  Calling this from an
@@ -2190,7 +2198,8 @@ fn zeroize_array<T>(value: &mut T) {
 /// against an adversary who chooses keys — a route in the *attacker-chosen* game
 /// this crate prices only in part: the key-commitment half falls at `2^128`, with
 /// both keys decrypting to the same plaintext, while the two-different-messages
-/// half is unanalysed (see `SECURITY-ANALYSIS.md` §4.5).
+/// half is priced at the key-search level by construction (see `SECURITY-ANALYSIS.md`
+/// §4.5: `≈ 2^256`, a route rather than a bound).
 /// # Why this writes through the caller's slices
 ///
 /// It used to return `([u8; 32], [u8; 32], [u8; 32])`. A 96-byte aggregate return makes the
@@ -3735,6 +3744,12 @@ mod x86_simd {
     /// `no_std` rules out `is_x86_feature_detected!`, so this queries CPUID
     /// directly and additionally checks XCR0, because a CPU can advertise AVX2
     /// while the OS has not enabled YMM state saving (using AVX2 then faults).
+    /// Leaf 7 is only read after leaf 0 reports a maximum basic leaf of at least
+    /// 7: on a CPU with AVX but no leaf 7 (Sandy/Ivy Bridge), `CPUID.(EAX=7)`
+    /// returns the data of the highest supported leaf instead, and bit 5 of that
+    /// data is not the AVX2 feature bit — reading it there would claim AVX2 and
+    /// the first kernel call would take SIGILL (an availability defect, not a
+    /// wrong answer).
     /// The result is cached: CPUID is serialising and would otherwise dominate
     /// the cost of short messages.
     pub(super) fn has_avx2() -> bool {
@@ -3774,8 +3789,13 @@ mod x86_simd {
             use core::arch::x86_64::{__cpuid_count, _xgetbv};
             // SAFETY: CPUID is always available on x86_64.  `_xgetbv` is only
             // executed after confirming OSXSAVE, which guarantees the instruction
-            // exists and XCR0 is readable.
+            // exists and XCR0 is readable.  `CPUID.(EAX=7,ECX=0)` is only read
+            // after leaf 0's EAX says leaf 7 exists; on a CPU whose maximum basic
+            // leaf is below 7, `CPUID` returns the *highest supported leaf's*
+            // data for leaf 7 (Intel SDM, "CPUID—CPU Identification"), whose
+            // bit 5 is not the AVX2 feature bit.
             unsafe {
+                let max_basic_leaf = __cpuid_count(0, 0).eax;
                 let leaf1 = __cpuid_count(1, 0);
                 let osxsave = (leaf1.ecx >> 27) & 1 == 1;
                 let avx = (leaf1.ecx >> 28) & 1 == 1;
@@ -3784,6 +3804,9 @@ mod x86_simd {
                 }
                 // XCR0[2:1] must both be set: XMM and YMM state enabled by the OS.
                 if _xgetbv(0) & 0b110 != 0b110 {
+                    return false;
+                }
+                if max_basic_leaf < 7 {
                     return false;
                 }
                 let leaf7 = __cpuid_count(7, 0);
@@ -5036,13 +5059,31 @@ mod tests {
     /// "the kernel refused to lock, so nothing ran" both read as `ok`.
     #[cfg(feature = "locked")]
     fn refuse_skip(e: isize) {
+        // Only an affirmative value allows the skip, the rule `tests/locked.rs`'s and
+        // `tests/ultra.rs`'s `allow_unlocked()` apply. `is_ok()` made
+        // `XSIV_ALLOW_UNLOCKED=0` -- the value a caller writes to *refuse* the skip --
+        // behave like `=1`, so the one setting that asks for the failure was the one
+        // setting that could not produce it (found by the third-party report on
+        // `92c85ad`). An unrecognised value is not affirmative either: it fails here
+        // rather than being read as consent.
+        let allowed = matches!(
+            std::env::var("XSIV_ALLOW_UNLOCKED").as_deref(),
+            Ok(v)
+                if v.eq_ignore_ascii_case("1")
+                    || v.eq_ignore_ascii_case("true")
+                    || v.eq_ignore_ascii_case("yes")
+        );
         assert!(
-            std::env::var("XSIV_ALLOW_UNLOCKED").is_ok(),
+            allowed,
             "the kernel refused to lock memory ({e:?}), so this test would verify nothing. \
              Raise RLIMIT_MEMLOCK or grant CAP_IPC_LOCK, or set XSIV_ALLOW_UNLOCKED=1 to \
              record that this host knowingly runs unlocked."
         );
-        std::eprintln!("SKIPPED: memory locking refused ({e:?}) and XSIV_ALLOW_UNLOCKED is set");
+        std::eprintln!(
+            "SKIPPED [a_refused_lock_is_reported_and_returns_the_allowance]: memory locking \
+             refused ({e:?}) and XSIV_ALLOW_UNLOCKED is set to an affirmative value. This is \
+             NOT a pass."
+        );
     }
 
     /// A corrupted locked page must be *noticed*, at the first use after the corruption.

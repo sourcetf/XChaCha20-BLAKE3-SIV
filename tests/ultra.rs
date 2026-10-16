@@ -61,7 +61,8 @@ const NONCE: [u8; 24] = [0x22u8; 24];
 /// compiles rather than about a copy that can drift.
 const LIB: &str = include_str!("../src/lib.rs");
 
-/// `LIB` with comments removed and string-literal contents blanked, cut at `mod tests {`.
+/// The non-test source of `LIB`: everything outside the body of its `#[cfg(test)]
+/// mod tests` module, wherever that module sits in the file.
 ///
 /// Every source-shape assertion in this file runs on this rather than on the raw file.
 /// `include_str!` text makes a `matches`/`contains` satisfiable without the code: replace a
@@ -72,9 +73,73 @@ const LIB: &str = include_str!("../src/lib.rs");
 /// behavioural signature, so that count is its only existence witness. The scanner is the
 /// one `tests/decision_scope.rs` and `tests/counter_range.rs` use; it is copied rather than
 /// shared because a test binary cannot import another test binary's items.
+///
+/// The obvious way to get the cut — truncate at the first `mod tests {` — hides code
+/// that is textually *after* the module, because the cut is at the module's first
+/// line, not at its closing brace: a production function appended below the test
+/// module (legal Rust, compiled in normal builds) is skipped entirely. Measured: a
+/// helper calling `zeroize_array` on a `recomputed_tag` appended after the test
+/// module left this file's suite green, though
+/// `dual_mac_is_wired_into_both_decrypt_paths` counts exactly those wipes. It also
+/// hid a `mod tests {` *mentioned in a comment*
+/// before the real one, since the old `find` ran on the raw text; stripping comments
+/// and literals first removes that.
+///
+/// This finds the module on the stripped text, requires it to carry `#[cfg(test)]`,
+/// brace-matches its body (braces inside comments and string literals are already gone,
+/// so they cannot unbalance the count), and removes exactly the body — blanking those
+/// lines rather than deleting them, so line numbers in the scans' failure messages keep
+/// pointing at the source. Everything else, before *and* after the module, is what the
+/// scans read.
+///
+/// [`non_test_source_of`] is the same cut for `src/witness.rs`, which
+/// `the_witness_shares_only_the_specification_with_the_crate` scans.
 fn non_test_source() -> String {
-    let cut = LIB.find("mod tests {").expect("the test module must exist");
-    strip_comments(&LIB[..cut])
+    non_test_source_of(LIB)
+}
+
+/// See [`non_test_source`]: the same cut applied to `text` rather than to `LIB`, for the
+/// witness-file scan below.
+fn non_test_source_of(text: &str) -> String {
+    let stripped = strip_comments(text);
+    let at = stripped
+        .find("mod tests {")
+        .expect("the scanned file's test module must exist (`mod tests {`)");
+    assert_eq!(
+        stripped.matches("mod tests {").count(),
+        1,
+        "the scanned file holds more than one `mod tests {{`: which one is the test \
+         module, and what the scan cut, would be ambiguous"
+    );
+    assert!(
+        stripped[..at].trim_end().ends_with("#[cfg(test)]"),
+        "the scanned `mod tests {{` is not `#[cfg(test)]`: it is production code being \
+         mistaken for the test module, so the scan would skip it"
+    );
+    let open = at + "mod tests {".len() - 1;
+    let mut depth = 0usize;
+    let mut close = None;
+    for (i, c) in stripped[open..].char_indices() {
+        match c {
+            '{' => depth += 1,
+            '}' => {
+                depth -= 1;
+                if depth == 0 {
+                    close = Some(open + i);
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+    let close = close.expect("the test module's body is unterminated");
+    let mut out = String::with_capacity(stripped.len());
+    out.push_str(&stripped[..at]);
+    for _ in 0..stripped[at..=close].matches('\n').count() {
+        out.push('\n');
+    }
+    out.push_str(&stripped[close + 1..]);
+    out
 }
 
 /// See [`non_test_source`]: comments and string-literal contents are removed, with newlines
@@ -525,6 +590,46 @@ fn the_witness_is_called_from_exactly_these_entry_points() {
     );
 }
 
+/// Whether `XSIV_ALLOW_UNLOCKED` *affirmatively* says this host knowingly runs a
+/// `locked` build with nothing locked.
+///
+/// Only `1`, `true` and `yes` (case-insensitive) count. `0`, `false`, `no`, the empty
+/// string and an unset variable all mean "do not allow", so a kernel refusal is then a
+/// *failure* — the old `is_ok()` parse made `XSIV_ALLOW_UNLOCKED=0` and an empty value
+/// behave exactly like `=1`, i.e. the "refuse" setting could not be requested at all. A
+/// value that is neither affirmative nor one of those recognisable denials is printed and
+/// then treated as "do not allow": refusing to reinterpret a typo silently is the same
+/// rule the `SKIPPED` lines below follow — a skip or an override must be recorded, never
+/// inferred.
+fn allow_unlocked() -> bool {
+    match std::env::var("XSIV_ALLOW_UNLOCKED") {
+        Ok(v)
+            if ["1", "true", "yes"]
+                .iter()
+                .any(|a| v.eq_ignore_ascii_case(a)) =>
+        {
+            true
+        }
+        Ok(v)
+            if ["0", "false", "no", ""]
+                .iter()
+                .any(|n| v.eq_ignore_ascii_case(n)) =>
+        {
+            false
+        }
+        Ok(v) => {
+            eprintln!(
+                "NOTE: XSIV_ALLOW_UNLOCKED={v:?} is neither an affirmative value \
+                 (1/true/yes) nor a recognised denial (0/false/no/empty), so it is treated \
+                 as *not* allowing an unlocked `locked` build: a kernel refusal will fail \
+                 the tests that meet it."
+            );
+            false
+        }
+        Err(_) => false,
+    }
+}
+
 /// A locking key is really locked, read back from the kernel.
 ///
 /// The syscall numbers in `locked` are `const`s, and a wrong one would not be caught by
@@ -543,7 +648,7 @@ fn locked_key_is_actually_locked() {
     // default. `XSIV_ALLOW_UNLOCKED=1` is the explicit, recorded way to say "this
     // host cannot lock and that is not a regression" -- and setting it is a
     // decision that `ultra`'s `locked` layer is knowingly inactive here.
-    let allow_unlocked = std::env::var("XSIV_ALLOW_UNLOCKED").is_ok();
+    let allow_unlocked = allow_unlocked();
 
     if !SUPPORTED {
         // `SUPPORTED == false` is a compile-time property of the target, not a failure: the
@@ -552,8 +657,10 @@ fn locked_key_is_actually_locked() {
         // platform limit. What *is* a failure is the runtime refusal below: there the target
         // should have worked and did not.
         eprintln!(
-            "SKIPPED: memory locking is unsupported on this target/architecture, so \
-             `ultra`'s `locked` layer is inactive here (as documented)"
+            "SKIPPED [locked_key_is_actually_locked]: memory locking is unsupported on this \
+             target/architecture (`locked::SUPPORTED == false` is a compile-time property), \
+             so `ultra`'s `locked` layer is inactive here (as documented). This is not a \
+             pass; no environment variable can exercise it on this target."
         );
         return;
     }
@@ -568,7 +675,18 @@ fn locked_key_is_actually_locked() {
                 "the kernel refused to lock memory (errno {}), so `ultra` promises \
                  mlock + MADV_DONTDUMP and this host is not getting it. Raise \
                  RLIMIT_MEMLOCK or grant CAP_IPC_LOCK, or set XSIV_ALLOW_UNLOCKED=1 to \
-                 record that this host knowingly runs unlocked.",
+                 record that this host knowingly runs unlocked. [test: \
+                 locked_key_is_actually_locked]",
+                -e
+            );
+            // The allowed branch must be visible: a returned test reports `ok` exactly
+            // like one that measured a live lock, and libtest captures this line unless
+            // it is run with `--nocapture`.
+            eprintln!(
+                "SKIPPED [locked_key_is_actually_locked]: the kernel refused to lock memory \
+                 (errno {}), so the lock was never measured. This is NOT a pass: it was \
+                 reached only because XSIV_ALLOW_UNLOCKED=1 records that this host knowingly \
+                 runs a `locked` build unlocked.",
                 -e
             );
             return;
@@ -614,7 +732,16 @@ fn locked_key_is_actually_locked() {
                 allow_unlocked,
                 "the kernel refused the second lock (errno {}), so the live-page half of this \
                  test cannot run on this host. Raise RLIMIT_MEMLOCK or grant CAP_IPC_LOCK, or \
-                 set XSIV_ALLOW_UNLOCKED=1 to record that this host knowingly runs unlocked.",
+                 set XSIV_ALLOW_UNLOCKED=1 to record that this host knowingly runs unlocked. \
+                 [test: locked_key_is_actually_locked]",
+                -e
+            );
+            eprintln!(
+                "SKIPPED [locked_key_is_actually_locked]: the kernel refused the second lock \
+                 (errno {}), so the live-page half (the lock must be on the page the key is \
+                 on) was not measured. This is NOT a pass: it was reached only because \
+                 XSIV_ALLOW_UNLOCKED=1 records that this host knowingly runs a `locked` build \
+                 unlocked.",
                 -e
             );
             return;
@@ -764,11 +891,12 @@ fn the_decision_still_answers_correctly_with_every_layer_on() {
 #[test]
 fn the_witness_shares_only_the_specification_with_the_crate() {
     let src = include_str!("../src/witness.rs");
-    let cut = src.find("mod tests {").expect("the witness test module");
     // Comments stripped by the same scanner as `non_test_source`, so a mention in prose
     // neither trips the check nor hides a use, and a `//` inside a string literal cannot
-    // cut a line short.
-    let code = strip_comments(&src[..cut]);
+    // cut a line short. The cut is the brace-matched body of the witness's test module,
+    // not the text before its first line: a `crate::` use appended after that module
+    // would otherwise be invisible to the assertions below.
+    let code = non_test_source_of(src);
 
     // The one permitted import: the specification's constants.
     let allowed = "use crate::{DOM_ENC, DOM_PRE, DOM_TAG, NONCE_LEN, SUBKEY_DOMAIN, TAG_LEN};";

@@ -1,9 +1,10 @@
-# Audit response — the four third-party reviews of revision `8ae80ce`
+# Audit response — the four third-party reviews of revision `8ae80ce` (and, in §5, the line-by-line report against `92c85ad`)
 
 Four reports were produced against revision `8ae80ce` (construction `v0.3`), and this document
 records what was done with each finding: what was **fixed** (with the commit and the evidence),
 and what was **not changed**, with the reason. It is written to be checkable — every disposition
-names a file, a test, a command, or a commit, and "responded" never means "ignored".
+names a file, a test, a command, or a commit, and "responded" never means "ignored". §5 applies the
+same treatment to the fifth report, the independent line-by-line pass against `92c85ad`.
 
 | # | Report | Pages | Findings | Disposition |
 | --- | --- | --- | --- | --- |
@@ -106,7 +107,7 @@ not about the current source.
 | "a fault that replaces the computed tag with a constant … not defended by `hardened`" | the *source-level* fault is pinned by the campaign row, but the byte-level probe is profile-dependent (LTO off accepts, the shipping profile does not) | the row now says which evidence pins what (`77b18ac`) |
 | Context commitment quoted `2^-520` per candidate key and "the width is what sets it" | the context enters the tag's hash input, not its key: a key-holder target is `≈ 2^256`, and in the attacker-chosen game two chosen contexts collide at `2^128` with immediate completion | README, `SECURITY-ANALYSIS.md` (Thm 2, §4.5, §5 row 17, §5.1, §8.1) and the crate docs now carry all three routes (`8dcc09e`) |
 | "Commitment to the nonce and the lengths: same argument, byte for byte" | false for the context components (same reason as above) | rewritten (`8dcc09e`) |
-| "the completion step is a fixed point" (as a general statement) | only the different-message route is; the key and context routes complete immediately with the same plaintext | rewritten as three routes (`8dcc09e`) |
+| "the completion step is a fixed point" (as a general statement) | only the different-message route is; the key and context routes complete immediately with the same plaintext | rewritten as three routes (`8dcc09e`); the third is priced by construction, without searching the tag space (see §4) |
 | `enc_seed` "bound into the tag's derivation" (README) | `enc_seed` keys the KDF *whose input is the tag* — the opposite direction | corrected |
 | CHANGELOG's "reopens a complete invisible-salamander at `2^128`" | the route forces equal material, hence identical plaintexts: a key-commitment break, not a salamander | withdrawn in place (`8dcc09e`) |
 | `random::fill`'s "a sandbox that blocks `getrandom(2)`" | the `getrandom` crate falls back to `/dev/urandom` on `EPERM`/`ENOSYS` | the example now says both must be blocked |
@@ -334,7 +335,8 @@ record skips, not passes — and the reports' own measurements are the substitut
   derivations (target `≈ 2^-256` per candidate key — the 256-bit `subkey` preimage, so `≈ 1`
   second key over the key space at key-search level; attacker-chosen key and context routes
   `2^128` with identical plaintexts; different-message
-  salamander not derived). **An eighth round (2026-10-08) corrected this line again**: the target
+  salamander priced by construction at the key-search level, its bound not derived). **An eighth
+  round (2026-10-08) corrected this line again**: the target
   figure had been `2^-520` per candidate key and `≈ 2^-264` over the key space, which prices only
   the *pure tag-collision* route and is dominated by the `subkey` one. See `CHANGELOG.md`'s
   eighth-round entry.
@@ -366,8 +368,88 @@ record skips, not passes — and the reports' own measurements are the substitut
 
 ## 4. What would settle the items left open
 
-* **The different-message salamander** (`SECURITY-ANALYSIS.md` §5 row 17): a proof or a break of
-  the `T = tag(K₂, N, A, C ⊕ KS₂(T))` completion. Nothing in these reports claims a cheaper
-  route; the document does not claim `2^520` is optimal.
+* **The different-message salamander** (`SECURITY-ANALYSIS.md` §5 row 17): a *bound* on the route
+  the documents now price by construction — fix `k_out₁ = k_out₂`, choose `M₁`, search for the
+  256-bit inner-digest equality at ≈`2^256` candidates — or a cheaper break of it. The price is
+  key-search level; the documents claim neither `2^520` nor that `2^256` is optimal.
 * **A synchronous two-fault bench** (§2.2): the residual the README names is a hardware
   countermeasure question, not a software one.
+
+## 5. The line-by-line report against `92c85ad` (the fifth review)
+
+That report's own independent measurement came back clean on the construction: 5,411 differential
+comparisons against a self-written reference across three configurations with **0 mismatches** (34
+lengths × 7 AAD lengths, the 1999/2000/65488/65489 boundaries and 8 MiB among them), the witness's
+independence confirmed adversarially, 13/13 Kani harnesses with no vacuity, and its own conclusion
+that no implementation defect breaks confidentiality or integrity. Everything it raised was in the
+verification apparatus and the documents. Every item below was **reproduced in this tree** before
+being accepted, and every fix was verified in both directions — the mutation must fail, the clean
+tree must pass. The full record, including the commands and the counters, is in `CHANGELOG.md`'s
+entry for this round.
+
+### 5.1 Adopted and fixed (17 of the 19)
+
+| Item | Substance | What was done |
+| --- | --- | --- |
+| H-1 | ctgrind's shipped recipe (`+crt-static -C strip=none`, no `-C debuginfo`) attributes a branch inlined *into* `accept_or_reject` to `accept_or_reject`, which the single suppression entry then covers silently | `-C debuginfo=2` added to both build sites. An `#[inline(always)]` probe with a secret-dependent loop: rc 99 and the helper named; the same tree with the flag removed passes again; clean tree unchanged (one suppressed decision, rc 0) |
+| H-2 | `witness_tag.copy_from_slice(&computed_tag);` before either `ultra` comparison makes the agreement vacuous, suite still 128/0/7 | `the_witness_outputs_reach_the_agreement_unwritten`: the binding the witness result arrives in may be mentioned nowhere between the call and the agreement. Four variants (both directions, the plaintext operand, the third site in `encrypt`) now fail it |
+| H-3 | `verify.sh --kani-only` with zero harnesses printed "all requested checks passed" and exited 0 | Harness-count guard in the Kani stage: source count, cross-check against `check_kani_cfg.sh`'s `COMMITTED_HARNESSES`, and Kani's own zero-harness output. Explicit → rc 1, implicit → rc 3; real run unchanged (13/13, rc 0) |
+| H-4 | The position screen cannot fail for the leak it names (its ~24 ns/op resolution is the order of the effect) | Renamed to `timing_tag_position_screen_finds_no_gross_difference`, docstring rewritten to lead with the bounds; CI's blocking existence-check follows. Its blocking status is *answered*, not adopted — see §5.2 |
+| H-5 | The tamper sweeps are exhaustive only up to 300 bytes; a mask on `ct[60000]`'s bit 4 is accepted (reproduced — and the reason is that `pt_for(60000) = 235` has that bit clear, so only a *different* bit is caught) | New `differential_long_rows_sampled_positions_are_authenticated`: all eight bits at a deterministic position set over the 16 rows above the caps (297 positions, 2,376 comparisons), each anchored against the reference; the mask now fails it |
+| H-6 | The stack-residue lists omit the whole 32-byte `k_in` (measured 32/32, plus 16/44 of `enc_key ‖ enc_nonce`, 4/32 of `k_out`; `pure` 16/32) | `README.md`, `SECURITY-ANALYSIS.md` and `scrub_stack`'s rustdoc corrected, attributed as `blake3_keyed_multi`'s own comment already did (the dependency's by-value temporaries); the quoted no-copy claim is scoped to what the crate can name |
+| H-7 | The salamander's "cheapest known route `≈ 2^520`" is an overestimate by `2^264`: equal `k_out` first (≈`2^128.5`-key birthday), then a *chosen* message makes the tag satisfy the first opening by construction, leaving a 256-bit inner-digest equality at ≈`2^256` candidates | Corrected at every live site in both documents, `AUDIT-RESPONSE.md` and four rustdoc sites, keeping the distinction the report also keeps: a priced **route**, not a proven **bound**. Every remaining `2^520` is a tag-guess/forgery number |
+| B-1 | Not on crates.io (404) while the README's two dependency snippets say `version = "0.1"`; no docs.rs metadata, so the gated API is invisible on a default doc build | Both snippets now say so and give the working `git` line; `[package.metadata.docs.rs] features = ["ultra"]` added, with a default `cargo doc` measured to render neither `locked` nor `random` and the `ultra` build to render both. The *publishing* part is §5.2 |
+
+| Item | Substance | What was done |
+| --- | --- | --- |
+| M-1 | A shadow constant (`let acc = 0u64;`) makes `ct_eq_independent`'s fold tautological while the pinned lines survive | `the_fold_accumulator_is_the_compared_value`: one binding, four mentions, compared against zero after the last accumulation |
+| M-2 | `XSIV_ALLOW_UNLOCKED` read with `is_ok()`, so `=0` meant "allow"; skips invisible under captured output | `allow_unlocked()` accepts only `1`/`true`/`yes`, an unrecognised value is loud and *not* consent, and every skip prints `SKIPPED [<test>]`. Matrix measured: unset, `1`, `0`, empty, `TRUE`, `maybe`. The same `is_ok()` in `src/lib.rs`'s `refuse_skip` (not named by the report) was fixed too |
+| M-3 | The zero-test guard summed over the whole invocation, so emptying one target stayed green | Per-target counts for every suite invocation, with documented exclusions; emptied and deleted targets each fail |
+| M-4 | Cross-execution with `QEMU_*=/bin/true` reported "executed 12 … under qemu" and passed | Emulator identity (basename `qemu-*` **and** a QEMU-mentioning `--version`) plus a per-binary `test result:` requirement; `/bin/true` now exits 1 before any build, real qemu unchanged |
+| M-5 | The 8-byte threshold missed a 4+4 split and a 7-byte run | Split rule (two runs totalling ≥8 bytes) and a 7-byte rule, each with its own positive control. A global 4-byte threshold was measured at ~1 false FAIL per 12 runs over the 1 MiB paint region and rejected in the comment rather than adopted |
+| M-6 | `fi_instruction.sh`'s `nop` model reported zero counts for an empty scan set and exited 0 | Per-shard and driver-level scan-count guards (exit 3 = could not run); empty set now rc 3, clean runs unchanged in `nop` and `bits` |
+| M-7 | `counter_range.rs` bypassed by a function-pointer alias, by a call after `mod tests {`, and by counter arithmetic spelled differently | All three reproduced (the literal `wrapping_add(1)` form was *not* green even before, as reported honestly) and closed: standalone mentions panic, post-module code is scanned, and the ordered counter-arithmetic lines are pinned with an exact total of `.wrapping_add(` |
+| M-8 | `locked.rs`'s asserted wipes could be moved into `if black_box(false) { … }` and the file stayed 10/10 | Brace-depth guard (each wipe an unconditional top-level statement, no preceding `#[…]`), plus a new behavioural test that corrupts the live key page through `/proc/self/mem` and requires the integrity check to panic |
+| M-9 | `#[cfg(any())] { zeroize_array(…) }` deadened wipes survived 96/96 and 128/128 | Recursive constant-`cfg` rejection across `src/lib.rs` and `src/witness.rs` (spacing evasions proven caught, `cfg_attr` correctly excluded), applied at every wipe the count table relies on; the tree has no legitimate constant `cfg` to carve out |
+| M-10 | The primitive census counted literal `name(` text, so a function pointer added an eighth live call invisibly | `the_counted_primitives_are_never_taken_as_values`: every occurrence of a counted name in non-test source must be a call or the definition the census skips. The guard states its own residual scope (assembled identifiers, code from outside the scanned text) instead of claiming the class is closed |
+| M-11 | `detect_avx2` read CPUID leaf 7 without checking the maximum basic leaf (SIGILL on Sandy/Ivy Bridge — availability, not a silent wrong answer) | Standard guard: leaf 0 first, `max_basic_leaf < 7` returns false. Verified by the SIMD suite on this host and demonstrated synthetically for the faulty-hardware case, which this CPU cannot present |
+
+### 5.2 Answered rather than changed (2 of the 19)
+
+* **H-4's second half — "and it is in no blocking CI job".** True as stated, and deliberately so.
+  The CI job's comment carries the measurement behind it: two hosted-runner runs with no possible
+  causal difference reported `t = 10.96` (release) and `t = 11.89` (debug) against a real order
+  artefact's `t = 35.6`, i.e. the runner biases the comparison by ~0.8% between classes. A screen
+  sharpened enough to see tens of nanoseconds would therefore fail on CI for reasons that are not the
+  crate's. The property it names is held by clock-free gates instead — ctgrind (H-1's fix makes it
+  stronger), `tools/fi_instruction.sh`'s byte and bit sweeps of the compiled decision, and the
+  source-shape pins — and the screens themselves run strictly in `verify.sh` (stage 3c) on every
+  invocation. What the report was right about is the *claim*, and that is what changed.
+* **B-1's framing as a defect to be fixed before 1.0.** The documentation half was a real defect and
+  is fixed (§5.1). The remainder is not a defect but a release decision: publishing to crates.io is
+  irreversible, requires the maintainer's credentials, and is not something CI should do on a push —
+  this repository's release job attaches the `.crate` it builds to a GitHub Release instead, and the
+  README now says exactly that. The version (`0.1.0`) and the `Unreleased` changelog heading are
+  consequences of not having released, not evidence of a mistake.
+
+### 5.3 Found by this round, beyond the report
+
+* **`non_test_source()` truncated at the first line of `mod tests {` in six test files**, hiding
+  production code appended *after* the test module from every scan those helpers feed (measured: a
+  helper calling `chacha20_keystream` with a fixed counter, appended and called from `encrypt`, left
+  `tests/security.rs` green). All six now brace-match the module body and blank it; five of them are
+  demonstrated to fail on an appended probe that they used to miss, with the old cut as the control.
+* **Three more instances of the same truncation** in `tests/variable_latency.rs`'s inventories.
+* **`refuse_skip`'s `is_ok()`** in `src/lib.rs` — M-2's defect, one file outside where the report saw it.
+* **The control-flow census drifted 38 → 39** when the CPUID guard went in; the table, the row in
+  `tests/README.md` and the guard moved together, which is what that table exists to force.
+
+### 5.4 The state this section describes
+
+The tree carries all of it: `check.sh --fast` green, and `verify.sh --ctgrind --tools --kani` green
+(stages 1–4, Kani 13/13 with the new count guard, ctgrind, the mutation campaign with every mutation
+caught, the fault-injection campaign, and the tool-level gates), `Deep checks` dispatched for the
+commit. What is *not* claimed: the 4000-vector wide differential, the Miri Tree-Borrows sweep, the
+fuzz soak and the cross-execution matrix were not re-run here — they are the scheduled job's, and its
+dispatched run was still in the instruction-level sweep when this was written (ten of eleven jobs
+green, including the ASan step whose failure started this stretch).

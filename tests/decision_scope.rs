@@ -30,7 +30,8 @@ const LIB: &str = include_str!("../src/lib.rs");
 /// The suppression file itself.
 const SUPP: &str = include_str!("ctgrind.supp");
 
-/// `LIB` with comments removed, string-literal contents blanked, cut at `mod tests {`.
+/// The non-test source of `LIB`: everything outside the body of its `#[cfg(test)]
+/// mod tests` module, wherever that module sits in the file.
 ///
 /// Every presence and count assertion below runs on this, not on the raw file. Both
 /// of those used to be satisfiable without the code: delete a real line and add a
@@ -47,9 +48,62 @@ const SUPP: &str = include_str!("ctgrind.supp");
 /// quotes as code — with one exception: `#[cfg(…)]` attributes are copied through
 /// verbatim, because their `"feature"` payload is itself a match target and no literal
 /// can stand in for an attribute.
+///
+/// The obvious way to get the cut — truncate at the first `mod tests {` — hides code
+/// that is textually *after* the module, because the cut is at the module's first
+/// line, not at its closing brace: a production function appended below the test
+/// module (legal Rust, compiled in normal builds) is skipped entirely. Measured: a
+/// helper calling `accept_or_reject` appended after the test module and reached
+/// through `core::hint::black_box` left this file's suite green. It also hid a
+/// `mod tests {` *mentioned in a comment* before the real one, since the old `find`
+/// ran on the raw text; stripping comments and literals first removes that.
+///
+/// This finds the module on the stripped text, requires it to carry `#[cfg(test)]`,
+/// brace-matches its body (braces inside comments and string literals are already gone,
+/// so they cannot unbalance the count), and removes exactly the body — blanking those
+/// lines rather than deleting them, so line numbers in the scans' failure messages keep
+/// pointing at the source. Everything else, before *and* after the module, is what the
+/// scans read.
 fn non_test_source() -> String {
-    let cut = LIB.find("mod tests {").expect("the test module must exist");
-    strip_comments(&LIB[..cut])
+    let stripped = strip_comments(LIB);
+    let at = stripped
+        .find("mod tests {")
+        .expect("the test module must exist (`mod tests {`)");
+    assert_eq!(
+        stripped.matches("mod tests {").count(),
+        1,
+        "src/lib.rs holds more than one `mod tests {{`: which one is the test module, and \
+         what the scan cut, would be ambiguous"
+    );
+    assert!(
+        stripped[..at].trim_end().ends_with("#[cfg(test)]"),
+        "the scanned `mod tests {{` is not `#[cfg(test)]`: it is production code being \
+         mistaken for the test module, so the scan would skip it"
+    );
+    let open = at + "mod tests {".len() - 1;
+    let mut depth = 0usize;
+    let mut close = None;
+    for (i, c) in stripped[open..].char_indices() {
+        match c {
+            '{' => depth += 1,
+            '}' => {
+                depth -= 1;
+                if depth == 0 {
+                    close = Some(open + i);
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+    let close = close.expect("the test module's body is unterminated");
+    let mut out = String::with_capacity(stripped.len());
+    out.push_str(&stripped[..at]);
+    for _ in 0..stripped[at..=close].matches('\n').count() {
+        out.push('\n');
+    }
+    out.push_str(&stripped[close + 1..]);
+    out
 }
 
 /// See `non_test_source`. Public to the file so each test can build it once.
@@ -287,6 +341,43 @@ fn brace_blocks(needle: &str) -> Vec<String> {
         rest = &after[end + 1..];
     }
     out
+}
+
+/// Does `code` contain `word` as a whole identifier -- not as an alphanumeric/`_`-continued
+/// substring of a longer name (`plaintext` inside `witness_plaintext` is not an occurrence)?
+///
+/// The gaps the tests below scan are statements, not prose, so this is the boundary test
+/// for "this binding was named here" without matching a longer identifier that merely
+/// contains its text.
+fn contains_word(code: &str, word: &str) -> bool {
+    code.match_indices(word).any(|(at, _)| {
+        let before = code[..at].chars().next_back();
+        let after = code[at + word.len()..].chars().next();
+        !before.is_some_and(|c| c.is_alphanumeric() || c == '_')
+            && !after.is_some_and(|c| c.is_alphanumeric() || c == '_')
+    })
+}
+
+/// The byte just past the `;` that ends the statement containing the byte `at`, counting
+/// bracket depth so a `;` inside the statement's own parentheses or braces cannot end it
+/// early.
+///
+/// The witness call's argument list is the statement `the_witness_outputs_reach_the_
+/// agreement_unwritten` has to cut at. Today it holds no `;`, but a future argument (a
+/// closure body) could, and a naive `find(';')` would then treat the text between there
+/// and the comparison as the gap to check -- a gap that *excludes* a write inserted just
+/// before the real `;`.
+fn statement_end(code: &str, at: usize) -> usize {
+    let mut depth = 0i64;
+    for (n, c) in code[at..].char_indices() {
+        match c {
+            '(' | '[' | '{' => depth += 1,
+            ')' | ']' | '}' => depth -= 1,
+            ';' if depth == 0 => return at + n + 1,
+            _ => {}
+        }
+    }
+    panic!("the statement at byte {at} has no terminating `;`");
 }
 
 /// Locate `accept_or_reject` by name and return its full text, body included,
@@ -729,6 +820,112 @@ fn the_second_gate_uses_two_comparison_shapes_wherever_the_gates_are_built() {
     );
 }
 
+/// The fold's accumulator must be the value the final comparison sees.
+///
+/// Everything pinned about `ct_eq_independent` above is a *line*: the two `acc |= …;`
+/// accumulations, the exact XOR operands, and the return `acc.ct_eq(&0u64)`. An audit kept
+/// every one of those lines and inserted `let acc = 0u64;` between the tail loop and the
+/// return: the OR-ed bytes are then dead, the function returns the constant
+/// `0u64.ct_eq(&0u64)`, and the whole suite stays green (measured on a copy) -- the fold is
+/// the second comparison *shape*, so a tautological fold silently removes the single-fault
+/// defence the two shapes exist for. This test pins the *binding* instead of the lines:
+/// declared `mut` exactly once, no second `let` binding of the same name anywhere (that is
+/// the shadow), and no mention of `acc` between the last accumulation and the comparison
+/// (which also catches `acc = 0;`, `acc &= 0;`, `acc ^= acc;` and any other statement that
+/// discards the folded bits).
+///
+/// Narrow on purpose: it reads one function and only rejects a changed binding shape or an
+/// extra mention of the accumulator, so reformatting, comment changes, or renaming an
+/// unrelated local do not trip it.
+#[test]
+fn the_fold_accumulator_is_the_compared_value() {
+    let fold = brace_blocks("fn ct_eq_independent(");
+    assert_eq!(fold.len(), 1, "one `ct_eq_independent` expected");
+    let code = strip_comments(&fold[0]);
+    // Whitespace-flattened for the binding shapes: rustfmt's line breaks are not the
+    // subject of these assertions.
+    let flat = code.split_whitespace().collect::<Vec<_>>().join(" ");
+
+    // Declared once, and `mut` -- the two `acc |= …` lines write it, and a non-`mut`
+    // accumulator cannot be the one they write.
+    assert_eq!(
+        flat.matches("let mut acc = 0u64;").count(),
+        1,
+        "`ct_eq_independent` must declare `let mut acc = 0u64;` exactly once:\n{}",
+        fold[0]
+    );
+    // And no second `let` binding of the same name: `let acc = 0u64;` shadows the
+    // accumulator, so the returned comparison no longer sees the folded bytes -- every
+    // line pinned above is still present under that mutation, which is why it passed.
+    let binders: usize = [
+        "let acc =",
+        "let mut acc =",
+        "let ref acc =",
+        "let ref mut acc =",
+    ]
+    .iter()
+    .map(|form| flat.matches(form).count())
+    .sum();
+    assert_eq!(
+        binders, 1,
+        "`acc` must be bound exactly once in `ct_eq_independent`: a second `let` binding of \
+         the same name shadows the accumulator, discarding the OR-ed bytes before the \
+         comparison (measured: an inserted `let acc = 0u64;` kept the whole suite green, \
+         every pinned line intact):\n{}",
+        fold[0]
+    );
+    // Every mention of `acc` is one of the fold's four statements: the declaration, the
+    // two accumulations, the comparison. A fifth mention is a shadow binding, a
+    // cancel/zero (`acc &= 0;`, `acc ^= acc;`), or a move of the compared value away from
+    // the accumulator -- each leaves the fold constant or dependent on something other
+    // than both tags.
+    assert_eq!(
+        code.match_indices("acc")
+            .filter(|(at, _)| {
+                let before = code[..*at].chars().next_back();
+                let after = code[*at + 3..].chars().next();
+                !before.is_some_and(|c| c.is_alphanumeric() || c == '_')
+                    && !after.is_some_and(|c| c.is_alphanumeric() || c == '_')
+            })
+            .count(),
+        4,
+        "`ct_eq_independent` must mention the accumulator exactly four times -- the \
+         declaration, the two accumulations, and the final comparison. Any other mention \
+         (`let acc = 0u64;`, `acc = 0;`, `acc &= 0;`, ...) is a write that discards the \
+         folded bits before they are compared:\n{}",
+        fold[0]
+    );
+    // The compared binding is the accumulator, and the comparison follows the fold. (The
+    // last-line pin in the test above states the return shape for the whole function;
+    // repeated here so a failure of this invariant names what it caught.)
+    assert_eq!(
+        code.matches("acc.ct_eq(&0u64)").count(),
+        1,
+        "the accumulator must be compared against zero exactly once:\n{}",
+        fold[0]
+    );
+    let cmp_at = code
+        .rfind("acc.ct_eq(&0u64)")
+        .expect("asserted present above");
+    let last_accum = code
+        .rfind("acc |=")
+        .expect("the fold must accumulate into `acc`");
+    let accum_end = statement_end(&code, last_accum);
+    assert!(
+        accum_end <= cmp_at,
+        "the comparison must follow the last accumulation:\n{}",
+        fold[0]
+    );
+    assert!(
+        !contains_word(&code[accum_end..cmp_at], "acc"),
+        "`acc` must not be mentioned between the last accumulation and the comparison: any \
+         statement there (`acc = 0;`, `acc &= 0;`, `acc ^= acc;`, a shadowing \
+         `let acc = ...`) discards the folded bytes, and the fold then certifies any two \
+         tags whose bytes the loops covered:\n{}",
+        fold[0]
+    );
+}
+
 /// A skipped decision call must leave a rejection standing.
 ///
 /// The outcome is written *through* `out`, which the caller initialises before the
@@ -1029,4 +1226,177 @@ fn the_decision_outcome_is_fail_closed() {
          covers (valgrind reported it: one report inside `encrypt`, `tools/ctgrind.sh \
          --features ultra`)"
     );
+}
+
+/// The witness's own outputs must reach the agreement unwritten.
+///
+/// `ultra`'s headline property is that the accept decision requires the independent
+/// implementation to agree, and the two comparisons in each `witness_ok` block are that
+/// requirement's only statement. They are worth their names only if the compared values are
+/// what `witness::decrypt` produced: an inserted
+/// `witness_tag.copy_from_slice(&computed_tag);` immediately before the `let agree = ...`
+/// line makes the tag comparison a value against itself, leaves every substring this file
+/// pins elsewhere intact, and kept the whole `--features ultra` suite green at 128 passed /
+/// 0 failed / 7 ignored (measured on a copy). The same insertion on the other operands is
+/// the same defeat and was measured green too: `computed_tag.copy_from_slice(&witness_tag);`
+/// empties the tag agreement from the other side, and
+/// `witness_plaintext.copy_from_slice(...);` empties the plaintext agreement.
+///
+/// So the gap between the witness call's `;` and the comparison is pinned to name *none* of
+/// the four operands: a write of any spelling (`=`, `copy_from_slice`, `copy_from`,
+/// `copy_within`, `fill`, `swap`, `&mut`, a raw-pointer store) has to name its target, so
+/// "not named at all" is the deterministic form of "never written". The tag comparison's two
+/// operands are pinned here as well, and the exact-text `let agree = ...` pins in
+/// `the_decision_outcome_is_fail_closed` hold the rest of the agreement line, so a write
+/// hiding *inside* the comparison expression breaks those.
+///
+/// `encrypt`'s cross-check is the same agreement outside a `witness_ok` block -- the witness
+/// tag against the tag `encrypt` is about to return, turned into a rejection path through
+/// `accept_or_reject` -- and it carries the same rule: an inserted
+/// `witness_tag.copy_from_slice(&tag);` there was measured green at the same 128 passed / 0
+/// failed / 7 ignored.
+#[test]
+fn the_witness_outputs_reach_the_agreement_unwritten() {
+    let blocks = brace_blocks("let witness_ok: subtle::Choice = {");
+    assert_eq!(
+        blocks.len(),
+        2,
+        "one `ultra` witness-agreement block per decrypt entry point"
+    );
+    for block in &blocks {
+        let code = strip_comments(block);
+
+        // The main path's recovered plaintext, the plaintext comparison's other operand:
+        // `plaintext` in `decrypt` (a slice, against the witness's slice), the caller's
+        // `buffer` in `decrypt_in_place_detached`. Derived from the block rather than
+        // assumed by position, so the two blocks cannot be swapped under this check.
+        let recovered = if code.contains("witness_plaintext.as_slice().ct_eq(plaintext.as_slice())")
+        {
+            "plaintext"
+        } else if code.contains("witness_plaintext.ct_eq(buffer)") {
+            "buffer"
+        } else {
+            panic!(
+                "the witness block's plaintext comparison is neither known shape, so this \
+                 test cannot tell what its operands are:\n{block}"
+            );
+        };
+
+        // The witness's tag is received by one `let mut witness_tag =` binding, directly
+        // from the call.
+        assert_eq!(
+            code.matches("let mut witness_tag =").count(),
+            1,
+            "the witness tag must be received by exactly one `let mut witness_tag =` binding \
+             (a second binding of the name would shadow the first):\n{block}"
+        );
+        let decl_at = code
+            .find("let mut witness_tag =")
+            .expect("asserted present above");
+        let call_at = decl_at
+            + code[decl_at..]
+                .find("witness::decrypt(")
+                .expect("the binding must be initialised from the witness call");
+        assert!(
+            code[decl_at + "let mut witness_tag =".len()..call_at]
+                .trim()
+                .is_empty(),
+            "`witness_tag` must be bound *directly* from `witness::decrypt(...)`, with no \
+             other expression in between:\n{block}"
+        );
+
+        let stmt_end = statement_end(&code, call_at);
+        let agree_at = code
+            .find("let agree =")
+            .expect("the witness block must bind `agree`");
+        assert!(
+            agree_at > stmt_end,
+            "the agreement must follow the witness call:\n{block}"
+        );
+
+        // The gap: comments are already stripped, so any mention here is code, and every
+        // write to one of these names is a mention of it.
+        let gap = &code[stmt_end..agree_at];
+        for name in [
+            "witness_tag",
+            "witness_plaintext",
+            "computed_tag",
+            recovered,
+        ] {
+            assert!(
+                !contains_word(gap, name),
+                "`{name}` must not be mentioned between the `witness::decrypt(...)` call and \
+                 the `let agree = ...` comparison. A write of any spelling here -- an \
+                 assignment, `copy_from_slice`, `copy_from`, `fill`, `swap`, `&mut` -- has to \
+                 name its target, so \"mentioned nowhere\" is the deterministic form of \
+                 \"never written\": a mention is either a write to `{name}` or an expression \
+                 that moves `{name}`'s value somewhere else, and both make one half of the \
+                 agreement compare a value with itself (measured: \
+                 `witness_tag.copy_from_slice(&computed_tag);`, \
+                 `computed_tag.copy_from_slice(&witness_tag);` and \
+                 `witness_plaintext.copy_from_slice(...);` each left the whole \
+                 `--features ultra` suite green at 128 passed / 0 failed / 7 ignored).\n\
+                 Gap was:\n{gap}"
+            );
+        }
+
+        // The tag comparison's operands are that binding and the computed tag, and the
+        // comparison is the `agree` binding's initialiser rather than a dropped one.
+        assert_eq!(
+            code.matches("witness_tag.ct_eq(&computed_tag)").count(),
+            1,
+            "the agreement must compare the witness tag against the computed tag exactly \
+             once:\n{block}"
+        );
+        let cmp_at = code
+            .find("witness_tag.ct_eq(&computed_tag)")
+            .expect("asserted present above");
+        assert!(
+            cmp_at > agree_at,
+            "the tag comparison must be the `agree` binding's initialiser, not an earlier \
+             comparison whose result is dropped:\n{block}"
+        );
+        assert_eq!(
+            code.matches("witness_tag.ct_eq(").count(),
+            1,
+            "the witness tag must be compared exactly once in the block:\n{block}"
+        );
+    }
+
+    // `encrypt`'s cross-check is the same agreement outside a `witness_ok` block: the
+    // witness tag against the tag `encrypt` is about to return, turned into a rejection
+    // path through `accept_or_reject` (see `the_decision_outcome_is_fail_closed`). Same
+    // defeat, same rule. It has no `let witness_ok` to find a block by, so it is pinned
+    // here rather than in the loop above.
+    let non_test = non_test_source();
+    let decl = "let mut witness_tag = witness::encrypt_tag(";
+    assert_eq!(
+        non_test.matches(decl).count(),
+        1,
+        "`encrypt` must receive the witness tag into one `let mut witness_tag =` binding"
+    );
+    let decl_at = non_test.find(decl).expect("asserted present above");
+    let call_at = decl_at + "let mut witness_tag = ".len();
+    let stmt_end = statement_end(&non_test, call_at);
+    let agree_line = "let agree: subtle::Choice = witness_tag.ct_eq(&tag);";
+    assert_eq!(
+        non_test.matches(agree_line).count(),
+        1,
+        "`encrypt`'s witness agreement must be the `witness_tag.ct_eq(&tag)` comparison"
+    );
+    let agree_at = non_test.find(agree_line).expect("asserted present above");
+    assert!(
+        agree_at > stmt_end,
+        "`encrypt`'s agreement must follow the witness call"
+    );
+    let gap = &non_test[stmt_end..agree_at];
+    for name in ["witness_tag", "tag"] {
+        assert!(
+            !contains_word(gap, name),
+            "`{name}` must not be touched between `encrypt`'s `witness::encrypt_tag(...)` \
+             call and its `let agree = ...` comparison: the same one-line write that empties \
+             a decrypt-path agreement empties this one, and it was measured green at 128 \
+             passed / 0 failed / 7 ignored as well.\nGap was:\n{gap}"
+        );
+    }
 }

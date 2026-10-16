@@ -224,12 +224,28 @@ fn resolution_ns(a: &[f64], b: &[f64]) -> f64 {
     10.0 * (va / n + vb / m).sqrt()
 }
 
-/// The tag comparison must not leak *where* the first differing byte is.
+/// A *screen* for the classic MAC-verification leak — a byte-at-a-time comparison
+/// that exits on the first mismatch, letting an attacker who can time it recover the
+/// tag one byte at a time — together with the bounds of that screen, which are
+/// measured rather than assumed.
 ///
-/// This is the classic MAC-verification leak: a byte-at-a-time comparison exits
-/// on the first mismatch, so an attacker who can time it recovers the tag one
-/// byte at a time. `subtle::ConstantTimeEq` must make the two classes
-/// indistinguishable.
+/// The property under it is that `subtle::ConstantTimeEq` makes the two classes
+/// indistinguishable. This test cannot establish that property: a
+/// first-byte-versus-last-byte mismatch differs by tens of nanoseconds, and the
+/// screen's resolution at `|t| = 10` is the same order (24 ns/op on the reference
+/// host — the "Sensitivity" paragraph below carries the measurements and the range
+/// across hosts), so *at* the floor rather than comfortably inside it. An audit
+/// planted a byte-at-a-time comparison in both decrypt gates and this screen passed
+/// 3/3; a later one reproduced that at 5/5. What the screen does catch is a gross
+/// regression — an early exit skipping hundreds of nanoseconds, or a per-byte
+/// difference — and that is what its name claims. The mechanical evidence for the
+/// comparison itself is clock-free: `tools/ctgrind.sh`, whose build recipe carries
+/// `-C debuginfo=2` so valgrind attributes a branch inlined *into* the decision to
+/// the function it came from, and `tools/fi_instruction.sh`, whose byte and bit
+/// sweeps look at the compiled decision instruction by instruction. Sharpen this
+/// screen instead and it stops being usable: at 5x the sample count a hosted runner
+/// reports `t > 10` with no causal difference present (the `timing` job's comment in
+/// `.github/workflows/ci.yml` records that measurement).
 ///
 /// # Why the message is empty
 ///
@@ -239,7 +255,8 @@ fn resolution_ns(a: &[f64], b: &[f64]) -> f64 {
 /// differs between the two classes. Both classes are then mixtures over the
 /// first-mismatch position of *that* recomputed tag, a position unrelated to
 /// the flipped byte, and a byte-at-a-time comparison has no contrast to show:
-/// an audit planted one in both decrypt gates and this screen passed 3/3. With
+/// an audit planted one in both decrypt gates and this screen passed 3/3 (5/5 in a
+/// later audit). With
 /// an **empty** ciphertext the recovered plaintext is empty whatever the
 /// received tag is, so the recomputed tag is one fixed value; flipping byte 0
 /// in one class and byte `TAG_LEN - 1` in the other makes the comparison itself
@@ -260,7 +277,7 @@ fn resolution_ns(a: &[f64], b: &[f64]) -> f64 {
 /// skipping hundreds of nanoseconds, or a per-byte difference), while the mechanical
 /// evidence for the comparison itself is ctgrind.
 #[test]
-fn timing_tag_comparison_does_not_leak_position() {
+fn timing_tag_position_screen_finds_no_gross_difference() {
     let _guard = timing_guard();
     let key = [0x42u8; 32];
     let nonce = [0x55u8; 24];
@@ -316,7 +333,10 @@ fn timing_tag_comparison_does_not_leak_position() {
     );
 }
 
-/// No operation may branch on the *contents* of the key.
+/// A screen for branches on the *contents* of the key — a timing screen, with the
+/// resolution and the limits the position screen above states, so its name claims a
+/// screen rather than the property; the clock-free evidence for the decision is
+/// `tools/ctgrind.sh` and `tools/fi_instruction.sh`.
 #[test]
 fn timing_does_not_depend_on_key_contents() {
     let _guard = timing_guard();

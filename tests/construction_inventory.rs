@@ -22,8 +22,8 @@
 
 use xchacha20_blake3_siv::{DOM_ENC, DOM_PRE, DOM_TAG, SUBKEY_DOMAIN};
 
-/// `src/lib.rs` with comments removed and string-literal contents blanked, cut at
-/// `mod tests {`.
+/// The non-test source of `src/lib.rs`: everything outside the body of its
+/// `#[cfg(test)] mod tests` module, wherever that module sits in the file.
 ///
 /// Every presence and count assertion in this file runs on this rather than on the raw
 /// text. `include_str!` text makes a `contains`/`count` satisfiable without the code: a use
@@ -33,10 +33,64 @@ use xchacha20_blake3_siv::{DOM_ENC, DOM_PRE, DOM_TAG, SUBKEY_DOMAIN};
 /// `libtest` cannot share items between test binaries, so the scanner is copied from
 /// `tests/decision_scope.rs`, `tests/counter_range.rs`, `tests/ultra.rs` and
 /// `tests/locked.rs` rather than imported.
+///
+/// The obvious way to get this — truncate at the first `mod tests {` — hides code that
+/// is textually *after* the module, because the cut is at the module's first line, not
+/// at its closing brace: a production function appended below the test module (legal
+/// Rust, compiled in normal builds) is skipped entirely. Measured: a helper calling
+/// `chacha20_keystream`, appended after the test module, left this file's suite green,
+/// though `the_primitive_uses_are_the_ones_the_analysis_covers` counts exactly those
+/// call sites. It also hid a `mod tests {` *mentioned in a comment* before the real
+/// one, since the old `find` ran on the raw text; stripping comments and literals first
+/// removes that.
+///
+/// This finds the module on the stripped text, requires it to carry `#[cfg(test)]`,
+/// brace-matches its body (braces inside comments and string literals are already gone,
+/// so they cannot unbalance the count), and removes exactly the body — blanking those
+/// lines rather than deleting them, so line numbers in the scans' failure messages keep
+/// pointing at the source. Everything else, before *and* after the module, is what the
+/// scans read.
 fn non_test_source() -> String {
     let src = include_str!("../src/lib.rs");
-    let cut = src.find("mod tests {").expect("the test module must exist");
-    strip_comments(&src[..cut])
+    let stripped = strip_comments(src);
+    let at = stripped
+        .find("mod tests {")
+        .expect("the test module must exist (`mod tests {`)");
+    assert_eq!(
+        stripped.matches("mod tests {").count(),
+        1,
+        "src/lib.rs holds more than one `mod tests {{`: which one is the test module, and \
+         what the scan cut, would be ambiguous"
+    );
+    assert!(
+        stripped[..at].trim_end().ends_with("#[cfg(test)]"),
+        "the scanned `mod tests {{` is not `#[cfg(test)]`: it is production code being \
+         mistaken for the test module, so the scan would skip it"
+    );
+    let open = at + "mod tests {".len() - 1;
+    let mut depth = 0usize;
+    let mut close = None;
+    for (i, c) in stripped[open..].char_indices() {
+        match c {
+            '{' => depth += 1,
+            '}' => {
+                depth -= 1;
+                if depth == 0 {
+                    close = Some(open + i);
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+    let close = close.expect("the test module's body is unterminated");
+    let mut out = String::with_capacity(stripped.len());
+    out.push_str(&stripped[..at]);
+    for _ in 0..stripped[at..=close].matches('\n').count() {
+        out.push('\n');
+    }
+    out.push_str(&stripped[close + 1..]);
+    out
 }
 
 /// See [`non_test_source`]: comments and string-literal contents are removed, with newlines
@@ -307,6 +361,78 @@ fn the_primitive_uses_are_the_ones_the_analysis_covers() {
     );
 }
 
+/// **Every counted primitive must be called, never taken as a value.**
+///
+/// The census above counts literal `name(` text. Obtaining the same call through a
+/// function pointer preserves the original site's literal count while adding a live call
+/// the census cannot see: `let f: fn(&[u8; 32], &[&[u8]], &mut [u8]) = blake3_keyed_multi;
+/// f(k, parts, out);` adds an eighth use with every count unchanged (measured: the whole
+/// `--features ultra` suite stayed green). `tests/counter_range.rs` rejects a `use ... as`
+/// alias of a scanned name, but not `= name`, `name as fn(...)`, `&name`, or `name` passed
+/// as an argument -- all of which leave the name followed by something other than `(`.
+///
+/// This test requires the converse for every occurrence of every counted name in the
+/// non-test source: the next character is `(` -- i.e. the occurrence is a call, or a `fn`
+/// definition, which is the one position the census itself already skips. Calling one of
+/// these through a binding requires writing the name in some non-call position, so no
+/// function-pointer call of a counted primitive can be added while this test holds.
+///
+/// **What this cannot close, and does not claim to:** the identifier can be *assembled*
+/// rather than written (`concat_idents!`/`paste!`-style splicing, a macro that builds it),
+/// or the code can come from outside this file (`include!`, a build script, a new
+/// submodule -- the census reads `src/lib.rs` outside the body of its `#[cfg(test)]
+/// mod tests` module and nothing else). A
+/// nested `fn name(...)` that shadows the real item is textually a definition like the
+/// real one, so this test cannot tell the two apart either. It closes the textual half of
+/// the class -- value-taking through a written name -- and states that scope instead of
+/// claiming the census now has no evasion surface.
+#[test]
+fn the_counted_primitives_are_never_taken_as_values() {
+    let body = non_test_source();
+    for (call, _) in PRIMITIVE_CALLS {
+        let name = call.trim_end_matches('(');
+        let path = name.contains("::");
+        let mut from = 0usize;
+        while let Some(rel) = body[from..].find(name) {
+            let start = from + rel;
+            let end = start + name.len();
+            from = end;
+            let after = &body[end..];
+            if path {
+                // `blake3::Hasher::new` is a prefix of the separately-counted
+                // `blake3::Hasher::new_keyed` row; that occurrence is the longer name's.
+                if after.starts_with("_keyed(") {
+                    continue;
+                }
+            } else {
+                let before = body[..start].chars().next_back();
+                let next = after.chars().next();
+                if before.is_some_and(|c| c.is_alphanumeric() || c == '_')
+                    || next.is_some_and(|c| c.is_alphanumeric() || c == '_')
+                {
+                    // A substring of a longer identifier: `chacha20_keystream` inside
+                    // `chacha20_keystream_raw` is not an occurrence of the shorter name.
+                    continue;
+                }
+            }
+            let line = body[..start].matches('\n').count() + 1;
+            let source_line = body.split('\n').nth(line - 1).unwrap_or("").trim();
+            assert!(
+                after.starts_with('('),
+                "`{name}` is referred to as a value, not called, at line {line} of the \
+                 non-test source:\n    {source_line}\n\
+                 A function pointer preserves this name's literal `{call}` count while \
+                 adding a call the census above cannot see (measured: \
+                 `let f: fn(&[u8; 32], &[&[u8]], &mut [u8]) = blake3_keyed_multi; \
+                 f(k, parts, out);` left the whole `--features ultra` suite green with all \
+                 counts unchanged), and `tests/counter_range.rs` rejects only `use ... as` \
+                 aliases, not value-taking. Every reference to a counted primitive must be \
+                 written as `{call}`"
+            );
+        }
+    }
+}
+
 /// **Where the derivation blocks are consumed.** The census above counts the two
 /// `chacha20_keystream_raw` calls but cannot see what their output is *used* for: an audit
 /// changed `k_in.copy_from_slice(&block0[0..32]);` to read `block1` -- the wrong tag key, a real
@@ -461,11 +587,13 @@ fn the_derivation_nonce_does_not_use_xchacha20s_nul_padding() {
     // And the placement is in the *nonce*, not the counter: a label in the counter slot would
     // not separate this scheme from XChaCha20-Poly1305, which leaves the counter at 0.
     //
-    // Cut at `mod tests {` before searching. The searched string occurs in this file's *own*
-    // test module too (the nonce-reuse unit test writes the same line), so searching the whole
-    // file made the assertion true even with the real write at `derive_material` deleted — a
-    // guard satisfied by the test that was supposed to need it. The sibling test above already
-    // cuts at `mod tests {`; this one did not.
+    // The test module's body is removed before searching -- brace-matched to its closing
+    // brace, not cut at its first line, so production code appended below the module is
+    // searched too. The searched string occurs in this file's *own* test module (the
+    // nonce-reuse unit test writes the same line), so searching the whole file made the
+    // assertion true even with the real write at `derive_material` deleted — a guard
+    // satisfied by the test that was supposed to need it. The sibling test above already
+    // read the non-test source; this one did not.
     //
     // And it now reads `non_test_source`: cutting alone left the assertions satisfiable by a
     // block comment or a dead string literal carrying the same line, which is the same
