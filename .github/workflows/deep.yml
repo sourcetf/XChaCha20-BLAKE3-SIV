@@ -337,7 +337,7 @@ jobs:
       # cargo-deny (next job) also checks advisories, but through its own engine and
       # its own pinned database; running both is deliberate rather than redundant --
       # a miss in one is not a miss in the other.
-      - uses: taiki-e/install-action@83ac0ad63c0167e6f06796fab0fce28db1bf3db0 # v2
+      - uses: taiki-e/install-action@1168f6810a3cb30a3514bf5756a3b7f0422c6df8 # v2
         with:
           # `tool@version` is install-action's pin syntax: an unpinned tool lets a
           # new release change what a scheduled audit ran without a commit here.
@@ -362,7 +362,7 @@ jobs:
       # shorthand: when a ref is not one of install-action's tool tags, the
       # action warns "no tool specified" and exits *successfully*, so the failure
       # only shows up later as `no such command` in the step that needs it.
-      - uses: taiki-e/install-action@83ac0ad63c0167e6f06796fab0fce28db1bf3db0 # v2
+      - uses: taiki-e/install-action@1168f6810a3cb30a3514bf5756a3b7f0422c6df8 # v2
         with:
           tool: cargo-deny@0.20.2
 
@@ -456,7 +456,7 @@ jobs:
       # (the default), and replacing the computed tag outright is accepted by both --
       # pinned there so a change in that known limit is noticed rather than
       # rediscovered.
-      - uses: taiki-e/install-action@83ac0ad63c0167e6f06796fab0fce28db1bf3db0 # v2
+      - uses: taiki-e/install-action@1168f6810a3cb30a3514bf5756a3b7f0422c6df8 # v2
         with:
           tool: cargo-mutants@27.1.0
 
@@ -603,7 +603,7 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           shared-key: coverage
-      - uses: taiki-e/install-action@83ac0ad63c0167e6f06796fab0fce28db1bf3db0 # v2
+      - uses: taiki-e/install-action@1168f6810a3cb30a3514bf5756a3b7f0422c6df8 # v2
         with:
           tool: cargo-llvm-cov@0.9.1
 
@@ -638,7 +638,7 @@ jobs:
           cargo tree --edges normal > dependencies.txt
           cargo tree --edges normal | sort -u | wc -l
 
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: coverage-and-dependencies
           path: |
@@ -828,7 +828,7 @@ jobs:
       # exited 0, and `cargo fuzz` then failed with "no such command: fuzz" --
       # the job never fuzzed anything. Name the tool, and keep a source build as
       # a fallback so the fuzzer runs even if the action cannot provide it.
-      - uses: taiki-e/install-action@83ac0ad63c0167e6f06796fab0fce28db1bf3db0 # v2
+      - uses: taiki-e/install-action@1168f6810a3cb30a3514bf5756a3b7f0422c6df8 # v2
         with:
           tool: cargo-fuzz@0.13.2
 
@@ -891,7 +891,7 @@ jobs:
       # is reproducible rather than just reported.
       - name: upload any crash artifact
         if: failure()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: fuzz-artifacts
           path: fuzz/artifacts/
