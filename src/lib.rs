@@ -732,6 +732,13 @@ impl PartialEq<&Plaintext> for Plaintext {
     }
 }
 
+/// The `Eq` marker, which an audit pointed out was missing while the `PartialEq` impls
+/// were present. It adds no comparison: it only lets a generic caller use a `Plaintext`
+/// (or [`Key`], or `locked::LockedKey`) as a map key or satisfy a `T: Eq` bound. It is
+/// sound because the equality above is byte equality, hence reflexive and total — the
+/// types carry no hidden state a comparison could miss.
+impl Eq for Plaintext {}
+
 impl Drop for Plaintext {
     fn drop(&mut self) {
         // Wipe the whole allocation, not just `len` bytes.  `decrypt` builds this
@@ -862,6 +869,9 @@ impl PartialEq<&Key> for Key {
         bool::from(self.0.ct_eq(&other.0))
     }
 }
+
+/// The `Eq` marker, for the reason [`Plaintext`]'s records.
+impl Eq for Key {}
 
 /// # Why `Deref` is worth a warning
 ///
@@ -1921,6 +1931,9 @@ pub mod locked {
             bool::from(self.as_bytes().ct_eq(other.as_bytes()))
         }
     }
+
+    /// The `Eq` marker, for the reason [`crate::Plaintext`]'s records.
+    impl Eq for LockedKey {}
 
     /// A `LockedKey` may be moved to another thread, and borrowed from several.
     ///
@@ -3128,7 +3141,13 @@ pub fn decrypt_bounded(
 /// place. Note this destroys the caller's buffer on the failure path — including
 /// the *length* error below, which returns before anything is written: the wipe
 /// is unconditional so that "the call failed" and "the buffer still holds what
-/// the caller put there" can never both be true.
+/// the caller put there" can never both be true. The cost of that choice is worth
+/// stating: a *refusal* is `O(buffer.len())` here, not `O(1)` — measured, refusing a
+/// 512 MiB buffer writes 512 MiB of volatile stores (35 ms in a release build against
+/// 30 ns for `encrypt_in_place_detached`'s identical refusal, which has nothing to
+/// wipe), and at `MAX_MSG_SIZE` it is 256 GiB of stores rather than an immediate
+/// error. A caller that wants the refusal to be free checks the length itself first;
+/// `MAX_MSG_SIZE` is public for exactly that, and `tools`/`README.md` say so.
 ///
 /// # Allocation
 ///

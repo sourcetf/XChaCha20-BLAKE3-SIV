@@ -654,9 +654,11 @@ jobs:
     # weekly schedule (`cron: "0 4 * * 1"` above -- this said "every night", which
     # the cron never did) instead of never: the 4000-vector differential against
     # the reference implementation, AddressSanitizer over the whole suite (the fuzz
-    # job only covers the fuzz target), and the full Miri suite under Tree Borrows
-    # -- the aliasing model that is *not* the default, so nothing else exercises it
-    # at this scale.
+    # job only covers the fuzz target), and the full instruction-level sweep of the
+    # compiled decision. The other half of the scheduled audit -- the full Miri suite
+    # under Tree Borrows (the aliasing model that is *not* the default, so nothing else
+    # exercises it at this scale) and the fuzz soak -- is the `wide-miri-fuzz` job
+    # below, which has its own timeout for the reason recorded there.
     # Runs on the schedule *and* on a manual dispatch. The workflow header says
     # `workflow_dispatch` is there for "re-running the wide audit on demand", and this
     # condition used to be `== 'schedule'` alone — so dispatching the workflow ran every
@@ -721,6 +723,29 @@ jobs:
       # `tools/fi_instruction.sh --bits`.
       - name: instruction-level faults (every byte of the decision)
         run: ./tools/fi_instruction.sh
+
+  # The Miri and fuzz halves of the scheduled audit live in their own job, with their
+  # own `timeout-minutes`, because one budget could not hold both: the instruction
+  # sweep above measures 5.4 minutes on a 32-core development host but took over two
+  # hours of a scheduled runner's time (two cores, one sweep worker per core), which
+  # left the Miri suite and the fuzz soak whatever remained of the shared 300 minutes.
+  # That asymmetry is what turns a slow step into a cancelled job -- and a step cut off
+  # by `timeout-minutes` reads as `cancelled`, not as a failure, which is the signature
+  # that made the Monday cron hard to read in the first place. Splitting them also runs
+  # the two halves in parallel, so the wall-clock is the slower half rather than the sum.
+  wide-miri-fuzz:
+    name: wide audit (Miri and fuzzing)
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          shared-key: wide
 
       - name: Miri, full library suite under Tree Borrows
         run: |
