@@ -8,6 +8,32 @@ green push to `main` — which are build artefacts of that job, not construction
 
 ## Unreleased
 
+### Deep checks was failing on the one job that only the schedule runs, and a doctest was why
+
+The weekly scheduled audit — `wide audit (scheduled)`, the job behind the Monday cron — has been
+failing in **`AddressSanitizer over the whole suite`** with `Process completed with exit code
+101`. Measured in run `38245121255` (2026-10-12) and reproduced on the development host:
+`RUSTFLAGS=-Zsanitizer=address cargo +nightly test … --doc` cannot link
+**`src/lib.rs - decrypt_bounded (line 3058)`** — `undefined symbol: __asan_memcpy` and the rest
+of the sanitizer runtime — and exits 101. The cause is that rustdoc builds a doctest as its own
+crate and does not put the sanitizer runtime on that link line.
+
+That example is a **running** doctest (a plain fence, added in `ce81ecb`), the only fence in
+`src/lib.rs` that is neither `no_run`, `ignore` nor `text` — so the step could not pass, and
+nothing said so: the per-push runs skip `wide` (its condition is `schedule ||
+workflow_dispatch`), and a skipped job still leaves the run green, which is why the workflow
+badge read "passing" until the schedule ran it. The step now passes `--tests`, so the lib's own
+tests and every file in `tests/` are sanitized while the doctest — which still runs on every
+push, inside the per-push `test` job's `cargo test --release -- --skip timing` — is not linked
+here. Verified on this host both ways: with `--tests` the step exits 0, and the doctest phase
+alone under ASan exits 101, which is the CI signature.
+
+The job's other steps were exercised locally while diagnosing it: the multi-core fuzz soak
+(32 workers, ~220k executions each, no crash artifact), the full instruction-level sweep (its
+`nop` summary is the documented `opt-out 17 / hardened 1 / ultra 0`, all outside the decision),
+and the whole ASan suite after the fix. Not run here: the Miri Tree Borrows sweep over the full
+library (hours) and the 4000-vector differential.
+
 ### An independent line-by-line round: two false claims, and one the audit itself introduced
 
 A fresh, adversarial line-by-line pass over the whole tree — deliberately independent of the

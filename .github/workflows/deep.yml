@@ -685,12 +685,24 @@ jobs:
       - name: 4000 random vectors against the independent reference
         run: python3 tools/broad_differential.py 4000
 
+      # `--tests`: rustdoc builds a doctest as its own crate and does not put the
+      # sanitizer runtime on that link line, so the crate's one *running* doctest
+      # (`decrypt_bounded`'s, the only fence in `src/lib.rs` that is neither `no_run`,
+      # `ignore` nor `text`) fails here with `undefined symbol: __asan_memcpy` and the
+      # step exits 101 -- measured in the scheduled audit of 2026-10-12
+      # (run 38245121255: "AddressSanitizer over the whole suite", `Process completed
+      # with exit code 101`, `failures: src/lib.rs - decrypt_bounded (line 3058)`), and
+      # reproduced on the development host. The doctest is not the thing this step
+      # exists for (`tests/` and the lib's own tests are), it still runs on every push
+      # -- the per-push `test` job's `cargo test --release -- --skip timing` includes
+      # doctests -- and the `no_run`/`ignore` ones are unaffected here either way
+      # because rustdoc never links those.
       - name: AddressSanitizer over the whole suite
         run: |
           set -euo pipefail
           rustup toolchain install nightly --profile minimal
           RUSTFLAGS="-Zsanitizer=address" cargo +nightly test --release --features pure \
-            --target x86_64-unknown-linux-gnu
+            --target x86_64-unknown-linux-gnu --tests
 
       # Byte-by-byte corruption of the compiled decision code, in both builds. It
       # rewrites the binary once per byte and re-runs the decision test, so it is a
