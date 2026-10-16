@@ -39,12 +39,12 @@ include = [
 # measured with `cargo doc --no-deps`, a default build renders neither `locked` nor
 # `random` (the `rng` feature's module), so half of this crate's public API -- the
 # opt-in layers, which are the point of the `ultra` section in README.md -- would be
-# invisible in the published docs. `ultra` implies the other two
-# (`ultra = ["hardened", "rng", "dual-mac", "locked"]`), so naming it builds every
-# module docs.rs can build on Linux without listing the layers one by one, where the
-# list could drift out of step with `[features]`.
+# invisible in the published docs. `all-features` rather than a list: a hand-picked set
+# (`ultra` was the first idea) documents exactly the features someone remembered to name,
+# and a feature added later would be invisible on docs.rs until someone noticed -- the
+# kind of gap that reads as a hidden API rather than a documentation setting.
 [package.metadata.docs.rs]
-features = ["ultra"]
+all-features = true
 
 [dependencies]
 # subtle provides constant-time comparison

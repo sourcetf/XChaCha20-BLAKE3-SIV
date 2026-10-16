@@ -8,6 +8,12 @@ green push to `main` — which are build artefacts of that job, not construction
 
 ## Unreleased
 
+### One shortcut of this round's own, removed: a residue report is not a warning
+
+The `stack residue (advisory, ultra)` job's new wrappers converted the tool's exit 1 into a `::warning::` for both the default and the `ultra` build. That is the same class this round has been removing everywhere else, and it was mine: the tool's assertion is that the **master key** never appears in the call-chain stack region in *any* configuration, so a report means either a real finding or a layout change nobody has looked at yet, and both deserve a red step rather than a yellow one. The steps fail again (the job stays advisory for the documented reason — which frames a compiler leaves is not a property this repository controls), and the only thing the wrapper adds to the tool's own exit code is a message naming *which* of the two exit-1 causes happened: a positive control that did not take (measurement void) or residue reported.
+
+The same pass changed `docs.rs` metadata to build **all** features instead of a hand-picked list: `ultra` was the first idea, and it would have left any feature added later invisible on docs.rs until someone remembered to name it — a documentation setting that reads like a hidden API. Measured with `cargo doc --no-deps --all-features`, which renders `locked` and `random`.
+
 ### The instruction sweep is sharded across jobs, because the region is not negotiable
 
 A previous revision of this job ran `--quick` — the decision region alone — to fit a hosted runner's budget. The measurement behind it was real (the sweep step of `Deep checks` #183 ran 2 h 47 min and was killed with the job at five hours; the full region measures about five hours on such a runner) and the conclusion was not: cutting the region removes exactly the evidence the sweep exists for, because its motivating finding — six single-byte faults in `decrypt` that skipped the call and accepted a forgery — came from *outside* the decision. Coverage is not a knob; the budget was the thing to change.
