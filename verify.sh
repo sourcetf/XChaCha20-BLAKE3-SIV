@@ -366,7 +366,8 @@ if [ "$KANI_ONLY" -eq 0 ]; then
   # static valgrind build, so a plain run reports `0 passed; 5 ignored` on a
   # healthy tree -- an emptied file would look identical, which is why the ctgrind
   # stage's own tool, not this list, is what covers it), and `locked`/`ultra`
-  # (whole files `#![cfg(feature = ...)]`-gated off when the feature is not on).
+  # (whole files `#![cfg(feature = ...)]`-gated off when the feature is not on,
+  # which is why each is promised only by the invocation that turns its feature on).
   suite_targets="lib construction_inventory counter_range decision decision_scope \
 differential_reference mac_commitment security threads variable_latency"
   step "3. test suite"
@@ -384,6 +385,15 @@ differential_reference mac_commitment security threads variable_latency"
   # and qemu), so a machine where mlock is refused would never have said so here.
   # The test itself reports a skip to stderr when the platform refuses to lock.
   cargo_test "the locked suite" "$suite_targets locked" test --release --features locked -- --skip timing_
+
+  # `ultra` is the configuration the second decision gate, the witness and the residue
+  # wipe are compiled in — and until this stage existed it was the one configuration
+  # this script never *ran*: the ctgrind stage ran its tool under `--features ultra`,
+  # the cross-target stages type-checked it and the fuzz stage built it, but the test
+  # targets themselves ran only in CI's matrix — including `tests/ultra.rs`'s eight,
+  # which is also why an emptied `tests/ultra.rs` could not be noticed here. Measured:
+  # 3 s on top of a tree the fuzz stage has already built for the same feature set.
+  cargo_test "the ultra suite" "$suite_targets ultra" test --release --features ultra -- --skip timing_
 
   # The security tests are in `tests/security.rs` and run with the rest above,
   # but they are called out because one of them is a fuzz loop -- if it starts

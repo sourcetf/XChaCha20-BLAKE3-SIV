@@ -1376,7 +1376,11 @@ experiment against `tools/ref_impl.py` confirms what the route actually gives:
   as a **`2^256`** target (a preimage of the 256-bit inner digest) rather than a `2^520` one.
 
 So the accurate statement is: **`v0.3` reopens a key-commitment break at `2^128`, at the cost of
-the same plaintext; the salamander half was never at `2^128` and is not analysed.** Corrected in
+the same plaintext; the salamander half was never at `2^128` and is not analysed.** (Superseded on
+its price only: the round at the top of this file prices that route *by construction* at the
+key-search level, `≈ 2^256` — what is still missing is a **bound**, not a price. "Not analysed"
+here meant "no completion derived"; that part of the sentence is what the later round answered, and
+the two documents now say so at every site.) Corrected in
 Thm 2's commitment bullet, §5 row 17 and its closing paragraph, and §8.1 — which now carries a
 *key-commitment* row and a *salamander* row rather than one row answering `2^128` to both — plus
 README's security table and its "two games" section. The error's direction was conservative (it
