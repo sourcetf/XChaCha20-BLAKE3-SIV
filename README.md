@@ -753,8 +753,14 @@ deployment.
   it includes a derived *key*, in full, in frames this crate cannot reach. `ultra`'s
   `scrub_stack` overwrites the derivation region and clears all three, which is why the
   `ultra` scan reports clean. The **master** key itself
-  is not left (measured: longest
-  run 4 bytes); the derived material is. `blake3`'s `zeroize` feature is already on and
+  is not left *whole* and its fragments are short rather than absent: the committed tool's
+  own reading, on the reference host, was a longest run of 4 bytes — and its thresholds are
+  lower than that measurement (it reports a 7-byte run, or two runs totalling 8 bytes across
+  the key's 32), so the honest form of the claim is that no whole key and no long run
+  survives, not that every fragment is gone. Which fragments a compiler leaves is its
+  choice, and the tool reports them (the `stack residue (advisory, ultra)` job surfaces a
+  report as a warning; `verify.sh --deep` is where a report fails a run). The derived
+  material is the part that survives in full. `blake3`'s `zeroize` feature is already on and
   the crate already calls `reader.zeroize(); hasher.zeroize();`, which is the entire
   reach a caller has apart from `scrub_stack`. What this means in practice: an attacker who can read this
   process's stack gets per-message encryption keys, not the master key — and such an
