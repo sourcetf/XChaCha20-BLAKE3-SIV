@@ -1072,13 +1072,27 @@ fn strip_comments(text: &str) -> String {
             }
             Mode::Str => {
                 if c == b'\\' {
-                    i += 2; // skip the escaped byte (including `\"`)
+                    // Skip the escaped byte (including `\"`). A newline escaped this way
+                    // still ends a raw source line, so it is emitted: dropping it made
+                    // this function's output have fewer lines than its input, which
+                    // `raw_cfg_predicate_at` (in the guards below) relies on not
+                    // happening — it reads a raw line back by line number.
+                    if b.get(i + 1) == Some(&b'\n') {
+                        out.push('\n');
+                    }
+                    i += 2;
                 } else if c == b'"' {
                     out.push('"');
                     mode = Mode::Code;
                     i += 1;
                 } else {
-                    // Drop the contents so no byte inside a literal is scanned.
+                    // Drop the contents so no byte inside a literal is scanned. A
+                    // newline is the exception, as everywhere else in this function: it
+                    // is structure, not contents, and keeping it holds line numbers
+                    // comparable.
+                    if c == b'\n' {
+                        out.push('\n');
+                    }
                     i += 1;
                 }
             }
@@ -1361,20 +1375,26 @@ fn constant_cfg_attributes(source: &str) -> Vec<(usize, String)> {
 ///   to deaden a wipe with this per-site check silent (the blanket scan in
 ///   [`no_constant_cfg_attribute_can_deaden_the_crypto_source`] did catch them, but the
 ///   per-site message is the one that names the wipe).
-fn preceding_attributes(body: &str, at: usize) -> Vec<&str> {
+///
+/// Each entry is `(0-based line number within `body`, trimmed line)` rather than a bare
+/// text: the line number is what lets [`assert_wipes_are_not_deadened`] read a
+/// predicate's *string contents* back from the raw `src/lib.rs`, where the scan text
+/// has them blanked.
+fn preceding_attributes(body: &str, at: usize) -> Vec<(usize, &str)> {
     let mut out = Vec::new();
-    let mut text = body[..at].trim_end();
+    let mut end = body[..at].trim_end().len();
     loop {
-        let start = text.rfind('\n').map_or(0, |n| n + 1);
-        let line = text[start..].trim();
+        let start = body[..end].rfind('\n').map_or(0, |n| n + 1);
+        let line = body[start..end].trim();
+        let line_no = body[..start].matches('\n').count();
         if line.starts_with("#[") || line.starts_with("#![") {
-            out.push(line);
+            out.push((line_no, line));
             if start == 0 {
                 break;
             }
-            text = &text[..start - 1];
+            end = start - 1;
         } else if let Some(attr) = attribute_suffix(line) {
-            out.push(attr);
+            out.push((line_no, attr));
             break;
         } else {
             break;
@@ -1480,6 +1500,48 @@ fn attribute_finding(attr: &str) -> Option<String> {
     attribute_finding_for(kind, &args)
 }
 
+/// Whether the attribute text `attr` is a `cfg`-family attribute (`#[cfg(…)]`,
+/// `#![cfg(…)]`, `#[cfg_attr(…)]`).
+fn is_cfg_attribute(attr: &str) -> bool {
+    find_cfg_attribute(attr, 0).is_some()
+}
+
+/// The predicate of the `cfg`-family attribute on **line `line` (1-based) of
+/// `src/lib.rs`**, whitespace normalised away, read from the raw file.
+///
+/// The predicate has to come from the raw line rather than from the stripped scan
+/// text, and that is the whole reason this function exists: [`strip_comments`] blanks
+/// every string literal's contents (it must, or a literal could stand in for code in
+/// this file's counts), so `feature = "dual-mac"` and `feature = "pure"` both read as
+/// `feature = ""` in the scan text — and a feature *name* is exactly what the
+/// allow-list compares. A predicate this function cannot read is a panic, not a pass:
+/// waving through a line whose gating could not be determined is the fail-open shape
+/// the guard exists to prevent.
+///
+/// The line numbers line up because the cut and the stripper preserve every newline —
+/// asserted by the caller before this is reached, see
+/// [`assert_wipes_are_not_deadened`].
+fn raw_cfg_predicate_at(line: usize) -> String {
+    let raw = raw_lib_line(line);
+    let (_, open, _) = find_cfg_attribute(raw, 0).unwrap_or_else(|| {
+        panic!(
+            "line {line} of `src/lib.rs` is an attribute in the stripped scan text but \
+             carries no `cfg`-family attribute when read raw (`{raw}`); the predicate \
+             cannot be checked, and passing it would be fail-open"
+        )
+    });
+    let (args, _) = cfg_predicate_at(raw, open);
+    args.chars().filter(|c| !c.is_whitespace()).collect()
+}
+
+/// The raw text of `src/lib.rs` line `line` (1-based), for reading back what
+/// [`strip_comments`] blanked (string contents) or dropped (a trailing comment).
+fn raw_lib_line(line: usize) -> &'static str {
+    LIB.lines().nth(line - 1).unwrap_or_else(|| {
+        panic!("`src/lib.rs` has no line {line}, so a `cfg` predicate cannot be read back")
+    })
+}
+
 /// The wipe sites the counts below rely on must not be deadened by a `cfg` attribute.
 ///
 /// `#[cfg(any())] { zeroize_array(&mut enc_key); }` keeps the wipe's text — and therefore
@@ -1488,13 +1550,60 @@ fn attribute_finding(attr: &str) -> Option<String> {
 /// success-path wipe) and the same attribute wrapping `zeroize_array(&mut tag)` surviving
 /// the whole `ultra` suite (128/128): a count cannot tell a wiped frame from a compiled-out
 /// one. Each occurrence is checked against the attributes directly above it, including the
-/// same-line and block-wrapped spellings [`preceding_attributes`] now sees; any attribute
-/// there whose gating is constant is a failure.
-fn assert_wipes_are_not_deadened(name: &str, body: &str, wipe: &str) {
+/// same-line and block-wrapped spellings [`preceding_attributes`] now sees.
+///
+/// Two shapes are rejected, because a `cfg` can deaden a counted wipe in two ways:
+///
+/// * **constant gating** (`#[cfg(any())]`, `#[cfg(test)]`, a `cfg_attr` whose condition
+///   or listed attribute is constant): the wipe is compiled out in *every* build.
+///   [`attribute_finding`] is the check, and it predates the second shape;
+/// * **a non-constant predicate the table does not count the wipe in** (`allowed_cfg`):
+///   a *plausible feature name* compiles the wipe out of every build that feature is
+///   off in. This half was missing when an auditor planted `#[cfg(feature = "pure")]`
+///   on `encrypt`'s `zeroize_array(&mut enc_key);`: the default and `ultra` builds
+///   then contained no wipe, while the text — and every count in this file — was
+///   unchanged, so the whole suite stayed green (16/16 in `--release --features
+///   ultra`, and the constant-`cfg` blanket scan saw nothing, because `pure` is not
+///   constant). Each counted wipe therefore carries **the set of predicates the table
+///   enumerates as configurations it counts that wipe in**, and the set is empty for
+///   every wipe that exists in every build — so a `cfg` no one wrote down as counted
+///   is, by default, not counted, whatever its feature name.
+///
+///   The one non-empty entry is `recomputed_tag`, which only exists under `dual-mac`
+///   (its declaration is gated the same way), so `feature="dual-mac"` is allowed there
+///   and nothing else is. The predicate is read from the raw source by line number:
+///   the scan text this file builds has string literals blanked, so every feature
+///   predicate reads there as `feature=""` — indistinguishable from any other — and an
+///   allow-list matched against that would accept `pure` at a `dual-mac` site.
+///
+/// `body_line` is the 1-based line of `src/lib.rs` that `body`'s first line is, so the
+/// raw read can find the attribute the stripped line describes.
+fn assert_wipes_are_not_deadened(
+    name: &str,
+    body: &str,
+    body_line: usize,
+    wipe: &str,
+    allowed_cfg: &[&str],
+) {
+    // The raw read below turns a line number in `body` into a line of `src/lib.rs`.
+    // That mapping holds because every stage of the cut blanks spans and comments while
+    // keeping every newline (`strip_comments` keeps them inside line comments, block
+    // comments and raw strings; the one shape it can drop is a `\`-continued ordinary
+    // string literal, which no longer matches the raw file). Asserted, not assumed: a
+    // future edit that breaks it would make the read land on the wrong line, and the
+    // wrong line is a predicate this guard did not check.
+    assert_eq!(
+        non_test_source().lines().count(),
+        LIB.lines().count(),
+        "the stripped scan text and `src/lib.rs` have different line counts (a \
+         `\\`-continued string literal drops its newline in `strip_comments`), so a raw \
+         `cfg` predicate cannot be read back by line number; fix the stripper rather \
+         than reading the wrong line"
+    );
     let mut base = 0usize;
     while let Some(i) = body[base..].find(wipe) {
         let at = base + i;
-        for attr in preceding_attributes(body, at) {
+        for (line_no, attr) in preceding_attributes(body, at) {
             if let Some(finding) = attribute_finding(attr) {
                 panic!(
                     "`{name}`'s wipe `{wipe}` is directly preceded by `{attr}`: {finding}. An \
@@ -1502,6 +1611,23 @@ fn assert_wipes_are_not_deadened(name: &str, body: &str, wipe: &str) {
                      the text this file counts unchanged, and `#[cfg(any())] {{ {wipe} }}` \
                      survived the whole suite before this check existed. Delete the \
                      attribute — a constant gate is not a configuration."
+                );
+            }
+            if is_cfg_attribute(attr) {
+                let line = body_line + line_no;
+                let predicate = raw_cfg_predicate_at(line);
+                assert!(
+                    allowed_cfg.contains(&predicate.as_str()),
+                    "`{name}`'s wipe `{wipe}` is directly preceded by `{}` (line {line}), \
+                     whose predicate `{predicate}` is not one of the configurations this \
+                     table enumerates for this wipe ({allowed_cfg:?}). A `cfg` on a counted \
+                     wipe compiles the wipe out of every build the predicate is false in \
+                     while leaving the counted text unchanged: `#[cfg(feature = \"pure\")]` \
+                     on `encrypt`'s `enc_key` wipe was measured taking the wipe out of the \
+                     default and `ultra` builds with the whole suite green. Delete the \
+                     attribute, or add the predicate to the table deliberately, with the \
+                     reason the wipe is not counted in the configurations it excludes.",
+                    raw_lib_line(line).trim()
                 );
             }
         }
@@ -1557,30 +1683,53 @@ fn no_constant_cfg_attribute_can_deaden_the_crypto_source() {
     }
 }
 
+/// The body of the item whose header starts with `marker` — `"pub fn encrypt("`,
+/// `"fn derive_tag("`, `"impl Drop for Plaintext {"` — brace-matched, on the
+/// comment-free non-test source, so a comment or a dead literal cannot stand in for
+/// the item the count below wants.
+///
+/// This generalises the `body` helper inside `every_allocation_happens_before_any_derivation`,
+/// which only finds `pub fn`: roughly half the wipes the crate's documentation promises
+/// live in `impl Drop` bodies and in private helpers, and pinning a *call site* there
+/// witnesses nothing — `derive_material`, `derive_tag`, `derive_enc` and
+/// `blake3_keyed_multi` are `#[inline]`-able and are reached from several entry points,
+/// so the wipe has to be counted where it is written.
+///
+/// Returns the body **and the 1-based line of `src/lib.rs` its first line is**, which
+/// [`assert_wipes_are_not_deadened`] needs to read a `cfg` predicate's string contents
+/// back from the raw source (the scan text has them blanked). Line numbers survive the
+/// cut and the stripper; the guard asserts that before it relies on it.
+fn body_of(marker: &str) -> (String, usize) {
+    let source = non_test_source();
+    let start = source
+        .find(marker)
+        .unwrap_or_else(|| panic!("`{marker}` not found in src/lib.rs"));
+    let line = source[..start].matches('\n').count() + 1;
+    let after = &source[start..];
+    let open = after.find('{').expect("block without a body");
+    let mut depth = 0usize;
+    for (i, c) in after[open..].char_indices() {
+        match c {
+            '{' => depth += 1,
+            '}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return (after[..=open + i].to_string(), line);
+                }
+            }
+            _ => {}
+        }
+    }
+    panic!("unbalanced braces in `{marker}`");
+}
+
 #[test]
 fn every_allocation_happens_before_any_derivation() {
-    /// The body of `fn name(`, brace-matched, on the comment-free source.
+    /// The body of `pub fn name(`: [`body_of`] with the marker spelled for an entry
+    /// point, kept because every call in this test names an entry point. (The wipe
+    /// loop below needs the line as well, so it calls `body_of` directly.)
     fn body(name: &str) -> String {
-        let source = non_test_source();
-        let start = source
-            .find(&format!("pub fn {name}("))
-            .unwrap_or_else(|| panic!("{name} not found"));
-        let after = &source[start..];
-        let open = after.find('{').expect("block without a body");
-        let mut depth = 0usize;
-        for (i, c) in after[open..].char_indices() {
-            match c {
-                '{' => depth += 1,
-                '}' => {
-                    depth -= 1;
-                    if depth == 0 {
-                        return after[..=open + i].to_string();
-                    }
-                }
-                _ => {}
-            }
-        }
-        panic!("unbalanced braces in {name}");
+        body_of(&format!("pub fn {name}(")).0
     }
 
     // All three allocating entry points: the allocation must exist (deleting it would
@@ -1630,6 +1779,19 @@ fn every_allocation_happens_before_any_derivation() {
     // `Vec::with_capacity`, which the turbofish walked past). Pin the other spellings so a
     // new one has to be added deliberately, at a decided position, rather than slipping past
     // the ordering.
+    //
+    // Iterator adapters and the owned-conversion constructors are the same class, and the
+    // list was measured incomplete: a later pass inserted
+    // `let _late: Vec<u8> = (0..4u8).collect();` immediately after `derive_material(` in
+    // `decrypt_in_place_detached` -- an allocation whose `try_reserve` failure aborts
+    // *after* the derivation, exactly the defect this loop exists for -- and this test, and
+    // the whole suite, stayed green. `.collect(`, `.to_owned(`, `String::`, `Rc::` and
+    // `Arc::` are pinned for that reason; `Vec::from` is named as well even though the bare
+    // `Vec::` above already subsumes it, because the list is a checklist of the class rather
+    // than a minimal set. It remains a spelling list, not a proof: a helper of the crate's
+    // own that allocates (there is one, `alloc_zeroed`) or a macro that expands to an
+    // allocation elsewhere would not be caught here, so an ordering assertion over the
+    // alloc_zeroed sites is still the primary check.
     for name in [
         "encrypt",
         "encrypt_in_place_detached",
@@ -1643,10 +1805,16 @@ fn every_allocation_happens_before_any_derivation() {
             // caught too: an injected `Vec::<u8>::with_capacity(1)` after `derive_enc`
             // walked straight past a `Vec::with_capacity` match.
             "Vec::",
+            "Vec::from",
             "with_capacity",
             "try_reserve",
             ".to_vec()",
+            ".to_owned(",
+            ".collect(",
             "Box::new",
+            "String::",
+            "Rc::",
+            "Arc::",
         ] {
             assert!(
                 !body.contains(spelling),
@@ -1746,7 +1914,7 @@ fn every_allocation_happens_before_any_derivation() {
             ][..],
         ),
     ] {
-        let body = body(name);
+        let (body, body_line) = body_of(&format!("pub fn {name}("));
         for (buffer, expected) in buffers {
             let wipe = format!("zeroize_array(&mut {buffer});");
             let found = body.matches(wipe.as_str()).count();
@@ -1758,10 +1926,269 @@ fn every_allocation_happens_before_any_derivation() {
                  derivation with each allocation, never the wipes"
             );
             // The count is text, and text survives being compiled out: the same wipe
-            // wrapped in `#[cfg(any())] { … }` (or prefixed with `#[cfg(any())]`) is
-            // counted exactly as before while never running. Pin the live shape at each
-            // site the count just found.
-            assert_wipes_are_not_deadened(name, &body, &wipe);
+            // wrapped in `#[cfg(any())] { … }` (or prefixed with `#[cfg(any())]`, or with
+            // `#[cfg(feature = "…")]`) is counted exactly as before while never running.
+            // Pin the live shape at each site the count just found. `&[]` is the
+            // allow-list: every wipe in this table exists in every configuration, so no
+            // `cfg`-family attribute directly on one is acceptable.
+            assert_wipes_are_not_deadened(name, &body, body_line, &wipe, &[]);
         }
     }
+}
+
+/// Every wipe the crate's own documentation promises, witnessed by an exact
+/// source-shape count **in the body that promises it**.
+///
+/// `every_allocation_happens_before_any_derivation`'s table counts the secret locals
+/// of the four entry points. The wipes those functions rely on live one level down —
+/// in `derive_material`, `derive_tag`, `derive_enc`, the `Drop` impls, `locked`'s page
+/// and BLAKE3's own state — and an adversarial pass deleted **twelve** of them with
+/// `cargo test --all-features` still green: `Plaintext::drop`'s `zeroize_slice`,
+/// `Page::drop` and `LockedKey::drop`, `derive_material`'s four, `derive_tag`'s
+/// `cat`/`inner`/`outer` and `derive_enc`'s `material`/`input`. A wipe of a stack local
+/// has no behavioural signature, so a text count is the only witness it can have; the
+/// counts are exact, so a buffer with more than one site (the two BLAKE3-state pairs)
+/// fails on a single deleted call rather than being covered by the survivor.
+///
+/// `tag_copy` is here with the opposite history: it was counted nowhere *and* the code
+/// called it "secret-derived", which an audit pointed out is false — it is a copy of
+/// the **received** tag, which is public. The wipe stays (the pair is read out as one
+/// comparison's operands, and the table should cover both), the rationale where the
+/// wipe lives is corrected, and the count here is what makes the wipe survive an edit.
+///
+/// The one deliberate **absence** is the two `zeroize_slice(&mut ciphertext);`
+/// statements that used to sit in `encrypt`'s `ultra` witness-rejection arms. They
+/// cleared a buffer that `alloc_zeroed` had just filled with zeros and the keystream
+/// had not touched yet — `O(plaintext.len())` volatile stores on a should-never-happen
+/// path, protecting nothing — so they are deleted rather than counted, and the `0`
+/// assertion at the end of this test pins the deletion.
+///
+/// Wipes this table deliberately does **not** duplicate, because another test already
+/// pins the same statement (with a stronger, call-site-specific check) and a second
+/// count would only be a second thing to keep in step:
+///
+/// * `LockedKey::new`'s `crate::zeroize_array(&mut tag);` and
+///   `check_integrity`'s `crate::zeroize_array(&mut expected);` — `tests/locked.rs`'s
+///   `the_integrity_tag_is_wiped_in_both_callers` pins both, their position relative to
+///   the fallible `lock_range` / the branch, and that each is an unconditional
+///   top-level statement rather than a nested or attribute-deadened one;
+/// * `ultra`'s witness copies (`witness_tag`, `witness_plaintext`,
+///   `witness_ciphertext`) — exact counts in `tests/ultra.rs`
+///   (`dual_mac_is_wired_into_both_decrypt_paths`'s wipe assertions: 3/2/1);
+/// * `decrypt`'s `zeroize_slice(&mut plaintext);` and the in-place entry point's
+///   `zeroize_slice(buffer);` rejection wipes — `tests/decision_scope.rs` pins the
+///   `if decisionN.is_err() { <wipe>; return … }` shape at all four sites and the
+///   accept-fall-through, and this file's allocation table pins the two
+///   `zeroize_slice(buffer);\n return Err(e);` allocation-failure arms.
+///
+/// Each row carries the item `marker` its body is extracted by and the `cfg`
+/// predicates the table counts each wipe under (empty for every wipe that exists in
+/// every build; see [`assert_wipes_are_not_deadened`]). That second half is what
+/// catches a *plausible feature name*: an auditor planted
+/// `#[cfg(feature = "pure")]` on `encrypt`'s `zeroize_array(&mut enc_key);` and the
+/// default and `ultra` builds lost the wipe while every test stayed green.
+#[test]
+fn every_documented_wipe_has_a_witness() {
+    /// One item, its body located by `marker`, and every wipe that body owes.
+    struct Site {
+        label: &'static str,
+        marker: &'static str,
+        /// `(wipe text, exact count, the `cfg` predicates this wipe is counted in)`.
+        wipes: &'static [(&'static str, usize, &'static [&'static str])],
+    }
+
+    let sites = [
+        Site {
+            label: "Plaintext::drop",
+            marker: "impl Drop for Plaintext {",
+            // The buffer is the recovered plaintext: the one wipe a caller of `decrypt`
+            // never sees and cannot do for the crate. The second row is the capacity tail:
+            // it is conditional today (`alloc_zeroed` reserves exactly `len`, so the
+            // branch does not run), but the comment there promises it for a future
+            // constructor that grows the buffer, and the raw-pointer form is the *only*
+            // way to clear bytes past `len` that no reference may cover.
+            wipes: &[
+                ("zeroize_slice(self.0.as_mut_slice());", 1, &[]),
+                (
+                    "zeroize_raw(self.0.as_mut_ptr().add(len), cap - len)",
+                    1,
+                    &[],
+                ),
+            ],
+        },
+        Site {
+            label: "Key::zeroize",
+            marker: "impl Zeroize for Key {",
+            // `Key::drop` goes through this impl, so the wipe the `Key` docs promise is
+            // one statement in one body; the `Drop` row below pins the call into it.
+            wipes: &[("zeroize_array(&mut self.0);", 1, &[])],
+        },
+        Site {
+            label: "Key::drop",
+            marker: "impl Drop for Key {",
+            wipes: &[("self.zeroize();", 1, &[])],
+        },
+        Site {
+            label: "Page::drop (locked)",
+            marker: "impl Drop for Page {",
+            // The failure path of `LockedKey::new` drops the page directly, with the key
+            // and its integrity tag already written, so this wipe and not
+            // `LockedKey::drop` is the one that covers it.
+            wipes: &[("crate::zeroize_slice(self.bytes_mut());", 1, &[])],
+        },
+        Site {
+            label: "LockedKey::drop (locked)",
+            marker: "impl Drop for LockedKey {",
+            // Wipes the whole page *before* unlocking it: `munlock` opens the swap window
+            // this wipe exists to close.
+            wipes: &[("crate::zeroize_slice(self.0.bytes_mut());", 1, &[])],
+        },
+        Site {
+            label: "derive_material",
+            marker: "fn derive_material(",
+            wipes: &[
+                ("zeroize_array(&mut subkey);", 1, &[]),
+                ("zeroize_array(&mut subkey_nonce);", 1, &[]),
+                ("zeroize_array(&mut block0);", 1, &[]),
+                ("zeroize_array(&mut block1);", 1, &[]),
+            ],
+        },
+        Site {
+            label: "derive_tag",
+            marker: "fn derive_tag(",
+            wipes: &[
+                // The one allocation in the two-level tag: the concatenated inner-hash
+                // input, wiped before it is freed.
+                ("zeroize_slice(&mut cat);", 1, &[]),
+                // The inner digest is a PRF output under `k_in`; the outer input is that
+                // digest under a domain word.
+                ("zeroize_array(&mut inner);", 1, &[]),
+                ("zeroize_array(&mut outer);", 1, &[]),
+            ],
+        },
+        Site {
+            label: "derive_enc",
+            marker: "fn derive_enc(",
+            wipes: &[
+                ("zeroize_array(&mut material);", 1, &[]),
+                ("zeroize_array(&mut input);", 1, &[]),
+            ],
+        },
+        Site {
+            label: "blake3_keyed_multi (keyed seam)",
+            marker: "fn blake3_keyed_multi(",
+            wipes: &[("reader.zeroize();", 1, &[]), ("hasher.zeroize();", 1, &[])],
+        },
+        Site {
+            label: "integrity_tag (locked's unkeyed seam)",
+            marker: "fn integrity_tag(",
+            wipes: &[("reader.zeroize();", 1, &[]), ("hasher.zeroize();", 1, &[])],
+        },
+        Site {
+            label: "random::fill_from",
+            marker: "fn fill_from(",
+            // `getrandom` guarantees nothing about `dest` on failure, so a partial fill
+            // is wiped rather than left for a caller that ignores the `Result`.
+            wipes: &[("crate::zeroize_slice(dest);", 1, &[])],
+        },
+        Site {
+            label: "decrypt",
+            marker: "pub fn decrypt(",
+            wipes: &[
+                // Secret-derived: the computed MAC. (Previously uncounted here; the
+                // existence check in `tests/decision_scope.rs` did not pin the count.)
+                ("zeroize_array(&mut computed_tag_copy);", 1, &[]),
+                // A copy of the *received* tag: public, wiped as one operand of the pair
+                // rather than because it is a secret. See the comment at the wipe.
+                ("zeroize_array(&mut tag_copy);", 1, &[]),
+                // Only exists under `dual-mac`, which is why this is the table's one
+                // non-empty allow-list.
+                (
+                    "zeroize_array(&mut recomputed_tag);",
+                    1,
+                    &["feature=\"dual-mac\""],
+                ),
+            ],
+        },
+        Site {
+            label: "decrypt_in_place_detached",
+            marker: "pub fn decrypt_in_place_detached(",
+            wipes: &[
+                ("zeroize_array(&mut computed_tag_copy);", 1, &[]),
+                ("zeroize_array(&mut tag_copy);", 1, &[]),
+                (
+                    "zeroize_array(&mut recomputed_tag);",
+                    1,
+                    &["feature=\"dual-mac\""],
+                ),
+            ],
+        },
+    ];
+
+    for site in &sites {
+        let (body, body_line) = body_of(site.marker);
+        for (wipe, expected, allowed_cfg) in site.wipes {
+            let found = body.matches(wipe).count();
+            assert_eq!(
+                found, *expected,
+                "`{}`'s wipe `{wipe}` appears {found} times in its body, not {expected}: a \
+                 deleted (or added) wipe of a local no test can name has no behavioural \
+                 signature -- twelve of them were deleted with the whole suite green -- so \
+                 this count is the witness. The live shape at each found site is pinned \
+                 separately, below.",
+                site.label
+            );
+            assert_wipes_are_not_deadened(site.label, &body, body_line, wipe, allowed_cfg);
+        }
+    }
+
+    // The BLAKE3-state pair, counted as a total across its two call sites: `Cargo.toml`
+    // enables `blake3/zeroize` for exactly these calls, and the key lives inside
+    // `blake3::Hasher` where no `zeroize_array` of this crate can reach it. The pair is
+    // `2` together -- `reader.zeroize(); hasher.zeroize();` at the keyed seam and at
+    // `locked`'s unkeyed one -- and the per-site rows above make each of the four
+    // statements individually counted, so deleting one half of one pair fails twice
+    // over. Half a pair is not a wipe: a `reader`-only call would leave the hasher's
+    // `CVWords` (the key, for the keyed seam) in the dependency's frame.
+    let pairs: usize = ["fn blake3_keyed_multi(", "fn integrity_tag("]
+        .iter()
+        .map(|marker| {
+            let body = body_of(marker).0;
+            let reader = body.matches("reader.zeroize();").count();
+            let hasher = body.matches("hasher.zeroize();").count();
+            assert_eq!(
+                reader, hasher,
+                "`{marker}` has {reader} `reader.zeroize();` and {hasher} \
+                 `hasher.zeroize();`: the two calls are one wipe (BLAKE3's XOF reader \
+                 carries key-derived output state, the hasher holds the key), so a pair \
+                 that lost one half is not a wipe"
+            );
+            reader
+        })
+        .sum();
+    assert_eq!(
+        pairs, 2,
+        "the `reader.zeroize(); hasher.zeroize();` pair must survive at both keyed-BLAKE3 \
+         seams (`blake3_keyed_multi` and `locked`'s `integrity_tag`); `Cargo.toml`'s \
+         `zeroize`-feature note cites exactly these calls, and nothing else in this crate \
+         can reach BLAKE3's internal key state"
+    );
+
+    // The one deliberate absence: `encrypt` no longer wipes its all-zero ciphertext
+    // buffer on the `ultra` witness-rejection arms. `0` is the recorded decision, not a
+    // witness to a wipe: the buffer comes from `alloc_zeroed` and the keystream has not
+    // run yet, so the wipe was `O(plaintext.len())` volatile stores on a path that must
+    // never be taken. If a wipe is wanted there after all, delete this assertion
+    // deliberately and say what it protects.
+    assert_eq!(
+        body_of("pub fn encrypt(")
+            .0
+            .matches("zeroize_slice(&mut ciphertext)")
+            .count(),
+        0,
+        "`encrypt`'s witness-rejection arms must not wipe `ciphertext`: it is still all \
+         zeros there (`alloc_zeroed`, keystream below), and the wipe of an all-zero \
+         buffer is `O(msg)` work on a should-never-happen path, protecting nothing. \
+         Re-adding one is a decision, not a hygiene fix -- make it here."
+    );
 }

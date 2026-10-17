@@ -978,8 +978,9 @@ mod tests {
     /// `test_random_helpers_produce_usable_output`, `test_tag_binds_both_derived_keys`)
     /// that see it as `AuthenticationFailed` from the `ultra` encrypt/decrypt
     /// cross-check rather than as a named site;
-    /// `tests/ultra.rs::every_layer_answers_correctly_in_the_ultra_build` fails the same
-    /// way. What this test adds is the unit-level witness of the unpacking: the failure
+    /// `tests/ultra.rs::ultra_still_round_trips_rejects_a_forgery_and_generates_keys`
+    /// fails the same way. What this test adds is the unit-level witness of the unpacking:
+    /// the failure
     /// lands on the `hchacha20` comparison itself, with both values, so the word order
     /// is named where it lives instead of surfacing as "the witness disagrees". It runs
     /// the comparisons on distinct bytes, so the unpacking order in every one of the

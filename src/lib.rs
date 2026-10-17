@@ -538,10 +538,22 @@ pub const fn stack_requirement_bytes() -> usize {
 ///
 /// [`Error::AuthenticationFailed`] is the only outcome that can depend on secret
 /// material, and it carries no information beyond "the tag did not verify": the
-/// comparison covers all [`TAG_LEN`] bytes in constant time, every intermediate
-/// secret is wiped before the decision is taken, and the unverified plaintext is
-/// wiped rather than returned. There is no distinction between "wrong key",
-/// "wrong nonce", "wrong AAD" and "corrupted ciphertext".
+/// comparison covers all [`TAG_LEN`] bytes in constant time, the unverified
+/// plaintext is wiped rather than returned, and on **both decrypt entry points**
+/// every intermediate secret is wiped before the decision is taken. There is no
+/// distinction between "wrong key", "wrong nonce", "wrong AAD" and "corrupted
+/// ciphertext".
+///
+/// That last clause is an ordering claim about the decrypt paths and is **not**
+/// claimed for [`encrypt`]'s `ultra` cross-check, where the decision call runs
+/// before the rejection arms' wipes: the accept path still needs the tag and
+/// `enc_seed` for `derive_enc` after the decision, so wiping them ahead of it
+/// would have to wipe them on the accept path too, where they are live. What
+/// `encrypt` does guarantee is that each rejection wipes the material it has
+/// derived before returning — the same fail-closed shape, one step later. (An
+/// audit read the previously unqualified sentence back against `encrypt` and
+/// found it false as written: the wipes at the two rejection returns follow the
+/// `accept_or_reject` call they belong to.)
 ///
 /// The two length variants are reported before any cryptography runs. That is a
 /// deliberate choice, not an oversight: message and AAD lengths are chosen by the
@@ -2642,10 +2654,13 @@ pub fn encrypt(
             // below -- so it is named and wiped with the derived keys on this path, not
             // left to `scrub_stack`.
             zeroize_array(&mut tag);
-            // The buffer has not been written yet (the keystream runs below), but it is
-            // zeroized on this path anyway rather than left to `Drop`, so the two rejection
-            // paths out of this function differ only in what they have derived.
-            zeroize_slice(&mut ciphertext);
+            // No `ciphertext` wipe on this path. The buffer comes from `alloc_zeroed` and
+            // the keystream that would fill it runs *below* this return, so it is still
+            // all zeros: a wipe here is `O(plaintext.len())` volatile stores on a path
+            // that must never be taken, protecting nothing. The statement that used to be
+            // here (and its copy in the `decision1` arm below) is deliberately removed
+            // rather than counted; `tests/security.rs` pins the absence so re-adding it is
+            // a decision rather than a hygiene reflex.
             // `scrub_stack` is called on the *success* path below, after the last
             // derivation; this early return skips it, so the `witness::encrypt_tag` frame
             // that just ran (it held the key and the tag it derived) is left in the region
@@ -2660,7 +2675,9 @@ pub fn encrypt(
             zeroize_array(&mut k_out);
             zeroize_array(&mut enc_seed);
             zeroize_array(&mut tag);
-            zeroize_slice(&mut ciphertext);
+            // No `ciphertext` wipe: see the `decision0` arm above -- the buffer is still
+            // all zeros here, so the wipe was `O(plaintext.len())` work that protected
+            // nothing.
             #[cfg(feature = "dual-mac")]
             scrub_stack();
             return Err(Error::AuthenticationFailed);
@@ -3036,9 +3053,16 @@ pub fn decrypt(
         #[cfg(not(feature = "dual-mac"))]
         let second = gate_pair;
 
-        // The copies are secret-derived (they are the computed MAC), so they are
-        // wiped like every other copy in this function rather than left in the
-        // frame of the `hardened` build.
+        // `computed_tag_copy` is secret-derived (it is the computed MAC), so it is wiped
+        // like every other copy in this function rather than left in the frame of the
+        // `hardened` build. `tag_copy` is a copy of the **received** tag, which is public
+        // -- it arrived from the caller, and whoever chose it knows it -- so wiping it
+        // protects nothing; it is wiped anyway because the two copies are read out
+        // together as one comparison's operands, and a rule that lets the public operand
+        // of the pair stay un-wiped is the rule a later secret-bearing operand gets filed
+        // under. One 65-byte volatile store per message. (This comment called both copies
+        // "secret-derived" until an audit pointed out that the received tag is not a
+        // secret, and `tests/security.rs` now counts each copy separately.)
         zeroize_array(&mut computed_tag_copy);
         zeroize_array(&mut tag_copy);
 
@@ -3293,9 +3317,16 @@ pub fn decrypt_in_place_detached(
         #[cfg(not(feature = "dual-mac"))]
         let second = gate_pair;
 
-        // The copies are secret-derived (they are the computed MAC), so they are
-        // wiped like every other copy in this function rather than left in the
-        // frame of the `hardened` build.
+        // `computed_tag_copy` is secret-derived (it is the computed MAC), so it is wiped
+        // like every other copy in this function rather than left in the frame of the
+        // `hardened` build. `tag_copy` is a copy of the **received** tag, which is public
+        // -- it arrived from the caller, and whoever chose it knows it -- so wiping it
+        // protects nothing; it is wiped anyway because the two copies are read out
+        // together as one comparison's operands, and a rule that lets the public operand
+        // of the pair stay un-wiped is the rule a later secret-bearing operand gets filed
+        // under. One 65-byte volatile store per message. (This comment called both copies
+        // "secret-derived" until an audit pointed out that the received tag is not a
+        // secret, and `tests/security.rs` now counts each copy separately.)
         zeroize_array(&mut computed_tag_copy);
         zeroize_array(&mut tag_copy);
 
@@ -4375,20 +4406,27 @@ mod tests {
     }
 
     /// The dispatched keystream (SIMD where available) must equal the scalar
-    /// reference at every length, including the tails that fall between SIMD width,
-    /// block size, and exact multiples. (Counter 0 throughout: this test is the length
-    /// sweep; `test_simd_matches_scalar_counters` below is the counter sweep, at a
-    /// subset of these lengths. Together they cover every length at one counter and
-    /// several counters at several lengths, not the full cross product — an earlier
-    /// revision of this comment said "every length and counter" while neither test
-    /// crossed the two.)
+    /// reference over **every length `0..=2049`** -- a contiguous sweep, so the
+    /// tails that fall between SIMD width (256/512), block size (64) and their
+    /// exact multiples are all covered, not sampled -- plus the larger sampled
+    /// points 4096, 8191, 8192 and 8193. (Counter 0 throughout: this test is the
+    /// length sweep; `test_simd_matches_scalar_counters` below is the counter
+    /// sweep, at a subset of these lengths. Together they cover every length in
+    /// that contiguous range at one counter and several counters at several
+    /// lengths, not the full cross product — an earlier revision of this comment
+    /// said "every length and counter" while neither test crossed the two.) An
+    /// earlier revision of the loop swept `0..=600` and then jumped to 1023, so
+    /// `601..=1022` were covered by no sweep in this pair; the loop now runs to
+    /// 2046 (the sampled points carry 2047..=2049), which costs about 2 MB of
+    /// keystream in total, and this doc says what is actually swept rather than
+    /// "every length".
     #[test]
     fn test_simd_matches_scalar_all_lengths() {
         let key = [0x9Bu8; 32];
         let nonce = [0x4Cu8; 12];
         // Lengths covering: SIMD widths (256/512), block size, boundaries.
-        let mut lens: Vec<usize> = (0..=600).collect();
-        lens.extend([1023, 1024, 1025, 2047, 2048, 2049, 4096, 8191, 8192, 8193]);
+        let mut lens: Vec<usize> = (0..=2046).collect();
+        lens.extend([2047, 2048, 2049, 4096, 8191, 8192, 8193]);
         for &len in &lens {
             let mut got = vec![0u8; len];
             chacha20_keystream_raw(&key, 0, &nonce, &mut got);
@@ -5651,24 +5689,54 @@ mod tests {
     #[cfg(feature = "rng")]
     #[test]
     fn test_random_fill_covers_whole_buffer() {
-        // A count, not "no byte equals the sentinel". An earlier revision asserted
-        // `any(...)`, which a `fill` that wrote a single byte satisfied -- the test
-        // named "whole buffer" could not see the defect it was named for. Demanding
-        // *zero* matches overshot the other way: a correct random fill reproduces the
-        // sentinel byte with probability 1/256 per byte, so "none of 64" fails about
-        // 22% of the time (measured in CI: two jobs red on this line). Five or more
-        // matches is the actual failure tail: P(X >= 5) ~ 5.7e-6 for X ~ Binomial(64,
-        // 1/256), i.e. four or fewer matches ~ 1 - 5.7e-6 passes -- while a
-        // prefix-writing `fill` leaves the whole tail at the sentinel, far more than
-        // four.
-        let mut buf = [0xAAu8; 64];
-        crate::random::fill(&mut buf).unwrap();
-        let untouched = buf.iter().filter(|&&b| b == 0xAA).count();
-        assert!(
-            untouched <= 4,
-            "{untouched} of {} bytes still hold the sentinel: fill did not cover \
-             the whole buffer",
-            buf.len()
+        // A *per-position, across-fills* rule, not a count and not "no byte equals the
+        // sentinel". Two earlier revisions each missed one end of the defect:
+        //
+        //   * `any(...)` accepted a `fill` that wrote a single byte -- the test named
+        //     "whole buffer" could not see the defect it was named for;
+        //   * a count with a tolerance (`untouched <= 4`) accepted a `fill` that wrote
+        //     all but the last 1-4 bytes. Measured with the fill capped at
+        //     `dest[..len - 4]`: 18 of 20 runs passed (the two failures are random bytes
+        //     elsewhere happening to equal the sentinel and pushing the count over four)
+        //     and with it capped at `dest[..len - 1]`: 20 of 20 passed. Both are exactly
+        //     the failure this test is named for.
+        //
+        // A single-run "no four consecutive sentinel bytes" rule does not close it either,
+        // and that is measured rather than assumed: with the fill capped one byte short,
+        // the surviving sentinel needs only *three* coincidental neighbours to form a run
+        // of four, so the defect escapes a run rule with probability 2^-24 (~6e-8) per
+        // run -- it was observed passing the single-run form. What a *single* sample
+        // cannot do is tell one unwritten byte from a byte a correct fill happened to set
+        // to the sentinel; no rule over one sample can, at a false-positive rate below
+        // 1/256.
+        //
+        // So the same idea is applied across four independent fills into four
+        // sentinel-initialised buffers: an unwritten position is sentinel in **every**
+        // run, and therefore fails deterministically -- including a one-byte tail --
+        // while a correct fill makes one byte sentinel with probability 1/256 per run,
+        // so one position is sentinel in all four with probability 2^-32 and the 64
+        // positions of a buffer give a spurious failure probability of ~64 * 2^-32 =
+        // 1.5e-8. That is the same order as the single-run rule it replaces (61 windows
+        // * 2^-32), and unlike it, it fails *any* unwritten window rather than only one
+        // at least four bytes long.
+        let mut bufs = [[0xAAu8; 64]; 4];
+        for b in &mut bufs {
+            crate::random::fill(b).unwrap();
+        }
+        let mut always_sentinel = [true; 64];
+        for b in &bufs {
+            for (i, &x) in b.iter().enumerate() {
+                always_sentinel[i] &= x == 0xAA;
+            }
+        }
+        let survivors: usize = always_sentinel.iter().filter(|&&s| s).count();
+        assert_eq!(
+            survivors, 0,
+            "{survivors} byte position(s) still held the sentinel after four independent \
+             fills: an unwritten window stays the sentinel in every run, while a correct \
+             fill makes one byte sentinel with probability 1/256 per run (all four \
+             agreeing at one position is 2^-32; over 64 positions the spurious failure \
+             probability is ~1.5e-8), so this is an unwritten window, not chance."
         );
     }
 

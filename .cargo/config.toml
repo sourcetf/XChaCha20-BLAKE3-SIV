@@ -66,7 +66,7 @@ linker = "rust-lld"
 #     the `getrandom` crate passes that address as a function pointer: the call
 #     jumps to itself.  Measured: the executed instruction stream is a single
 #     `auipc ra, 0; jalr ra` pair (15.3M executions of one guest PC), which is
-#     what `tests/ultra.rs::every_layer_answers_correctly_in_the_ultra_build`
+#     what `tests/ultra.rs::ultra_still_round_trips_rejects_a_forgery_and_generates_keys`
 #     hangs in after it asks for OS entropy.  Forcing the member in fixes it; no
 #     other target is affected (aarch64's binary defines `getrandom` — something
 #     in that link already references it strongly — so only riscv64 showed this).

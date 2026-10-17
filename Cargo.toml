@@ -12,11 +12,13 @@ keywords = ["cryptography", "aead", "xchacha20", "blake3", "siv"]
 categories = ["cryptography", "no-std"]
 # What the published `.crate` contains. Without this, `cargo package` ships every
 # tracked, non-dotfile file: the CI workflows, `tools/`, `tests/`, and (worst)
-# `mutants.out/`, whose logs carry developer host paths -- 101 files of the 110 this
-# tree tracks (the 7 dotfiles/dotdirs and the nested `fuzz/` package's 4 are skipped,
-# and cargo adds its own two), most of them not part of the library a consumer
-# builds. The allow list below is the crate plus the documents `README.md` links to;
-# run `cargo package --list` to verify it stays that way.
+# `mutants.out/`, whose logs carry developer host paths -- 102 files, and the count is
+# written as the arithmetic so it stays checkable rather than decaying: tracked files
+# (`git ls-files | wc -l` is 111 today) minus the 7 dotpaths and the nested `fuzz/`
+# package's 4 files, plus cargo's own two (`Cargo.toml.orig`, `.cargo_vcs_info.json`),
+# i.e. 111 - 7 - 4 + 2 = 102, most of them not part of the library a consumer builds.
+# The allow list below is the crate plus the documents `README.md` links to; run
+# `cargo package --list` to verify it stays that way.
 #
 # `Cargo.toml` and the `readme` file are not listed: cargo always includes them.
 # Naming `README.md` here would also sweep in `tests/README.md` -- include globs

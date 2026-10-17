@@ -622,8 +622,21 @@ if [ "$RUN_CROSS_EXEC" -eq 1 ]; then
       # closing the impersonation case; see the note at qemu_identity_ok.
       # `tee` keeps the output streaming; `pipefail` (top of file) makes a non-zero
       # emulator or guest exit fail the `if`.
+      #
+      # `XSIV_ALLOW_UNOBSERVABLE_DUMP_FLAGS=1`, scoped to this emulated invocation: measured
+      # on this host, `qemu-aarch64` does not synthesize the guest's `VmFlags` in
+      # `/proc/self/smaps` (a successful `mlock`/`madvise` leaves it at `rd wr mr mw`), so
+      # `locked`'s `unlocking_restores_core_dump_inclusion` cannot observe `MADV_DODUMP`
+      # here -- the *observation channel* is missing, not the behaviour, and the call itself
+      # stays pinned against the shipped source by
+      # `the_dump_advice_is_issued_on_the_right_range`. That test now fails by default when
+      # the channel is missing (a returned test prints `ok`, which is indistinguishable from
+      # having observed the effect); with this consent it prints a loud
+      # `SKIPPED [unlocking_restores_core_dump_inclusion]: ...` line naming itself and the
+      # variable. Deliberately *not* exported for the native stages: there a real
+      # `/proc/self/smaps` must keep observing the effect rather than skipping it.
       : > "$cross_log"
-      if ! "$QEMU" "$bin" --test-threads=1 ${extra[@]+"${extra[@]}"} 2>&1 | tee "$cross_log"; then
+      if ! XSIV_ALLOW_UNOBSERVABLE_DUMP_FLAGS=1 "$QEMU" "$bin" --test-threads=1 ${extra[@]+"${extra[@]}"} 2>&1 | tee "$cross_log"; then
         echo "FAILED: $(basename "$bin") exited non-zero under $QEMU" >&2
         exit 1
       fi
@@ -632,6 +645,17 @@ if [ "$RUN_CROSS_EXEC" -eq 1 ]; then
         echo "        test binary was not executed: an exit status of 0 from the emulator" >&2
         echo "        is not evidence that anything ran, and this stage exists to execute" >&2
         echo "        the target's code." >&2
+        exit 1
+      fi
+      # A summary line is necessary and not sufficient: libtest prints
+      # `test result: ok. 0 passed; 0 failed; 0 ignored; … 0 filtered out` for a binary whose
+      # tests were all compiled away, which is a guest that ran *nothing* while this stage
+      # reports it as executed. `ignored` counts -- the deliberate-race and valgrind-only
+      # tests are legitimately ignored -- so the rule is passed + ignored >= 1.
+      if ! awk '/^test result:/ { p = $4 + 0; i = $8 + 0; saw = 1; if (p + i < 1) bad = 1 } END { exit (saw && !bad) ? 0 : 1 }' "$cross_log"; then
+        echo "FAILED: $(basename "$bin") ran no test under $QEMU: every summary line says" >&2
+        echo "        0 passed and 0 ignored, so the binary was built and executed nothing" >&2
+        echo "        (a target whose tests are all cfg'd out looks exactly like this)." >&2
         exit 1
       fi
       ran=$((ran + 1))
@@ -947,11 +971,18 @@ if [ "$RUN_TOOLS" -eq 1 ]; then
   run_tool "planted bugs (mutation check)" tools/mutation_check.sh
   run_tool "fault-injection campaign"      tools/fi_check.sh
 
-  # The instruction-level sweeps, in `--quick` mode: every byte of the decision
-  # function, both fault models, three configurations. The full sweep over the whole
-  # entry points is the scheduled `wide` job's (and `tools/fi_instruction.sh`'s).
-  run_tool "instruction sweep (nop)"  tools/fi_instruction.sh --quick
-  run_tool "instruction sweep (bits)" tools/fi_instruction.sh --quick --bits
+  # The instruction-level sweeps. `--quick` covers the decision function; the *whole*
+  # symbol-mapped region is what this sweep exists for -- the six single-byte accepting faults
+  # it found in `decrypt` came from outside the decision -- so `--deep`/`--all` run that too,
+  # and every label says which region it swept. Measured at `--jobs 16` on a 32-core host:
+  # about 2 minutes for the nop model, about 9 with `--bits`.
+  if [ "$STRICT" -eq 1 ]; then
+    run_tool "instruction sweep (nop, every symbol-mapped byte)"  tools/fi_instruction.sh
+    run_tool "instruction sweep (bits, every symbol-mapped byte)" tools/fi_instruction.sh --bits
+  else
+    run_tool "instruction sweep (nop, decision region)"  tools/fi_instruction.sh --quick
+    run_tool "instruction sweep (bits, decision region)" tools/fi_instruction.sh --quick --bits
+  fi
 
   # The cache/branch-profile differential, with its planted-leak control, in the two
   # configurations that matter (the default build and `ultra`, which puts a second

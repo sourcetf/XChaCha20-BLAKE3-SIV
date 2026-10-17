@@ -197,7 +197,31 @@ jobs:
       # one (see the advisory `timing` job below for the measurements). Only that
       # target names its tests `timing_*`, so nothing else is affected.
       - name: cargo test
-        run: cargo test ${{ matrix.args }} -- --skip timing
+        run: |
+          set -euo pipefail
+          log="${RUNNER_TEMP:-/tmp}/cargo-test-${{ strategy.job-index }}.log"
+          cargo test ${{ matrix.args }} -- --skip timing 2>&1 | tee "$log"
+          # A target cargo *ran* and that reported nothing at all -- no test passed, none
+          # ignored, none filtered -- is a vacuous result: the file exists, so it has tests,
+          # and none of them ran. libtest exits 0 for that, so without this check this leg,
+          # the release job that needs it, and the tag that job cuts all stay green on a suite
+          # that tested nothing. Legitimate empty-looking targets always carry a reason:
+          # `ignored` (ctgrind's valgrind-only tests, the deliberate race) or `filtered`
+          # (`--skip timing` here).
+          if grep -qE 'test result: ok\. 0 passed; 0 failed; 0 ignored; 0 filtered out' "$log"; then
+            echo "::error::a test target reported 0 passed, 0 ignored and 0 filtered: it was built and executed nothing"
+            grep -B 4 'test result: ok\. 0 passed; 0 failed; 0 ignored; 0 filtered out' "$log" | head -15
+            exit 1
+          fi
+          # Every binary cargo ran must also have reported: a target that produced no summary
+          # line at all was compiled and never executed.
+          ran="$(grep -cE '^[[:space:]]+Running (unittests|tests/)' "$log" || true)"
+          reported="$(grep -cE 'test result:' "$log" || true)"
+          if [ "${reported:-0}" -lt "${ran:-0}" ]; then
+            echo "::error::cargo ran ${ran} test binaries but only ${reported} reported a result"
+            exit 1
+          fi
+          echo "cargo test: ${ran} test binaries ran and reported (${reported} result lines, doc-tests included)"
 
   timing-instrument:
     name: timing instrument (blocking)
@@ -205,11 +229,13 @@ jobs:
     timeout-minutes: 20
     # The split matters: the *instrument* is gated, the two leak *screens* are not.
     # `timing_screen_can_detect_a_real_difference` plants a ~67 ns/op difference and
-    # requires the Welch t to see it (asserted `t > 10`; measured t = 3244 on a
-    # runner), so hosted-VM bias cannot make it lie -- and it is the assertion that
-    # keeps the two screens from being vacuous. Blocking, because a screen whose
-    # instrument has rotted is a green check that means nothing, which is the failure
-    # mode this repository keeps finding in other gates.
+    # requires the Welch t to see it (asserted `t > 10`). The measured t is host-dependent,
+    # not a constant this comment can pin: t = 3244 on one runner, and ~1195 elsewhere,
+    # where the same build resolved ~60 ns/op. What is fixed is the assertion against 10,
+    # and that is what keeps the two screens from being vacuous -- no host bias can make
+    # the instrument lie. Blocking, because a screen whose instrument has rotted is a
+    # green check that means nothing, which is the failure mode this repository keeps
+    # finding in other gates.
     #
     # The two leak screens themselves are deliberately *not* run here: on a hosted VM
     # their two classes are biased by ~0.8% with no possible cause (t = 10.96 release,
@@ -515,6 +541,7 @@ jobs:
       - name: execute under qemu
         run: |
           set -euo pipefail
+          work="${RUNNER_TEMP:-${TMPDIR:-/tmp}}"
           ran=0
           # Every test binary the build produced, not a hand-listed few. The list used to
           # name four (`xchacha20_blake3_siv-*`, `differential_reference-*`, `security-*`,
@@ -530,14 +557,45 @@ jobs:
           # already excluded above), so the flag is currently a no-op -- but it costs
           # nothing and keeps this step correct if a timing test moves back into
           # `security.rs`, which is where it used to live.
+          #
+          # Each binary's output is kept and its summary line read: a target whose tests are
+          # all `#[cfg]`-ed out prints "test result: ok. 0 passed; 0 failed; 0 ignored; 0
+          # filtered out" and exits 0, which reads as success in the one job whose whole
+          # point is *executing* the NEON, 32-bit and big-endian code. A binary cargo built
+          # and ran must have run something; `ignored` counts, like the native test legs --
+          # valgrind-only and deliberate-race tests are legitimately ignored, but nothing
+          # run and nothing ignored is a target that tested nothing.
+          #
+          # `XSIV_ALLOW_UNOBSERVABLE_DUMP_FLAGS=1`, scoped to this emulated invocation:
+          # measured on the reference host, `qemu-aarch64` does not synthesize the guest's
+          # `VmFlags` in `/proc/self/smaps` (a successful `mlock`/`madvise` leaves it at
+          # `rd wr mr mw`), so `locked`'s `unlocking_restores_core_dump_inclusion` cannot
+          # observe `MADV_DODUMP` under emulation -- the *observation channel* is missing,
+          # not the behaviour, and the call itself stays pinned against the shipped source
+          # by `the_dump_advice_is_issued_on_the_right_range`. The test fails by default
+          # when the channel is missing (a returned test prints `ok`, indistinguishable
+          # from having observed the effect); with this consent it prints a loud
+          # `SKIPPED [unlocking_restores_core_dump_inclusion]: ...` line naming itself and
+          # the variable, so the gap is still visible in the log.
           while IFS= read -r bin; do
             case "$(basename "$bin")" in timing-*|ctgrind-*) continue ;; esac
             extra=()
             case "$(basename "$bin")" in security-*) extra=(--skip timing) ;; esac
             echo "--- $(basename "$bin") ---"
-            ${{ matrix.qemu }} "$bin" --test-threads=1 ${extra[@]+"${extra[@]}"}
+            log="$work/qemu-$(basename "$bin").log"
+            if ! XSIV_ALLOW_UNOBSERVABLE_DUMP_FLAGS=1 ${{ matrix.qemu }} "$bin" --test-threads=1 ${extra[@]+"${extra[@]}"} 2>&1 | tee "$log"; then
+              echo "FAILED: $(basename "$bin") exited non-zero under ${{ matrix.qemu }}" >&2
+              exit 1
+            fi
+            result="$(grep -E 'test result:' "$log" | tail -1 || true)"
+            passed="$(printf '%s' "$result" | sed -n 's/.* \([0-9][0-9]*\) passed.*/\1/p')"
+            ignored="$(printf '%s' "$result" | sed -n 's/.* \([0-9][0-9]*\) ignored.*/\1/p')"
+            if [ -z "$passed" ] || [ -z "$ignored" ] || [ $((passed + ignored)) -eq 0 ]; then
+              echo "::error::a test binary reported ${passed:-no} passed and ${ignored:-no} ignored test(s) under qemu: it was built and executed nothing (all its tests were compiled away, filtered out, or it printed no libtest summary)"
+              exit 1
+            fi
             ran=$((ran + 1))
-          done < "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/executables.txt"
+          done < "$work/executables.txt"
           if [ "$ran" -eq 0 ]; then
             echo "no ${{ matrix.target }} test binaries were executed (executables.txt was empty or all entries were excluded)" >&2
             exit 1
@@ -608,8 +666,11 @@ jobs:
                  echo "::error::stack_residue.sh reported residue in the default build: $(grep -E ' \| KEY RESIDUE: ' "$RUNNER_TEMP/residue-default.log" | head -3 | tr '\n' ' ')"
                fi
                exit "$rc" ;;
-            3) echo "::warning::stack_residue.sh could not run in the default build (see the log)" ;;
-            *) echo "::error::stack_residue.sh exited $rc: neither a measurement nor a skip"; exit "$rc" ;;
+            *) # 3 is "could not run" -- the repository's convention, and a *skipped stage* in
+               # verify.sh. It is still an error here, because this step exists to produce the
+               # measurement and an absent measurement reported as a passed step is how a check
+               # stops being a check. The job stays advisory, so this blocks nothing.
+               echo "::error::stack_residue.sh exited $rc in the default build: no measurement was produced (3 = could not run)"; exit "$rc" ;;
           esac
 
       # `ultra`: `scrub_stack` overwrites the region, so this is the run that shows the
@@ -629,8 +690,7 @@ jobs:
                  echo "::error::stack_residue.sh reported residue in the ultra build, where scrub_stack is supposed to erase it: $(grep -E ' \| KEY RESIDUE: ' "$RUNNER_TEMP/residue-ultra.log" | head -3 | tr '\n' ' ')"
                fi
                exit "$rc" ;;
-            3) echo "::warning::stack_residue.sh could not run in the ultra build (see the log)" ;;
-            *) echo "::error::stack_residue.sh exited $rc: neither a measurement nor a skip"; exit "$rc" ;;
+            *) echo "::error::stack_residue.sh exited $rc in the ultra build: no measurement was produced (3 = could not run)"; exit "$rc" ;;
           esac
 
   release:

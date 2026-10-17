@@ -710,10 +710,22 @@ fn model_blake3_keyed_multi(key: &[u8; 32], parts: &[&[u8]], out: &mut [u8]) {
             assert!(parts[0].len() >= HEAD_LEN);
             assert!(out.len() == 32);
             let (aad_len, msg_len) = head_lengths(parts[0]);
+            // `checked_add`, matching the shipped `derive_tag`'s bound rather than
+            // wrapping: the real function computes the same sum with `checked_add` and
+            // falls back to its incremental hash on `None`, so a model that wrapped
+            // would accept a head the crate itself refuses -- and on a 32-bit target,
+            // where the sum can overflow, it would disagree with the code it models.
+            // The harness must fail on the overflow rather than fold it away.
             let total = (HEAD_LEN as u64)
-                .wrapping_add(aad_len)
-                .wrapping_add(msg_len);
-            assert!(parts[0].len() as u64 == total);
+                .checked_add(aad_len)
+                .and_then(|t| t.checked_add(msg_len));
+            assert!(
+                total.is_some(),
+                "the inner head's encoded lengths overflow u64: `derive_tag` refuses this \
+                 sum with `checked_add` (its `None` arm), so the model cannot check the \
+                 shape here"
+            );
+            assert!(parts[0].len() as u64 == total.unwrap());
         }
     }
 

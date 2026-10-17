@@ -421,9 +421,10 @@ plus the 9 large-fixture rows: 298 positions, 2384 comparisons) and the **AAD** 
 every row the exhaustive AAD sweep cannot reach (12 rows — the 10 with `aad_len > 130`,
 including the nine whose AAD no other sweep touches, plus the large fixture's two
 non-empty AADs: 72 positions, 576 comparisons). Each sampled row is anchored against the
-reference first and required to round-trip untampered; rows above 100 000 bytes get the
-end anchors only, because one comparison there costs a full 1 000 000-byte decryption
-(measured, ~115 ms in a debug build). The
+reference first and required to round-trip untampered; rows above 100 000 bytes lose their
+*spread* — the four end anchors stay, and so does the 60000/60001 pair, which is what those
+rows are in the fixture for — because each remaining comparison costs a full
+1 000 000-byte decryption (measured, ~115 ms in a debug build). The
 property tests and the fuzzer *sample* the same space rather than exhausting it (one
 `(pos, bit)` per case, their comments say "statistical, not exhaustive"), and every
 fuzz run recorded in CI has found no acceptance — but those are *non-physical*

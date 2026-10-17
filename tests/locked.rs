@@ -272,27 +272,28 @@ fn a_locked_key_encrypts_and_decrypts() {
     );
 }
 
-/// `Debug` must not print the key — this type has its own `Debug`, so `Key`'s is not
-/// evidence about it.
+/// `Debug` must render the documented redacted form **exactly** — this type has its own
+/// `Debug`, so `Key`'s is not evidence about it.
 #[test]
 fn debug_prints_nothing_derived_from_the_key() {
     let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     let Some(key) = lock_or_skip("debug_prints_nothing_derived_from_the_key") else {
         return;
     };
-    let shown = format!("{key:?}");
-    // The key is `[0x11; 32]`, so a leak can spell its bytes as `11` (hex, with or
-    // without a `0x` prefix) or as `17` (decimal). The earlier heuristic checked only
-    // `11`/`0x`, so an implementation that printed the decimal bytes alongside
-    // `REDACTED` passed it; the shipped `Debug` is the fixed string
-    // `LockedKey([REDACTED; 32], locked)`.
-    for leak in ["11", "17", "0x"] {
-        assert!(
-            !shown.contains(leak),
-            "`Debug` leaked key-derived text (`{leak}` appears): {shown}"
-        );
-    }
-    assert!(shown.contains("REDACTED"), "unexpected `Debug`: {shown}");
+    // Pinned with `assert_eq!` on the whole rendering, the way `src/lib.rs`'s
+    // `test_key_zeroizes_on_drop_and_hides_itself` pins `Key([REDACTED; 32])`. The
+    // earlier form of this test rejected only the substrings `11`, `17` and `0x` and
+    // required `REDACTED`; a `Debug` that appended the whole 32-byte key in **octal**
+    // left it green, because `0x11` renders as `21` (as does decimal 17) and no
+    // substring list written for the key's byte value happens to reject it. An exact
+    // comparison accepts only the shipped form `LockedKey([REDACTED; 32], locked)`.
+    assert_eq!(
+        format!("{key:?}"),
+        "LockedKey([REDACTED; 32], locked)",
+        "`Debug` must print nothing derived from the key -- not a prefix, not a hash, \
+         and not the bytes in another radix (hex, decimal and octal all pass a \
+         substring search for one spelling)"
+    );
 }
 
 /// The lock is released when the value is dropped: a `locked` build must not leak its
@@ -360,7 +361,36 @@ fn allow_unexercised_refusal() -> bool {
     affirmative("XSIV_ALLOW_UNEXERCISED_REFUSAL")
 }
 
-/// The shared parse for both `XSIV_ALLOW_*` escapes: `1`, `true` or `yes` (case-insensitive)
+/// Whether this host has recorded, with `XSIV_ALLOW_UNOBSERVABLE_DUMP_FLAGS=1`, that
+/// `/proc/self/smaps` cannot show the dump flags of *this* process's mappings — either
+/// the file is unreadable, or an emulator (`qemu-user`) does not reflect the guest's
+/// `madvise` advice in `VmFlags`.
+///
+/// Either condition makes `unlocking_restores_core_dump_inclusion` return before it can
+/// observe `MADV_DODUMP`, and libtest prints `ok` for a returned test exactly like one
+/// that observed it, so the return is a failure unless this variable records the gap —
+/// the same convention as `XSIV_ALLOW_UNLOCKED`/`XSIV_ALLOW_UNEXERCISED_REFUSAL`.
+/// `XSIV_ALLOW_UNLOCKED` is deliberately *not* reused here: it means "this host runs the
+/// `locked` layer with nothing locked", and under `qemu-user` locking itself works (the
+/// lock shows up in `VmLck`); what is missing is the observation channel for the dump
+/// advice, which is a different, separately recorded condition.
+fn allow_unobservable_dump_flags() -> bool {
+    affirmative("XSIV_ALLOW_UNOBSERVABLE_DUMP_FLAGS")
+}
+
+/// Whether this host has recorded, with `XSIV_ALLOW_UNINJECTED_CORRUPTION=1`, that
+/// `/proc/self/mem` cannot be written, so
+/// `the_integrity_check_fails_stop_on_a_corrupted_page` cannot inject the corruption it
+/// exists for and would return without observing the fail-stop check.
+///
+/// Loud by default for the same reason as the skips above: a returned test is reported as
+/// `ok` whether or not the corruption was ever written.
+fn allow_uninjected_corruption() -> bool {
+    affirmative("XSIV_ALLOW_UNINJECTED_CORRUPTION")
+}
+
+/// The shared parse for the `XSIV_ALLOW_*` escapes that do not carry their own parse
+/// (`XSIV_ALLOW_UNLOCKED` does): `1`, `true` or `yes` (case-insensitive)
 /// is consent, everything else — including `0`, an empty value and an unrecognised one — is
 /// not, and an unrecognised value says so rather than being silently reinterpreted.
 fn affirmative(name: &str) -> bool {
@@ -669,11 +699,25 @@ fn unlocking_restores_core_dump_inclusion() {
     let ptr = buf.as_ptr() as usize;
 
     let Some(before) = flags_at(ptr) else {
+        // A returned test reports `ok` whether or not it observed anything, and this
+        // return observes nothing at all: smaps *is* the measurement. It is therefore a
+        // failure unless the operator records the gap, the same rule as the other skips
+        // in this file. (`XSIV_ALLOW_UNLOCKED` does not fit: locking may work fine here;
+        // it is the dump-flag channel that is missing.)
+        assert!(
+            allow_unobservable_dump_flags(),
+            "/proc/self/smaps is not readable here, so the kernel's view of the dump flags \
+             cannot be read and this test would return without observing MADV_DODUMP at \
+             all. Set XSIV_ALLOW_UNOBSERVABLE_DUMP_FLAGS=1 to record that this host \
+             knowingly leaves the dump-advice effect unobserved. [test: \
+             unlocking_restores_core_dump_inclusion]"
+        );
         eprintln!(
             "SKIPPED [unlocking_restores_core_dump_inclusion]: /proc/self/smaps is not \
              readable here, so the kernel's view of the dump flags cannot be read. This is \
-             not a pass; no environment variable enables smaps, and the MADV_DODUMP call \
-             itself is pinned at source level by \
+             NOT a pass: it was reached only because XSIV_ALLOW_UNOBSERVABLE_DUMP_FLAGS=1 \
+             records that this host knowingly leaves the dump-advice effect unobserved; the \
+             MADV_DODUMP call itself is pinned at source level by \
              `the_dump_advice_is_issued_on_the_right_range`."
         );
         return;
@@ -725,15 +769,28 @@ fn unlocking_restores_core_dump_inclusion() {
         // long as the bug existed — is pinned against the shipped source by
         // `the_dump_advice_is_issued_on_the_right_range` below, which needs no kernel
         // cooperation at all. What is genuinely not verified on such a host is the
-        // *effect*, and saying so is the point of printing this.
+        // *effect*, and saying so is the point of printing this. The return is also a
+        // *failure* unless `XSIV_ALLOW_UNOBSERVABLE_DUMP_FLAGS=1` records the gap: an
+        // audit measured this branch returning `ok` with nothing observed, which is
+        // indistinguishable in a test report from having verified the effect.
         xchacha20_blake3_siv::locked::unlock_range(buf.as_ptr(), buf.len());
+        assert!(
+            allow_unobservable_dump_flags(),
+            "VmFlags does not report `lo` for the mapping that holds the buffer, so this \
+             environment does not reflect its memory advice (qemu-user does not) and the \
+             effect of MADV_DODUMP is unobservable — this test would return without \
+             observing its property. Set XSIV_ALLOW_UNOBSERVABLE_DUMP_FLAGS=1 to record \
+             that this host knowingly leaves the dump-advice effect unobserved. [test: \
+             unlocking_restores_core_dump_inclusion]"
+        );
         eprintln!(
             "SKIPPED [unlocking_restores_core_dump_inclusion]: VmFlags does not report `lo` \
              for the mapping that holds the buffer, so this environment does not reflect the \
              guest's memory advice here (qemu-user does not); the effect of MADV_DODUMP is \
              then unobservable, and the call is checked at source level by \
-             `the_dump_advice_is_issued_on_the_right_range` instead. This is not a pass; no \
-             environment variable makes smaps reflect the advice. flags: {locked}"
+             `the_dump_advice_is_issued_on_the_right_range` instead. This is NOT a pass: it \
+             was reached only because XSIV_ALLOW_UNOBSERVABLE_DUMP_FLAGS=1 records that this \
+             host knowingly leaves the dump-advice effect unobserved. flags: {locked}"
         );
         return;
     }
@@ -1361,7 +1418,8 @@ fn the_integrity_check_fails_stop_on_a_corrupted_page() {
     let ptr = key.as_bytes().as_ptr() as usize;
 
     // `Seek` + `Write` rather than `std::os::unix::fs::FileExt`, so this file still
-    // *compiles* on a non-unix target; there the open below fails and the skip is printed.
+    // *compiles* on a non-unix target; there the open below fails and the return is a
+    // failure unless the operator records the gap.
     use std::io::{Seek, SeekFrom, Write};
     let mut mem = match std::fs::OpenOptions::new()
         .read(true)
@@ -1370,13 +1428,27 @@ fn the_integrity_check_fails_stop_on_a_corrupted_page() {
     {
         Ok(f) => f,
         Err(e) => {
+            // A returned test reports `ok` whether or not it corrupted anything. The
+            // corruption *is* the measurement, so this is a failure unless the operator
+            // records that this host cannot inject it — the same convention as the other
+            // skips in this file.
+            assert!(
+                allow_uninjected_corruption(),
+                "/proc/self/mem is not writable here ({e}), so a byte in the live page \
+                 cannot be corrupted and this test would return without observing the \
+                 fail-stop integrity check. Set XSIV_ALLOW_UNINJECTED_CORRUPTION=1 to \
+                 record that this host knowingly leaves the corrupted-page path unobserved. \
+                 [test: the_integrity_check_fails_stop_on_a_corrupted_page]"
+            );
             eprintln!(
                 "SKIPPED [the_integrity_check_fails_stop_on_a_corrupted_page]: \
                  /proc/self/mem is not writable here ({e}), so a byte in the live page \
                  cannot be corrupted and the integrity check cannot be observed. This is \
-                 not a pass; no environment variable enables it — the check's call sites \
-                 stay pinned by `the_integrity_tag_is_wiped_in_both_callers` and the \
-                 in-crate `a_corrupted_locked_page_is_detected_on_use`."
+                 NOT a pass: it was reached only because XSIV_ALLOW_UNINJECTED_CORRUPTION=1 \
+                 records that this host knowingly leaves the corrupted-page path \
+                 unobserved; the check's call sites stay pinned by \
+                 `the_integrity_tag_is_wiped_in_both_callers` and the in-crate \
+                 `a_corrupted_locked_page_is_detected_on_use`."
             );
             return;
         }
@@ -1388,10 +1460,20 @@ fn the_integrity_check_fails_stop_on_a_corrupted_page() {
         .seek(SeekFrom::Start((ptr + 7) as u64))
         .and_then(|_| mem.write_all(&flipped))
     {
+        // Same rule as the open above: nothing was corrupted, so nothing was tested.
+        assert!(
+            allow_uninjected_corruption(),
+            "writing to /proc/self/mem failed ({e}), so the page could not be corrupted and \
+             this test would return without observing the fail-stop integrity check. Set \
+             XSIV_ALLOW_UNINJECTED_CORRUPTION=1 to record that this host knowingly leaves \
+             the corrupted-page path unobserved. [test: \
+             the_integrity_check_fails_stop_on_a_corrupted_page]"
+        );
         eprintln!(
             "SKIPPED [the_integrity_check_fails_stop_on_a_corrupted_page]: writing to \
-             /proc/self/mem failed ({e}), so the page could not be corrupted. This is not \
-             a pass; no environment variable enables it."
+             /proc/self/mem failed ({e}), so the page could not be corrupted. This is NOT a \
+             pass: it was reached only because XSIV_ALLOW_UNINJECTED_CORRUPTION=1 records \
+             that this host knowingly leaves the corrupted-page path unobserved."
         );
         return;
     }

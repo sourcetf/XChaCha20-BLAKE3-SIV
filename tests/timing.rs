@@ -107,11 +107,17 @@ fn timing_guard() -> std::sync::MutexGuard<'static, ()> {
 //   3. the leaked quantity is bounded in principle: the only secret-dependent
 //      branch is the final accept/reject, and every secret is wiped before it.
 //
-// These tests are a screen for gross regressions — e.g. someone replacing
-// `ct_eq` with `==`, whose early exit is a difference of *tens* of ns on a
-// 65-byte tag, which is the same order as this screen's resolution (the tag test
-// below says so and prints the figure): the effect sits *at* the floor rather
-// than comfortably inside it. An earlier revision of this comment claimed
+// These tests are a screen for gross timing differences, and — plainly — **no
+// `cargo test` target in this repository detects the classic MAC-verification
+// regression**: `ct_eq` replaced by `==` on the 65-byte tag. That regression's
+// early exit differs by *tens* of ns, the same order as this screen's resolution
+// rather than comfortably inside it (the tag test below says so and prints the
+// figure); measured, an injected byte-at-a-time comparison left this screen green
+// in 3/3 runs, and a later audit reproduced that at 5/5. The evidence for the
+// constant-time comparison is clock-free and lives elsewhere: `tools/ctgrind.sh`,
+// which is blocking in the Deep checks (`verify.sh --deep`/`--all`, where a skip is
+// fatal, and the `Deep checks` workflow's ctgrind job), plus the instruction-level
+// sweep in `tools/fi_instruction.sh`. An earlier revision of this comment claimed
 // "hundreds of ns ... visible even here", which the tag test's own doc contradicts.
 
 /// Operations per timed sample: enough that the clock's own cost is a small
@@ -224,28 +230,27 @@ fn resolution_ns(a: &[f64], b: &[f64]) -> f64 {
     10.0 * (va / n + vb / m).sqrt()
 }
 
-/// A *screen* for the classic MAC-verification leak — a byte-at-a-time comparison
-/// that exits on the first mismatch, letting an attacker who can time it recover the
-/// tag one byte at a time — together with the bounds of that screen, which are
-/// measured rather than assumed.
-///
-/// The property under it is that `subtle::ConstantTimeEq` makes the two classes
-/// indistinguishable. This test cannot establish that property: a
-/// first-byte-versus-last-byte mismatch differs by tens of nanoseconds, and the
-/// screen's resolution at `|t| = 10` is the same order (24 ns/op on the reference
+/// A timing *screen* for the position of the first differing tag byte, with the bounds
+/// of that screen measured rather than assumed. It is **not** a screen for the classic
+/// MAC-verification leak, and it must not be read as one: a byte-at-a-time comparison
+/// that exits on the first mismatch differs by tens of nanoseconds on the 65-byte tag,
+/// the same order as the screen's resolution at `|t| = 10` (24 ns/op on the reference
 /// host — the "Sensitivity" paragraph below carries the measurements and the range
-/// across hosts), so *at* the floor rather than comfortably inside it. An audit
-/// planted a byte-at-a-time comparison in both decrypt gates and this screen passed
-/// 3/3; a later one reproduced that at 5/5. What the screen does catch is a gross
-/// regression — an early exit skipping hundreds of nanoseconds, or a per-byte
-/// difference — and that is what its name claims. The mechanical evidence for the
-/// comparison itself is clock-free: `tools/ctgrind.sh`, whose build recipe carries
-/// `-C debuginfo=2` so valgrind attributes a branch inlined *into* the decision to
-/// the function it came from, and `tools/fi_instruction.sh`, whose byte and bit
-/// sweeps look at the compiled decision instruction by instruction. Sharpen this
-/// screen instead and it stops being usable: at 5x the sample count a hosted runner
-/// reports `t > 10` with no causal difference present (the `timing` job's comment in
-/// `.github/workflows/ci.yml` records that measurement).
+/// across hosts), so *at* the floor rather than comfortably inside it. An audit planted
+/// a byte-at-a-time comparison in both decrypt gates and this screen passed 3/3; a later
+/// one reproduced that at 5/5. **No `cargo test` target in this repository detects that
+/// regression** at this effect size. The evidence for the comparison itself is
+/// clock-free: `tools/ctgrind.sh` — blocking in the Deep checks (`verify.sh
+/// --deep`/`--all`, where a skip is fatal, and the `Deep checks` workflow's ctgrind
+/// job), whose build recipe carries `-C debuginfo=2` so valgrind attributes a branch
+/// inlined *into* the decision to the function it came from — plus
+/// `tools/fi_instruction.sh`, whose byte and bit sweeps look at the compiled decision
+/// instruction by instruction. What this screen does catch is a gross timing difference
+/// (the deliberate per-operation work in `timing_screen_can_detect_a_real_difference`
+/// is measured with `t` in the thousands); a tens-of-ns comparison regression is not in
+/// its reach. Sharpen the screen instead and it stops being usable: at 5x the sample
+/// count a hosted runner reports `t > 10` with no causal difference present (the
+/// `timing` job's comment in `.github/workflows/ci.yml` records that measurement).
 ///
 /// # Why the message is empty
 ///
@@ -273,9 +278,11 @@ fn resolution_ns(a: &[f64], b: &[f64]) -> f64 {
 /// 24 ns/op for this test), and ~4.6x coarser under `ultra` (168 vs 36 ns/op in an
 /// audit's side-by-side), which is the configuration where the screen is least
 /// sensitive. A tens-of-ns effect is therefore *at* the floor, not
-/// comfortably inside it: the screen catches gross regressions (an early exit
-/// skipping hundreds of nanoseconds, or a per-byte difference), while the mechanical
-/// evidence for the comparison itself is ctgrind.
+/// comfortably inside it: an injected byte-at-a-time comparison left this screen green
+/// in 3/3 runs (5/5 later), so this screen is **not** the screen for that regression,
+/// and nothing in `cargo test` here is. The mechanical evidence for the comparison
+/// itself is `tools/ctgrind.sh` (blocking in the Deep checks) plus the instruction-level
+/// sweep in `tools/fi_instruction.sh`.
 #[test]
 fn timing_tag_position_screen_finds_no_gross_difference() {
     let _guard = timing_guard();

@@ -981,19 +981,23 @@ fn documents_what_it_cannot_defend_against() {
     }
 }
 
-/// Every gate the crate has is *present* in this build, not merely documented.
+/// A smoke test of the assembled `ultra` build: a round trip, a tampered-tag rejection,
+/// and `rng` key/nonce generation.
 ///
-/// A feature flag that silently does not compose — `ultra` turning on `dual-mac` but the
-/// code checking `feature = "ultra"` somewhere and missing it — would be invisible in a
-/// normal test run because the default build does not compile any of it.
+/// It replaces a test that asserted `src/lib.rs` contains the strings
+/// `#[cfg(feature = "hardened")]` and `pub mod locked` -- true in every build, so it
+/// passed whether or not the layers were compiled. The name says what the body does
+/// rather than "every layer answers correctly", because a per-layer *answer* is not
+/// behaviourally observable from a `cargo test` target here: `dual-mac`'s recomputation,
+/// the witness agreement and the derived-value wipes are pinned by
+/// `dual_mac_is_wired_into_both_decrypt_paths` (and the gate's answer by
+/// `the_decision_still_answers_correctly_with_every_layer_on`), `locked`'s kernel
+/// behaviour by `locked_key_is_actually_locked`, and the feature bundle at compile time
+/// by the `const _` assertion at the top of this file.
 #[test]
-fn every_layer_answers_correctly_in_the_ultra_build() {
-    // Replaces a test that asserted `src/lib.rs` contains the strings
-    // `#[cfg(feature = "hardened")]` and `pub mod locked` -- true in every build, so it
-    // passed whether or not the layers were compiled. What is worth asserting here is
-    // that the assembled build still answers correctly end to end; the per-layer
-    // behaviour is checked by the `const _` assertion at the top of this file,
-    // `locked_key_is_actually_locked` and the unit tests in `src/lib.rs`.
+fn ultra_still_round_trips_rejects_a_forgery_and_generates_keys() {
+    // The body is deliberately this narrow; the doc above says where each layer's own
+    // answer is checked.
     let (ct, tag) = encrypt(&KEY, &NONCE, b"aad", b"message").unwrap();
     assert_eq!(
         decrypt(&KEY, &NONCE, b"aad", &ct, &tag).unwrap(),

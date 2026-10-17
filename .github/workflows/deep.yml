@@ -552,7 +552,7 @@ jobs:
       # is the one that finds what no source-level shape can remove (a conditional
       # jump's opcode is one bit from its inverse), so it is measured rather than
       # argued about. Eight times the `nop` sweep, hence `--quick` here and the full
-      # run in the scheduled `wide` job.
+      # run in the scheduled `wide-sweep-bits` job.
       - name: instruction-level faults, quick bit-flip sweep
         run: timeout 2400 ./tools/fi_instruction.sh --quick --bits
 
@@ -657,9 +657,10 @@ jobs:
     # The checks that are too slow or too noisy to gate every push, run on the
     # weekly schedule (`cron: "0 4 * * 1"` above -- this said "every night", which
     # the cron never did) instead of never: the 4000-vector differential against
-    # the reference implementation, AddressSanitizer over the whole suite (the fuzz
-    # job only covers the fuzz target), and the full instruction-level sweep of the
-    # compiled decision. The other half of the scheduled audit -- the full Miri suite
+    # the reference implementation, AddressSanitizer over the test targets (the fuzz
+    # job only covers the fuzz target; the doctest runs in the per-push job), and the
+    # full instruction-level sweep of the compiled decision. The other half of the
+    # scheduled audit -- the full Miri suite
     # under Tree Borrows (the aliasing model that is *not* the default, so nothing else
     # exercises it at this scale) and the fuzz soak -- is the `wide-miri-fuzz` job
     # below, which has its own timeout for the reason recorded there.
@@ -703,7 +704,7 @@ jobs:
       # -- the per-push `test` job's `cargo test --release -- --skip timing` includes
       # doctests -- and the `no_run`/`ignore` ones are unaffected here either way
       # because rustdoc never links those.
-      - name: AddressSanitizer over the whole suite
+      - name: AddressSanitizer over the test targets (doctests run in the per-push job)
         run: |
           set -euo pipefail
           rustup toolchain install nightly --profile minimal
@@ -718,14 +719,17 @@ jobs:
       # region is not negotiable and the budget is what moves. `wide-verdict` proves that the
       # six shards are a complete, disjoint sweep before applying the verdict, and a missing
       # shard fails there rather than reading as less work.
-      # The `bits` model is not run in full here (eight times the faults of this one); it runs
-      # `--quick` on every push in the mutation job above, and in full locally via
-      # `tools/fi_instruction.sh --bits`.
+      # The `bits` model is not run here (eight times the faults of the nop one); it runs
+      # `--quick` on every push in the mutation job above, and in full in the scheduled
+      # `wide-sweep-bits` job below, which splits the same region six ways and has its
+      # verdict applied there alongside this one's.
 
-  # The shards and their verdict, split from the differential and the sanitizer above so that
-  # each job's budget holds only its own work: the full sweep measures about five hours on a
-  # hosted runner (`Deep checks` #183's sweep step ran 2 h 47 min and was killed with the job
-  # at five hours), which is why it is six jobs and not one.
+  # The shards and the verdict, split from the differential and the sanitizer above so
+  # that each job's budget holds only its own work: the full nop sweep measures about five
+  # hours on a hosted runner (`Deep checks` #183's sweep step ran 2 h 47 min and was killed
+  # with the job at five hours), which is why it is six jobs and not one. The `bits` model
+  # gets the same six-way split of the same region in `wide-sweep-bits` below, with its own
+  # budget because it is eight times the faults; both jobs feed the verdict job that follows.
   wide-sweep:
     name: wide audit (sweep shard ${{ matrix.shard }}/6)
     runs-on: ubuntu-latest
@@ -758,11 +762,60 @@ jobs:
           name: sweep-shard-${{ matrix.shard }}
           path: ${{ runner.temp }}/sweep-shard-${{ matrix.shard }}.json
 
+  # The bit-flip model over the same region, split the same six ways. It is eight times
+  # the nop model's fault count (the tool's header: ~150k faults against ~19 KB of region),
+  # so it needs its own job rather than a larger slice of the nop budget. Without it the
+  # full bit-flip sweep ran nowhere on a schedule -- `--quick` on every push and "in full
+  # locally" -- so a fault that only a flipped bit reaches (a conditional jump's opcode is
+  # one bit from its inverse) could sit on `main` with the README's pinned residual moving
+  # and nothing re-measuring it. The shards use the tool's `--bits --shard I/N --report FILE`
+  # over exactly the nop shards' region, and the verdict job below reads their reports with
+  # `--model bits`: an incomplete set of bits reports fails the verdict rather than
+  # shrinking it, the same way a missing nop shard does.
+  wide-sweep-bits:
+    name: wide audit (bits sweep shard ${{ matrix.shard }}/6)
+    runs-on: ubuntu-latest
+    # 360, the ceiling a GitHub-hosted job allows, and the number is derived from the
+    # *measured* sweep time rather than from the fault-count ratio: the tool's header prices
+    # the bit-flip model at about eight times the *faults* of the nop model, but on a 16-core
+    # host the full bits sweep measures ~9 minutes against ~2 for nop -- a ratio of 1.7. With
+    # a nop shard at 180 minutes, one bits shard is therefore about 1.4 hours of a hosted
+    # runner's time, which fits 360 with room. A larger number would be one GitHub ignores,
+    # and a job cut off by `timeout-minutes` reads as `cancelled`, not as `failure`.
+    timeout-minutes: 360
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4, 5, 6]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          shared-key: wide-sweep-bits
+
+      - name: instruction-level faults (every symbol-mapped byte, bit-flip model; shard ${{ matrix.shard }} of 6)
+        run: |
+          set -euo pipefail
+          ./tools/fi_instruction.sh --bits --shard "${{ matrix.shard }}/6" \
+            --report "$RUNNER_TEMP/sweep-bits-shard-${{ matrix.shard }}.json"
+
+      # `if: always()` as in `wide-sweep`: a failed shard still uploads its numbers, so the
+      # verdict can say *why* the sweep is incomplete instead of only that an artifact is missing.
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: sweep-bits-shard-${{ matrix.shard }}
+          path: ${{ runner.temp }}/sweep-bits-shard-${{ matrix.shard }}.json
+
   wide-verdict:
-    name: wide audit (sweep verdict)
+    name: wide audit (sweep verdicts)
     runs-on: ubuntu-latest
     timeout-minutes: 30
-    needs: [wide-sweep]
+    needs: [wide-sweep, wide-sweep-bits]
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     permissions:
       contents: read
@@ -779,11 +832,20 @@ jobs:
           gh run download "${{ github.run_id }}" -D reports
           find reports -name '*.json' | sort
 
-      - name: verdict (the tool's own reading, over the shards)
+      - name: verdict (the tool's own reading, over the nop shards)
         run: |
           set -euo pipefail
           python3 tools/fi_instruction_verdict.py --shards 6 \
             $(find reports -name 'sweep-shard-*.json' | sort)
+
+      # The bit-flip model's reading, in a separate invocation because the verdict script
+      # rejects a report whose model is not the one asked for: a nop shard that slipped into
+      # this set fails here rather than passing as a bits shard.
+      - name: bits verdict (the tool's own reading, over the bit-flip shards)
+        run: |
+          set -euo pipefail
+          python3 tools/fi_instruction_verdict.py --shards 6 --model bits \
+            $(find reports -name 'sweep-bits-shard-*.json' | sort)
 
   # The Miri and fuzz halves of the scheduled audit live in their own job, with their
   # own `timeout-minutes`, because one budget could not hold both: the instruction
@@ -811,9 +873,25 @@ jobs:
       - name: Miri, full library suite under Tree Borrows
         run: |
           set -euo pipefail
+          work="${RUNNER_TEMP:-${TMPDIR:-/tmp}}"
           rustup component add miri --toolchain nightly
           MIRIFLAGS="-Zmiri-disable-isolation -Zmiri-strict-provenance -Zmiri-tree-borrows" \
-            cargo +nightly miri test --release --features pure --lib
+            cargo +nightly miri test --release --features pure --lib 2>&1 | tee "$work/miri-full-lib.log"
+          # The floor every filtered Miri step above carries, for the one run that has no
+          # filter: here the vacuum is not a filter matching nothing but the suite itself
+          # getting smaller -- a module (or a whole test block) that stops being compiled
+          # makes this run interpret less while staying green. The number is derived, not
+          # guessed: on this host `cargo test --release --features pure --lib`, the same
+          # target and feature set without Miri, reports 50 passed; that is the library's
+          # test count, and the floor. It moves only with the suite, and a shrink has to
+          # be paid for by updating this line in the same commit.
+          count="$(grep -E 'test result:' "$work/miri-full-lib.log" | tail -1 \
+            | sed -n 's/.* \([0-9][0-9]*\) passed.*/\1/p' || true)"
+          if [ -z "$count" ] || [ "$count" -lt 50 ]; then
+            echo "::error::the full Miri suite reported ${count:-0} passed test(s); expected at least 50 (the library's test count on this host), so this run interpreted less than the library's suite"
+            exit 1
+          fi
+          echo "Miri interpreted $count tests"
 
       # 15 minutes across every core the runner has, versus the two the push-time
       # job spends. The scheduled run is where coverage-of-time is affordable. Both
