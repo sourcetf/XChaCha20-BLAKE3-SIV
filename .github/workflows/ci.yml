@@ -213,25 +213,31 @@ jobs:
           #
           # Parse by *field position*; matching `'… 0 ignored; 0 filtered out'` as one literal
           # never fires, because libtest always prints `0 measured;` between those fields.
+          # Strip ANSI colour and carriage returns first: cargo colours `Running` when it
+          # thinks it is on a terminal, and a CI log is a pipe that may still carry the
+          # escapes (measured: an ANSI-wrapped `Running` line does not match an anchored
+          # pattern while the plain `test result:` line does, so every summary looked
+          # unattributable and every leg failed).
+          sed -E $'s/\x1b\\[[0-9;]*[A-Za-z]//g; s/\r$//' "$log" > "$RUNNER_TEMP/cargo-test-clean.log"
           awk '
             # `     Running unittests src/lib.rs (…)` and `     Running tests/foo.rs (…)`
             # differ in field count (the lib target has the kind and then the path; an
             # integration target has the path and then the binary). Take the first field
-            # that looks like a source path -- `$2` is `unittests` for the lib and the path
-            # for the rest, `$3` is the reverse, and both mistakes made every leg see an
-            # unattributable target and fail.
-            /^     Running / {
+            # that ends in `.rs`, which is the path in both shapes -- `$2` is `unittests`
+            # for the lib and the path for the rest, `$3` is the reverse, and either mistake
+            # made the summary unattributable.
+            /^[[:space:]]*Running / {
               target = ""
-              for (k = 2; k <= NF; k++) if ($k ~ /\.rs$/) { target = $k; break }
+              for (k = 1; k <= NF; k++) if ($k ~ /\.rs$/) { target = $k; break }
               next
             }
-            /^   Doc-tests / { target = "doc-tests"; next }
+            /^[[:space:]]*Doc-tests / { target = "doc-tests"; next }
             /^test result:/ {
               p = $4 + 0; f = $6 + 0; i = $8 + 0; x = $12 + 0
               if (p + i + x == 0) { print target; n++ }
             }
             END { exit (n > 0) ? 0 : 1 }
-          ' "$log" > "$RUNNER_TEMP/zero-targets.txt" || true
+          ' "$RUNNER_TEMP/cargo-test-clean.log" > "$RUNNER_TEMP/zero-targets.txt" || true
           if [ -s "$RUNNER_TEMP/zero-targets.txt" ]; then
             bad=0
             while IFS= read -r target; do
@@ -266,8 +272,8 @@ jobs:
           fi
           # Every binary cargo ran must also have reported: a target that produced no summary
           # line at all was compiled and never executed.
-          ran="$(grep -cE '^[[:space:]]+Running (unittests|tests/)' "$log" || true)"
-          reported="$(grep -cE '^test result:' "$log" || true)"
+          ran="$(grep -cE '^[[:space:]]+Running (unittests|tests/)' "$RUNNER_TEMP/cargo-test-clean.log" || true)"
+          reported="$(grep -cE '^test result:' "$RUNNER_TEMP/cargo-test-clean.log" || true)"
           if [ "${reported:-0}" -lt "${ran:-0}" ]; then
             echo "::error::cargo ran ${ran} test binaries but only ${reported} reported a result"
             exit 1
