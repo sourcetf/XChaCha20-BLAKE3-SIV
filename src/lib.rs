@@ -3176,7 +3176,9 @@ pub fn decrypt_bounded(
 /// 30 ns for `encrypt_in_place_detached`'s identical refusal, which has nothing to
 /// wipe), and at `MAX_MSG_SIZE` it is 256 GiB of stores rather than an immediate
 /// error. A caller that wants the refusal to be free checks the length itself first;
-/// `MAX_MSG_SIZE` is public for exactly that, and `tools`/`README.md` say so.
+/// `MAX_MSG_SIZE` is public for exactly that (`README.md`'s "On a 32-bit target the length
+/// guard cannot fire" and its "What this crate cannot fix for you" section carry the same
+/// advice).
 ///
 /// # Allocation
 ///
@@ -3849,24 +3851,64 @@ mod x86_simd {
             // leaf is below 7, `CPUID` returns the *highest supported leaf's*
             // data for leaf 7 (Intel SDM, "CPUID—CPU Identification"), whose
             // bit 5 is not the AVX2 feature bit.
+            //
+            // The decision itself lives in [`avx2_from_cpuid`], a pure function, so the
+            // rules above can be tested without the hardware that makes them matter: the
+            // "maximum leaf below 7" case cannot be produced on a CPU that has AVX2, and
+            // a third-party pass could only argue it from the logic. Its table test pins
+            // each rule, including that one.
             unsafe {
                 let max_basic_leaf = __cpuid_count(0, 0).eax;
                 let leaf1 = __cpuid_count(1, 0);
-                let osxsave = (leaf1.ecx >> 27) & 1 == 1;
-                let avx = (leaf1.ecx >> 28) & 1 == 1;
-                if !osxsave || !avx {
-                    return false;
-                }
-                // XCR0[2:1] must both be set: XMM and YMM state enabled by the OS.
-                if _xgetbv(0) & 0b110 != 0b110 {
-                    return false;
-                }
-                if max_basic_leaf < 7 {
-                    return false;
-                }
-                let leaf7 = __cpuid_count(7, 0);
-                (leaf7.ebx >> 5) & 1 == 1
+                let xcr0 = if (leaf1.ecx >> 27) & 1 == 1 {
+                    // OSXSAVE: XGETBV is available and XCR0 readable.
+                    Some(_xgetbv(0))
+                } else {
+                    None
+                };
+                let leaf7_ebx = if max_basic_leaf >= 7 {
+                    Some(__cpuid_count(7, 0).ebx)
+                } else {
+                    None
+                };
+                avx2_from_cpuid(max_basic_leaf, leaf1.ecx, xcr0, leaf7_ebx)
             }
+        }
+    }
+
+    /// Which CPUID results mean "AVX2 usable": the decision `detect_avx2` makes from the
+    /// registers it reads, as a pure function so it can be tested.
+    ///
+    /// * `max_basic_leaf` is leaf 0's EAX. Below 7, leaf 7 does not exist and querying it
+    ///   returns the highest supported leaf's data -- whose bit 5 is not AVX2 (Intel SDM).
+    ///   `leaf7_ebx` is `None` exactly when the caller did not query leaf 7.
+    /// * `leaf1_ecx` is leaf 1's ECX: bit 27 is OSXSAVE, bit 28 is AVX.
+    /// * `xcr0` is `XGETBV(0)`, read only when OSXSAVE is set: bits 1 and 2 must both be
+    ///   set for XMM and YMM state to be enabled by the OS.
+    pub(super) fn avx2_from_cpuid(
+        max_basic_leaf: u32,
+        leaf1_ecx: u32,
+        xcr0: Option<u64>,
+        leaf7_ebx: Option<u32>,
+    ) -> bool {
+        let osxsave = (leaf1_ecx >> 27) & 1 == 1;
+        let avx = (leaf1_ecx >> 28) & 1 == 1;
+        if !osxsave || !avx {
+            return false;
+        }
+        match xcr0 {
+            // XMM and YMM state must both be enabled by the OS.
+            Some(x) if x & 0b110 == 0b110 => {}
+            _ => return false,
+        }
+        if max_basic_leaf < 7 {
+            return false;
+        }
+        match leaf7_ebx {
+            Some(ebx) => (ebx >> 5) & 1 == 1,
+            // Belt and braces: the caller passes `Some` exactly when the leaf exists. A
+            // missing leaf is "not usable", never "assume yes".
+            None => false,
         }
     }
 }
@@ -4489,6 +4531,86 @@ mod tests {
         }
     }
 
+    /// The AVX2 usability decision, as a table.
+    ///
+    /// The distinction this test exists for is the one no machine in CI can produce: a CPU
+    /// with AVX but a maximum basic leaf below 7. On such a CPU `CPUID.(EAX=7,…)` returns
+    /// the highest supported leaf's data, and bit 5 of that is not the AVX2 bit -- reading
+    /// it would execute AVX2 on a Sandy/Ivy Bridge and take SIGILL. A third-party pass
+    /// showed that flipping the production guard to a constant left the whole suite green,
+    /// because nothing could exercise the branch; the decision is now a pure function and
+    /// the rows below are the device.
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn avx2_usability_follows_the_cpuid_rules() {
+        const OSXSAVE: u32 = 1 << 27;
+        const AVX: u32 = 1 << 28;
+        const AVX2_BIT: u32 = 1 << 5;
+        // A fully capable machine: OSXSAVE + AVX, XCR0 with XMM and YMM, leaf 7 present
+        // with the AVX2 bit.
+        let capable = (32, OSXSAVE | AVX, Some(0b110), Some(AVX2_BIT));
+        assert!(x86_simd::avx2_from_cpuid(
+            capable.0, capable.1, capable.2, capable.3
+        ));
+        // One CPUID state: (max basic leaf, leaf-1 ECX, XCR0 or `None`, leaf-7 EBX or
+        // `None`), plus why it is in the table and what AVX2 usability must follow.
+        type Case = (&'static str, (u32, u32, Option<u64>, Option<u32>), bool);
+        let cases: &[Case] = &[
+            ("capable machine", capable, true),
+            // The Sandy/Ivy Bridge case: AVX present, leaf 7 absent. Whatever the high
+            // leaf happens to hold, the answer is no -- and `None` is what the caller
+            // passes, because it does not query a leaf that does not exist.
+            (
+                "max leaf 6, AVX set, bit 5 of the high leaf set",
+                (6, OSXSAVE | AVX, Some(0b110), None),
+                false,
+            ),
+            (
+                "max leaf below 7 even with a leaf-7 word supplied",
+                (3, OSXSAVE | AVX, Some(0b110), Some(AVX2_BIT)),
+                false,
+            ),
+            (
+                "no OSXSAVE (no XGETBV)",
+                (32, AVX, None, Some(AVX2_BIT)),
+                false,
+            ),
+            ("no AVX", (32, OSXSAVE, Some(0b110), Some(AVX2_BIT)), false),
+            (
+                "XCR0 without YMM state",
+                (32, OSXSAVE | AVX, Some(0b010), Some(AVX2_BIT)),
+                false,
+            ),
+            (
+                "XCR0 without XMM state",
+                (32, OSXSAVE | AVX, Some(0b100), Some(AVX2_BIT)),
+                false,
+            ),
+            (
+                "XCR0 unavailable although OSXSAVE is set",
+                (32, OSXSAVE | AVX, None, Some(AVX2_BIT)),
+                false,
+            ),
+            (
+                "leaf 7 present without the AVX2 bit",
+                (32, OSXSAVE | AVX, Some(0b110), Some(0)),
+                false,
+            ),
+            (
+                "leaf 7 present with only another bit set",
+                (32, OSXSAVE | AVX, Some(0b110), Some(1 << 3)),
+                false,
+            ),
+        ];
+        for (why, (max_leaf, ecx, xcr0, ebx), want) in cases {
+            assert_eq!(
+                x86_simd::avx2_from_cpuid(*max_leaf, *ecx, *xcr0, *ebx),
+                *want,
+                "{why}: max_leaf={max_leaf} ecx={ecx:#x} xcr0={xcr0:?} leaf7_ebx={ebx:?}"
+            );
+        }
+    }
+
     /// Explicitly exercise the SSE2 (4-block) and AVX2 (8-block) kernels in
     /// isolation where the target supports them, so a broken backend cannot
     /// hide behind the dispatcher's fallback.
@@ -4497,7 +4619,6 @@ mod tests {
     fn test_x86_simd_kernels_match_scalar() {
         let key = [0x55u8; 32];
         let nonce = [0x66u8; 12];
-
         for &ctr in &[0u32, 1, 9, 0xFFFF_FFF0] {
             // SSE2: 4 blocks = 256 bytes
             let mut out4 = [0u8; 256];

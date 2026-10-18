@@ -481,6 +481,11 @@ fn the_primitive_uses_are_the_ones_the_analysis_covers() {
         // (`pub fn f(k: &[u8; 32], o: &mut [u8]) { blake3_keyed_xof(k, &[], o); }`)
         // was invisible: measured, the eighth primitive use this census exists to
         // catch stayed green.
+        //
+        // The name must be the *whole* identifier: a prefix match skipped
+        // `fn blake3_keyed_multi_decoy(…) { blake3_keyed_multi(k, …); }` as if it were the
+        // definition, hiding a live call (same class as `tests/counter_range.rs`'s decoy;
+        // found by the same third-party pass).
         let bare = call.trim_end_matches('(');
         let found: usize = body
             .lines()
@@ -489,7 +494,11 @@ fn the_primitive_uses_are_the_ones_the_analysis_covers() {
                 !["fn ", "pub fn ", "unsafe fn ", "pub(crate) fn "]
                     .iter()
                     .filter_map(|prefix| code.strip_prefix(prefix))
-                    .any(|rest| rest.starts_with(bare))
+                    .any(|rest| {
+                        rest.strip_prefix(bare).is_some_and(|after| {
+                            !after.starts_with(|c: char| c.is_alphanumeric() || c == '_')
+                        })
+                    })
             })
             .map(|l| l.matches(call).count())
             .sum();

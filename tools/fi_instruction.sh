@@ -65,6 +65,12 @@
 # single-fault models over the instruction stream and nothing else.
 #
 # Usage: tools/fi_instruction.sh [--quick] [--bits] [--jobs N]
+#                                  [--shard I/N --report FILE]
+#        (--jobs defaults to the core count, capped at 16; the sweep shards across cores.
+#         --shard splits the work across *jobs* instead, and requires --report: the shards'
+#         JSON reports are combined by tools/fi_instruction_verdict.py. Without --shard,
+#         --report is an error rather than a silently ignored flag -- a caller who asks
+#         for a report and gets a passing run with no file has been told the wrong thing.)
 #        (--jobs defaults to the core count, capped at 16; the sweep shards across cores)
 # Exit codes: 0 = every layer is at least as good as the one below it; 1 = otherwise,
 #             or the machinery failed; 3 = the sweep could not run -- the scanned
@@ -158,6 +164,17 @@ if [ -n "$SHARD" ]; then
   if [ -z "$REPORT" ] || [ "$REPORT" = "next" ]; then
     echo "FAIL: --shard requires --report FILE: the verdict job reads the shards' reports," >&2
     echo "      and a shard whose numbers reach nobody is a sweep nobody checks." >&2
+    exit 1
+  fi
+else
+  # `--report` without `--shard` used to be accepted and silently ignored: the run passed
+  # and no file appeared, which tells the caller the opposite of what happened (found by a
+  # third-party pass). The unsharded run computes the full verdict itself and has nothing to
+  # write a shard report from, so the honest answer is to refuse.
+  if [ -n "$REPORT" ]; then
+    echo "FAIL: --report needs --shard: a report describes one shard's slice, and the" >&2
+    echo "      unsharded run prints its verdict directly. Use --shard I/N --report FILE," >&2
+    echo "      or drop --report." >&2
     exit 1
   fi
 fi
@@ -842,13 +859,37 @@ if [ -n "$shard_i" ]; then
     shard_bad=1
   fi
   python3 - "$REPORT" "$shard_i" "$shard_n" "$MODEL" "$WORK" <<'PY'
-import json, os, sys
+import hashlib, json, os, sys
 report, i, n, model, work = sys.argv[1], int(sys.argv[2]), int(sys.argv[3]), sys.argv[4], sys.argv[5]
 def read(name):
     try:
         return int(open(os.path.join(work, name)).read().strip() or "0")
     except OSError:
         return 0
+
+def digest(label):
+    """SHA-256 over the union of this shard's examined offsets, per configuration.
+
+    The verdict script can check *counts*, and counts can be written by hand; this is the
+    part that says which bytes the numbers came from. Sharded, the offsets live in one file
+    per core-slice (`shard-<label>-<n>.bin.scanned_offsets`), so the digest is taken over
+    their union *in the same order and deduplication the witness uses*: a report copied from
+    another shard, re-labelled, or invented fails the verdict even if its numbers are
+    consistent.
+    """
+    import glob
+    parts = []
+    for path in sorted(glob.glob(os.path.join(work, f"shard-{label}-*.bin.scanned_offsets"))):
+        try:
+            with open(path, "rb") as fh:
+                parts.extend(int(line) for line in fh.read().split() if line.strip())
+        except OSError:
+            pass
+    if not parts:
+        return None
+    body = "\n".join(str(o) for o in sorted(set(parts))) + "\n"
+    return hashlib.sha256(body.encode()).hexdigest()
+
 configs = {}
 for label in ("plain (no hardened)", "hardened (default)", "ultra"):
     configs[label] = {
@@ -856,6 +897,7 @@ for label in ("plain (no hardened)", "hardened (default)", "ultra"):
         "covered_total": read(label + ".covered_total"),
         "accepting_total": read(label + ".count"),
         "accepting_inside_decision": read(label + ".decision"),
+        "offsets_sha256": digest(label),
     }
 with open(report, "w") as fh:
     json.dump({"shard": i, "n": n, "model": model, "configs": configs}, fh, indent=1, sort_keys=True)

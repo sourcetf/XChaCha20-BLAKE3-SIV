@@ -784,10 +784,43 @@ fn the_suppressed_function_contains_only_the_decision() {
              covers: the body must contain only the two `if` branches"
         );
     }
-
-    // A keyword is counted when the character after it is not an identifier
-    // character, so `if(` is the same branch as `if ` rather than an invisible
-    // spelling: matching `"if "` alone let `if(` slip past this scan.
+    // A *method call* can branch without any of the spellings above: `Choice` converts to
+    // `bool`, and `bool::then`/`then_some`/`map_or`/`and_then`/`unwrap_or*` all take a
+    // closure that runs conditionally. A third-party pass injected
+    // `bool::from(gate0 & gate1).then(_audit_branchy)` -- helper defined outside this body,
+    // so its definition is not counted here -- measured `accept_or_reject`'s conditional
+    // jumps rise from 2 to 3 in `--emit asm`, and this file stayed 7/7. Inside the
+    // suppressed function the body is a fixed shape, so the honest check forbids the whole
+    // family rather than tracking its members: with these names gone, no expression in
+    // this body can evaluate a closure conditionally.
+    for method in [
+        ".then(",
+        ".then_some(",
+        ".map_or(",
+        ".map_or_else(",
+        ".and_then(",
+        ".or_else(",
+        ".unwrap_or(",
+        ".unwrap_or_else(",
+        ".unwrap_or_default(",
+        ".ok_or(",
+        ".ok_or_else(",
+        ".filter(",
+        ".is_some_and(",
+        ".is_none_or(",
+        ".is_ok_and(",
+    ] {
+        assert_eq!(
+            code.matches(method).count(),
+            0,
+            "`{method}` inside accept_or_reject evaluates a closure or an argument \
+             conditionally, which is a branch on the secret-derived gates inside the one \
+             function `tests/ctgrind.supp` covers -- the keyword counts and the \
+             conditional-jump count (2) do not see it, and neither does memcheck. The \
+             decision's body is a fixed shape: if it needs a conditional expression, the \
+             suppression entry needs re-reviewing."
+        );
+    }
     let branches = keyword_occurrences(&code, "if");
     assert_eq!(
         branches, 2,

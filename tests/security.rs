@@ -2191,4 +2191,38 @@ fn every_documented_wipe_has_a_witness() {
          buffer is `O(msg)` work on a should-never-happen path, protecting nothing. \
          Re-adding one is a decision, not a hygiene fix -- make it here."
     );
+
+    // The counts above are text, and text does not resolve names: a local
+    // `fn zeroize_array<T>(_: &mut T) {}` at the top of an entry point leaves every
+    // counted occurrence in place while every call resolves to the empty local (a
+    // third-party pass measured all thirteen dead and `security` still 17/17). Rust has
+    // no overloading to hide behind, so the direct check is enough: no function item
+    // inside an entry point (or a `Drop` impl) may be named after a wipe it performs.
+    for marker in [
+        "pub fn encrypt(",
+        "pub fn decrypt(",
+        "pub fn decrypt_in_place_detached(",
+        "pub fn encrypt_in_place_detached(",
+        "impl Drop for Plaintext {",
+    ] {
+        let body = body_of(marker).0;
+        for name in [
+            "zeroize_array",
+            "zeroize_slice",
+            "zeroize_raw",
+            "scrub_stack",
+        ] {
+            for decl in [format!("fn {name}"), format!("fn {name}<")] {
+                assert!(
+                    !body.contains(&decl),
+                    "`{marker}` declares its own `{name}`: every occurrence of that name in \
+                     the body then resolves to the local item, so the wipe counts above stay \
+                     green while the wipes do nothing (measured: the text counts are \
+                     unchanged and the whole suite passes). Delete the local item, or route \
+                     the wipe through `crate::{name}` and teach the counts that spelling -- \
+                     but do not leave a name that shadows a wipe."
+                );
+            }
+        }
+    }
 }

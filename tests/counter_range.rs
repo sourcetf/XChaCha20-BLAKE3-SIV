@@ -280,13 +280,22 @@ fn every_keystream_call_site_starts_the_counter_at_zero() {
             // start -- `fn `/`pub fn `/`unsafe fn `/`pub(crate) fn ` -- *and* by the
             // name that follows being the one searched for; a call inside someone
             // else's (one-line) body follows a different name and is counted.
+            //
+            // "The name that follows" must be the *whole* identifier: a prefix match let
+            // `fn chacha20_keystream_decoy(...) { chacha20_keystream(k, 7, …); }` be
+            // skipped as if it were the definition, so a one-line decoy hid a live
+            // counter-7 call and this census stayed green (found by a third-party pass and
+            // reproduced here). The character after the name has to be one that cannot
+            // continue an identifier.
             let trimmed = line.trim_start();
             let defines_the_searched_name = ["fn ", "pub fn ", "unsafe fn ", "pub(crate) fn "]
                 .iter()
                 .any(|prefix| {
-                    trimmed
-                        .strip_prefix(prefix)
-                        .is_some_and(|rest| rest.starts_with(bare))
+                    trimmed.strip_prefix(prefix).is_some_and(|rest| {
+                        rest.strip_prefix(bare).is_some_and(|after| {
+                            !after.starts_with(|c: char| c.is_alphanumeric() || c == '_')
+                        })
+                    })
                 });
             if defines_the_searched_name {
                 continue;
@@ -514,15 +523,95 @@ fn the_counter_steps_are_the_block_arithmetic() {
 /// carrying a counted call left the census here green while the real call was deleted,
 /// because the planted text lies outside the one module body this cut removed.
 fn non_test_source() -> String {
-    let stripped = strip_comments(include_str!("../src/lib.rs"));
-    let at = stripped
-        .find("mod tests {")
-        .expect("the test module must exist (`mod tests {`)");
+    // Every Rust file in `src/`, not just `lib.rs`: a new module (`mod extra_counter;`)
+    // holding a real counter-7 call was invisible to this census -- measured, 4/4 green --
+    // because the text it scanned was one `include_str!`. The list is spelled out rather
+    // than globbed because this is a test binary, not a build script: a file added later
+    // must be added here, and `every_source_file_is_scanned` fails if it is not. `include!`
+    // and `#[path]` are rejected outright: their expansion is not in this text at all, so
+    // no scan over source strings can see what they bring in.
+    let files = [
+        ("src/lib.rs", include_str!("../src/lib.rs")),
+        ("src/witness.rs", include_str!("../src/witness.rs")),
+        ("src/proofs.rs", include_str!("../src/proofs.rs")),
+    ];
+    let mut out = String::new();
+    for (name, text) in files {
+        let code = strip_comments(text);
+        // `include!` splices tokens that these scans cannot read; `#[path = …]` moves a
+        // module to a file the list above does not name. Both are refused rather than
+        // silently unscanned.
+        assert!(
+            !code.contains("include!("),
+            "`{name}` uses `include!`: the census scans source text, and the included \
+             tokens are not in it. Inline the code or teach this census to expand it."
+        );
+        assert!(
+            !code.contains("#[path"),
+            "`{name}` uses `#[path = …]`: the module lives in a file this census does not \
+             read, so its call sites are invisible. Add the file to the list above."
+        );
+        out.push_str("// ===== ");
+        out.push_str(name);
+        out.push_str(" =====\n");
+        // The *conventions* this file pins -- which call sites may pass which counter,
+        // which `wrapping_add` steps the kernels take, and the total step count -- describe
+        // the primary path in `src/lib.rs`. `src/witness.rs` is the independent second
+        // implementation with its own keystream loop (its independence is pinned by
+        // `tests/ultra.rs`), and `src/proofs.rs` is the Kani model of the same path; both
+        // legitimately carry their own spellings, so they are scanned for the file-list
+        // invariant but not counted against the primary path's pins. Said here rather than
+        // silently leaving them out of the file list: the list is what
+        // `every_source_file_is_scanned` checks.
+        if name == "src/lib.rs" {
+            out.push_str(&non_test_source_of(text));
+        }
+        out.push('\n');
+    }
+    out
+}
+
+/// The census above must cover every `src/*.rs` file. Spelled as a literal list in the
+/// test binary (it cannot glob), so a new file is caught here instead of being quietly
+/// unscanned -- the failure mode that let `src/extra_counter.rs` hide a counter-7 call.
+#[test]
+fn every_source_file_is_scanned() {
+    const SOURCES: &[&str] = &["lib.rs", "proofs.rs", "witness.rs"];
+    // `cargo test` runs with the crate root as the working directory.
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let mut found: Vec<String> = std::fs::read_dir(&dir)
+        .expect("src/ must be readable")
+        .filter_map(|e| e.ok())
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .filter(|n| n.ends_with(".rs"))
+        .collect();
+    found.sort();
+    let mut listed: Vec<String> = SOURCES.iter().map(|s| (*s).to_string()).collect();
+    listed.sort();
+    assert_eq!(
+        found, listed,
+        "the censuses in this file read the source files listed in `non_test_source`; \
+         `src/` has {found:?} but the list has {listed:?}. A file that is not listed is \
+         not scanned at all -- add it to both, or the call sites it holds are invisible."
+    );
+}
+
+/// `non_test_source`'s per-file half, unchanged in meaning: blank the `#[cfg(test)]`
+/// module body (and every other `#[cfg(test)]` item) so only what a consumer's build
+/// compiles is left, keeping line numbers aligned with the source.
+fn non_test_source_of(text: &str) -> String {
+    let stripped = strip_comments(text);
+    // `src/witness.rs` and `src/proofs.rs` have no in-file test module (their tests live
+    // in `tests/` or under `#[cfg(kani)]`), so a file without one is returned whole --
+    // but a file with two is still ambiguous and still fails.
+    let Some(at) = stripped.find("mod tests {") else {
+        return stripped;
+    };
     assert_eq!(
         stripped.matches("mod tests {").count(),
         1,
-        "src/lib.rs holds more than one `mod tests {{`: which one is the test module, and \
-         what the scan cut, would be ambiguous"
+        "this source file holds more than one `mod tests {{`: which one is the test \
+         module, and what the scan cut, would be ambiguous"
     );
     let before = stripped[..at].trim_end();
     assert!(

@@ -187,12 +187,18 @@ const DIVISION_METHODS: &[&str] = &[
 /// (Sandy/Ivy Bridge), `CPUID.(EAX=7)` returns the highest supported leaf's data instead
 /// of the leaf-7 feature bits, so reading bit 5 there claimed AVX2 and the first kernel
 /// call took SIGILL — an availability defect, not a wrong answer.
+///
+/// `if` 39 -> 41 and `match` 7 -> 9 when that decision moved into the pure
+/// `avx2_from_cpuid`: the `xcr0` and `leaf7_ebx` `match`es are the "the caller did not
+/// supply it" arms, and the two `if`s are the XCR0 and leaf-7 checks — the same CPU facts
+/// as before, now in a function a table test can pin without the hardware. No new class of
+/// branch, and no new data reaching a comparison.
 const CONTROL_FLOW: &[(&str, usize)] = &[
-    ("if", 39),
+    ("if", 41),
     ("while", 10),
     ("for", 26),
     ("loop", 0),
-    ("match", 7),
+    ("match", 9),
 ];
 
 /// The same table for `src/witness.rs`, the `ultra` build's independent second

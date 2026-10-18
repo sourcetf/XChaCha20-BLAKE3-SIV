@@ -208,20 +208,45 @@ jobs:
           # that tested nothing. Legitimate empty-looking targets always carry a reason:
           # `ignored` (ctgrind's valgrind-only tests, the deliberate race) or `filtered`
           # (`--skip timing` here).
-          if grep -qE 'test result: ok\. 0 passed; 0 failed; 0 ignored; 0 filtered out' "$log"; then
-            echo "::error::a test target reported 0 passed, 0 ignored and 0 filtered: it was built and executed nothing"
-            grep -B 4 'test result: ok\. 0 passed; 0 failed; 0 ignored; 0 filtered out' "$log" | head -15
-            exit 1
-          fi
+          #
+          # Parse the summary by *field position*, the way `verify.sh`'s `test_target_counts`
+          # and `tools/fi_check.sh` do. An earlier revision of this guard matched
+          # `'… 0 ignored; 0 filtered out'` as one literal string; libtest always prints
+          # `0 measured;` between those fields, so the pattern could never match and the
+          # guard was dead code (found by a third-party pass on the commit that added it, and
+          # reproduced: a real summary line does not match it). Fields in the counted form:
+          # $4 = passed, $6 = failed, $8 = ignored, $12 = filtered.
+          awk '
+            /^test result:/ {
+              p = $4 + 0; f = $6 + 0; i = $8 + 0; x = $12 + 0
+              if (p + i + x == 0) {
+                printf "::error::a test target reported %d passed, %d failed, %d ignored and %d filtered: it was built and executed nothing\n", p, f, i, x
+                bad = 1
+              }
+            }
+            END { exit bad ? 1 : 0 }
+          ' "$log"
           # Every binary cargo ran must also have reported: a target that produced no summary
           # line at all was compiled and never executed.
           ran="$(grep -cE '^[[:space:]]+Running (unittests|tests/)' "$log" || true)"
-          reported="$(grep -cE 'test result:' "$log" || true)"
+          reported="$(grep -cE '^test result:' "$log" || true)"
           if [ "${reported:-0}" -lt "${ran:-0}" ]; then
             echo "::error::cargo ran ${ran} test binaries but only ${reported} reported a result"
             exit 1
           fi
           echo "cargo test: ${ran} test binaries ran and reported (${reported} result lines, doc-tests included)"
+          # Positive control, in the same step: the guard must reject a summary that reports
+          # nothing. Without this, it rots exactly the way it just did -- a pattern that stops
+          # matching is indistinguishable from a suite that is clean.
+          vacuous="$(mktemp)"
+          printf 'test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out\n' > "$vacuous"
+          if awk '/^test result:/ { if ($4 + $8 + $12 == 0) bad = 1 } END { exit bad ? 0 : 1 }' "$vacuous"; then
+            echo "positive control: a 0-passed/0-ignored/0-filtered summary is rejected, so the guard can fail"
+          else
+            echo "::error::the zero-test guard did not reject a vacuous summary -- it cannot fail, so it proves nothing"
+            exit 1
+          fi
+          rm -f "$vacuous"
 
   timing-instrument:
     name: timing instrument (blocking)
