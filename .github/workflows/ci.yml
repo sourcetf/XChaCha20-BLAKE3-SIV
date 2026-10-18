@@ -226,13 +226,25 @@ jobs:
             bad=0
             while IFS= read -r target; do
               case "$target" in
+                # `doc-tests` is the rustdoc harness: in the feature configurations that
+                # compile out the one example that runs (and in every leg but the default,
+                # measured), it legitimately has nothing to run. A doctest cannot be
+                # "silently emptied" the way a test file can -- it *is* the source text.
+                doc-tests)
+                  echo "note: the doctest harness reported no runnable examples in this configuration" ;;
+                # `tests/timing.rs` is excluded from this step by `--skip timing`, and libtest
+                # reports that as `0 tests` rather than as `filtered` (measured), so the target
+                # is legitimately empty here. It has its own blocking presence check and its own
+                # advisory run in the `timing` job; the strict screens run in `verify.sh` 3c.
+                tests/timing.rs)
+                  echo "note: tests/timing.rs is skipped in this step by --skip timing and runs in the timing jobs" ;;
                 # The three targets that are legitimately empty in some matrix legs: all of
                 # `ctgrind` is `#[ignore]`d unless built static; `locked`/`ultra` are
                 # `#![cfg(feature)]`-gated. Each still has tests in the leg that turns its
-                # feature on, where the `--list` count below is non-zero and this guard
-                # applies like any other target.
+                # feature on, where this guard applies like any other target.
                 tests/ctgrind.rs|tests/locked.rs|tests/ultra.rs)
                   echo "note: $target reported no tests in this configuration (documented above)" ;;
+                "") echo "::error::a summary line could not be attributed to a test target -- the log format changed, so this guard proved nothing" ; bad=1 ;;
                 *)
                   echo "::error::$target reported 0 passed, 0 ignored and 0 filtered: it was built and executed nothing"
                   bad=1 ;;
