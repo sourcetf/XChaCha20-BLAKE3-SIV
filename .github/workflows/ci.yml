@@ -214,7 +214,17 @@ jobs:
           # Parse by *field position*; matching `'… 0 ignored; 0 filtered out'` as one literal
           # never fires, because libtest always prints `0 measured;` between those fields.
           awk '
-            /^     Running / { target = $2; next }
+            # `     Running unittests src/lib.rs (…)` and `     Running tests/foo.rs (…)`
+            # differ in field count (the lib target has the kind and then the path; an
+            # integration target has the path and then the binary). Take the first field
+            # that looks like a source path -- `$2` is `unittests` for the lib and the path
+            # for the rest, `$3` is the reverse, and both mistakes made every leg see an
+            # unattributable target and fail.
+            /^     Running / {
+              target = ""
+              for (k = 2; k <= NF; k++) if ($k ~ /\.rs$/) { target = $k; break }
+              next
+            }
             /^   Doc-tests / { target = "doc-tests"; next }
             /^test result:/ {
               p = $4 + 0; f = $6 + 0; i = $8 + 0; x = $12 + 0
@@ -244,6 +254,8 @@ jobs:
                 # feature on, where this guard applies like any other target.
                 tests/ctgrind.rs|tests/locked.rs|tests/ultra.rs)
                   echo "note: $target reported no tests in this configuration (documented above)" ;;
+                # `src/lib.rs` is the crate's unit-test target: reporting nothing there means
+                # the library lost every test, which is the vacuous case itself.
                 "") echo "::error::a summary line could not be attributed to a test target -- the log format changed, so this guard proved nothing" ; bad=1 ;;
                 *)
                   echo "::error::$target reported 0 passed, 0 ignored and 0 filtered: it was built and executed nothing"
