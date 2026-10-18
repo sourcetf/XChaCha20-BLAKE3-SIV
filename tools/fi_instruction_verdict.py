@@ -121,6 +121,18 @@ def main(argv=None):
             else:
                 seen[key] = r.get("shard")
 
+    # If any report already failed validation, stop before the arithmetic: summing a
+    # field that failed the "is this a count?" check raises `TypeError` and ends the run
+    # with a traceback instead of the diagnosis the check just produced (an audit passed
+    # `scanned = "833"` and got the traceback; rc was still 1, but a report of "not a
+    # count" should be the last thing the tool says, not the first of two messages).
+    if problems:
+        print(f"FAIL: {len(problems)} problem(s):", file=sys.stderr)
+        for p in problems:
+            print(f"      {p}", file=sys.stderr)
+        print("      (no verdict: the reports are not measurements the tool could have produced)", file=sys.stderr)
+        return 1
+
     for label in labels:
         totals = {
             r["configs"][label].get("covered_total")

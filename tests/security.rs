@@ -2193,26 +2193,27 @@ fn every_documented_wipe_has_a_witness() {
     );
 
     // The counts above are text, and text does not resolve names: a local
-    // `fn zeroize_array<T>(_: &mut T) {}` at the top of an entry point leaves every
-    // counted occurrence in place while every call resolves to the empty local (a
-    // third-party pass measured all thirteen dead and `security` still 17/17). Rust has
-    // no overloading to hide behind, so the direct check is enough: no function item
-    // inside an entry point (or a `Drop` impl) may be named after a wipe it performs.
+    // `fn zeroize_array<T>(_: &mut T) {}` at the top of a function leaves every counted
+    // occurrence in place while every call resolves to the empty local (a third-party pass
+    // measured all thirteen dead in an entry point and `security` still 17/17). Rust has no
+    // overloading to hide behind, so the direct check is enough: no function item inside a
+    // wipe-bearing body may be named after a wipe it performs.
+    //
+    // **The markers come from the same table as the counts.** An earlier revision drove
+    // this check from a hand-written list of five entry points while the `Site` table above
+    // already knew about twelve -- so `derive_material`, `derive_tag`, `derive_enc`,
+    // `blake3_keyed_multi` and `random::fill_from` (the core derivation chain, and the only
+    // place `stack_residue.sh` cannot reach) could each carry a shadowing no-op and stay
+    // green (found by a later pass and reproduced here). Two lists that describe the same
+    // set drift; one list cannot.
     //
     // A *`use` import* does the same thing without declaring anything in the body: a
     // crate-level `mod dummy { pub fn zeroize_array<T>(_: &mut T) {} }` plus
-    // `use crate::dummy::zeroize_array;` inside the entry point made all thirteen calls
-    // no-ops while `security`, `fmt`, `clippy -D warnings` and every suite stayed green
-    // (found by a later pass and reproduced here). The `fn`-declaration check above cannot
-    // see it, so the import spelling is rejected too -- and the *call* forms are checked
-    // for the same reason below.
-    for marker in [
-        "pub fn encrypt(",
-        "pub fn decrypt(",
-        "pub fn decrypt_in_place_detached(",
-        "pub fn encrypt_in_place_detached(",
-        "impl Drop for Plaintext {",
-    ] {
+    // `use crate::dummy::zeroize_array;` made all thirteen calls no-ops while `security`,
+    // `fmt`, `clippy -D warnings` and every suite stayed green. Both the import spelling and
+    // the bare-call spelling are rejected below, in every one of the table's sites.
+    for site in &sites {
+        let marker = site.marker;
         let body = body_of(marker).0;
         for name in [
             "zeroize_array",
@@ -2233,8 +2234,8 @@ fn every_documented_wipe_has_a_witness() {
             }
             // `use …::{name};` / `use …::{name} as …;` / `use {name};` inside the body
             // import a different item under the wipe's name. There is no legitimate reason
-            // for an entry point to import one of these four names: they resolve through
-            // the crate root already.
+            // for a wipe-bearing body to import one of these four names: they resolve
+            // through the crate root already.
             for import in [
                 format!("use {name}"),
                 format!("use crate::{name}"),
@@ -2293,6 +2294,48 @@ fn every_documented_wipe_has_a_witness() {
                  occurrence(s)): a bare name is shadowable by a `use` in the same body, and \
                  then the wipe silently does nothing while every count stays. Write \
                  `crate::{name}(…)`. ({path_calls} call(s) in this body already do.)"
+            );
+        }
+    }
+
+    // Whole-file fallback: every wipe call in the crate is `crate::`-qualified. The loop
+    // above covers the table's twelve sites; this covers anything the table does not name --
+    // a helper added later, a call moved out of a site's body -- so a bare `zeroize_array(`
+    // anywhere in non-test source fails here regardless of which function it is in.
+    let whole = body_of("fn zeroize_array<T>(value: &mut T) {").0;
+    let _ = whole; // (kept for the reader: the defs themselves are exempt below)
+    let source = non_test_source();
+    for n in [
+        "zeroize_array",
+        "zeroize_slice",
+        "zeroize_raw",
+        "scrub_stack",
+    ] {
+        let mut from = 0usize;
+        while let Some(rel) = source[from..].find(&format!("{n}(")) {
+            let at = from + rel;
+            from = at + n.len();
+            let before = &source[..at];
+            // Skip the definition itself and anything already `crate::`-qualified.
+            if before.ends_with("crate::") {
+                continue;
+            }
+            let line_start = before.rfind('\n').map(|i| i + 1).unwrap_or(0);
+            let line = &source[line_start..];
+            if line.trim_start().starts_with("fn ")
+                || line.trim_start().starts_with("pub fn ")
+                || line.trim_start().starts_with("pub(crate) fn ")
+                || line.trim_start().starts_with("unsafe fn ")
+            {
+                continue;
+            }
+            let line_no = before.matches('\n').count() + 1;
+            panic!(
+                "`{n}(` is called without the `crate::` prefix at line {line_no}: a bare name \
+                 is shadowable by a local `fn` or a `use` in the same body, which turns the \
+                 wipe into a no-op while every count stays green. Write `crate::{n}(…)`. \
+                 (This check covers the whole crate; the per-site loop above covers the \
+                 table's twelve sites.)"
             );
         }
     }

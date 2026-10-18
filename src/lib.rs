@@ -918,7 +918,7 @@ impl AsRef<[u8; KEY_LEN]> for Key {
 
 impl Zeroize for Key {
     fn zeroize(&mut self) {
-        zeroize_array(&mut self.0);
+        crate::zeroize_array(&mut self.0);
     }
 }
 
@@ -2096,7 +2096,7 @@ fn zeroize_slice(slice: &mut [u8]) {
     // SAFETY: `slice` is a live `&mut [u8]` of exactly `len` bytes, so the pointer
     // is valid for writes of that many bytes, and no other reference to them
     // exists while `slice` is borrowed.
-    unsafe { zeroize_raw(slice.as_mut_ptr(), slice.len()) };
+    unsafe { crate::zeroize_raw(slice.as_mut_ptr(), slice.len()) };
 }
 
 /// Overwrite `len` bytes at `ptr` with volatile zero stores, through a raw pointer.
@@ -2187,7 +2187,7 @@ fn scrub_stack() {
     // optimizer may delete -- and deleting it is exactly what must not happen.
     // `zeroize_array` issues volatile stores, so the write to this address range
     // happens.  Note what is being written to *is the point*, not what is in it.
-    zeroize_array(&mut buf);
+    crate::zeroize_array(&mut buf);
     core::hint::black_box(&buf);
 }
 
@@ -2206,7 +2206,7 @@ fn zeroize_array<T>(value: &mut T) {
     // an integer or an array of integers here, so every bit pattern is valid
     // `u8` and the resulting slice is in bounds and uniquely borrowed.
     let slice = unsafe { core::slice::from_raw_parts_mut(p, bytes) };
-    zeroize_slice(slice);
+    crate::zeroize_slice(slice);
     core::hint::black_box(value);
 }
 
@@ -2261,10 +2261,10 @@ fn derive_material(
     k_out.copy_from_slice(&block0[32..64]);
     enc_seed.copy_from_slice(&block1[0..32]);
 
-    zeroize_array(&mut subkey);
-    zeroize_array(&mut subkey_nonce);
-    zeroize_array(&mut block0);
-    zeroize_array(&mut block1);
+    crate::zeroize_array(&mut subkey);
+    crate::zeroize_array(&mut subkey_nonce);
+    crate::zeroize_array(&mut block0);
+    crate::zeroize_array(&mut block1);
 }
 
 /// `out.len()` bytes of `BLAKE3_keyed(key, parts[0] || parts[1] || ...)`, in
@@ -2481,7 +2481,7 @@ fn derive_tag(
                 cat.extend_from_slice(aad);
                 cat.extend_from_slice(msg);
                 blake3_keyed_multi(k_in, &[&cat], &mut inner);
-                zeroize_slice(&mut cat);
+                crate::zeroize_slice(&mut cat);
             } else {
                 blake3_keyed_multi(k_in, &[&head, aad, msg], &mut inner);
             }
@@ -2499,8 +2499,8 @@ fn derive_tag(
 
     // Both buffers are key-derived (the digest is a PRF output under `k_in`), so
     // they are wiped like every other key-bearing local in this module.
-    zeroize_array(&mut inner);
-    zeroize_array(&mut outer);
+    crate::zeroize_array(&mut inner);
+    crate::zeroize_array(&mut outer);
     tag
 }
 
@@ -2546,8 +2546,8 @@ fn derive_enc(
     enc_key.copy_from_slice(&material[0..32]);
     enc_nonce.copy_from_slice(&material[32..44]);
 
-    zeroize_array(&mut material);
-    zeroize_array(&mut input);
+    crate::zeroize_array(&mut material);
+    crate::zeroize_array(&mut input);
 }
 
 #[inline]
@@ -3495,8 +3495,8 @@ fn chacha20_block(key: &[u8; 32], counter: u32, nonce: &[u8; 12]) -> [u8; 64] {
     // locals themselves -- an earlier version wrote `let mut orig = orig;
     // zeroize_array(&mut orig);`, which wipes a *copy* (`[u32; 16]` is `Copy`) and
     // leaves the original on the stack, i.e. no wipe at all.
-    zeroize_array(&mut s);
-    zeroize_array(&mut orig);
+    crate::zeroize_array(&mut s);
+    crate::zeroize_array(&mut orig);
 
     keystream
 }
@@ -3539,7 +3539,7 @@ fn chacha20_state_words(key: &[u8; 32], counter: u32, nonce: &[u8; 12]) -> [u32;
 
 #[cfg(all(target_arch = "x86_64", not(kani)))]
 mod x86_simd {
-    use super::{chacha20_state_words, zeroize_array};
+    use super::chacha20_state_words;
     use core::arch::x86_64::*;
     use core::sync::atomic::{AtomicU8, Ordering};
 
@@ -3638,7 +3638,7 @@ mod x86_simd {
 
         zeroize_xmm(&mut x);
         zeroize_xmm(&mut orig);
-        zeroize_array(&mut s);
+        crate::zeroize_array(&mut s);
     }
 
     /// Transpose a 4x4 matrix of 32-bit words held in four `__m128i`.
@@ -3773,7 +3773,7 @@ mod x86_simd {
         }
 
         zeroize_ymm(&mut x);
-        zeroize_array(&mut s);
+        crate::zeroize_array(&mut s);
     }
 
     /// Volatile-zero an array of 256-bit vectors with full-width stores.
@@ -3915,7 +3915,7 @@ mod x86_simd {
 
 #[cfg(all(target_arch = "aarch64", not(kani)))]
 mod aarch64_simd {
-    use super::{chacha20_state_words, zeroize_array};
+    use super::chacha20_state_words;
     use core::arch::aarch64::*;
 
     // NEON has no 32-bit rotate; combine shift-left and shift-right.  Shift
@@ -3995,8 +3995,8 @@ mod aarch64_simd {
 
         zeroize_neon(&mut x);
         zeroize_neon(&mut orig);
-        zeroize_array(&mut w);
-        zeroize_array(&mut s);
+        crate::zeroize_array(&mut w);
+        crate::zeroize_array(&mut s);
     }
 
     /// Volatile-zero an array of NEON vectors with full-width stores.
@@ -4095,7 +4095,7 @@ fn chacha20_apply(
                 off += 512;
             }
             // Keystream equals plaintext XOR ciphertext; treat it as secret.
-            zeroize_array(&mut ks);
+            crate::zeroize_array(&mut ks);
         }
         {
             let mut ks = [0u8; 256];
@@ -4106,7 +4106,7 @@ fn chacha20_apply(
                 ctr = ctr.wrapping_add(4);
                 off += 256;
             }
-            zeroize_array(&mut ks);
+            crate::zeroize_array(&mut ks);
         }
     }
 
@@ -4120,7 +4120,7 @@ fn chacha20_apply(
             ctr = ctr.wrapping_add(4);
             off += 256;
         }
-        zeroize_array(&mut ks);
+        crate::zeroize_array(&mut ks);
     }
 
     // Scalar tail: remaining full blocks, then a final partial block.
@@ -4140,12 +4140,12 @@ fn chacha20_apply(
         xor_or_copy(input, output, off, &ks);
         ctr = ctr.wrapping_add(1);
         off += CHACHA20_BLOCK;
-        zeroize_array(&mut ks);
+        crate::zeroize_array(&mut ks);
     }
     if off < n {
         let mut ks = chacha20_block(key, ctr, nonce);
         xor_or_copy(input, output, off, &ks[..n - off]);
-        zeroize_array(&mut ks);
+        crate::zeroize_array(&mut ks);
     }
 }
 
@@ -4214,7 +4214,7 @@ fn hchacha20(key: &[u8; 32], nonce: &[u8; 16]) -> [u8; 32] {
     // themselves. There is no `orig` here because HChaCha20 has no feed-forward, so
     // a copy of the pre-round state would be a second copy of the key material to
     // keep alive for no reason.
-    zeroize_array(&mut s);
+    crate::zeroize_array(&mut s);
 
     r
 }
@@ -4827,7 +4827,7 @@ mod tests {
             let end = off + 24;
             {
                 let s = &mut backing[off..end];
-                zeroize_slice(s);
+                crate::zeroize_slice(s);
             }
             assert!(
                 backing[off..end].iter().all(|&b| b == 0),
@@ -4847,7 +4847,7 @@ mod tests {
                 // 16 initialised bytes from it, so the reference is valid and
                 // uniquely borrowed for the rest of this block.
                 let arr: &mut [u8; 16] = unsafe { &mut *p };
-                zeroize_array(arr);
+                crate::zeroize_array(arr);
             }
             assert!(
                 backing[off..off + 16].iter().all(|&b| b == 0),
@@ -4858,7 +4858,7 @@ mod tests {
         // Sizes that exercise the trailing-byte path.
         for len in 0..24usize {
             let mut buf = vec![0xFFu8; len];
-            zeroize_slice(&mut buf);
+            crate::zeroize_slice(&mut buf);
             assert!(buf.iter().all(|&b| b == 0), "len {len} not fully wiped");
         }
     }
