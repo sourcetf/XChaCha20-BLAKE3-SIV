@@ -342,10 +342,14 @@ patch_wipe_skipped() {
   python3 - "$1/src/lib.rs" <<'PY'
 import sys
 p = sys.argv[1]; s = open(p).read()
-old = "    zeroize_slice(buffer);"
-# The 4-space pattern also matches inside the 8-space one, so this covers the
-# decision's wipes and the entry point's in one pass.
-assert s.count(old) >= 2, f"in-place wipe sites: {s.count(old)}"
+# The wipe is `crate::`-qualified (so no `use` in the body can shadow it into a no-op;
+# see `every_documented_wipe_has_a_witness`). Both spellings are accepted so this patch
+# keeps working if one is reintroduced -- and the assertion below is what catches the
+# case where *neither* is present, rather than silently patching nothing.
+olds = ("    crate::zeroize_slice(buffer);", "    zeroize_slice(buffer);")
+present = {o: s.count(o) for o in olds}
+total = sum(present.values())
+assert total >= 2, f"in-place wipe sites: {total} (counted {present})"
 # The replacement has to COMPILE. `let _ = &mut buffer;` was here and does not: the
 # parameter is `buffer: &mut [u8]` and the *binding* is not declared `mut`, so taking
 # `&mut buffer` is E0596 ("cannot borrow as mutable, as it is not declared as mutable").
@@ -353,7 +357,9 @@ assert s.count(old) >= 2, f"in-place wipe sites: {s.count(old)}"
 # reported OK while testing nothing. The build check in `run_row` is what flushed that
 # out; `core::hint::black_box(&mut buffer)` fails for the same reason, so the no-op is a
 # read of the slice instead.
-open(p, "w").write(s.replace(old, "    let _ = buffer.len();"))
+for old in olds:
+    s = s.replace(old, "    let _ = buffer.len();")
+open(p, "w").write(s)
 PY
 }
 
