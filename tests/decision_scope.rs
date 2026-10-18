@@ -1307,9 +1307,18 @@ fn the_decision_outcome_is_fail_closed() {
 
     // And the wipe lives in the *caller*, on the path every rejection takes -- the
     // decision function no longer touches the buffer, so a skipped call still wipes.
+    // The call is `crate::zeroize_slice(` (absolute, so no `use` in the body can shadow it
+    // into a no-op -- see `every_documented_wipe_has_a_witness`); the count accepts either
+    // spelling so this pin is about *where* the wipe is, not how it is named.
     assert_eq!(
-        code.matches("if decision0.is_err() {\n        zeroize_slice(")
+        code.matches("if decision0.is_err() {\n        crate::zeroize_slice(")
             .count()
+            + code
+                .matches("if decision1.is_err() {\n        crate::zeroize_slice(")
+                .count()
+            + code
+                .matches("if decision0.is_err() {\n        zeroize_slice(")
+                .count()
             + code
                 .matches("if decision1.is_err() {\n        zeroize_slice(")
                 .count(),
@@ -1319,10 +1328,18 @@ fn the_decision_outcome_is_fail_closed() {
     // The third call site, `ultra`'s cross-check inside `encrypt`, wipes what it has
     // derived by then -- the MAC key and the encryption seed -- on both of its reject
     // paths. It is a different set of locals (the buffer is not written yet on that path),
-    // so it is asserted separately rather than folded into the count above.
+    // so it is asserted separately rather than folded into the count above. As with the
+    // decrypt wipes, the call is `crate::`-qualified so no `use` in the body can shadow it;
+    // both spellings are counted.
     assert_eq!(
-        code.matches("if decision0.is_err() {\n            zeroize_array(&mut k_in);")
+        code.matches("if decision0.is_err() {\n            crate::zeroize_array(&mut k_in);")
             .count()
+            + code
+                .matches("if decision1.is_err() {\n            crate::zeroize_array(&mut k_in);")
+                .count()
+            + code
+                .matches("if decision0.is_err() {\n            zeroize_array(&mut k_in);")
+                .count()
             + code
                 .matches("if decision1.is_err() {\n            zeroize_array(&mut k_in);")
                 .count(),
@@ -1340,10 +1357,14 @@ fn the_decision_outcome_is_fail_closed() {
         "the accept path must not be reached by a conditional jump"
     );
     // Both entry points, one pattern each: the second check's rejection block followed
-    // immediately by the accept, which is what "fall-through" means in the source.
+    // immediately by the accept, which is what "fall-through" means in the source. The
+    // wipe is `crate::`-qualified (see the note above), so the pattern uses that spelling.
     for (place, accept) in [
-        ("zeroize_slice(&mut plaintext);", "Ok(Plaintext(plaintext))"),
-        ("zeroize_slice(buffer);", "Ok(())"),
+        (
+            "crate::zeroize_slice(&mut plaintext);",
+            "Ok(Plaintext(plaintext))",
+        ),
+        ("crate::zeroize_slice(buffer);", "Ok(())"),
     ] {
         let tail = [
             "    if decision1.is_err() {",

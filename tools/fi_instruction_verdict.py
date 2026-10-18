@@ -70,6 +70,20 @@ def main(argv=None):
             problems.append(
                 f"shard {r.get('shard')} was written for {r.get('n')} shards, not {args.shards}"
             )
+        for label, cfg in r.get("configs", {}).items():
+            # Every count is a count of things that happened. A negative one cannot come
+            # from the tool, and it used to be printed as-is (an audit passed
+            # `accepting_total = -100` on all six shards and got `-600 accepting total`
+            # accepted); with the gate on the decision-scoped count it no longer changes a
+            # verdict, but a report that cannot have been produced should not be read as a
+            # measurement at all.
+            for key in ("scanned", "covered_total", "accepting_total", "accepting_inside_decision"):
+                value = cfg.get(key)
+                if not isinstance(value, int) or value < 0:
+                    problems.append(
+                        f"shard {r.get('shard')} ({label}): {key}={value!r} is not a count; "
+                        "the shard reports were not produced by the tool"
+                    )
         # Evidence binding: the counts alone can be written by hand, so each report carries
         # the SHA-256 of the offset list its numbers were computed from. Rejecting a missing
         # digest keeps the format from regressing to numbers; the duplicate check below is

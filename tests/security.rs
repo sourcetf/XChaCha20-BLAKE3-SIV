@@ -2198,6 +2198,14 @@ fn every_documented_wipe_has_a_witness() {
     // third-party pass measured all thirteen dead and `security` still 17/17). Rust has
     // no overloading to hide behind, so the direct check is enough: no function item
     // inside an entry point (or a `Drop` impl) may be named after a wipe it performs.
+    //
+    // A *`use` import* does the same thing without declaring anything in the body: a
+    // crate-level `mod dummy { pub fn zeroize_array<T>(_: &mut T) {} }` plus
+    // `use crate::dummy::zeroize_array;` inside the entry point made all thirteen calls
+    // no-ops while `security`, `fmt`, `clippy -D warnings` and every suite stayed green
+    // (found by a later pass and reproduced here). The `fn`-declaration check above cannot
+    // see it, so the import spelling is rejected too -- and the *call* forms are checked
+    // for the same reason below.
     for marker in [
         "pub fn encrypt(",
         "pub fn decrypt(",
@@ -2223,6 +2231,69 @@ fn every_documented_wipe_has_a_witness() {
                      but do not leave a name that shadows a wipe."
                 );
             }
+            // `use …::{name};` / `use …::{name} as …;` / `use {name};` inside the body
+            // import a different item under the wipe's name. There is no legitimate reason
+            // for an entry point to import one of these four names: they resolve through
+            // the crate root already.
+            for import in [
+                format!("use {name}"),
+                format!("use crate::{name}"),
+                format!("use super::{name}"),
+            ] {
+                assert!(
+                    !body.contains(&import),
+                    "`{marker}` imports `{name}` (`{import}`): in a function body that \
+                     `use` shadows the crate-level item, so every wipe call in this body \
+                     resolves to whatever was imported -- a no-op carrying the right name \
+                     passes all of the counts above and the whole suite. Wipes resolve \
+                     through the crate root; write `crate::{name}(…)` if a local import is \
+                     ever tempting."
+                );
+            }
+            // And the *general* import shape: `use <any path>::{name};` inside the body.
+            // Matching only the three prefixes above misses the form a real bypass used --
+            // a crate-level `mod dummy { pub fn zeroize_array<T>(_: &mut T) {} }` plus
+            // `use crate::dummy::zeroize_array;` in the body (a later pass measured all
+            // thirteen calls dead and `security` 17/17). Any `use` that ends with one of
+            // the four wipe names is rejected, whatever path precedes it.
+            for line in body.lines() {
+                let t = line.trim();
+                if !t.starts_with("use ") || !t.ends_with(&format!("{name};")) {
+                    continue;
+                }
+                panic!(
+                    "`{marker}` imports `{name}` (`{t}`): a `use` that brings a different \
+                     item in under a wipe's name makes every call to that name resolve to \
+                     it, so the wipes silently do nothing while every count above stays \
+                     green (measured: a crate-level no-op plus this import left 17/17 and \
+                     `clippy -D warnings` clean). Delete the import, and write the call as \
+                     `crate::{name}(…)`."
+                );
+            }
+        }
+        // And the calls themselves must not be shadowable in the first place: with
+        // `-D warnings` a genuinely unused `use` would be caught, but one that *is* used
+        // (by rewriting the call) is not. Requiring the absolute form here means a body
+        // that calls the bare name is a failing test before any shadowing is attempted --
+        // the counting table above matches both spellings, so this is a naming rule, not a
+        // coverage change.
+        for name in [
+            "zeroize_array",
+            "zeroize_slice",
+            "zeroize_raw",
+            "scrub_stack",
+        ] {
+            let bare = format!(" {name}(");
+            let path = format!("crate::{name}(");
+            let bare_calls = body.matches(&bare).count();
+            let path_calls = body.matches(&path).count();
+            assert_eq!(
+                bare_calls, 0,
+                "`{marker}` calls `{name}(` without the `crate::` prefix ({bare_calls} \
+                 occurrence(s)): a bare name is shadowable by a `use` in the same body, and \
+                 then the wipe silently does nothing while every count stays. Write \
+                 `crate::{name}(…)`. ({path_calls} call(s) in this body already do.)"
+            );
         }
     }
 }

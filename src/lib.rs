@@ -762,7 +762,7 @@ impl Drop for Plaintext {
         // replaced -- the difference is the `Error::AllocationFailed` return rather
         // than an abort, so a reader trusting the old text would have had the
         // memory-exhaustion behaviour backwards.)
-        zeroize_slice(self.0.as_mut_slice());
+        crate::zeroize_slice(self.0.as_mut_slice());
         let (len, cap) = (self.0.len(), self.0.capacity());
         if cap > len {
             // Bytes past `len` belong to this allocation but were never written,
@@ -781,7 +781,7 @@ impl Drop for Plaintext {
             // the allocation and `cap - len` bytes from there are owned by this
             // `Vec` (still alive: we are in its owner's `Drop`); no live reference
             // covers that region.
-            unsafe { zeroize_raw(self.0.as_mut_ptr().add(len), cap - len) };
+            unsafe { crate::zeroize_raw(self.0.as_mut_ptr().add(len), cap - len) };
         }
     }
 }
@@ -2639,7 +2639,7 @@ pub fn encrypt(
         // MAC copy in this file rather than left to `scrub_stack` alone.
         let mut witness_tag = witness::encrypt_tag(key, nonce, aad, plaintext);
         let agree: subtle::Choice = witness_tag.ct_eq(&tag);
-        zeroize_array(&mut witness_tag);
+        crate::zeroize_array(&mut witness_tag);
         // Two rejections written before the call and checked in series, the same fail-closed
         // shape as both decrypt entry points: a fault that skips the call, or corrupts one
         // outcome, leaves a rejection standing.
@@ -2647,13 +2647,13 @@ pub fn encrypt(
         let mut decision1: Result<(), Error> = Err(Error::AuthenticationFailed);
         accept_or_reject(agree, agree, &mut decision0, &mut decision1);
         if decision0.is_err() {
-            zeroize_array(&mut k_in);
-            zeroize_array(&mut k_out);
-            zeroize_array(&mut enc_seed);
+            crate::zeroize_array(&mut k_in);
+            crate::zeroize_array(&mut k_out);
+            crate::zeroize_array(&mut enc_seed);
             // The tag is secret-derived -- it is the KDF input for `enc_key`/`enc_nonce`
             // below -- so it is named and wiped with the derived keys on this path, not
             // left to `scrub_stack`.
-            zeroize_array(&mut tag);
+            crate::zeroize_array(&mut tag);
             // No `ciphertext` wipe on this path. The buffer comes from `alloc_zeroed` and
             // the keystream that would fill it runs *below* this return, so it is still
             // all zeros: a wipe here is `O(plaintext.len())` volatile stores on a path
@@ -2667,19 +2667,19 @@ pub fn encrypt(
             // the scrub exists to overwrite. Cheap (0.5-1 us) and only on a path that
             // should never be taken, so it is paid here too.
             #[cfg(feature = "dual-mac")]
-            scrub_stack();
+            crate::scrub_stack();
             return Err(Error::AuthenticationFailed);
         }
         if decision1.is_err() {
-            zeroize_array(&mut k_in);
-            zeroize_array(&mut k_out);
-            zeroize_array(&mut enc_seed);
-            zeroize_array(&mut tag);
+            crate::zeroize_array(&mut k_in);
+            crate::zeroize_array(&mut k_out);
+            crate::zeroize_array(&mut enc_seed);
+            crate::zeroize_array(&mut tag);
             // No `ciphertext` wipe: see the `decision0` arm above -- the buffer is still
             // all zeros here, so the wipe was `O(plaintext.len())` work that protected
             // nothing.
             #[cfg(feature = "dual-mac")]
-            scrub_stack();
+            crate::scrub_stack();
             return Err(Error::AuthenticationFailed);
         }
     }
@@ -2689,17 +2689,17 @@ pub fn encrypt(
 
     chacha20_keystream(&enc_key, 0, &enc_nonce, plaintext, &mut ciphertext);
 
-    zeroize_array(&mut k_in);
-    zeroize_array(&mut k_out);
-    zeroize_array(&mut enc_seed);
-    zeroize_array(&mut enc_key);
+    crate::zeroize_array(&mut k_in);
+    crate::zeroize_array(&mut k_out);
+    crate::zeroize_array(&mut enc_seed);
+    crate::zeroize_array(&mut enc_key);
     // The per-message ChaCha20 nonce is secret-derived too (it comes out of
     // the same XOF call as `enc_key`), so it is wiped with the rest rather
     // than left on the stack.
-    zeroize_array(&mut enc_nonce);
+    crate::zeroize_array(&mut enc_nonce);
 
     #[cfg(feature = "dual-mac")]
-    scrub_stack();
+    crate::scrub_stack();
 
     Ok((ciphertext, tag))
 }
@@ -2736,17 +2736,17 @@ pub fn encrypt_in_place_detached(
 
     chacha20_apply(&enc_key, 0, &enc_nonce, &Input::InPlace, buffer);
 
-    zeroize_array(&mut k_in);
-    zeroize_array(&mut k_out);
-    zeroize_array(&mut enc_seed);
-    zeroize_array(&mut enc_key);
+    crate::zeroize_array(&mut k_in);
+    crate::zeroize_array(&mut k_out);
+    crate::zeroize_array(&mut enc_seed);
+    crate::zeroize_array(&mut enc_key);
     // The per-message ChaCha20 nonce is secret-derived too (it comes out of
     // the same XOF call as `enc_key`), so it is wiped with the rest rather
     // than left on the stack.
-    zeroize_array(&mut enc_nonce);
+    crate::zeroize_array(&mut enc_nonce);
 
     #[cfg(feature = "dual-mac")]
-    scrub_stack();
+    crate::scrub_stack();
 
     Ok(tag)
 }
@@ -2993,8 +2993,8 @@ pub fn decrypt(
             & witness_plaintext.as_slice().ct_eq(plaintext.as_slice());
         // Both are secret-derived: the witness tag is a MAC, the plaintext is the recovered
         // message. Wiped like the rest of the copies in this function.
-        zeroize_array(&mut witness_tag);
-        zeroize_slice(&mut witness_plaintext);
+        crate::zeroize_array(&mut witness_tag);
+        crate::zeroize_slice(&mut witness_plaintext);
         agree
     };
     // The gate's extra operand when `ultra` is off: `Choice::from(1)` is "true", so the
@@ -3063,34 +3063,34 @@ pub fn decrypt(
         // under. One 65-byte volatile store per message. (This comment called both copies
         // "secret-derived" until an audit pointed out that the received tag is not a
         // secret, and `tests/security.rs` now counts each copy separately.)
-        zeroize_array(&mut computed_tag_copy);
-        zeroize_array(&mut tag_copy);
+        crate::zeroize_array(&mut computed_tag_copy);
+        crate::zeroize_array(&mut tag_copy);
 
         (first, second)
     };
     #[cfg(not(feature = "hardened"))]
     let auth_ok = computed_tag.ct_eq(tag);
 
-    zeroize_array(&mut k_in);
-    zeroize_array(&mut k_out);
-    zeroize_array(&mut enc_seed);
-    zeroize_array(&mut enc_key);
+    crate::zeroize_array(&mut k_in);
+    crate::zeroize_array(&mut k_out);
+    crate::zeroize_array(&mut enc_seed);
+    crate::zeroize_array(&mut enc_key);
     // The per-message ChaCha20 nonce is secret-derived too (it comes out of
     // the same XOF call as `enc_key`), so it is wiped with the rest rather
     // than left on the stack.
-    zeroize_array(&mut enc_nonce);
-    zeroize_array(&mut computed_tag);
+    crate::zeroize_array(&mut enc_nonce);
+    crate::zeroize_array(&mut computed_tag);
     // The independent recomputation is the computed MAC too, so it is wiped like the
     // rest -- `tests/ultra.rs` asserts this, which is how the omission was found.
     #[cfg(feature = "dual-mac")]
-    zeroize_array(&mut recomputed_tag);
+    crate::zeroize_array(&mut recomputed_tag);
 
     // Two rejections until the decision proves otherwise, written *before* the call:
     // a fault that skips the call leaves both standing, and a fault that corrupts one
     // outcome leaves the other -- so accepting would take two faults. See the comment
     // on `accept_or_reject`.
     #[cfg(feature = "dual-mac")]
-    scrub_stack();
+    crate::scrub_stack();
 
     let mut decision0: Result<(), Error> = Err(Error::AuthenticationFailed);
     let mut decision1: Result<(), Error> = Err(Error::AuthenticationFailed);
@@ -3105,11 +3105,11 @@ pub fn decrypt(
     // and that residual is measured (`tools/fi_instruction.sh --bits`) and pinned in
     // the README's table rather than claimed away.
     if decision0.is_err() {
-        zeroize_slice(&mut plaintext);
+        crate::zeroize_slice(&mut plaintext);
         return Err(Error::AuthenticationFailed);
     }
     if decision1.is_err() {
-        zeroize_slice(&mut plaintext);
+        crate::zeroize_slice(&mut plaintext);
         return Err(Error::AuthenticationFailed);
     }
     Ok(Plaintext(plaintext))
@@ -3202,7 +3202,7 @@ pub fn decrypt_in_place_detached(
     // contract is the one a caller can rely on, and it matches the allocation-failure
     // arm below.)
     if let Err(e) = check_lengths(buffer.len(), aad.len()) {
-        zeroize_slice(buffer);
+        crate::zeroize_slice(buffer);
         return Err(e);
     }
 
@@ -3226,7 +3226,7 @@ pub fn decrypt_in_place_detached(
     let mut witness_ciphertext = match alloc_zeroed(buffer.len()) {
         Ok(v) => v,
         Err(e) => {
-            zeroize_slice(buffer);
+            crate::zeroize_slice(buffer);
             return Err(e);
         }
     };
@@ -3234,7 +3234,7 @@ pub fn decrypt_in_place_detached(
     let mut witness_plaintext = match alloc_zeroed(buffer.len()) {
         Ok(v) => v,
         Err(e) => {
-            zeroize_slice(buffer);
+            crate::zeroize_slice(buffer);
             return Err(e);
         }
     };
@@ -3273,9 +3273,9 @@ pub fn decrypt_in_place_detached(
         let agree = witness_tag.ct_eq(&computed_tag) & witness_plaintext.ct_eq(buffer);
         // All three are secret-derived (a MAC, the recovered plaintext, and the recovered
         // ciphertext buffer); wiped like the rest of the copies in this function.
-        zeroize_array(&mut witness_tag);
-        zeroize_slice(&mut witness_plaintext);
-        zeroize_slice(&mut witness_ciphertext);
+        crate::zeroize_array(&mut witness_tag);
+        crate::zeroize_slice(&mut witness_plaintext);
+        crate::zeroize_slice(&mut witness_ciphertext);
         agree
     };
     // Constant `true` when `ultra` is off, so the gate below stays one expression; see the
@@ -3329,32 +3329,32 @@ pub fn decrypt_in_place_detached(
         // under. One 65-byte volatile store per message. (This comment called both copies
         // "secret-derived" until an audit pointed out that the received tag is not a
         // secret, and `tests/security.rs` now counts each copy separately.)
-        zeroize_array(&mut computed_tag_copy);
-        zeroize_array(&mut tag_copy);
+        crate::zeroize_array(&mut computed_tag_copy);
+        crate::zeroize_array(&mut tag_copy);
 
         (first, second)
     };
     #[cfg(not(feature = "hardened"))]
     let auth_ok = computed_tag.ct_eq(tag);
 
-    zeroize_array(&mut k_in);
-    zeroize_array(&mut k_out);
-    zeroize_array(&mut enc_seed);
-    zeroize_array(&mut enc_key);
+    crate::zeroize_array(&mut k_in);
+    crate::zeroize_array(&mut k_out);
+    crate::zeroize_array(&mut enc_seed);
+    crate::zeroize_array(&mut enc_key);
     // The per-message ChaCha20 nonce is secret-derived too (it comes out of
     // the same XOF call as `enc_key`), so it is wiped with the rest rather
     // than left on the stack.
-    zeroize_array(&mut enc_nonce);
-    zeroize_array(&mut computed_tag);
+    crate::zeroize_array(&mut enc_nonce);
+    crate::zeroize_array(&mut computed_tag);
     // The independent recomputation is the computed MAC too, so it is wiped like the
     // rest -- `tests/ultra.rs` asserts this, which is how the omission was found.
     #[cfg(feature = "dual-mac")]
-    zeroize_array(&mut recomputed_tag);
+    crate::zeroize_array(&mut recomputed_tag);
 
     // As in `decrypt`: two rejections written first, and two serial checks, so a fault
     // that skips the call or corrupts one outcome cannot accept.
     #[cfg(feature = "dual-mac")]
-    scrub_stack();
+    crate::scrub_stack();
 
     let mut decision0: Result<(), Error> = Err(Error::AuthenticationFailed);
     let mut decision1: Result<(), Error> = Err(Error::AuthenticationFailed);
@@ -3364,11 +3364,11 @@ pub fn decrypt_in_place_detached(
     accept_or_reject(gates.0, gates.1, &mut decision0, &mut decision1);
 
     if decision0.is_err() {
-        zeroize_slice(buffer);
+        crate::zeroize_slice(buffer);
         return Err(Error::AuthenticationFailed);
     }
     if decision1.is_err() {
-        zeroize_slice(buffer);
+        crate::zeroize_slice(buffer);
         return Err(Error::AuthenticationFailed);
     }
     Ok(())
