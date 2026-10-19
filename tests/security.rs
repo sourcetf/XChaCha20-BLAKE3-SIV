@@ -2201,7 +2201,7 @@ fn every_documented_wipe_has_a_witness() {
     //
     // **The markers come from the same table as the counts.** An earlier revision drove
     // this check from a hand-written list of five entry points while the `Site` table above
-    // already knew about twelve -- so `derive_material`, `derive_tag`, `derive_enc`,
+    // already knew about thirteen -- so `derive_material`, `derive_tag`, `derive_enc`,
     // `blake3_keyed_multi` and `random::fill_from` (the core derivation chain, and the only
     // place `stack_residue.sh` cannot reach) could each carry a shadowing no-op and stay
     // green (found by a later pass and reproduced here). Two lists that describe the same
@@ -2299,12 +2299,51 @@ fn every_documented_wipe_has_a_witness() {
     }
 
     // Whole-file fallback: every wipe call in the crate is `crate::`-qualified. The loop
-    // above covers the table's twelve sites; this covers anything the table does not name --
+    // above covers the table's entries; this covers anything the table does not name --
     // a helper added later, a call moved out of a site's body -- so a bare `zeroize_array(`
     // anywhere in non-test source fails here regardless of which function it is in.
-    let whole = body_of("fn zeroize_array<T>(value: &mut T) {").0;
-    let _ = whole; // (kept for the reader: the defs themselves are exempt below)
-    let source = non_test_source();
+    //
+    // It scans all three source files, not just `lib.rs`: `src/witness.rs` has no wipe
+    // calls today, and `src/proofs.rs`'s two (inside Kani harnesses) are qualified below,
+    // but a comment claiming "the whole crate" while reading one file is exactly the kind
+    // of scope mismatch this file exists to catch (a later pass pointed that out).
+    let stripped_witness = strip_comments(include_str!("../src/witness.rs"));
+    let witness_source = {
+        // Cut the module body if there is one; `witness.rs` has one, but stay robust.
+        match stripped_witness.find("mod tests {") {
+            Some(at) => {
+                let mut depth = 0usize;
+                let mut close = None;
+                for (i, c) in stripped_witness[at..].char_indices() {
+                    match c {
+                        '{' => depth += 1,
+                        '}' => {
+                            depth -= 1;
+                            if depth == 0 {
+                                close = Some(at + i);
+                                break;
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                let close = close.expect("unterminated `mod tests` in witness.rs");
+                format!(
+                    "{}\n{}",
+                    &stripped_witness[..at],
+                    &stripped_witness[close + 1..]
+                )
+            }
+            None => stripped_witness,
+        }
+    };
+    let proofs_source = strip_comments(include_str!("../src/proofs.rs"));
+    let source = format!(
+        "{}\n{}\n{}",
+        non_test_source(),
+        witness_source,
+        proofs_source
+    );
     for n in [
         "zeroize_array",
         "zeroize_slice",
@@ -2334,9 +2373,42 @@ fn every_documented_wipe_has_a_witness() {
                 "`{n}(` is called without the `crate::` prefix at line {line_no}: a bare name \
                  is shadowable by a local `fn` or a `use` in the same body, which turns the \
                  wipe into a no-op while every count stays green. Write `crate::{n}(…)`. \
-                 (This check covers the whole crate; the per-site loop above covers the \
-                 table's twelve sites.)"
+                 (This check covers `lib.rs`, `witness.rs` and `proofs.rs`; the per-site \
+                 loop above covers the table's entries.)"
             );
         }
     }
+
+    // The one list must not be able to shrink. The count and the shadow check are driven
+    // by `sites` now, so a deleted entry takes *both* its witness and its shadow check with
+    // it: delete `derive_enc`'s entry and its two wipes and every gate stays green (a later
+    // pass measured exactly that). The literal below is the list the table must be.
+    let expected_labels = [
+        "Plaintext::drop",
+        "Key::zeroize",
+        "Key::drop",
+        "Page::drop (locked)",
+        "LockedKey::drop (locked)",
+        "derive_material",
+        "derive_tag",
+        "derive_enc",
+        "blake3_keyed_multi (keyed seam)",
+        "integrity_tag (locked's unkeyed seam)",
+        "random::fill_from",
+        "decrypt",
+        "decrypt_in_place_detached",
+    ];
+    let mut actual: Vec<&str> = sites.iter().map(|s| s.label).collect();
+    let mut expected: Vec<&str> = expected_labels.to_vec();
+    actual.sort_unstable();
+    expected.sort_unstable();
+    assert_eq!(
+        actual, expected,
+        "the `Site` table is the crate's one list of wipe-bearing sites: the count and the \
+         shadow check both read it, so a deleted entry removes its own witness and its own \
+         shadow check at once and nothing fails (measured: deleting `derive_enc`'s entry and \
+         its two wipes left `security` 17/17 and every other gate green). This literal is \
+         the list; adding a site means adding it here in the same change, and removing one \
+         means saying so deliberately rather than by deleting a row."
+    );
 }

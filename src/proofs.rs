@@ -117,7 +117,7 @@ fn zeroize_slice_clears_all_bytes() {
         buf.push(kani::any::<u8>());
     }
 
-    zeroize_slice(&mut buf);
+    crate::zeroize_slice(&mut buf);
 
     for b in buf.iter() {
         assert_eq!(*b, 0u8);
@@ -152,7 +152,7 @@ fn zeroize_slice_clears_unaligned_window() {
     let before_prefix = backing[..off].to_vec();
     let before_suffix = backing[off + len..].to_vec();
 
-    zeroize_slice(&mut backing[off..off + len]);
+    crate::zeroize_slice(&mut backing[off..off + len]);
 
     for i in off..off + len {
         assert_eq!(backing[i], 0u8);
