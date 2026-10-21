@@ -753,11 +753,25 @@ CPU_SECONDS = 15
 CHILD_NICE = 10
 
 
+def _set_limit(which, want):
+    """Lower `which` to `want`, or to the hard limit if that is already lower.
+
+    Raising above the hard limit would make `setrlimit` fail inside the forked child,
+    which never reaches exec: every fault would then be classified `crashed` and the
+    map would read clean. Clamping instead keeps the containment at whatever the host
+    allows -- and the probe below still proves that whatever limit was set is enforced.
+    """
+    _soft, hard = resource.getrlimit(which)
+    if hard != resource.RLIM_INFINITY:
+        want = min(want, hard)
+    resource.setrlimit(which, (want, want))
+
+
 def child_limits():
-    resource.setrlimit(resource.RLIMIT_AS, (ADDRESS_SPACE_LIMIT, ADDRESS_SPACE_LIMIT))
-    resource.setrlimit(resource.RLIMIT_CPU, (CPU_SECONDS, CPU_SECONDS))
-    resource.setrlimit(resource.RLIMIT_FSIZE, (CAPTURE_FILE_BYTES, CAPTURE_FILE_BYTES))
-    resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
+    _set_limit(resource.RLIMIT_AS, ADDRESS_SPACE_LIMIT)
+    _set_limit(resource.RLIMIT_CPU, CPU_SECONDS)
+    _set_limit(resource.RLIMIT_FSIZE, CAPTURE_FILE_BYTES)
+    _set_limit(resource.RLIMIT_CORE, 0)
     os.nice(CHILD_NICE)
 
 
@@ -817,13 +831,23 @@ def could_not_run(msg):
     sys.exit(3)
 
 
-# Positive control for the limits: a child that allocates well past the cap must die.
-# RLIMIT_AS is enforced on Linux and only partially elsewhere, and a limit that is
-# silently not in effect is the same failure this control exists to prevent -- the
-# sweep would look contained while one fault could still take the runner down
+# Positive control for the limits: a child that allocates well past the cap must die
+# *of the cap*. RLIMIT_AS is enforced on Linux and only partially elsewhere, and a limit
+# that is silently not in effect is the same failure this control exists to prevent --
+# the sweep would look contained while one fault could still take the runner down
 # mid-slice. 24 x 64 MiB = 1.5 GiB, so the control itself is bounded if the limit is
-# absent; when it is present the child raises `MemoryError` and exits non-zero.
-_allocation_probe = "b = []\nfor _ in range(24):\n    b.append(bytearray(64 << 20))\n"
+# absent. The probe answers 7 for "the allocation was refused" and 0 for "it was not",
+# so a control that fails for some third reason (the limit machinery itself broken)
+# reads as neither and is reported as what it is.
+_allocation_probe = (
+    "b = []\n"
+    "try:\n"
+    "    for _ in range(24):\n"
+    "        b.append(bytearray(64 << 20))\n"
+    "except MemoryError:\n"
+    "    raise SystemExit(7)\n"
+    "raise SystemExit(0)\n"
+)
 _probe = subprocess.run(
     [sys.executable, "-c", _allocation_probe],
     stdout=subprocess.DEVNULL,
@@ -831,11 +855,12 @@ _probe = subprocess.run(
     timeout=60,
     preexec_fn=child_limits,
 )
-if _probe.returncode == 0:
+if _probe.returncode != 7:
     could_not_run(
-        f"the child limits are not enforced: a process allocated 1.5 GiB under "
-        f"RLIMIT_AS={ADDRESS_SPACE_LIMIT} and exited 0, so one exploding fault could "
-        f"again take the host down instead of being classified"
+        f"the child limits are not in effect: a process allocating 1.5 GiB under "
+        f"RLIMIT_AS={ADDRESS_SPACE_LIMIT} exited {_probe.returncode} instead of "
+        f"reporting the refused allocation (7), so one exploding fault could again "
+        f"take the host down instead of being classified"
     )
 
 
