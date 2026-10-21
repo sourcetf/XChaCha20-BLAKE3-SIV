@@ -64,14 +64,16 @@ jobs:
           # A job id doubles as its check-run id, and the annotations are where the
           # runner's own wording survives: "received a shutdown signal" and "lost
           # communication with the server" are infrastructure; "The operation was
-          # canceled" is the generic wording the service pairs with them. A verdict or a
-          # FAIL line matches none of these.
+          # canceled" is the generic wording the service pairs with them; and exit 143
+          # is SIGTERM, which is how the step process is ended when the runner service
+          # stops (measured: 5 lost-communication, 10 canceled and 1 exit 143 in run
+          # 39639772764). A verdict or a FAIL line matches none of these.
           infra=0
           other=0
           while read -r id; do
             notes="$(gh api "repos/$REPO/check-runs/$id/annotations" --jq '.[].message')"
             if printf '%s\n' "$notes" | grep -Eq \
-              'received a shutdown signal|lost communication with the server|The operation was canceled'; then
+              'received a shutdown signal|lost communication with the server|The operation was canceled|exit code 143'; then
               infra=$((infra + 1))
             else
               other=$((other + 1))
