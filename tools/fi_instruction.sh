@@ -59,6 +59,18 @@
 # *timeout* being hit by branches whose NOP turns a loop into a spin, and a five-second
 # timeout fixed that.
 #
+# Every faulted child runs under per-process limits -- 1 GiB of address space, a CPU
+# backstop, a capped capture file, coredumps off, and `nice` -- and the shard checks at
+# startup (by allocating past the cap) that the limits are actually enforced, exiting 3
+# if they are not. This is containment, not a verdict change: a fault that allocates or
+# prints without bound dies and is counted `crashed`, exactly as one that segfaults is.
+# Without it, such a fault takes the *host's* runner agent down and the job dies as
+# "the hosted runner lost communication with the server" (measured: 17 of 42 sweep jobs
+# on the 2026-10-21 dispatch of the 20-shard sweep, run 39628640338), losing the rest of
+# that shard's slice. A platform that does not enforce the address-space limit therefore
+# makes the sweep exit 3 rather than run uncontained -- including it in the class of
+# things this tool refuses to report a verdict from.
+#
 # What this is still not: a fault model. A real glitch can hit a register or a bus
 # rather than the instruction stream, can be timed relative to the data it is meant to
 # disturb, and can be *targeted* rather than uniform. This enumerates two uniform
@@ -584,8 +596,11 @@ scan_shard() {  # bin, label, quick, model, shard, nshards
   python3 - "$@" <<'PY'
 import re
 import errno
+import os
+import resource
 import subprocess
 import sys
+import tempfile
 import time
 
 binpath, label, quick, model = sys.argv[1], sys.argv[2], sys.argv[3] == "--quick", sys.argv[4]
@@ -704,21 +719,89 @@ def reopen_for_write(path):
     raise AssertionError("unreachable")
 
 
+# Limits on every child, so one pathological fault cannot take the machine down
+# instead of being classified.
+#
+# Measured, not hypothetical: on the 2026-10-21 dispatch of the 20-shard wide sweep
+# (run 39628640338) 17 of the 42 sweep jobs died with "The hosted runner lost
+# communication with the server. Anything in your workflow that terminates the runner
+# process, starves it for CPU/Memory, or blocks its network access can cause this
+# error." The step was killed mid-sweep by *the runner's own box*, not by a verdict.
+# A corrupted instruction can turn a bounded loop into an unbounded one; a five-second
+# window is enough to reach gigabytes, and the kernel then kills the largest thing on
+# the box, which can be the runner agent. The fault is a legitimate result either way
+# -- what must not happen is that it destroys the rest of the shard's slice, because
+# the scan then says nothing about the thousands of faults it never reached.
+#
+# RLIMIT_AS is 1 GiB: the unpatched decision test peaks at a few MiB, and four
+# concurrent children (one per core on a hosted runner) then cannot ask for more than
+# 4 GiB in total. RLIMIT_FSIZE caps the capture file `run` writes to; RLIMIT_CPU is a
+# backstop behind the five-second wall clock; coredumps are off so a crashing child
+# cannot fill the disk. A child that hits a limit dies, and `run` classifies that as
+# "crashed" -- the verdict a corrupted instruction that segfaults already gets, so
+# containment changes how the process ends and not what the sweep concludes.
+#
+# The children are also niced: a fault that turns a loop into a spin runs at 100% for
+# the full five-second timeout, and the sweep runs one child per core, so the runner's
+# own agent competes with them for the CPU it needs to keep its connection alive. That
+# work is batch work; it should yield to the process deciding whether the job is still
+# healthy. `nice` costs nothing when the box is otherwise idle.
+ADDRESS_SPACE_LIMIT = 1 << 30
+CAPTURE_BYTES = 1 << 20
+CAPTURE_FILE_BYTES = 4 << 20
+CPU_SECONDS = 15
+CHILD_NICE = 10
+
+
+def child_limits():
+    resource.setrlimit(resource.RLIMIT_AS, (ADDRESS_SPACE_LIMIT, ADDRESS_SPACE_LIMIT))
+    resource.setrlimit(resource.RLIMIT_CPU, (CPU_SECONDS, CPU_SECONDS))
+    resource.setrlimit(resource.RLIMIT_FSIZE, (CAPTURE_FILE_BYTES, CAPTURE_FILE_BYTES))
+    resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
+    os.nice(CHILD_NICE)
+
+
+# One capture file, truncated before each fault. Output goes here rather than through
+# `capture_output=True` for the same reason: a corrupted instruction can also turn a
+# bounded print into an unbounded one, and `communicate` would then accumulate it in
+# this shard process's memory, where no rlimit applies.
+capture = tempfile.TemporaryFile()
+
+
 def run():
     # Bytes, decoded with `errors="replace"`: a corrupted binary that crashes can
     # write non-UTF-8 to stderr, and `text=True` turned that into a
     # `UnicodeDecodeError` escaping the shard (measured in the full sweep: 0xe1 and
     # 0xf0 at offsets 90 and 17). The verdict only looks for one ASCII needle, so a
     # replaced byte cannot change it.
-    r = subprocess.run([binpath], capture_output=True, timeout=5)  # a NOPed
-    # branch inside a loop hangs; the test itself needs milliseconds, so anything
-    # past a few seconds is that hang, not a slow success
+    capture.seek(0)
+    capture.truncate(0)
+    r = subprocess.run(
+        [binpath],
+        stdout=capture.fileno(),
+        stderr=subprocess.STDOUT,
+        timeout=5,  # a NOPed
+        # branch inside a loop hangs; the test itself needs milliseconds, so anything
+        # past a few seconds is that hang, not a slow success
+        preexec_fn=child_limits,
+    )
     if r.returncode == 0:
         return "rejected"
-    blob = (r.stdout + r.stderr).decode("utf-8", "replace")
-    if "forged tag accepted" in blob:
+    size = capture.seek(0, os.SEEK_END)
+    capture.seek(0)
+    if size <= CAPTURE_BYTES:
+        blob = capture.read()
+    else:
+        # A child that floods the log must not push the needle -- libtest writes a
+        # failing test's captured output near the end -- past what is examined, so both
+        # ends are read; neither read exceeds the cap.
+        blob = capture.read(CAPTURE_BYTES)
+        capture.seek(size - CAPTURE_BYTES)
+        blob += capture.read(CAPTURE_BYTES)
+    if "forged tag accepted" in blob.decode("utf-8", "replace"):
         return "accepted"
     return "crashed"
+
 
 # A baseline: unpatched, the test must pass.
 base = run()
@@ -732,6 +815,28 @@ def could_not_run(msg):
     does not cover what the symbol map says it should."""
     print(f"FAIL: {msg}", file=sys.stderr)
     sys.exit(3)
+
+
+# Positive control for the limits: a child that allocates well past the cap must die.
+# RLIMIT_AS is enforced on Linux and only partially elsewhere, and a limit that is
+# silently not in effect is the same failure this control exists to prevent -- the
+# sweep would look contained while one fault could still take the runner down
+# mid-slice. 24 x 64 MiB = 1.5 GiB, so the control itself is bounded if the limit is
+# absent; when it is present the child raises `MemoryError` and exits non-zero.
+_allocation_probe = "b = []\nfor _ in range(24):\n    b.append(bytearray(64 << 20))\n"
+_probe = subprocess.run(
+    [sys.executable, "-c", _allocation_probe],
+    stdout=subprocess.DEVNULL,
+    stderr=subprocess.DEVNULL,
+    timeout=60,
+    preexec_fn=child_limits,
+)
+if _probe.returncode == 0:
+    could_not_run(
+        f"the child limits are not enforced: a process allocated 1.5 GiB under "
+        f"RLIMIT_AS={ADDRESS_SPACE_LIMIT} and exited 0, so one exploding fault could "
+        f"again take the host down instead of being classified"
+    )
 
 
 # The fault, per model: `nop` writes 0x90 over a byte; `bits` flips one bit of it.

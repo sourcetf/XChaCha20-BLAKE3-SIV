@@ -713,23 +713,23 @@ jobs:
 
       # Instruction-level faults: bytes of the compiled code are NOPed in turn, in all three
       # configurations, and the decision test has to keep rejecting forgeries. It runs in the
-      # `wide-sweep` job below, sharded across six jobs -- **every symbol-mapped byte, not a
+      # `wide-sweep` job below, sharded across twenty jobs -- **every symbol-mapped byte, not a
       # subset**: the finding this sweep exists for (six single-byte faults in `decrypt` that
       # skipped the call and accepted a forgery) came from *outside* the decision, so the
       # region is not negotiable and the budget is what moves. `wide-verdict` proves that the
-      # six shards are a complete, disjoint sweep before applying the verdict, and a missing
+      # twenty shards are a complete, disjoint sweep before applying the verdict, and a missing
       # shard fails there rather than reading as less work.
       # The `bits` model is not run here (eight times the faults of the nop one); it runs
       # `--quick` on every push in the mutation job above, and in full in the scheduled
-      # `wide-sweep-bits` job below, which splits the same region six ways and has its
+      # `wide-sweep-bits` job below, which splits the same region twenty ways and has its
       # verdict applied there alongside this one's.
 
   # The shards and the verdict, split from the differential and the sanitizer above so
   # that each job's budget holds only its own work: the full nop sweep measures about five
   # hours on a hosted runner (`Deep checks` #183's sweep step ran 2 h 47 min and was killed
-  # with the job at five hours), which is why it is six jobs and not one. The `bits` model
-  # gets the same six-way split of the same region in `wide-sweep-bits` below, with its own
-  # budget because it is eight times the faults; both jobs feed the verdict job that follows.
+  # with the job at five hours), which is why it is twenty jobs and not one. The `bits` model
+  # gets the same split of the same region in `wide-sweep-bits` below, with its own budget
+  # because it is eight times the faults; both jobs feed the verdict job that follows.
   wide-sweep:
     name: wide audit (sweep shard ${{ matrix.shard }}/20)
     runs-on: ubuntu-latest
@@ -762,7 +762,7 @@ jobs:
           name: sweep-shard-${{ matrix.shard }}
           path: ${{ runner.temp }}/sweep-shard-${{ matrix.shard }}.json
 
-  # The bit-flip model over the same region, split the same six ways. It is eight times
+  # The bit-flip model over the same region, split the same twenty ways. It is eight times
   # the nop model's fault count (the tool's header: ~150k faults against ~19 KB of region),
   # so it needs its own job rather than a larger slice of the nop budget. Without it the
   # full bit-flip sweep ran nowhere on a schedule -- `--quick` on every push and "in full

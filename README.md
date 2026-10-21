@@ -518,7 +518,13 @@ the second gate exists for, and `ultra` is the build whose *totals* are largest 
 decision-scoped count is still zero — the witness adds code to both entry points without
 adding an accepting byte to the decision. The sweep is sharded across cores
 (`--jobs`, default the core count capped at 16), which is what makes the full
-three-configuration sweep a two-minute check instead of a quarter-hour one.
+three-configuration sweep a two-minute check instead of a quarter-hour one; the
+scheduled run splits it across twenty CI jobs as well (`--shard I/N`), and each
+faulted child runs under per-process limits (1 GiB of address space, a capped capture
+file, `RLIMIT_CPU`, `nice`) so that a fault which allocates or spins without bound is
+counted `crashed` rather than taking the runner's agent down with it. The tool checks
+at startup that those limits are enforced and exits 3 (`could not run`) if they are
+not, rather than run uncontained.
 
 One more thing the campaign turned up, which is worth knowing before trusting a
 green suite here: the failure-path wipe of the *allocating* `decrypt` is not
