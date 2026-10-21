@@ -730,9 +730,16 @@ jobs:
   # with the job at five hours), which is why it is twenty jobs and not one. The `bits` model
   # gets the same split of the same region in `wide-sweep-bits` below, with its own budget
   # because it is eight times the faults; both jobs feed the verdict job that follows.
+  #
+  # Both sweep matrices pin `ubuntu-24.04` rather than `ubuntu-latest`, so that a label
+  # migration cannot move the platform under the only jobs here that run for tens of
+  # minutes. This is not the fix for the runner shutdowns below: the cancelled jobs' logs
+  # show `ubuntu-latest` still resolved to the ubuntu-24.04 image (20261018.339.1), so
+  # the pin only removes one variable while that failure is tracked in
+  # `.github/workflows/retry-runner-shutdown.yml`.
   wide-sweep:
     name: wide audit (sweep shard ${{ matrix.shard }}/20)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 360
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     strategy:
@@ -774,7 +781,7 @@ jobs:
   # shrinking it, the same way a missing nop shard does.
   wide-sweep-bits:
     name: wide audit (bits sweep shard ${{ matrix.shard }}/20)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     # 360, the ceiling a GitHub-hosted job allows, and the number is derived from the
     # *measured* sweep time rather than from the fault-count ratio: the tool's header prices
     # the bit-flip model at about eight times the *faults* of the nop model, but on a 16-core

@@ -59,7 +59,7 @@
 # *timeout* being hit by branches whose NOP turns a loop into a spin, and a five-second
 # timeout fixed that.
 #
-# Every faulted child runs under per-process limits -- 1 GiB of address space, a CPU
+# Every faulted child runs under per-process limits -- 256 MiB of address space, a CPU
 # backstop, a capped capture file, coredumps off, and `nice` -- and the shard checks at
 # startup (by allocating past the cap) that the limits are actually enforced, exiting 3
 # if they are not. This is containment, not a verdict change: a fault that allocates or
@@ -733,9 +733,9 @@ def reopen_for_write(path):
 # -- what must not happen is that it destroys the rest of the shard's slice, because
 # the scan then says nothing about the thousands of faults it never reached.
 #
-# RLIMIT_AS is 1 GiB: the unpatched decision test peaks at a few MiB, and four
-# concurrent children (one per core on a hosted runner) then cannot ask for more than
-# 4 GiB in total. RLIMIT_FSIZE caps the capture file `run` writes to; RLIMIT_CPU is a
+# RLIMIT_AS is 256 MiB: the unpatched decision test runs to completion under a 64 MiB
+# cap (measured with `ulimit -v`), so this is a 4x margin, and four concurrent children
+# (one per core on a hosted runner) then cannot ask for more than 1 GiB in total. RLIMIT_FSIZE caps the capture file `run` writes to; RLIMIT_CPU is a
 # backstop behind the five-second wall clock; coredumps are off so a crashing child
 # cannot fill the disk. A child that hits a limit dies, and `run` classifies that as
 # "crashed" -- the verdict a corrupted instruction that segfaults already gets, so
@@ -746,7 +746,7 @@ def reopen_for_write(path):
 # own agent competes with them for the CPU it needs to keep its connection alive. That
 # work is batch work; it should yield to the process deciding whether the job is still
 # healthy. `nice` costs nothing when the box is otherwise idle.
-ADDRESS_SPACE_LIMIT = 1 << 30
+ADDRESS_SPACE_LIMIT = 256 << 20
 CAPTURE_BYTES = 1 << 20
 CAPTURE_FILE_BYTES = 4 << 20
 CPU_SECONDS = 15
@@ -835,14 +835,14 @@ def could_not_run(msg):
 # *of the cap*. RLIMIT_AS is enforced on Linux and only partially elsewhere, and a limit
 # that is silently not in effect is the same failure this control exists to prevent --
 # the sweep would look contained while one fault could still take the runner down
-# mid-slice. 24 x 64 MiB = 1.5 GiB, so the control itself is bounded if the limit is
+# mid-slice. 5 x 64 MiB = 320 MiB, above the 256 MiB cap and bounded if the limit is
 # absent. The probe answers 7 for "the allocation was refused" and 0 for "it was not",
 # so a control that fails for some third reason (the limit machinery itself broken)
 # reads as neither and is reported as what it is.
 _allocation_probe = (
     "b = []\n"
     "try:\n"
-    "    for _ in range(24):\n"
+    "    for _ in range(5):\n"
     "        b.append(bytearray(64 << 20))\n"
     "except MemoryError:\n"
     "    raise SystemExit(7)\n"
@@ -857,7 +857,7 @@ _probe = subprocess.run(
 )
 if _probe.returncode != 7:
     could_not_run(
-        f"the child limits are not in effect: a process allocating 1.5 GiB under "
+        f"the child limits are not in effect: a process allocating 320 MiB under "
         f"RLIMIT_AS={ADDRESS_SPACE_LIMIT} exited {_probe.returncode} instead of "
         f"reporting the refused allocation (7), so one exploding fault could again "
         f"take the host down instead of being classified"

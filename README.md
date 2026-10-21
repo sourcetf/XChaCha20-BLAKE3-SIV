@@ -520,7 +520,7 @@ adding an accepting byte to the decision. The sweep is sharded across cores
 (`--jobs`, default the core count capped at 16), which is what makes the full
 three-configuration sweep a two-minute check instead of a quarter-hour one; the
 scheduled run splits it across twenty CI jobs as well (`--shard I/N`), and each
-faulted child runs under per-process limits (1 GiB of address space, a capped capture
+faulted child runs under per-process limits (256 MiB of address space, a capped capture
 file, `RLIMIT_CPU`, `nice`) so that a fault which allocates or spins without bound is
 counted `crashed` rather than taking the runner's agent down with it. The tool checks
 at startup that those limits are enforced and exits 3 (`could not run`) if they are
