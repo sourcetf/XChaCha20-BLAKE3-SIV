@@ -27,7 +27,7 @@
 //! under `ultra` *its* tests fail when `encrypt` refuses, and a detector that merely fails is
 //! not the same as a detector that says what happened.
 
-use xchacha20_blake3_siv::{decrypt, encrypt};
+use xchacha20_blake3_siv::{decrypt, encrypt, encrypt_in_place_detached};
 
 const KEY: [u8; 32] = [0x11; 32];
 const NONCE: [u8; 24] = [0x22; 24];
@@ -54,6 +54,17 @@ fn a_tag_must_commit_to_the_message_it_was_issued_for() {
                 matches!(e, xchacha20_blake3_siv::Error::AuthenticationFailed),
                 "the `ultra` refusal must be the independent implementation disagreeing, \
                  not {e:?}"
+            );
+            // Positive control: an `encrypt` that refuses *every* input encodes
+            // `AuthenticationFailed` unconditionally and would satisfy the assertion above
+            // without running any commitment check. The in-place entry point deliberately
+            // carries no witness, so the planted message-independent-tag fault leaves it
+            // working; if it also fails, the refusal is a global break, not the witness
+            // countermeasure this test is paired with.
+            let mut control = issued_for.to_vec();
+            encrypt_in_place_detached(&KEY, &NONCE, AAD, &mut control).expect(
+                "the in-place encryptor must still issue a tag: an `encrypt` that refuses \
+                 every input is not the `ultra` witness countermeasure",
             );
             eprintln!(
                 "encrypt refused to issue a tag ({e:?}): the independent implementation \

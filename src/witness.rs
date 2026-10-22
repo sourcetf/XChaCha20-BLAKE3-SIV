@@ -457,13 +457,17 @@ fn parent_output(left: &[u32; 8], right: &[u32; 8], key: &[u32; 8], flags: u32) 
     let mut block_words = [0u32; 16];
     block_words[0..8].copy_from_slice(left);
     block_words[8..16].copy_from_slice(right);
-    Output {
+    let output = Output {
         input_cv: *key,
         block_words,
         counter: 0,
         block_len: BLAKE3_BLOCK as u32,
         flags: flags | PARENT,
-    }
+    };
+    // `Output` owns a copy of these child CVs and wipes it on drop; this named local is
+    // the second copy, and an audit found it left unwiped.
+    wipe_words(&mut block_words);
+    output
 }
 
 fn parent_cv(left: &[u32; 8], right: &[u32; 8], key: &[u32; 8], flags: u32) -> [u32; 8] {
@@ -610,12 +614,17 @@ impl Hasher {
             key_words[i] = u32::from_le_bytes(b);
         }
         let flags = KEYED_HASH;
-        Hasher {
+        let hasher = Hasher {
             key_words,
             chunk: ChunkState::new(&key_words, 0, flags),
             cv_stack: CvStack::new(),
             flags,
-        }
+        };
+        // The struct literal copies `[u32; 8]`; the field is wiped by `wipe_state`, but
+        // this named local is a second copy and would otherwise outlive the call. The
+        // module's own rule is that every key-derived buffer it names is wiped.
+        wipe_words(&mut key_words);
+        hasher
     }
 
     fn add_chunk_cv(&mut self, mut new_cv: [u32; 8], total_chunks: u64) {

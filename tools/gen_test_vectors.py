@@ -195,9 +195,20 @@ def build():
 
 
 def main():
+    args = sys.argv[1:]
+    if any(arg in ("-h", "--help") for arg in args):
+        print(__doc__)
+        return
+    unknown = [arg for arg in args if arg != "--check"]
+    if unknown:
+        raise SystemExit(
+            f"error: unknown argument(s) {unknown}; usage: "
+            "python3 tools/gen_test_vectors.py [--check]"
+        )
+    check = "--check" in args
     for path, text, count in ((OUT, build(), len(PAIRS)),
                               (OUT_LARGE, build_digests(), len(DIGEST_PAIRS))):
-        if "--check" in sys.argv:
+        if check:
             with open(path) as fh:
                 if fh.read() == text:
                     print(f"{path} is current ({count} vectors)")

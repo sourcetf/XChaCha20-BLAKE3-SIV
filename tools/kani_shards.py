@@ -23,6 +23,12 @@ import os
 import re
 import sys
 
+# Legal spellings of the attribute: Rust permits whitespace inside the path and around
+# the brackets (`#[kani :: proof]`, `# [kani::proof]`). The old parser required the exact
+# `#[kani::proof]` prefix, so a harness written in one of these forms was silently absent
+# from the shard plan and the count.
+PROOF_ATTR = re.compile(r"#\s*\[\s*kani\s*::\s*proof\s*\]")
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 PROOFS = os.path.join(ROOT, "src", "proofs.rs")
@@ -106,7 +112,17 @@ def harnesses():
         # missed it; a *new* harness in that shape cannot lower a count, so nothing else
         # could notice). Measured before the fix: a file with one harness in each of the
         # three shapes reported a count of 1.
-        if stripped.startswith("#[kani::proof]"):
+        if "kani::proof" in stripped and not PROOF_ATTR.match(stripped):
+            # `#[cfg_attr(kani, kani::proof)]` (or a macro-generated attribute) is a form
+            # this parser cannot attribute to a harness. Refuse rather than count it: a
+            # silent miss is a proof that never runs while the count still looks healthy.
+            if not (stripped.startswith("//") or stripped.startswith("/*")):
+                raise SystemExit(
+                    "error: `kani::proof` appears in a form this parser does not count: "
+                    f"{stripped!r}. Write the attribute as `#[kani::proof]` (whitespace "
+                    "inside the brackets is accepted) or teach `PROOF_ATTR` the shape."
+                )
+        if PROOF_ATTR.match(stripped):
             # A `cfg` above the marker can take the harness out of the build while every
             # count here stays: an audit put `#[cfg(any())]` above twelve of the thirteen
             # and watched this parser report 13, `tools/check_kani_cfg.sh` print PASS and
@@ -123,7 +139,8 @@ def harnesses():
                 )
             attr_run = []
             # Attributes and comments can share the line; drop them and look for the `fn`.
-            rest = re.sub(r"#\[[^\]]*\]|//.*|/\*.*?\*/", " ", stripped[len("#[kani::proof]"):])
+            proof = PROOF_ATTR.match(stripped)
+            rest = re.sub(r"#\s*\[[^\]]*\]|//.*|/\*.*?\*/", " ", stripped[proof.end() :])
             m = re.match(r"\s*(?:pub\s+)?fn\s+([A-Za-z0-9_]+)", rest)
             if m:
                 names.append(m.group(1))
@@ -154,7 +171,7 @@ def harnesses():
     # again -- the failure mode this parser exists to prevent, and the one a `>= 13` count
     # floor in `tools/check_kani_cfg.sh` cannot see when the harness that vanishes is a new
     # one. (A commented-out `// #[kani::proof]` starts with `//`, so it is not counted.)
-    attribute_lines = sum(1 for line in lines if line.strip().startswith("#[kani::proof]"))
+    attribute_lines = sum(1 for line in lines if PROOF_ATTR.match(line.strip()))
     if attribute_lines != len(names):
         raise SystemExit(
             f"error: {attribute_lines} line(s) start with #[kani::proof] but {len(names)} "

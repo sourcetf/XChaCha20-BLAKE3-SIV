@@ -8,6 +8,35 @@ green push to `main` — which are build artefacts of that job, not construction
 
 ## Unreleased
 
+### Vendored BLAKE3 1.8.7: the 2/4-wide `hash_many` tail over-read, reproduced and fixed
+
+The external audit's D-01 is real and now reproduced, not merely reasoned about. A
+64-byte input placed at the last bytes of a readable page, with the next page
+inaccessible, makes `Platform::hash_many` with two inputs read +16/+32/+48 bytes past
+the block. On this host `Platform::detect()` is AVX512, and the first `n=2` call died
+with `STATUS_ACCESS_VIOLATION` (`0xc0000005`). The reproducer is
+`cargo run --release --example blake3_guard_probe`: it crashed before the patch and
+returns for `n=2,3,4,8` after it.
+
+`blake3/` is the released 1.8.7 source vendored into this workspace. The fork keeps
+complete SIMD groups on the C/assembly kernels and sends the remainder to the portable
+implementation, so a 2/4-wide tail never reaches the bad loads;
+`tests/blake3_fork_equivalence.rs` compares the result with `Platform::portable()` for
+0..=17 inputs and both counter modes. The same fork also fixes D-02 (multi-block
+AVX-512 `xof_many` now uses the documented `compress_xof` loop, tested for 1..=4
+blocks), D-04 (`reset` clears the hazmat initial chunk counter, reproduced as a
+`finalize` assertion failure before the fix), D-05 (`left_subtree_len(u64::MAX)` no
+longer wraps; reproduced as `1` instead of `1 << 63`), and D-06 (`position` saturates).
+D-03's narrow-argument ABI issue and D-09's manually-constructed `Platform` variants
+remain documented upstream limitations; the parent path does not reach them.
+
+`[patch.crates-io]` is workspace-local. `cargo package` verifies against the crates.io
+`blake3` (the packaged manifest does not carry the patch), so a published artifact
+would not include these fixes until the fork is published under its own
+package/version and the dependency is switched. The crate is not on crates.io; the
+README and `Cargo.toml` say so explicitly. No wire-format bytes changed: the full
+default-feature and `--all-features` suites pass.
+
 ### The sweep's children are contained, because an exploding fault was taking the runner with it
 
 `Deep checks` #213 (the dispatch of `7dedb71`, run 39628640338) had **17 of its 42 sweep jobs** end with the runner's own annotation — "The hosted runner lost communication with the server. Anything in your workflow that terminates the runner process, starves it for CPU/Memory, or blocks its network access can cause this error." — between 10 and 51 minutes into the step, in both matrices and both fault models. The sweep was not the finding: the nop shards that finished were green, and a failed bits shard re-run on the development host is clean. What failed was the host: `tools/fi_instruction.sh` ran every faulted child with **no resource limits and captured its output in memory**, so a corrupted instruction that turns a bounded loop into an unbounded one could grow a child to gigabytes inside the five-second window, or hold a core for the full timeout with one child per core, and the kernel or the scheduler then took the runner's agent — losing the rest of that shard's slice, which is the coverage the sweep exists for.

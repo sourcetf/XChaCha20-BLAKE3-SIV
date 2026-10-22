@@ -4,7 +4,7 @@
 //!
 //! The `-Z stubbing` flag is **required**: several harnesses use `#[kani::stub]`
 //! to replace the ChaCha20 permutation, the zeroization helper, and the keyed
-//! BLAKE3 MAC with cheap stand-ins (see the notes above `stub_chacha20_block`
+//! BLAKE3 MAC with cheap stand-ins (see the notes above `stub_chacha20_block_into`
 //! and `model_blake3_keyed_multi`).  Without the flag Kani rejects the attribute
 //! and the suite fails to compile.  Everything else runs unmodified.
 //!
@@ -197,25 +197,24 @@ fn zeroize_slice_clears_unaligned_window() {
 // * The *sequencing* — which counter each block uses, where the partial tail
 //   starts, whether the tail reads the right slice — is what a stream-cipher
 //   wrapper gets wrong in practice, and it is independent of the permutation's
-//   internals.  `kani::stub` replaces `chacha20_block` with a function that
+//   internals.  `kani::stub` replaces `chacha20_block_into` with a function that
 //   encodes its own arguments, so the harness can assert the exact counter
 //   sequence in seconds instead of hours.
 
-/// A stand-in for `chacha20_block` that stamps part of its arguments into the output.
+/// A stand-in for `chacha20_block_into` that stamps part of its arguments into the output.
 ///
 /// It is deliberately not a real cipher: its only job is to let a harness observe
 /// the counter a block was produced from.  Bytes 0..4 receive the counter, 4..8
 /// `nonce[0..4]`, 8..12 `nonce[8..12]`, 12..16 `key[0..4]` and 16..20
 /// `key[28..32]`; the remaining 44 bytes are zero, so key and nonce bytes outside
 /// those fields are not observable through it.
-fn stub_chacha20_block(key: &[u8; 32], counter: u32, nonce: &[u8; 12]) -> [u8; 64] {
-    let mut out = [0u8; 64];
+fn stub_chacha20_block_into(key: &[u8; 32], counter: u32, nonce: &[u8; 12], out: &mut [u8; 64]) {
+    *out = [0u8; 64];
     out[0..4].copy_from_slice(&counter.to_le_bytes());
     out[4..8].copy_from_slice(&nonce[0..4]);
     out[8..12].copy_from_slice(&nonce[8..12]);
     out[12..16].copy_from_slice(&key[0..4]);
     out[16..20].copy_from_slice(&key[28..32]);
-    out
 }
 
 /// A no-op stand-in for `zeroize_array`.
@@ -258,7 +257,7 @@ fn noop_zeroize_array<T>(_value: &mut T) {}
 /// experiment on the wrapper's sequencing, not a statement over all keys, and
 /// the permutation itself is stubbed out (the KATs pin the real one).
 #[kani::proof]
-#[kani::stub(chacha20_block, stub_chacha20_block)]
+#[kani::stub(chacha20_block_into, stub_chacha20_block_into)]
 #[kani::stub(zeroize_array, noop_zeroize_array)]
 #[kani::unwind(40)]
 fn chacha20_counter_sequencing_is_exact() {
@@ -296,7 +295,7 @@ fn chacha20_counter_sequencing_is_exact() {
 /// `unwind 200` exhausted its memory. 66 bytes at `unwind 80` verifies in ~77 s
 /// and already crosses the boundary; the sequencing harness covers the rest.)
 #[kani::proof]
-#[kani::stub(chacha20_block, stub_chacha20_block)]
+#[kani::stub(chacha20_block_into, stub_chacha20_block_into)]
 #[kani::stub(zeroize_array, noop_zeroize_array)]
 #[kani::unwind(80)]
 fn chacha20_keystream_involution_partial_blocks() {
@@ -317,7 +316,8 @@ fn chacha20_keystream_involution_partial_blocks() {
     // block: byte `i` comes from the block at `ctr + i/64`, offset `i%64`. (That
     // is the part a single-block harness could not see.)
     for i in 0..len {
-        let expect = stub_chacha20_block(&key, ctr + (i / 64) as u32, &nonce);
+        let mut expect = [0u8; 64];
+        stub_chacha20_block_into(&key, ctr + (i / 64) as u32, &nonce, &mut expect);
         assert_eq!(
             ct[i],
             pt[i] ^ expect[i % 64],
@@ -358,7 +358,8 @@ fn chacha20_keystream_involution_partial_blocks() {
 fn hchacha20_matches_draft_vector() {
     let key = hex32("000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f");
     let nonce = hex16("000000090000004a0000000031415927");
-    let got = hchacha20(&key, &nonce);
+    let mut got = [0u8; 32];
+    hchacha20_into(&key, &nonce, &mut got);
     let want = hex32("82413b4227b27bfed30e42508a877d73a0f9e4d58a74a853c12ec41326d3ecdc");
     assert_eq!(got, want);
 }

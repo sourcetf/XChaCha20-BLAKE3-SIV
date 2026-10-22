@@ -911,6 +911,26 @@ fn the_hardened_second_gate_is_recomputed() {
         ] {
             assert_eq!(block.matches(site).count(), 1, "{what}:\n{block}");
         }
+        // The read *lines* being present is not enough: assigning to either binding
+        // between the reads and the comparison leaves every snippet above in place while
+        // making the second gate compare a value with itself. That is the `gates-shared`
+        // shape the whole block exists to reject, and it stayed green when it was
+        // measured. Pin the segment between the last read and the comparison.
+        let last_read = "let mut tag_copy = unsafe { core::ptr::read_volatile(tag) };";
+        let read_end = block.find(last_read).expect("asserted present above") + last_read.len();
+        let compare =
+            "let gate_pair = second_gate_comparison(&computed_tag_copy, &tag_copy) & witness_ok";
+        let compare_at = block.find(compare).expect("asserted present below");
+        let between = &block[read_end..compare_at];
+        for operand in ["computed_tag_copy", "tag_copy"] {
+            assert!(
+                !between.contains(&format!("{operand} =")),
+                "`{operand}` must not be reassigned between the volatile read and the \
+                 comparison: the second gate would then read a different value than the \
+                 one it is documented to re-read, and a single assignment is enough to \
+                 make it compare a value with itself:\n{between}"
+            );
+        }
         assert!(
             block.contains("zeroize_array(&mut computed_tag_copy)"),
             "the re-read copy of the computed tag is secret-derived and must be \
@@ -1345,6 +1365,22 @@ fn the_decision_outcome_is_fail_closed() {
                 .count(),
         2,
         "`encrypt`'s two reject checks must wipe the derived key material"
+    );
+    // ...and must actually reject. The counts above witness the headers and their first
+    // wipe, not the `return`; deleting both returns from `encrypt`'s `ultra` arms left the
+    // suite green while a witness disagreement fell through to the success path and
+    // returned a tag (measured). Pin the one rejection statement each arm must carry.
+    let encrypt_body = brace_blocks("pub fn encrypt(");
+    assert_eq!(encrypt_body.len(), 1, "expected one `encrypt` body");
+    assert_eq!(
+        encrypt_body[0]
+            .matches("return Err(Error::AuthenticationFailed);")
+            .count(),
+        2,
+        "both `encrypt` `ultra` reject arms must return `AuthenticationFailed`; without \
+         the returns the decision wipes the key material and then falls through to issue \
+         a tag for a witness disagreement:\n{}",
+        encrypt_body[0]
     );
     // There must be no conditional jump *to the accept path*: accepting is the
     // fall-through of the two reject checks, so a corrupted branch lands on a

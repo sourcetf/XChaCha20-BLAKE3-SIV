@@ -193,11 +193,22 @@ const DIVISION_METHODS: &[&str] = &[
 /// supply it" arms, and the two `if`s are the XCR0 and leaf-7 checks — the same CPU facts
 /// as before, now in a function a table test can pin without the hardware. No new class of
 /// branch, and no new data reaching a comparison.
+///
+/// `if` 41 -> 44 and `loop` 0 -> 1 when `locked_bytes` stopped assuming
+/// `/proc/self/status` fits one 4 KiB read: the loop reads until EOF, retrying `EINTR`
+/// and refusing an unbounded stream, and the three `if`s are its return-value checks.
+/// They depend on the read result and a fixed buffer bound, never on key, nonce, AAD or
+/// message content.
+///
+/// `if` 44 -> 46 and `loop` 1 -> 2 when `page_size` became fail-closed: one `if` tests the
+/// cached value, one tests the `EINTR` return of the auxv read, and the read is inside a
+/// second `loop`. These depend on a public kernel fact and a syscall result, not on
+/// secret content.
 const CONTROL_FLOW: &[(&str, usize)] = &[
-    ("if", 41),
+    ("if", 46),
     ("while", 10),
     ("for", 26),
-    ("loop", 0),
+    ("loop", 2),
     ("match", 9),
 ];
 

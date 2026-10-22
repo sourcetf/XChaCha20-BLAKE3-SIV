@@ -199,17 +199,33 @@ jobs:
       - name: cargo test
         run: |
           set -euo pipefail
+          test_args="${{ matrix.args }}"
+          # Deleting a whole test target is invisible to a run-based guard: the remaining
+          # binaries still pass. Pin the expected target files themselves. The list is
+          # deliberately literal; a new integration test must be added here, and
+          # `tests/README.md` is the human index for it.
+          for target in \
+            tests/construction_inventory.rs tests/counter_range.rs tests/ctgrind.rs \
+            tests/decision.rs tests/decision_scope.rs tests/differential_reference.rs \
+            tests/locked.rs tests/mac_commitment.rs tests/plaintext_wipe.rs \
+            tests/security.rs tests/threads.rs tests/timing.rs tests/ultra.rs \
+            tests/variable_latency.rs; do
+            if [ ! -f "$target" ]; then
+              echo "::error::expected test target $target is missing"
+              exit 1
+            fi
+          done
           log="${RUNNER_TEMP:-/tmp}/cargo-test-${{ strategy.job-index }}.log"
           cargo test ${{ matrix.args }} -- --skip timing 2>&1 | tee "$log"
-          # A test target that `cargo test -- --list` says has tests, but whose run reported
-          # none passed, none ignored and none filtered, executed nothing -- that is the
-          # vacuous result this guard exists for. The comparison against `--list` (rather than
-          # "any 0/0/0/0 line fails") is what keeps it from firing on targets that legitimately
-          # have no tests *in this configuration*: `tests/ctgrind.rs` is all `#[ignore]`d
-          # outside the static valgrind build, and `tests/locked.rs` / `tests/ultra.rs` are
-          # whole-file `#![cfg(feature = …)]` gates, so all three print the same summary line
-          # on a healthy run (measured: that false positive is what made an earlier revision
-          # of this guard fail every leg).
+          # A test target whose run reported **zero passed** executed nothing, even if it
+          # reported ignored tests: marking the whole target `#[ignore]` is the same
+          # vacuous result as emptying it. The exemptions below are only the targets that
+          # are legitimately zero-passed in a given configuration (`ctgrind` outside the
+          # static build, `timing` skipped here, doctests that compile out, and the two
+          # whole-file feature gates in a leg that does not enable their feature); the
+          # `locked`/`ultra` exemptions are conditional on the leg's feature set.
+          # `--skip timing` and libtest's `filtered` field are handled per target, not by an
+          # "any 0/0/0/0 line fails" rule.
           #
           # Parse by *field position*; matching `'… 0 ignored; 0 filtered out'` as one literal
           # never fires, because libtest always prints `0 measured;` between those fields.
@@ -234,13 +250,17 @@ jobs:
             /^[[:space:]]*Doc-tests / { target = "doc-tests"; next }
             /^test result:/ {
               p = $4 + 0; f = $6 + 0; i = $8 + 0; x = $12 + 0
-              if (p + i + x == 0) { print target; n++ }
+              if (p == 0) {
+                if (target == "") target = "<unattributed>"
+                printf "%s\t%d\t%d\t%d\n", target, p, i, x
+                n++
+              }
             }
             END { exit (n > 0) ? 0 : 1 }
           ' "$RUNNER_TEMP/cargo-test-clean.log" > "$RUNNER_TEMP/zero-targets.txt" || true
           if [ -s "$RUNNER_TEMP/zero-targets.txt" ]; then
             bad=0
-            while IFS= read -r target; do
+            while IFS=$'\t' read -r target p i x; do
               case "$target" in
                 # `doc-tests` is the rustdoc harness: in the feature configurations that
                 # compile out the one example that runs (and in every leg but the default,
@@ -254,17 +274,35 @@ jobs:
                 # advisory run in the `timing` job; the strict screens run in `verify.sh` 3c.
                 tests/timing.rs)
                   echo "note: tests/timing.rs is skipped in this step by --skip timing and runs in the timing jobs" ;;
-                # The three targets that are legitimately empty in some matrix legs: all of
-                # `ctgrind` is `#[ignore]`d unless built static; `locked`/`ultra` are
-                # `#![cfg(feature)]`-gated. Each still has tests in the leg that turns its
-                # feature on, where this guard applies like any other target.
-                tests/ctgrind.rs|tests/locked.rs|tests/ultra.rs)
-                  echo "note: $target reported no tests in this configuration (documented above)" ;;
+                # `tests/ctgrind.rs` is all `#[ignore]`d outside the static valgrind build,
+                # so a zero-passed summary is legitimate here and the static configuration is
+                # the one that checks it.
+                tests/ctgrind.rs)
+                  echo "note: tests/ctgrind.rs reported no tests outside the static valgrind build" ;;
+                # `tests/locked.rs` and `tests/ultra.rs` are whole-file `#![cfg(feature)]`
+                # gates. A zero-passed summary is legitimate only in a leg that does *not*
+                # enable the gating feature; in the leg that turns it on -- including through
+                # `ultra`, which implies `locked` -- zero passed is the regression this guard
+                # exists to catch, and `ignored` does not excuse it.
+                tests/locked.rs)
+                  case "$test_args" in
+                    *locked*|*ultra*|*all-features*)
+                      echo "::error::tests/locked.rs reported 0 passed (ignored $i, filtered $x) in a leg that enables locked ($test_args)"
+                      bad=1 ;;
+                    *) echo "note: tests/locked.rs is empty because this leg does not enable locked" ;;
+                  esac ;;
+                tests/ultra.rs)
+                  case "$test_args" in
+                    *ultra*|*all-features*)
+                      echo "::error::tests/ultra.rs reported 0 passed (ignored $i, filtered $x) in a leg that enables ultra ($test_args)"
+                      bad=1 ;;
+                    *) echo "note: tests/ultra.rs is empty because this leg does not enable ultra" ;;
+                  esac ;;
                 # `src/lib.rs` is the crate's unit-test target: reporting nothing there means
                 # the library lost every test, which is the vacuous case itself.
-                "") echo "::error::a summary line could not be attributed to a test target -- the log format changed, so this guard proved nothing" ; bad=1 ;;
+                "<unattributed>") echo "::error::a summary line could not be attributed to a test target -- the log format changed, so this guard proved nothing" ; bad=1 ;;
                 *)
-                  echo "::error::$target reported 0 passed, 0 ignored and 0 filtered: it was built and executed nothing"
+                  echo "::error::$target reported 0 passed (ignored $i, filtered $x): every test was removed, gated out, or marked #[ignore]"
                   bad=1 ;;
               esac
             done < "$RUNNER_TEMP/zero-targets.txt"
@@ -280,12 +318,13 @@ jobs:
           fi
           echo "cargo test: ${ran} test binaries ran and reported (${reported} result lines, doc-tests included)"
           # Positive control, in the same step: the guard must reject a summary that reports
-          # nothing. Without this, it rots exactly the way it just did -- a pattern that stops
-          # matching is indistinguishable from a suite that is clean.
+          # zero passed, including the all-ignored shape. Without this, it rots exactly the
+          # way it just did -- a pattern that stops matching is indistinguishable from a
+          # suite that is clean.
           vacuous="$(mktemp)"
-          printf 'test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out\n' > "$vacuous"
-          if awk '/^test result:/ { if ($4 + $8 + $12 == 0) bad = 1 } END { exit bad ? 0 : 1 }' "$vacuous"; then
-            echo "positive control: a 0-passed/0-ignored/0-filtered summary is rejected, so the guard can fail"
+          printf 'test result: ok. 0 passed; 0 failed; 7 ignored; 0 measured; 0 filtered out\n' > "$vacuous"
+          if awk '/^test result:/ { if ($4 + 0 == 0) bad = 1 } END { exit bad ? 0 : 1 }' "$vacuous"; then
+            echo "positive control: a 0-passed summary (even with ignored tests) is rejected, so the guard can fail"
           else
             echo "::error::the zero-test guard did not reject a vacuous summary -- it cannot fail, so it proves nothing"
             exit 1
@@ -681,7 +720,7 @@ jobs:
           python-version: "3.x"
 
       - name: install the blake3 module
-        run: python3 -m pip install --quiet blake3
+        run: python3 -m pip install --quiet "blake3==1.0.11"
 
       # The reference implementation self-checks against the published RFC 8439,
       # HChaCha20 and c2sp.org vectors before it emits anything, so a failure
@@ -762,6 +801,29 @@ jobs:
             *) echo "::error::stack_residue.sh exited $rc in the ultra build: no measurement was produced (3 = could not run)"; exit "$rc" ;;
           esac
 
+  supply-chain:
+    name: dependency advisories and licences
+    # A release is a statement about the committed dependency tree, so the audit and the
+    # licence/source policy must pass for the same commit. They also run in Deep checks,
+    # but that workflow is scheduled/dispatched and does not gate a push.
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        with:
+          toolchain: stable
+      - uses: taiki-e/install-action@1168f6810a3cb30a3514bf5756a3b7f0422c6df8 # v2
+        with:
+          tool: cargo-audit@0.22.2
+      - name: audit the dependency tree
+        run: cargo audit --deny warnings
+      - uses: taiki-e/install-action@1168f6810a3cb30a3514bf5756a3b7f0422c6df8 # v2
+        with:
+          tool: cargo-deny@0.20.2
+      - name: cargo deny check
+        run: cargo deny check
+
   release:
     name: tag the commit and publish a release
     # Gate on every verification job: a release must not exist for a commit that
@@ -772,7 +834,7 @@ jobs:
     # instrument had rotted could still cut a release -- contradicting this comment.
     # The two advisory jobs (`timing`, `stack-residue`) are `continue-on-error: true`
     # and are deliberately not gates.
-    needs: [lint, test, msrv, cross, cross-exec, differential, timing-instrument]
+    needs: [lint, test, msrv, cross, cross-exec, differential, timing-instrument, supply-chain]
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     permissions:

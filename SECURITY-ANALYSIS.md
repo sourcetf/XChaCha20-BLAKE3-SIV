@@ -550,8 +550,10 @@ Consequences. Two different "collision" quantities live here and the numbers dif
 they are stated separately:
 
 * **Collision resistance between two *given* inputs.** For a fixed pair of distinct inputs the
-  two tags agree only if the PRF does, i.e. with probability `2^-520` — this is the statement
-  Thm 3 uses. (It is a *target*, not a birthday: the adversary does not get to search.)
+  two tags agree if the inner 256-bit digest collides (`≈2^-256`) or, conditional on distinct
+  digests, if the 520-bit outer outputs collide (`2^-520`); the inner-digest event dominates, so
+  the probability is `≈2^-256`, not `2^-520`. This is the statement Thm 3 uses. (It is a
+  *target*, not a birthday: the adversary does not get to search.)
 * **Collision resistance over `q` *chosen* inputs.** Here the tag is not a random 520-bit
   string: all 65 bytes are functions of BLAKE3's root state — the **256-bit chaining value**,
   the final block, its length, the counter and the flags — so an adversary who holds the tail
@@ -649,14 +651,15 @@ they are stated separately:
 ### Theorem 3 (per-tag key separation, and keystream binding)
 
 For distinct tags, the derived `(enc_key, enc_nonce)` pairs are jointly pseudorandom; and a
-change anywhere in `(K, N, A, M)` changes the tag with probability `1 − 2^-520`, hence
+change anywhere in `(K, N, A, M)` changes the tag with probability `1 − O(2^-256)`, hence
 changes the keystream entirely.
 
 *Proof.* Immediate from A3 (multi-query PRF security at distinct points `DOM_ENC ‖ T`) and
-Thm 2. The `2^-520` is the *fixed-pair* statement: for one specified change, the two tags agree
-only if the PRF does. It is not the birthday-level number — an adversary free to search over
-many changes gets a collision at `2^128` (§4.5), which is why that bound, and not this one,
-appears in Thm 4. ∎
+Thm 2. The fixed-pair statement is `≈2^-256 + 2^-520`: the two inputs' inner digests collide
+with probability `2^-256`, which dominates the outer 520-bit PRF collision; the older
+`2^-520` figure counted only the latter. It is still not the birthday-level number — an
+adversary free to search over many changes gets a collision at `2^128` (§4.5), which is why
+that bound, and not this one, appears in Thm 4. ∎
 
 This is the theorem that makes nonce reuse survivable (see the Corollary below) and that
 makes the ciphertext
@@ -672,7 +675,7 @@ answer) with the same length profile. Then
 
 ```
 Adv^{priv} ≤ 2·Adv^{A1} + Adv^{A2} + 3·Adv^{A3} + q²/2^257
-Adv^{auth} ≤ 2·Adv^{A1} + Adv^{A2} + 3·Adv^{A3} + q·2^-256 + q·2^-520 + q²/2^257
+Adv^{auth} ≤ 2·Adv^{A1} + Adv^{A2} + 3·Adv^{A3} + q·2^-256 + q²/2^257
 ```
 
 where `q` bounds the adversary's oracle queries and each `Adv` is the *multi-query* PRF
@@ -685,12 +688,14 @@ charged as `3·Adv^{A3}`. There is no L3.6 term: revision `v0.3`'s
 two-level tag puts no master key in any hash message, so the tag is an ordinary A3 cascade.
 MRAE security is the pair.
 
-The two forgery terms are different routes, and the larger is the *key guess*: a decryption
+The two forgery routes differ, and the larger is the *key guess*: a decryption
 query can be computed **offline under a guessed key** `K′`, and it is accepted whenever `K′`'s
 256-bit `subkey` is the real one — `≈ 2^-256` per query, the same event as Thm 2's commitment
 bullet (§3, §4.5) — while the alternative is a **fresh-tag guess** at `2^-520` (a PRF output hit
-directly, at a point determined by the guessed `T` itself). An earlier revision printed only
-`q·2^-520` and called it the per-query bound; the key-guess route dominates it. The **strength**
+directly, at a point determined by the guessed `T` itself). The displayed bound keeps only the
+larger route, `q·2^-256`; the fresh-tag term is dominated and is omitted. An earlier revision
+printed only `q·2^-520` and called it the per-query bound; the key-guess route dominates it. The
+**strength**
 headline is unaffected: it is the minimum of the two, `min(2^256 key search, 2^520 tag guess) =
 2^256`, and the key-guess route is a key search.
 
@@ -769,7 +774,7 @@ make that failure mode impossible to introduce quietly.
 "Degrades to equality" is the statement about what happens *when the tags differ*; it is not a
 claim that two-time-pad leakage is impossible. If two distinct `(A, M)` pairs under one nonce
 land on the same tag — the `q²/2^257` event of §4.5, and the same one Thm 3 rules out for a
-*fixed* pair at `2^-520` — then the two messages are encrypted under the *same* derived
+*fixed* pair at `≈2^-256` (the inner-digest collision dominates the outer `2^-520` term) — then the two messages are encrypted under the *same* derived
 keystream, and every ciphertext pair satisfies `C₁ ⊕ C₂ = M₁ ⊕ M₂`. An adversary does not even
 need to cause the collision: whoever observes both ciphertexts gets the two-time pad, and can
 then strip any known plaintext from one message off the other. So the honest statement of

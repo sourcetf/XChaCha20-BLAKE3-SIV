@@ -1,9 +1,10 @@
 # XChaCha20-BLAKE3-SIV
 
 Misuse-resistant AEAD with a 24-byte (192-bit) nonce, committing to the key and the
-context: a *given* ciphertext cannot be re-opened under another key or context (the
-target form of commitment — see "Security level" for why the attacker-chosen games the
-literature names are a different question).
+context: a *given* ciphertext cannot be re-opened under another key or context below
+key-search work (`≈2^256` per candidate key; the target form of commitment — see
+"Security level" for why the attacker-chosen games the literature names are a different
+question).
 
 ```rust
 use xchacha20_blake3_siv::{encrypt, decrypt};
@@ -20,16 +21,24 @@ assert_eq!(plaintext, b"secret message");
 
 A detached, in-place API is also available
 (`encrypt_in_place_detached` / `decrypt_in_place_detached`) for protocols that
-store the tag separately or want to avoid a second allocation.
+store the tag separately or want to avoid a second *message-sized* allocation.
+They do not allocate the message buffer, but they are not allocation-free: the
+tag derivation may allocate at most one bounded 2–64 KiB temporary, and falls
+back to the three-part hash if the allocator refuses. See the `# Allocation`
+note on `encrypt_in_place_detached`.
 
-> **Bound your input before you decrypt.** `decrypt` allocates a buffer as large as
-> the ciphertext it is handed, so the call holds ciphertext **and** plaintext — twice
-> the message in memory — and the format's ceiling (`MAX_MSG_SIZE`, 256 GiB) is not a
+> **Bound your input before you decrypt.** `decrypt` allocates a plaintext buffer as large
+> as the ciphertext it is handed, so the call holds ciphertext **and** plaintext — at least
+> twice the message in memory. When `48 + len(A) + len(M)` falls in 2 KiB..=64 KiB,
+> `derive_tag` also allocates a bounded concatenation buffer, making the default peak
+> **three times** the message; `ultra`'s witness adds a second plaintext, making it **four
+> times** in that window. The format's ceiling (`MAX_MSG_SIZE`, 256 GiB) is not a
 > safe one: it is the largest message the *construction* supports, not the largest a
 > service should accept. A caller whose message length comes off the wire must cap it
 > itself: `decrypt_bounded(key, nonce, aad, ciphertext, tag, max_len)` enforces the
-> caller's limit *before* the allocation, and `MAX_MSG_SIZE` is public so a length can
-> be rejected before the body is even read. Both allocating entry points allocate
+> caller's ciphertext limit *before* the allocation, and `MAX_MSG_SIZE` is public so a
+> length can be rejected before the body is even read. `max_len` does **not** bound the
+> AAD; cap that separately. Both allocating entry points allocate
 > *fallibly* — a refusal is `Error::AllocationFailed`, not a process `abort` — but a
 > request the kernel accepts can still be killed when the buffer is written to, and no
 > in-process library can catch that. This is the misuse this crate cannot catch on the
@@ -73,8 +82,13 @@ Three details are load-bearing rather than incidental:
 
 1. **Domain separation of the subkey-derivation block.** XChaCha20-Poly1305
    leaves those 4 bytes as NUL padding; this crate puts `"XSIV"` there, so the
-   same `(key, nonce)` derives different material in the two schemes and a
-   protocol that mixed them would not be reusing keys across schemes.
+   same `(key, nonce)` produces different derivation material in the two schemes.
+   Without it, the same `(key, nonce)` would produce the same HChaCha20 subkey and
+   the same counter-0/1 blocks as XChaCha20-Poly1305's Poly1305 key and first data
+   block, coupling the two schemes' derivations. The message keystream *here* is
+   not one of those blocks — it is derived through the tag KDF — and the master key
+   is still reused if a protocol uses one key for both schemes; the domain string
+   separates the derived material, not the key.
 
 2. **The tag is two keyed BLAKE3 calls, and no hash message contains the key.**
    The inner hash absorbs the public context (nonce, lengths, AAD, message) under
@@ -202,7 +216,7 @@ is always a stable revision to name.
 | --- | --- | --- |
 | Confidentiality (plaintext recovery) | 256-bit | the ChaCha20 key |
 | Forgery resistance | **256-bit** | BLAKE3 keyed mode as a PRF over a 256-bit key; a *target* problem, so no birthday search applies |
-| Context commitment (nonce/AAD) | **key-holder target: `≈ 2^256`; attacker-chosen: `2^128`, completion immediate** | the context enters the tag's *hash input* (`X`), not the tag's *key*, so the 65-byte width does **not** set this bound: a second context that reproduces a given `X` is a preimage of BLAKE3's 256-bit chaining value (`≈ 2^256`), and two *chosen* contexts whose `X` values collide are a `2^128` birthday — after which the tag, and therefore the derived keystream, are equal, so both openings share one plaintext and no fixed point is needed. The byte components of the AAD are what this exposes; a length re-split has too few candidates to reach a 256-bit preimage at all. An earlier revision of this row wrote `2^-520` per candidate key and "the width is what sets it", which is the *key*-search game, not this one — see below |
+| Context commitment (AAD; the nonce re-derives the whole key schedule) | **key-holder target: `≈ 2^256`; attacker-chosen: `2^128`, completion immediate** | The AAD enters the tag's *hash input* (`X`), not the tag's *key*, so the 65-byte width does **not** set this bound: a second AAD that reproduces a given `X` is a preimage of BLAKE3's 256-bit chaining value (`≈ 2^256`), and two *chosen* AADs whose `X` values collide are a `2^128` birthday — after which the tag, and therefore the derived keystream, are equal, so both openings share one plaintext and no fixed point is needed. The nonce is not merely a context input: it selects `subkey` through HChaCha20 and also enters the derived ChaCha20 nonce, so changing it changes all derived material; its `≈2^256` target bound comes from that 256-bit derivation, not from the `X`-preimage argument above. An earlier revision of this row wrote `2^-520` per candidate key and "the width is what sets it", which is the *key*-search game, not this one — see below |
 | Key commitment **against a given ciphertext** (the target game) | `≈ 2^-256` per candidate key — `≈ 1` second key over the whole key space, key-search level | reproducing the 256-bit `subkey = HC(K′, N₁)`: that one value determines `k_in`, `k_out` and `enc_seed`, hence the derived key pair, the recovered message, the inner digest and the tag alike — so the object is 256-bit and **the tag width does not set this bound**, exactly as in the context row above. The pure `2^-520` tag-collision route is dominated by it. The key enters the tag through `k_in` (the inner digest) and `k_out` (the tag's own derivation); `enc_seed` does **not** enter the tag at all — it keys the KDF *whose input is the tag*, which is how the tag binds the keystream material too. The literature's CMT-3 is *attacker-chosen*, not this — see below |
 | Commitment in the **attacker-chosen** games (invisible salamanders, CMT-1/CMT-3) | **two priced routes at `2^128`, both with identical plaintexts (key half and context half), and the different-message salamander priced by construction at the key-search level (`≈ 2^256`) — no bound derived** | the adversary outputs both keys (or contexts), both messages and `(C,T)`, so `2^520` does not describe it. A `subkey` collision at `2^128` gives two keys whose derived material, tag and keystream all coincide — one `(C,T)` valid under both, decrypting to the **same** plaintext (the key half). A collision of the inner digest `X` between two *chosen contexts* under one key does the same for the context half: equal tag, equal KDF output, equal keystream, one plaintext, completion immediate. The salamander — two *different* messages — needs `KS₁ ≠ KS₂`, hence two keys; the cheapest construction this file can find never searches the tag space: equal `k_out` first (a birthday over ≈`2^128.5` sampled keys), then a chosen-message search for the 256-bit inner-digest equality `X(k_in₂, C ⊕ KS₂(T)) = X(k_in₁, M₁)` — ≈`2^256` candidates, key-search level — a construction, not a bound. `SECURITY-ANALYSIS.md` §4.5, Thm 2 and §8.1 |
 | Tag collision resistance (the DAE bound's collision term) | **2^128** | the *chaining value*, not the tag: keyed BLAKE3's output is a function of its 256-bit state, so a state collision gives byte-identical tags of any length |
@@ -363,9 +377,10 @@ not cryptographic hardness.
 **The reduction, written out.** [SECURITY-ANALYSIS.md](SECURITY-ANALYSIS.md) is the
 mathematical treatment: the construction as a tuple of functions, each assumption as an
 explicit game, the SIV/DAE theorem with its five-hop reduction and concrete bound
-(`q²/2^257 + q·2^-256 + q·2^-520` plus the PRF advantages — `3·Adv^{A3}` for the two-level tag
+(`q²/2^257 + q·2^-256` plus the PRF advantages — `3·Adv^{A3}` for the two-level tag
 and the key derivation, with **no** `L3.6` term since `v0.3` removed it; the `q·2^-256` term is
-the offline key-guess route to a forgery, which dominates the `q·2^-520` fresh-tag guess), every
+the offline key-guess route to a forgery, which dominates the `q·2^-520` fresh-tag guess, so
+that smaller term is not shown), every
 pair of uses of one
 primitive enumerated with what separates it, and a falsification table — what would refute
 each claim, which refutations have been attempted, and which are out of reach of any test.
@@ -424,7 +439,11 @@ non-empty AADs: 72 positions, 576 comparisons). Each sampled row is anchored aga
 reference first and required to round-trip untampered; rows above 100 000 bytes lose their
 *spread* — the four end anchors stay, and so does the 60000/60001 pair, which is what those
 rows are in the fixture for — because each remaining comparison costs a full
-1 000 000-byte decryption (measured, ~115 ms in a debug build). The
+1 000 000-byte decryption (measured, ~115 ms in a debug build). One gap is explicit
+rather than implied: the long rows' **tag** bytes are not part of that sampled sweep;
+tag-byte coverage on those messages comes from `tests/decision.rs` and the fuzz target,
+which flip tag bytes on their own inputs. The sentence above is about the listed
+ciphertext and AAD positions, not every byte of every row. The
 property tests and the fuzzer *sample* the same space rather than exhausting it (one
 `(pos, bit)` per case, their comments say "statistical, not exhaustive"), and every
 fuzz run recorded in CI has found no acceptance — but those are *non-physical*
@@ -570,10 +589,11 @@ carries the `git` line that works today.)
 source. It **does not build on bare-metal `no_std` targets** (e.g. `--features ultra
 --target thumbv7em-none-eabihf` fails with `getrandom`'s "target is not supported");
 a `no_std` caller that wants those defences without OS randomness should spell them
-out as `features = ["hardened", "dual-mac", "locked"]` — knowing that the list is
-`ultra` **minus the witness**: the `witness` module hangs off the `ultra` feature
-*name* rather than off the four features it implies, and there is no `witness`
-feature, so on a target where `ultra` cannot build there is no way to turn the
+out as `features = ["hardened", "dual-mac"]` — `ultra` minus the witness, minus
+`rng` (which cannot build there), and minus `locked` (functional only on Linux
+x86_64/aarch64; its stubs fail closed elsewhere). The `witness` module hangs off
+the `ultra` feature *name* rather than off the features it implies, and there is no
+`witness` feature, so on a target where `ultra` cannot build there is no way to turn the
 second implementation on ("What the witness is" prices that loss).
 
 | Layer | What it defends | Cost (measured, this host) |
@@ -587,6 +607,11 @@ second implementation on ("What the witness is" prices that loss).
 | `locked` | a **hardware fault or bit flip in the key page** turning into a silent wrong key | `+42 ns` per use, measured: an 8-byte BLAKE3 tag of the key is stored beside it and checked (constant time) on every `as_bytes()`, so a corrupted page panics at the first use instead of decrypting with a key that is not the caller's. It does not detect a fault that rewrites the tag too, nor one outside the key-and-tag region (the rest of the page is never read) |
 | `locked` | a **debugger** attaching to the process, or another process reading its memory | two `prctl` calls in one opt-in function — `PR_GET_DUMPABLE` to read the previous state it returns, then `PR_SET_DUMPABLE` to clear it — via `locked::deny_debugging()`, after which the kernel refuses `PTRACE_MODE_ATTACH` (and `/proc/<pid>/mem`) even to the same user without `CAP_SYS_PTRACE`. Not automatic, not even under `ultra`, because it is *process* policy — it also disables core dumps and breaks crash reporters, which is the application's call rather than a library's |
 | `rng` | nothing about the cipher; it is how a caller gets a key at all | — |
+
+The three `locked` rows are Linux x86_64/aarch64 only (`locked::SUPPORTED`): on every
+other target `LockedKey::new` and `deny_debugging` return `ENOSYS`, and `locked_bytes` /
+`is_dumpable` return `None`. `ultra`'s `locked` layer is inert there; its other layers
+still apply.
 
 (§§) Last full sweep, bit-flip model, as `(total, inside the decision)`: the `hardened`
 build is `5, 0` and `ultra` is `5, 0`. The 5 in each sit in the entry points' own code —
@@ -765,8 +790,9 @@ deployment.
   lower than that measurement (it reports a 7-byte run, or two runs totalling 8 bytes across
   the key's 32), so the honest form of the claim is that no whole key and no long run
   survives, not that every fragment is gone. Which fragments a compiler leaves is its
-  choice, and the tool reports them (the `stack residue (advisory, ultra)` job surfaces a
-  report as a warning; `verify.sh --deep` is where a report fails a run). The derived
+  choice, and the tool reports them (the `stack residue (advisory, ultra)` job fails its
+  step on a report — the job itself is `continue-on-error`, so it is advisory; `verify.sh
+  --deep` is where a report fails the whole run). The derived
   material is the part that survives in full. `blake3`'s `zeroize` feature is already on and
   the crate already calls `reader.zeroize(); hasher.zeroize();`, which is the entire
   reach a caller has apart from `scrub_stack`. What this means in practice: an attacker who can read this
@@ -808,19 +834,23 @@ deployment.
   assumed: parent locked, child reads the plaintext, child `VmLck` = 0, the child's pages
   swap after one COW write.) An earlier revision of this list named debuggers, hypervisors,
   cold boot and hibernation but not `fork`, which is the one a server actually hits.
-- **Bounding the input is the caller's job.** `decrypt` allocates a buffer as large
-  as its ciphertext argument, so the peak for the call is twice the message — the
-  ciphertext the caller already holds, plus the plaintext — and the format's own
+- **Bounding the input is the caller's job.** `decrypt` allocates a plaintext buffer as
+  large as its ciphertext argument, so the peak is at least twice the message — the
+  ciphertext the caller already holds, plus the plaintext. When
+  `48 + len(A) + len(M)` falls in 2 KiB..=64 KiB, `derive_tag` also allocates a bounded
+  concatenation buffer, so the default peak is three times the message; under `ultra`
+  the witness adds a second recovered-plaintext buffer, so that window peaks at four
+  times (three times outside it). The format's own
   ceiling is `MAX_MSG_SIZE` (256 GiB, public, so a caller can check before it trusts a
-  length off the wire; `decrypt_bounded` enforces a policy limit before the
-  allocation). Both allocating entry points are fallible, so an allocator refusal
+  length off the wire; `decrypt_bounded` enforces a ciphertext policy limit before the
+  allocation, but does not bound the AAD). Both allocating entry points are fallible,
+  so an allocator refusal
   arrives as `Error::AllocationFailed` rather than as an `abort` the application
   cannot catch — but a request the kernel *accepts* can still be OOM-killed while the
   buffer is written to, and no in-process library can prevent that. A service that
-  reads unbounded input has to cap it. **Under `ultra` the peak is three times the
-  message**, not two: the witness decrypts into a second buffer of its own (`decrypt`)
-  or keeps a copy of the ciphertext plus an output buffer (`decrypt_in_place_detached`).
-  All of them are allocated up front, before any key material exists, and fallibly —
+  reads unbounded input has to cap it.
+  All of these buffers are allocated up front, before any key material exists, and
+  fallibly —
   `tests/security.rs::every_allocation_happens_before_any_derivation` pins both halves
   of that, because the `?` on an allocation taken after a derivation returns through
   live keys without wiping them (a defect this crate has now had twice).
@@ -1002,10 +1032,12 @@ works unprivileged, and the emulator is extracted into `~/.local/bin`.
   AddressSanitizer.
 - **Cross-architecture execution** — four configurations are *executed* under
   qemu, not merely type-checked. On x86 the aarch64 (NEON) backend is compiled
-  out entirely, so `qemu-aarch64` is the only thing that ever runs it; `qemu-i386`
+  out entirely, so `qemu-aarch64` is the only *qemu* execution of it (the Miri
+  cross-interpretation below is the other); `qemu-i386`
   is the only place the 32-bit code paths run, where `usize` is 32 bits and every
   length calculation takes a different route; `qemu-ppc64` is the only place
-  the code runs on a **big-endian** machine, where the `from_le_bytes`/
+  the code runs **compiled** on a **big-endian** machine (Miri's s390x pass is
+  the interpreted one), where the `from_le_bytes`/
   `to_le_bytes` conversions are no longer identity functions; and `qemu-riscv64`
   is a second 64-bit non-x86 target, running the scalar-only configuration.
   (`qemu-riscv64`'s link needs its own recipe — a self-contained musl link with
@@ -1111,12 +1143,44 @@ than from this implementation:
 `performance.md` states both with their measurements, and records where the remaining
 headroom is (and where it is not) so nobody has to rediscover it.
 
+## Vendored BLAKE3 (security patch)
+
+`blake3/` is the released **BLAKE3 1.8.7** source, vendored so the parent can carry
+fixes for defects that are not reachable through the lock and cannot be fixed from a
+dependent crate:
+
+- **D-01 (Medium, guard-page reproduced).** The AVX2/AVX-512 `hash_many` 2/4-wide
+  tail loads from `inputs[0]` at +16/+32/+48 bytes. With a 64-byte input ending at a
+  readable page and the next page inaccessible, `Platform::hash_many` with two inputs
+  crashed with `STATUS_ACCESS_VIOLATION` on this host (`Platform::detect()` =
+  AVX512). The fork sends complete SIMD groups to the kernels and the remainder
+  (fewer than one full group) to the portable implementation; the chaining values are
+  identical. `cargo run --release --example blake3_guard_probe` is the reproducer:
+  against crates.io 1.8.7 it dies at `n=2`; against this fork it returns for
+  `n=2,3,4,8`. `tests/blake3_fork_equivalence.rs` compares the split against
+  `Platform::portable()` for 0..=17 inputs and both counter modes.
+- **D-02 (Low).** The unix AVX-512 multi-block `xof_many` does not zero-extend
+  `block_len`/`flags`; the fork uses the documented `compress_xof` loop for every
+  request longer than one block. The equivalence test checks 1..=4 blocks against
+  portable.
+- **D-04/D-05/D-06 (Low).** `Hasher::reset` now clears the hazmat
+  `initial_chunk_counter`; `left_subtree_len` uses `div_ceil` so `u64::MAX` does not
+  overflow; `OutputReader::position` saturates instead of overflowing at the end of
+  the addressable stream.
+
+The patch is a **workspace-local** `[patch.crates-io]`, not a published dependency:
+`cargo package` still resolves `blake3 = "1.8"` from crates.io, so a published
+artifact would not contain these fixes. The crate is not on crates.io; a release is
+blocked until the fork is published under its own package/version and the dependency
+is switched to it. That caveat is repeated in `Cargo.toml`.
+
 ## Layout
 
 ```
 src/lib.rs                  the construction, the SIMD backends, the test suite
 src/proofs.rs               Kani harnesses (`cfg(kani)` only)
 src/witness.rs              the `ultra` build's independent second implementation
+blake3/                     vendored BLAKE3 1.8.7 with the D-01/D-02/D-04/D-05/D-06 fixes
 tests/                      differential vectors and their replay
 tools/ref_impl.py           independent Python reference implementation
 tools/gen_test_vectors.py   fixture generator for the differential vectors

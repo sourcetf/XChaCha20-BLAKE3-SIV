@@ -1355,12 +1355,32 @@ fn the_integrity_tag_is_wiped_in_both_callers() {
     let wipe = new
         .find("crate::zeroize_array(&mut tag);")
         .expect("LockedKey::new no longer wipes the integrity tag it computed");
-    let fallible = new
+    // The lock must be taken before *any* key byte enters the page. Writing first leaves
+    // the key in an ordinary, swappable page until `mlock` returns; a preemption in that
+    // window can send the page to swap, which is exactly what this layer prevents.
+    let lock = new
         .find("lock_range(page.as_ptr(), page.len())?;")
         .expect("LockedKey::new no longer calls lock_range");
+    let key_copy = new
+        .find("page.bytes_mut()[..crate::KEY_LEN].copy_from_slice(key);")
+        .expect("LockedKey::new no longer copies the key into the page");
     assert!(
-        wipe < fallible,
-        "the tag wipe must precede the fallible `lock_range`, or the `?` returns through it"
+        lock < key_copy,
+        "the key must not enter the page before `lock_range` is called: the page is \
+         ordinary, swappable memory until the lock succeeds"
+    );
+    // The tag is computed after the lock, so there is no fallible call between its copy
+    // into the page and the wipe of the caller's local; the wipe still has to follow the
+    // copy, or the only remaining local copy would be the one that is never cleared.
+    let tag_copy = new
+        .find(
+            "page.bytes_mut()[crate::KEY_LEN..crate::KEY_LEN + KEY_TAG_LEN]\
+             .copy_from_slice(&tag);",
+        )
+        .expect("LockedKey::new no longer copies the tag into the page");
+    assert!(
+        tag_copy < wipe,
+        "the tag wipe must follow the copy into the page"
     );
 
     let checks = brace_blocks("fn check_integrity(&self, bytes: &[u8; crate::KEY_LEN])");
@@ -1540,14 +1560,14 @@ fn the_dump_advice_is_issued_on_the_right_range() {
          page-aligned range"
     );
 
-    let unlock: Vec<String> = brace_blocks("pub fn unlock_range(")
+    let unlock: Vec<String> = brace_blocks("fn unlock_range_with(")
         .into_iter()
         .filter(|b| b.contains("NR_MUNLOCK"))
         .collect();
     assert_eq!(
         unlock.len(),
         1,
-        "one syscall-backed `unlock_range` expected"
+        "one syscall-backed `unlock_range_with` expected"
     );
     assert!(
         unlock[0].contains("syscall3(NR_MADVISE, start, end - start, MADV_DODUMP)"),
@@ -1582,14 +1602,34 @@ fn the_dump_advice_is_issued_on_the_right_range() {
          a refused munlock leaves the page locked *and* dumpable, with the lock quota \
          never returned"
     );
-    // The mirror image in `lock_range`: a refused `MADV_DONTDUMP` must undo the mlock.
+    // The mirror image in `lock_range`: a refused `MADV_DONTDUMP` must undo the mlock --
+    // and must undo the advice first, over the same range. `contains` on the whole function
+    // was not enough: the three statements could be reordered, or the `DODUMP` rollback
+    // deleted, while all three substrings stayed present (measured). Pin the failure block
+    // itself and the order inside it.
+    let rollback = brace_blocks("if !ok(d) {");
+    assert_eq!(
+        rollback.len(),
+        1,
+        "expected exactly one refused-`MADV_DONTDUMP` rollback block in `lock_range`"
+    );
+    let rollback = &rollback[0];
+    let dodump = rollback
+        .find("syscall3(NR_MADVISE, start, end - start, MADV_DODUMP)")
+        .expect("the rollback must restore MADV_DODUMP before releasing the lock");
+    let munlock = rollback
+        .find("syscall2(NR_MUNLOCK, ptr as usize, len)")
+        .expect("the rollback must undo the mlock");
     assert!(
-        lock[0].contains("if !ok(d) {")
-            && lock[0].contains("let _ = syscall2(NR_MUNLOCK, ptr as usize, len);")
-            && lock[0].contains("return Err(d);"),
-        "lock_range must roll back a successful mlock when MADV_DONTDUMP is refused, or \
-         the range stays locked while core dumps still include it\n{}",
-        lock[0]
+        dodump < munlock,
+        "the rollback must restore MADV_DODUMP before munlock: `madvise` applies as it \
+         walks, so a range it already excluded must be made dumpable before the lock is \
+         released\n{rollback}"
+    );
+    assert!(
+        rollback.contains("return Err(d);"),
+        "lock_range must return the MADV_DONTDUMP error after rolling back, or the range \
+         stays locked while core dumps still include it\n{rollback}"
     );
     for (name, body) in [("lock_range", &lock[0]), ("unlock_range", &unlock[0])] {
         assert!(

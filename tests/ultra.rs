@@ -525,6 +525,18 @@ fn dual_mac_is_wired_into_both_decrypt_paths() {
         2,
         "both decrypt paths must recompute the tag independently"
     );
+    // The binding is also the only write to `recomputed_tag` anywhere in the non-test
+    // source.  The comparisons below name the variable, not the value that reaches them:
+    // a later `recomputed_tag = computed_tag;` leaves every count in this file unchanged
+    // while making the second gate compare the stored tag with itself, which is exactly
+    // the rewritten-stored-tag fault the recomputation exists to catch.
+    assert_eq!(
+        body.matches("recomputed_tag =").count(),
+        2,
+        "each recomputation must be bound exactly once; a reassignment or shadowing \
+         `let recomputed_tag = ...` after `derive_tag` discards the independent value \
+         while every comparison below still reads a variable with the right name"
+    );
     // Two, and the count is exact rather than "at least": one comparison of each kind per
     // entry point, on the single `second` line that every configuration compiles. It was
     // four when `ultra` had an arm of its own for this expression, which is the shape the
