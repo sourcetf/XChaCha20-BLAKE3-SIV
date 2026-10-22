@@ -10,6 +10,12 @@ readme = "README.md"
 rust-version = "1.85"
 keywords = ["cryptography", "aead", "xchacha20", "blake3", "siv"]
 categories = ["cryptography", "no-std"]
+# Source-only distribution: BLAKE3 is a vendored path dependency reached through
+# [patch.crates-io], which a crates.io package would not carry. This flag makes the
+# exclusion a hard policy rather than a release-time surprise. Enabling publication
+# requires publishing the patched fork under its own package/version and switching
+# the dependency to it; see README "Vendored BLAKE3".
+publish = false
 # What the published `.crate` contains. Without this, `cargo package` ships every
 # tracked, non-dotfile file: the CI workflows, `tools/`, `tests/`, and (worst)
 # `mutants.out/`, whose logs carry developer host paths -- 102 files, and the count is
@@ -228,11 +234,11 @@ pure = ["blake3/pure"]
 # page boundary -> STATUS_ACCESS_VIOLATION). The vendored copy in `blake3/` contains
 # the fix; the patch is what makes every dependency (normal and dev) use it.
 #
-# A crates.io release cannot carry this path patch: `[patch]` applies only while
-# building this workspace, and a published crate would resolve `blake3 = "1.8"` from
-# crates.io again. Publishing this fork requires publishing a distinct patched
-# package/version and changing the dependency to it; until then the crate is a
-# working-tree/CI build, which the README's "not on crates.io" status already says.
+# The package is source-only (`publish = false`): a crates.io package cannot carry
+# this path patch, so publication is disabled rather than silently falling back to
+# upstream BLAKE3. GitHub source archives include `blake3/`; enabling publication
+# later requires publishing the fork under its own package/version and switching
+# the dependency, then removing the flag deliberately.
 [patch.crates-io]
 blake3 = { path = "blake3" }
 

@@ -19,10 +19,11 @@ unfixed `hash_many`/`xof_many` outputs are byte-identical for valid inputs; the
 parent's 64 KiB/1 MiB/16 MiB keyed-hash tags were also identical, and steady-state
 throughput was unchanged within host noise.
 
-**Publication caveat.** A crates.io package does not carry this `[patch]`; the parent
-`cargo package` resolves `blake3 = "1.8"` from crates.io. Publishing the fixed crate
-requires publishing this fork under its own package/version and switching the parent
-dependency to that package. The parent README and `Cargo.toml` state this.
+**Distribution policy.** The parent sets `publish = false`; this is a source-only
+distribution, so a GitHub source archive carries this directory and no crates.io
+package can silently resolve the unpatched crate. Enabling publication later requires
+publishing this fork under its own package/version and switching the parent
+dependency; that is a deliberate change, not an accident of packaging.
 
 **Not patched.** D-03 (narrow `block_len`/`flags` ABI arguments in the unix
 SSE2/SSE4.1 assembly) remains: normal Rust/C callers zero-extend, and only a

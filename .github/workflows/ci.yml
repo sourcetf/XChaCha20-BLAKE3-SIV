@@ -205,11 +205,11 @@ jobs:
           # deliberately literal; a new integration test must be added here, and
           # `tests/README.md` is the human index for it.
           for target in \
-            tests/construction_inventory.rs tests/counter_range.rs tests/ctgrind.rs \
-            tests/decision.rs tests/decision_scope.rs tests/differential_reference.rs \
-            tests/locked.rs tests/mac_commitment.rs tests/plaintext_wipe.rs \
-            tests/security.rs tests/threads.rs tests/timing.rs tests/ultra.rs \
-            tests/variable_latency.rs; do
+            tests/blake3_fork_equivalence.rs tests/construction_inventory.rs \
+            tests/counter_range.rs tests/ctgrind.rs tests/decision.rs \
+            tests/decision_scope.rs tests/differential_reference.rs tests/locked.rs \
+            tests/mac_commitment.rs tests/plaintext_wipe.rs tests/security.rs \
+            tests/threads.rs tests/timing.rs tests/ultra.rs tests/variable_latency.rs; do
             if [ ! -f "$target" ]; then
               echo "::error::expected test target $target is missing"
               exit 1

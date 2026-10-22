@@ -1168,11 +1168,12 @@ dependent crate:
   overflow; `OutputReader::position` saturates instead of overflowing at the end of
   the addressable stream.
 
-The patch is a **workspace-local** `[patch.crates-io]`, not a published dependency:
-`cargo package` still resolves `blake3 = "1.8"` from crates.io, so a published
-artifact would not contain these fixes. The crate is not on crates.io; a release is
-blocked until the fork is published under its own package/version and the dependency
-is switched to it. That caveat is repeated in `Cargo.toml`.
+The patch is **workspace-local**, and the package sets `publish = false`: this is a
+source-only distribution. A GitHub source archive carries `blake3/`, so there is no
+crates.io package that could silently fall back to upstream. Enabling publication
+later requires publishing the fork under its own package/version and switching the
+dependency; that is a deliberate change, not an accident of packaging. The policy is
+repeated in `Cargo.toml` and `blake3/PATCHES.md`.
 
 ## Layout
 
