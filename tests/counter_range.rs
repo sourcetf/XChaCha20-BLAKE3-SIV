@@ -84,8 +84,10 @@ const CALL_SITES: &[(&str, usize)] = &[
     // The scalar block primitive the kernels' tails fall through to. It was absent
     // from this list, so a call routed through it was invisible: an audit added
     // `chacha20_block(key, 7, nonce)` and this test stayed green. Both real call
-    // sites advance a `ctr` the caller owns, so it belongs here.
-    ("chacha20_block(", 2),
+    // sites advance a `ctr` the caller owns, so it belongs here. The production name
+    // is the out-parameter form, which keeps the keystream out of a by-value return
+    // temporary; the test-only wrapper still carries the old name.
+    ("chacha20_block_into(", 2),
 ];
 
 /// The counter *arithmetic* inside the keystream paths, which the call-site census
@@ -364,8 +366,8 @@ fn every_keystream_call_site_starts_the_counter_at_zero() {
     let mut expected: Vec<String> = [
         "chacha20_apply(key, counter, nonce, &Input::Keystream, out);",
         "chacha20_apply(key, counter, nonce, &Input::Separate(input), output);",
-        "let mut ks = chacha20_block(key, ctr, nonce);",
-        "let mut ks = chacha20_block(key, ctr, nonce);",
+        "chacha20_block_into(key, ctr, nonce, &mut ks);",
+        "chacha20_block_into(key, ctr, nonce, &mut ks);",
         "unsafe { aarch64_simd::blocks4(key, ctr, nonce, &mut ks) };",
         "unsafe { x86_simd::blocks4(key, ctr, nonce, &mut ks) };",
         "unsafe { x86_simd::blocks8(key, ctr, nonce, &mut ks) };",
@@ -571,20 +573,32 @@ fn non_test_source() -> String {
     out
 }
 
-/// The census above must cover every `src/*.rs` file. Spelled as a literal list in the
-/// test binary (it cannot glob), so a new file is caught here instead of being quietly
-/// unscanned -- the failure mode that let `src/extra_counter.rs` hide a counter-7 call.
+/// The census above must cover every Rust source file under `src/`, recursively.
+/// Spelled as a literal list in the test binary (it cannot glob), so a new file --
+/// including one in a nested module directory such as `src/extra/mod.rs` -- is caught
+/// here instead of being quietly unscanned: the failure mode that let
+/// `src/extra_counter.rs` hide a counter-7 call.
 #[test]
 fn every_source_file_is_scanned() {
+    fn collect(dir: &std::path::Path, base: &std::path::Path, out: &mut Vec<String>) {
+        for entry in std::fs::read_dir(dir).expect("src/ must be readable") {
+            let path = entry.expect("src/ entry must be readable").path();
+            if path.is_dir() {
+                collect(&path, base, out);
+            } else if path.extension().is_some_and(|ext| ext == "rs") {
+                let relative = path
+                    .strip_prefix(base)
+                    .expect("walked paths must stay under src/");
+                out.push(relative.to_string_lossy().replace('\\', "/"));
+            }
+        }
+    }
+
     const SOURCES: &[&str] = &["lib.rs", "proofs.rs", "witness.rs"];
     // `cargo test` runs with the crate root as the working directory.
     let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
-    let mut found: Vec<String> = std::fs::read_dir(&dir)
-        .expect("src/ must be readable")
-        .filter_map(|e| e.ok())
-        .map(|e| e.file_name().to_string_lossy().into_owned())
-        .filter(|n| n.ends_with(".rs"))
-        .collect();
+    let mut found = Vec::new();
+    collect(&dir, &dir, &mut found);
     found.sort();
     let mut listed: Vec<String> = SOURCES.iter().map(|s| (*s).to_string()).collect();
     listed.sort();

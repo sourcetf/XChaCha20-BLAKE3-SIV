@@ -1,0 +1,7 @@
+# The verification suite matches source text exactly (`tests/decision_scope.rs`,
+# `tests/security.rs`, `tests/counter_range.rs`, ...), so a CRLF checkout changes
+# behaviour: a Windows clone with the global `core.autocrlf=true` made
+# `the_decision_outcome_is_fail_closed` count 0 matches.  Store every text file
+# with LF and check it out with LF on every platform; binary files are detected
+# by Git's content sniffing.
+* text=auto eol=lf

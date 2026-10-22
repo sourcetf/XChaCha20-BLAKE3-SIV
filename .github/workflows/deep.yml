@@ -683,9 +683,9 @@ jobs:
         # Pinned like the tools above: Python's blake3 is what the 4000-vector
         # differential trusts as the independent reference, so an unpinned wheel
         # would let a new release change what the scheduled audit checks without a
-        # commit here. 1.0.9 is the version the tooling was validated against on
-        # this project's development host.
-        run: python3 -m pip install --quiet "blake3==1.0.9"
+        # commit here. 1.0.11 is the version the tooling was validated against (the
+        # ci.yml differential job pins the same release; it used to float).
+        run: python3 -m pip install --quiet "blake3==1.0.11"
 
       # `examples/xsiv_stdin.rs` is the batch interface it drives, so this exercises
       # the crate's real encryption path over thousands of random inputs.

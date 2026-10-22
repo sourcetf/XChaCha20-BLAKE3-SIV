@@ -32,8 +32,11 @@
 //! * **Domain separation in the subkey derivation.**  [`SUBKEY_DOMAIN`] sits in
 //!   the first 4 bytes of the derivation block's ChaCha20 *nonce* (counter 0),
 //!   where XChaCha20-Poly1305 leaves NUL padding.  Without it the same
-//!   `(key, nonce)` would derive identical material in both schemes, so a
-//!   protocol mixing them would be reusing keys across schemes.
+//!   `(key, nonce)` would produce the same HChaCha20 subkey and the same counter-0/1
+//!   blocks as XChaCha20-Poly1305's Poly1305 key and first data block, coupling the
+//!   two schemes' derivations. The message keystream here is *not* one of those
+//!   blocks — it is derived through the tag KDF — and the master key is still reused
+//!   if a protocol uses one key for both; the domain separates the derived material.
 //! * **The tag is computed in two levels, and no hash message contains the master
 //!   key.**  The inner hash absorbs the public context (nonce, lengths, AAD,
 //!   message) under `k_in`; the outer turns that 32-byte digest into the tag under
@@ -660,6 +663,12 @@ impl Plaintext {
     }
 }
 
+/// # Why `Deref` is worth a warning
+///
+/// `pt == expected` uses the constant-time `PartialEq` impls below. The deref target is
+/// plain `[u8]`, so `pt.as_slice() == expected` or `&*pt == expected` reaches the
+/// short-circuiting slice comparison instead. For secret plaintext, compare through the
+/// type (`pt == expected`) or `subtle::ConstantTimeEq`, not through a borrowed slice.
 impl core::ops::Deref for Plaintext {
     type Target = [u8];
     #[inline]
@@ -926,7 +935,11 @@ impl zeroize::ZeroizeOnDrop for Key {}
 
 impl Drop for Key {
     fn drop(&mut self) {
-        self.zeroize();
+        // Fully qualified: a future inherent `fn zeroize(&mut self)` on `Key` would
+        // otherwise win name resolution over the trait method and silently turn this into
+        // a no-op. The test that reads the storage back after drop is the behavioural
+        // witness for the wipe; this spelling removes the namespace hazard.
+        <Key as zeroize::Zeroize>::zeroize(self);
     }
 }
 
@@ -1305,6 +1318,13 @@ pub mod locked {
             if len == 0 {
                 return Ok(());
             }
+            // Page size first: if it cannot be established, do not lock at all. A guessed
+            // 4096 on a larger-page kernel would make the `madvise` below act on a range
+            // that is not kernel-page aligned, and the failure path would then unlock the
+            // whole kernel page, including whatever else shares it.
+            let Some(ps) = page_size() else {
+                return Err(-38isize /* ENOSYS */);
+            };
             // SAFETY: `ptr`/`len` describe a live allocation (the caller's slice), which
             // is what both syscalls require; neither reads or writes the bytes.
             unsafe {
@@ -1330,7 +1350,6 @@ pub mod locked {
                 // down cannot leave the mapping (mappings start on a page
                 // boundary) and rounding the end up cannot leave it either
                 // (mappings end on one), so this cannot touch foreign memory.
-                let ps = page_size();
                 let start = (ptr as usize) & !(ps - 1);
                 let end = ((ptr as usize).saturating_add(len).saturating_add(ps - 1)) & !(ps - 1);
                 let d = syscall3(NR_MADVISE, start, end - start, MADV_DONTDUMP);
@@ -1395,7 +1414,20 @@ pub mod locked {
             if len == 0 {
                 return;
             }
-            let ps = page_size();
+            // If the page size is unknown and was never cached, there is no safe aligned
+            // range to advise; leave the lock alone rather than guess and touch a larger
+            // kernel page. `LockedKey::drop` does not take this path: it passes the size
+            // stored in its `Page`, which was established before the lock was taken.
+            let Some(ps) = page_size() else {
+                return;
+            };
+            unlock_range_with(ps, ptr, len);
+        }
+
+        /// [`unlock_range`] with a page size established by the caller that locked the
+        /// range. Keeping the size on the `Page` means a page locked successfully can
+        /// always be unlocked, even if `/proc/self/auxv` becomes unreadable later.
+        pub(crate) fn unlock_range_with(ps: usize, ptr: *const u8, len: usize) {
             let start = (ptr as usize) & !(ps - 1);
             let end = ((ptr as usize).saturating_add(len).saturating_add(ps - 1)) & !(ps - 1);
             // SAFETY: as `lock_range`: `ptr`/`len` describe the caller's live allocation, and
@@ -1440,9 +1472,11 @@ pub mod locked {
         /// was already being traced keeps its tracer.
         ///
         /// Returns the previous dumpable state, so a caller can restore it (which is what the
-        /// test does) — the kernel's value, which is `0`, `1`, or `2`
-        /// (`SUID_DUMP_ROOT`, when `/proc/sys/fs/suid_dumpable` is 2 and the process came
-        /// from a setuid-root executable) — or a negative errno on failure.
+        /// test does) — the kernel's value is `0`, `1`, or `2` (`SUID_DUMP_ROOT`, when
+        /// `/proc/sys/fs/suid_dumpable` is 2 and the process came from a setuid-root
+        /// executable). `PR_SET_DUMPABLE` accepts only `0` or `1`; a caller restoring a
+        /// previous `2` must pass `1` (the test does). A negative errno is returned on
+        /// failure.
         pub fn deny_debugging() -> Result<u32, isize> {
             // SAFETY: `prctl` with either `PR_GET_DUMPABLE` or `PR_SET_DUMPABLE` takes an
             // integer in `arg2` and reads no pointer; `syscall2` passes it in the second
@@ -1477,7 +1511,12 @@ pub mod locked {
         }
 
         /// `page_size` for the rest of the module (the `Page` allocation needs it).
-        pub(crate) fn page_size_pub() -> usize {
+        ///
+        /// `None` means the kernel's page size could not be established. Callers must fail
+        /// closed: on a 16/64 KiB-page kernel, a guessed 4096 would align `madvise` to the
+        /// wrong boundary, and the failure path would then act on a kernel page that also
+        /// contains unrelated data.
+        pub(crate) fn page_size_pub() -> Option<usize> {
             page_size()
         }
 
@@ -1529,35 +1568,46 @@ pub mod locked {
         /// The system page size, from `/proc/self/auxv`'s `AT_PAGESZ`.
         ///
         /// Needed because `madvise` rejects an address that is not page-aligned --
-        /// unlike `mlock`, which rounds the range itself.  4096 is correct for
-        /// every x86_64 Linux, but an aarch64 kernel can be built with 16 or 64 KiB
-        /// pages, where aligning to 4096 would still not be aligned and the call
-        /// would keep returning `EINVAL`.  Falls back to 4096 if auxv cannot be
-        /// read, which is the x86_64 answer and the common aarch64 one.  On a kernel
-        /// whose pages are larger than that fallback the address is misaligned for
-        /// `madvise` unless it happens to be aligned to the real page size, and
-        /// `lock_range` then refuses with `EINVAL` — the failure mode is a
-        /// `LockedKey::new` that fails closed, not an unlocked key (see `lock_range`).
-        fn page_size() -> usize {
+        /// unlike `mlock`, which rounds the range itself. 4096 is correct for every
+        /// x86_64 Linux, but an aarch64 kernel can be built with 16 or 64 KiB pages.
+        /// The old version guessed 4096 when auxv could not be read; on such a kernel
+        /// that guess aligns `madvise` to the wrong boundary, and its failure path can
+        /// then `munlock`/`MADV_DODUMP` an entire kernel page containing unrelated
+        /// data. There is no safe guess, so this returns `None` and the callers fail
+        /// closed. A successful value is cached: a page locked while auxv was readable
+        /// can still be unlocked if a later read fails.
+        fn page_size() -> Option<usize> {
             const PATH: &[u8] = b"/proc/self/auxv\0";
             const AT_PAGESZ: u64 = 6;
-            const FALLBACK: usize = 4096;
+            static PAGE_SIZE: core::sync::atomic::AtomicUsize =
+                core::sync::atomic::AtomicUsize::new(0);
+
+            let cached = PAGE_SIZE.load(core::sync::atomic::Ordering::Relaxed);
+            if cached != 0 {
+                return Some(cached);
+            }
 
             // SAFETY: `PATH` is a NUL-terminated byte string in static memory.
             let fd = open_ro(PATH);
             if fd < 0 {
-                return FALLBACK;
+                return None;
             }
             let fd = fd as usize;
             let mut buf = [0u8; 512];
             // SAFETY: `buf` is a live local of exactly the length passed.
-            let n = unsafe { syscall3(NR_READ, fd, buf.as_mut_ptr() as usize, buf.len()) };
+            let n = loop {
+                let n = unsafe { syscall3(NR_READ, fd, buf.as_mut_ptr() as usize, buf.len()) };
+                if n != -4 {
+                    break n;
+                }
+                // EINTR: nothing was consumed; retry.
+            };
             // SAFETY: closing a descriptor this function owns.
             unsafe {
                 let _ = syscall2(NR_CLOSE, fd, 0);
             }
             if n < 16 {
-                return FALLBACK;
+                return None;
             }
             let n = n as usize;
             let mut i = 0usize;
@@ -1573,16 +1623,17 @@ pub mod locked {
                 if ty == AT_PAGESZ {
                     let v = u64::from_ne_bytes(val);
                     // Only accept something that could be a page size; a
-                    // truncated read must not produce a bogus mask.
-                    return if v >= 4096 && v.is_power_of_two() {
-                        v as usize
-                    } else {
-                        FALLBACK
-                    };
+                    // truncated or corrupt vector must not produce a bogus mask.
+                    if v >= 4096 && v.is_power_of_two() && v <= usize::MAX as u64 {
+                        let v = v as usize;
+                        PAGE_SIZE.store(v, core::sync::atomic::Ordering::Relaxed);
+                        return Some(v);
+                    }
+                    return None;
                 }
                 i += 16;
             }
-            FALLBACK
+            None
         }
 
         #[cfg(target_arch = "x86_64")]
@@ -1630,17 +1681,46 @@ pub mod locked {
                 return None;
             }
             let fd = fd as usize;
-            let mut buf = [0u8; 4096];
-            // SAFETY: `buf` is a live local of exactly the length passed.
-            let n = unsafe { syscall3(NR_READ, fd, buf.as_mut_ptr() as usize, buf.len()) };
+            // Read to EOF rather than assuming the status text fits one 4 KiB read. `VmLck`
+            // follows `Groups` and the namespace lines, so a process with many supplementary
+            // groups can push it past a single read; the old single-read version then
+            // reported `None`, which a caller cannot distinguish from the kernel refusing.
+            let mut buf = alloc::vec::Vec::new();
+            let mut chunk = [0u8; 4096];
+            loop {
+                // SAFETY: `chunk` is a live local of exactly the length passed.
+                let n = unsafe { syscall3(NR_READ, fd, chunk.as_mut_ptr() as usize, chunk.len()) };
+                if n == -4 {
+                    // EINTR: the read did not consume anything; retry.
+                    continue;
+                }
+                if n < 0 {
+                    // SAFETY: closing a descriptor this function owns.
+                    unsafe {
+                        let _ = syscall2(NR_CLOSE, fd, 0);
+                    }
+                    return None;
+                }
+                let n = n as usize;
+                if n == 0 {
+                    break;
+                }
+                // `/proc/self/status` is bounded in practice; refuse an unbounded stream
+                // rather than growing without limit.
+                if buf.len().saturating_add(n) > 1 << 20 {
+                    // SAFETY: closing a descriptor this function owns.
+                    unsafe {
+                        let _ = syscall2(NR_CLOSE, fd, 0);
+                    }
+                    return None;
+                }
+                buf.extend_from_slice(&chunk[..n]);
+            }
             // SAFETY: closing a descriptor this function owns.
             unsafe {
                 let _ = syscall2(NR_CLOSE, fd, 0);
             }
-            if n <= 0 {
-                return None;
-            }
-            let text = core::str::from_utf8(&buf[..n as usize]).ok()?;
+            let text = core::str::from_utf8(&buf).ok()?;
             for line in text.lines() {
                 if let Some(rest) = line.strip_prefix("VmLck:") {
                     let kb: u64 = rest.split_whitespace().next()?.parse().ok()?;
@@ -1656,6 +1736,11 @@ pub mod locked {
         any(target_arch = "x86_64", target_arch = "aarch64")
     ))]
     pub(crate) use imp::page_size_pub;
+    #[cfg(all(
+        target_os = "linux",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    ))]
+    pub(crate) use imp::unlock_range_with;
     #[cfg(all(
         target_os = "linux",
         any(target_arch = "x86_64", target_arch = "aarch64")
@@ -1721,9 +1806,17 @@ pub mod locked {
         target_os = "linux",
         any(target_arch = "x86_64", target_arch = "aarch64")
     )))]
-    pub(crate) fn page_size_pub() -> usize {
-        16 * 1024
+    pub(crate) fn page_size_pub() -> Option<usize> {
+        Some(16 * 1024)
     }
+
+    /// Unsupported on this target: nothing was ever locked, so there is nothing to undo.
+    /// Kept as a compiling stub because `LockedKey::drop` is compiled on every target.
+    #[cfg(not(all(
+        target_os = "linux",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    )))]
+    pub(crate) fn unlock_range_with(_ps: usize, _ptr: *const u8, _len: usize) {}
 
     /// A `Key` that is locked into RAM (and excluded from core dumps) for its lifetime.
     ///
@@ -1798,8 +1891,9 @@ pub mod locked {
     /// call-chain region rather than attributing a frame, and its blake3-only control leaves
     /// the same 8-byte pattern with no crate code — so the run it finds *today* is the
     /// dependency's XOF output buffer. What the write-through shape removes is the copy this
-    /// crate names: exactly one is left, and both callers wipe it (`new` before its fallible
-    /// `lock_range`, `check_integrity` before its branch, so the `panic!` path is covered too).
+    /// crate names: exactly one is left, and both callers wipe it (`new` after copying it
+    /// into the already-locked page, `check_integrity` before its branch, so the `panic!`
+    /// path is covered too).
     fn integrity_tag(key: &[u8], out: &mut [u8; KEY_TAG_LEN]) {
         // An explicit hasher rather than `blake3::hash`, so its internal state can be
         // wiped. `blake3::hash` builds and drops a hasher with no handle, which leaves the
@@ -1829,19 +1923,25 @@ pub mod locked {
         /// The bytes are copied into that page (so the locked range is the range the caller
         /// uses) and the *whole* page is locked and excluded from core dumps, which is also
         /// what makes the wipe on drop cover everything that could hold key material.
+        ///
+        /// The lock is taken **before** the key enters the page. Writing first would leave
+        /// the key in an ordinary, swappable page until `mlock` returned; a scheduler
+        /// preemption in that window can send the page to swap, which is the exposure this
+        /// layer exists to prevent. `Page` is an ordinary anonymous allocation, so a
+        /// successful `mlock` covers it; the kernel can silently skip special VMAs
+        /// (hugetlb, DAX, secretmem), and those are not the mappings used here.
         pub fn new(key: &[u8; crate::KEY_LEN]) -> Result<Self, isize> {
             let mut page = Page::new().ok_or(-12isize /* ENOMEM */)?;
+            // Lock the whole page first; on failure `page` is freed by its own `Drop`.
+            lock_range(page.as_ptr(), page.len())?;
             page.bytes_mut()[..crate::KEY_LEN].copy_from_slice(key);
             let mut tag = [0u8; KEY_TAG_LEN];
             integrity_tag(&key[..], &mut tag);
             page.bytes_mut()[crate::KEY_LEN..crate::KEY_LEN + KEY_TAG_LEN].copy_from_slice(&tag);
             // The tag is `BLAKE3(key)` truncated, i.e. key material by this crate's own
             // classification, and the copy in the page is covered by the page's own wipe on
-            // drop. This local is the copy that is *not*: wipe it before the fallible
-            // `lock_range`, so the `?` cannot return through it either.
+            // drop. This local is the copy that is *not*: wipe it before returning.
             crate::zeroize_array(&mut tag);
-            // Lock the whole page; on failure `page` is freed by its own `Drop`.
-            lock_range(page.as_ptr(), page.len())?;
             Ok(LockedKey(page))
         }
 
@@ -2013,11 +2113,15 @@ pub mod locked {
     struct Page {
         ptr: *mut u8,
         layout: alloc::alloc::Layout,
+        page_size: usize,
     }
 
     impl Page {
         fn new() -> Option<Self> {
-            let ps = page_size_pub();
+            // Fail closed when the kernel page size cannot be established. A guessed
+            // alignment is not safe on a 16/64 KiB-page kernel: the lock would cover a
+            // kernel page shared with unrelated allocations.
+            let ps = page_size_pub()?;
             let layout = alloc::alloc::Layout::from_size_align(ps, ps).ok()?;
             // SAFETY: `layout` has a non-zero size (one page), which is all this call
             // requires; the result is checked for null and freed with the same layout.
@@ -2025,8 +2129,15 @@ pub mod locked {
             if ptr.is_null() {
                 None
             } else {
-                Some(Page { ptr, layout })
+                Some(Page {
+                    ptr,
+                    layout,
+                    page_size: ps,
+                })
             }
+        }
+        fn page_size(&self) -> usize {
+            self.page_size
         }
         fn as_ptr(&self) -> *const u8 {
             self.ptr
@@ -2072,7 +2183,10 @@ pub mod locked {
             // locked and what could hold key-derived spill, and `Page`'s own `Drop` frees it
             // immediately afterwards either way.
             crate::zeroize_slice(self.0.bytes_mut());
-            unlock_range(self.0.as_ptr(), self.0.len());
+            // Pass the size that was established when the page was allocated and locked;
+            // recomputing it could fail (and leave the page locked) if auxv became
+            // unreadable in the meantime.
+            unlock_range_with(self.0.page_size(), self.0.as_ptr(), self.0.len());
         }
     }
 
@@ -2125,10 +2239,11 @@ unsafe fn zeroize_raw(ptr: *mut u8, len: usize) {
         core::ptr::write_volatile(ptr.add(i), 0);
         i += 1;
     }
-    while i + chunk <= len {
-        // SAFETY: `i + size_of::<usize>() <= len` keeps the store in bounds, and
+    while len - i >= chunk {
+        // SAFETY: `len - i >= size_of::<usize>()` keeps the store in bounds, and
         // the loop above left the pointer `usize`-aligned, which `write_volatile`
-        // on a `*mut usize` requires.
+        // on a `*mut usize` requires.  The subtraction cannot underflow: `i` starts
+        // at zero and every increment is bounded by the loop condition.
         core::ptr::write_volatile(ptr.add(i) as *mut usize, 0);
         i += chunk;
     }
@@ -2247,7 +2362,8 @@ fn derive_material(
     k_out: &mut [u8; 32],
     enc_seed: &mut [u8; 32],
 ) {
-    let mut subkey = hchacha20(key, &nonce[0..16].try_into().unwrap());
+    let mut subkey = [0u8; 32];
+    hchacha20_into(key, &nonce[0..16].try_into().unwrap(), &mut subkey);
     let mut subkey_nonce = [0u8; 12];
     subkey_nonce[0..4].copy_from_slice(&SUBKEY_DOMAIN);
     subkey_nonce[4..12].copy_from_slice(&nonce[16..24]);
@@ -2716,6 +2832,14 @@ pub fn encrypt(
 /// roughly +1.2 ms/MiB, which is the wrong trade on the API a caller chooses for speed.
 /// README's "What the witness is" states the same thing, and `tests/ultra.rs`
 /// (`the_witness_is_called_from_exactly_these_entry_points`) pins the set of call sites.
+///
+/// # Allocation
+///
+/// The message buffer is not allocated here, but this entry point is not
+/// allocation-free: `derive_tag`'s contiguous fast path may allocate one bounded
+/// temporary (the inner-hash input, 2 KiB..=64 KiB) when the 48-byte head plus the
+/// AAD and message lands in that window. A refused allocation falls back to the
+/// three-part hash, so it changes performance rather than the result.
 #[must_use = "the returned tag must be handled"]
 pub fn encrypt_in_place_detached(
     key: &[u8; 32],
@@ -2926,17 +3050,22 @@ fn accept_or_reject(
 
 /// Decrypt `ciphertext`, verifying the tag.
 ///
-/// **This allocates a buffer as large as `ciphertext`** — a second one under
-/// `ultra`, for the independent witness's plaintext. Bound untrusted input
+/// **This allocates a plaintext buffer as large as `ciphertext`** — a second one under
+/// `ultra`, for the independent witness's plaintext. When
+/// `48 + len(aad) + len(ciphertext)` falls in 2 KiB..=64 KiB, `derive_tag` also allocates
+/// a bounded concatenation buffer, so the peak is three times the message (four under
+/// `ultra`) in that window. Bound untrusted input
 /// before calling it: [`MAX_MSG_SIZE`] (256 GiB) is the format's ceiling, not a safe
 /// one, and a service that trusts a length field off the wire can be made to
 /// allocate that much per request. [`decrypt_bounded`] takes a policy limit and
 /// enforces it *before* the allocation; that is the entry point for input whose
-/// length came from a network peer.
+/// length came from a network peer, and its limit covers the ciphertext, not the AAD.
 ///
-/// Returns the plaintext in a [`Plaintext`] that zeroizes on drop. On failure
-/// returns [`Error::AuthenticationFailed`] and never exposes the unverified
-/// plaintext.
+/// Returns the plaintext in a [`Plaintext`] that zeroizes on drop. A length refusal
+/// ([`Error::MessageTooLong`] or [`Error::AadTooLong`]) or an allocation refusal
+/// ([`Error::AllocationFailed`]) can be returned before any key material is derived;
+/// once the tag attempt has run, the failure is [`Error::AuthenticationFailed`], and
+/// the unverified plaintext is never exposed.
 #[must_use = "the returned plaintext must be handled"]
 pub fn decrypt(
     key: &[u8; 32],
@@ -3271,8 +3400,9 @@ pub fn decrypt_in_place_detached(
             &mut witness_plaintext,
         );
         let agree = witness_tag.ct_eq(&computed_tag) & witness_plaintext.ct_eq(buffer);
-        // All three are secret-derived (a MAC, the recovered plaintext, and the recovered
-        // ciphertext buffer); wiped like the rest of the copies in this function.
+        // `witness_tag` and `witness_plaintext` are secret-derived. `witness_ciphertext`
+        // is a copy of the caller's *public* ciphertext; it is wiped with them for
+        // uniformity, not because it is a secret.
         crate::zeroize_array(&mut witness_tag);
         crate::zeroize_slice(&mut witness_plaintext);
         crate::zeroize_slice(&mut witness_ciphertext);
@@ -3351,8 +3481,10 @@ pub fn decrypt_in_place_detached(
     #[cfg(feature = "dual-mac")]
     crate::zeroize_array(&mut recomputed_tag);
 
-    // As in `decrypt`: two rejections written first, and two serial checks, so a fault
-    // that skips the call or corrupts one outcome cannot accept.
+    // As in `decrypt`: in the `hardened` build, two rejections written first and two
+    // serial checks, so a fault that skips the call or corrupts one outcome cannot
+    // accept. The opt-out build has one gate, and `accept_or_reject` deliberately writes
+    // both slots from it; there the two checks are one check written twice.
     #[cfg(feature = "dual-mac")]
     crate::scrub_stack();
 
@@ -3459,7 +3591,7 @@ fn chacha20_rounds(s: &mut [u32; 16]) {
 /// feed-forward addition -- *not* the Davies-Meyer construction, which is a
 /// block-cipher compression function and an earlier revision of this line
 /// misnamed) and serialized as a 64-byte keystream block.
-fn chacha20_block(key: &[u8; 32], counter: u32, nonce: &[u8; 12]) -> [u8; 64] {
+fn chacha20_block_into(key: &[u8; 32], counter: u32, nonce: &[u8; 12], out: &mut [u8; 64]) {
     const CHACHA_CONST: [u32; 4] = [0x61707865, 0x3320646e, 0x79622d32, 0x6b206574];
 
     let mut s = [0u32; 16];
@@ -3482,13 +3614,13 @@ fn chacha20_block(key: &[u8; 32], counter: u32, nonce: &[u8; 12]) -> [u8; 64] {
 
     let mut orig = s;
     // In place: `s` becomes the post-round state, and it is the caller's own local,
-    // so the wipe below reaches it. There is no `out` to leave behind.
+    // so the wipe below reaches it. The only thing written to `out` is the keystream;
+    // no key-bearing value is returned through an unnamed temporary.
     chacha20_rounds(&mut s);
 
-    let mut keystream = [0u8; 64];
     for i in 0..16 {
         let v = s[i].wrapping_add(orig[i]);
-        keystream[i * 4..i * 4 + 4].copy_from_slice(&v.to_le_bytes());
+        out[i * 4..i * 4 + 4].copy_from_slice(&v.to_le_bytes());
     }
 
     // Side-channel hygiene: wipe the key-derived state in place. It has to be these
@@ -3497,8 +3629,18 @@ fn chacha20_block(key: &[u8; 32], counter: u32, nonce: &[u8; 12]) -> [u8; 64] {
     // leaves the original on the stack, i.e. no wipe at all.
     crate::zeroize_array(&mut s);
     crate::zeroize_array(&mut orig);
+}
 
-    keystream
+/// Test-only wrapper for the out-parameter [`chacha20_block_into`].
+///
+/// Production calls the `_into` form so the 64-byte keystream never travels through a
+/// by-value return temporary that no wipe can name. Tests and the witness's
+/// cross-checks are not on a secret-handling path and keep the ergonomic shape.
+#[cfg(test)]
+fn chacha20_block(key: &[u8; 32], counter: u32, nonce: &[u8; 12]) -> [u8; 64] {
+    let mut out = [0u8; 64];
+    chacha20_block_into(key, counter, nonce, &mut out);
+    out
 }
 
 // ── SIMD backends (x86_64 / aarch64) ──────────────────────────────────
@@ -3913,7 +4055,7 @@ mod x86_simd {
     }
 }
 
-#[cfg(all(target_arch = "aarch64", not(kani)))]
+#[cfg(all(target_arch = "aarch64", target_feature = "neon", not(kani)))]
 mod aarch64_simd {
     use super::chacha20_state_words;
     use core::arch::aarch64::*;
@@ -3940,8 +4082,9 @@ mod aarch64_simd {
         }};
     }
 
-    /// 4 ChaCha20 blocks in parallel (NEON, 128-bit lanes).  Baseline on
-    /// aarch64 (ARMv8-A), so no runtime detection is required.
+    /// 4 ChaCha20 blocks in parallel (NEON, 128-bit lanes).  Compiled only when
+    /// the target enables NEON: every standard aarch64 OS target does, while
+    /// soft-float targets (for example `aarch64-unknown-none-softfloat`) do not.
     ///
     /// Writes 4 * 64 = 256 bytes of raw keystream to `out`.
     #[target_feature(enable = "neon")]
@@ -4110,11 +4253,11 @@ fn chacha20_apply(
         }
     }
 
-    #[cfg(all(target_arch = "aarch64", not(kani)))]
+    #[cfg(all(target_arch = "aarch64", target_feature = "neon", not(kani)))]
     {
         let mut ks = [0u8; 256];
         while off + 256 <= n {
-            // SAFETY: NEON is part of the ARMv8-A baseline.
+            // SAFETY: this block is compiled only when the target enables NEON.
             unsafe { aarch64_simd::blocks4(key, ctr, nonce, &mut ks) };
             xor_or_copy(input, output, off, &ks);
             ctr = ctr.wrapping_add(4);
@@ -4136,14 +4279,16 @@ fn chacha20_apply(
     // for four lanes to win: the wide loops above consume everything from 256 bytes
     // up, so this tail is at most three blocks plus a partial one.
     while off + CHACHA20_BLOCK <= n {
-        let mut ks = chacha20_block(key, ctr, nonce);
+        let mut ks = [0u8; 64];
+        chacha20_block_into(key, ctr, nonce, &mut ks);
         xor_or_copy(input, output, off, &ks);
         ctr = ctr.wrapping_add(1);
         off += CHACHA20_BLOCK;
         crate::zeroize_array(&mut ks);
     }
     if off < n {
-        let mut ks = chacha20_block(key, ctr, nonce);
+        let mut ks = [0u8; 64];
+        chacha20_block_into(key, ctr, nonce, &mut ks);
         xor_or_copy(input, output, off, &ks[..n - off]);
         crate::zeroize_array(&mut ks);
     }
@@ -4179,7 +4324,7 @@ fn chacha20_keystream_raw(key: &[u8; 32], counter: u32, nonce: &[u8; 12], out: &
 /// Runs 20 rounds, outputs state words 0-3 and 12-15 WITHOUT final addition.
 /// Per draft-irtf-cfrg-xchacha-03 §2.2.  (Not RFC 8439: that document is
 /// ChaCha20 and Poly1305 and contains no HChaCha20 at all.)
-fn hchacha20(key: &[u8; 32], nonce: &[u8; 16]) -> [u8; 32] {
+fn hchacha20_into(key: &[u8; 32], nonce: &[u8; 16], out: &mut [u8; 32]) {
     const CHACHA_CONST: [u32; 4] = [0x61707865, 0x3320646e, 0x79622d32, 0x6b206574];
 
     let mut s = [0u32; 16];
@@ -4203,11 +4348,10 @@ fn hchacha20(key: &[u8; 32], nonce: &[u8; 16]) -> [u8; 32] {
     // In place, for the same reason as in `chacha20_block`.
     chacha20_rounds(&mut s);
 
-    let mut r = [0u8; 32];
     // Output words 0,1,2,3,12,13,14,15 (NO final addition!)
     let indices = [0usize, 1, 2, 3, 12, 13, 14, 15];
     for (i, &idx) in indices.iter().enumerate() {
-        r[i * 4..i * 4 + 4].copy_from_slice(&s[idx].to_le_bytes());
+        out[i * 4..i * 4 + 4].copy_from_slice(&s[idx].to_le_bytes());
     }
 
     // Side-channel hygiene, as in `chacha20_block`: wipe the key-bearing locals
@@ -4215,8 +4359,18 @@ fn hchacha20(key: &[u8; 32], nonce: &[u8; 16]) -> [u8; 32] {
     // a copy of the pre-round state would be a second copy of the key material to
     // keep alive for no reason.
     crate::zeroize_array(&mut s);
+}
 
-    r
+/// Test-only wrapper for the out-parameter [`hchacha20_into`].
+///
+/// Production passes its already-wiped `subkey` buffer directly, so the subkey never
+/// exists as a by-value return temporary. Unit tests keep the ergonomic shape; they
+/// do not handle a live production key.
+#[cfg(test)]
+fn hchacha20(key: &[u8; 32], nonce: &[u8; 16]) -> [u8; 32] {
+    let mut out = [0u8; 32];
+    hchacha20_into(key, nonce, &mut out);
+    out
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────
@@ -4899,10 +5053,11 @@ mod tests {
         // wipes its internal buffer before returning `Err`, but that buffer is
         // private and already freed by the time the caller has the error, so no
         // assertion here can observe the wiping itself.  The wiping *is* checked
-        // -- by `test_detached_rejects_tampering_and_wipes`, which uses the
-        // in-place API where the buffer belongs to the caller and can be
-        // inspected afterwards.  This test covers the other half: that the
-        // failure is reported correctly and carries no data.
+        // behaviourally by `tests/plaintext_wipe.rs::decrypt_failure_wipes_internal_plaintext`
+        // (a global allocator inspects the block at `dealloc`), and the caller-owned
+        // in-place buffer is checked by `test_detached_rejects_tampering_and_wipes`.
+        // This test covers the other half: that the failure is reported correctly and
+        // carries no data.
         assert_eq!(
             decrypt(&wrong_key, &nonce, aad, &ct, &tag).unwrap_err(),
             Error::AuthenticationFailed
@@ -5121,6 +5276,34 @@ mod tests {
         );
     }
 
+    /// With an empty message the recomputed tag is fixed, so a tag-only tamper is not
+    /// masked by a changed keystream. Every one of the 65 bytes must be compared: a
+    /// verification that only checks the first 32 passes every non-empty-message test,
+    /// because an upper-byte change also changes `derive_enc` and therefore the recovered
+    /// plaintext.
+    #[test]
+    fn test_empty_message_rejects_every_tag_byte_tamper() {
+        let key = [0x42u8; KEY_LEN];
+        let nonce = [0x55u8; NONCE_LEN];
+        let (ct, tag) = encrypt(&key, &nonce, b"", b"").unwrap();
+        assert!(ct.is_empty());
+        for pos in 0..TAG_LEN {
+            let mut bad = tag;
+            bad[pos] ^= 1;
+            assert_eq!(
+                decrypt(&key, &nonce, b"", &ct, &bad).unwrap_err(),
+                Error::AuthenticationFailed,
+                "decrypt accepted a tag differing at byte {pos} on an empty message"
+            );
+            let mut empty: [u8; 0] = [];
+            assert_eq!(
+                decrypt_in_place_detached(&key, &nonce, b"", &mut empty, &bad).unwrap_err(),
+                Error::AuthenticationFailed,
+                "in-place decrypt accepted a tag differing at byte {pos} on an empty message"
+            );
+        }
+    }
+
     #[test]
     fn test_api_constants() {
         assert_eq!(NONCE_LEN, 24);
@@ -5300,19 +5483,26 @@ mod tests {
         }
         let key = [0x5Au8; KEY_LEN];
 
-        // (a) a flip in the key itself.
-        match crate::locked::LockedKey::new(&key) {
-            Ok(mut k) => {
-                k.flip_byte_for_test(7);
-                let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    let _ = k.as_bytes();
-                }))
-                .is_err();
-                assert!(panicked, "a flipped key byte was accepted by `as_bytes`");
-            }
-            Err(e) => {
-                refuse_skip(e);
-                return;
+        // (a) a flip in the key itself, at every key byte. A single fixed offset is not
+        // enough: an audit narrowed `integrity_tag` to `key[..8]`, and the old byte-7 flip
+        // still passed while bytes 8..31 were not covered.
+        for off in 0..KEY_LEN {
+            match crate::locked::LockedKey::new(&key) {
+                Ok(mut k) => {
+                    k.flip_byte_for_test(off);
+                    let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        let _ = k.as_bytes();
+                    }))
+                    .is_err();
+                    assert!(
+                        panicked,
+                        "a flipped key byte at offset {off} was accepted by `as_bytes`"
+                    );
+                }
+                Err(e) => {
+                    refuse_skip(e);
+                    return;
+                }
             }
         }
 
@@ -5344,14 +5534,20 @@ mod tests {
         // its documentation).
         match crate::locked::LockedKey::new(&key) {
             Ok(mut k) => {
-                let page = crate::locked::page_size_pub();
-                k.flip_byte_for_test(page - 1);
-                assert_eq!(
-                    k.as_bytes(),
-                    &key,
-                    "a flip outside the key and tag region was reported as corruption; the \
-                     check must cover exactly the bytes it verifies"
-                );
+                let page = crate::locked::page_size_pub().expect("the host must expose AT_PAGESZ");
+                // The first byte after the tag is the boundary the key/tag check must
+                // stop at; a check that hashed the whole page would reject both this and
+                // the far-page flip. The old test only flipped `page - 1`.
+                for off in [KEY_LEN + crate::locked::KEY_TAG_LEN, page - 1] {
+                    k.flip_byte_for_test(off);
+                    assert_eq!(
+                        k.as_bytes(),
+                        &key,
+                        "a flip at page offset {off}, outside the key and tag region, was \
+                         reported as corruption; the check must cover exactly the bytes it \
+                         verifies"
+                    );
+                }
             }
             Err(e) => {
                 refuse_skip(e);
@@ -5392,6 +5588,19 @@ mod tests {
         assert!(a == &b, "the by-reference spelling must work too");
         assert!(a != c, "keys differing in the last byte must differ");
         assert!(!(a == c));
+
+        // A comparison that only checks one end (or only a prefix) passes the assertions
+        // above. Probe the other end and the middle as well.
+        for offset in [0usize, KEY_LEN / 2] {
+            let mut bytes = [0x5Au8; KEY_LEN];
+            bytes[offset] ^= 1;
+            let other = Key::from_bytes(bytes);
+            assert!(
+                a != other,
+                "keys differing at byte {offset} must differ; a first/last-only comparison \
+                 would pass this test otherwise"
+            );
+        }
 
         // The impl, not `Deref`: named explicitly so that removing it fails to compile
         // right here — pinning the constant-time comparison, not an array fallback.
@@ -5439,13 +5648,37 @@ mod tests {
                 return;
             }
         };
+        // The opposite end and the middle, so a comparison that only checks byte 0 (the
+        // original test's only differing byte) cannot pass.
+        let mut other_last = [0x5Au8; 32];
+        other_last[31] ^= 1;
+        let d = match crate::locked::LockedKey::new(&other_last) {
+            Ok(k) => k,
+            Err(e) => {
+                refuse_skip(e);
+                return;
+            }
+        };
+        let mut other_mid = [0x5Au8; 32];
+        other_mid[16] ^= 1;
+        let e = match crate::locked::LockedKey::new(&other_mid) {
+            Ok(k) => k,
+            Err(e) => {
+                refuse_skip(e);
+                return;
+            }
+        };
         assert!(
             a == b,
             "two locked keys with the same bytes must compare equal"
         );
         assert!(a == &b, "the by-reference spelling must work too");
         assert!(a != c, "locked keys with different bytes must differ");
-        assert!(PartialEq::eq(&a, &b) && !PartialEq::eq(&a, &c));
+        assert!(
+            a != d && a != e,
+            "a locked-key comparison that only checks one end must not pass"
+        );
+        assert!(PartialEq::eq(&a, &b) && !PartialEq::eq(&a, &c) && !PartialEq::eq(&a, &d));
     }
 
     /// `Plaintext` equality must be constant-time but still *correct*:
@@ -5477,6 +5710,12 @@ mod tests {
         let mut first = secret.clone();
         first[0] ^= 1;
         assert!(pt != first);
+
+        // Differing in the middle: the first/last probes alone would pass a comparison
+        // that only checks those two positions.
+        let mut middle = secret.clone();
+        middle[secret.len() / 2] ^= 1;
+        assert!(pt != middle);
 
         // Shorter and longer (length mismatch must not panic).
         assert!(pt != secret[..secret.len() - 1]);
@@ -5770,14 +6009,11 @@ mod tests {
     /// be seen from the outside any other way.  `MaybeUninit` + `drop_in_place` is
     /// what makes reading afterwards legal — the storage is ours, the value is gone,
     /// and every byte is a `u8`.
-    #[cfg(feature = "rng")]
     #[test]
     fn test_key_zeroizes_on_drop_and_hides_itself() {
-        let key = crate::random::generate_key().expect("OS entropy source unavailable");
-        assert!(
-            key.as_bytes().iter().any(|&b| b != 0),
-            "an all-zero key from the OS CSPRNG means the entropy source is broken"
-        );
+        // The property is `Key`'s drop wipe and `Debug`, not randomness; using a fixed key
+        // keeps it compiled and exercised in the default (no-rng) build.
+        let key = Key::from_bytes([0x5Au8; KEY_LEN]);
         assert_eq!(
             alloc::format!("{key:?}"),
             "Key([REDACTED; 32])",
@@ -5939,12 +6175,12 @@ mod tests {
         let (ct_a, tag_a) = encrypt(&key, &nonce, b"ab", b"c").unwrap();
         let (ct_b, tag_b) = encrypt(&key, &nonce, b"a", b"bc").unwrap();
         assert_ne!(tag_a, tag_b, "A||M must not be ambiguous");
-        // The ciphertexts are *pinned* here as a regression check on these two fixed
-        // inputs, not because SIV guarantees they differ: with equal-length plaintexts the
-        // two ciphertexts would coincide if `KS_a ⊕ KS_b == M_a ⊕ M_b`, which distinct tags
-        // do not rule out. (The property the construction promises — that neither split
-        // authenticates under the other's context — is the two `decrypt` assertions below.)
-        assert_ne!(ct_a, ct_b);
+        // The ciphertexts differ in length here (one vs two bytes), so a bare
+        // `assert_ne!` would be satisfied by the length check before any byte comparison.
+        // State the lengths, and leave the split property to the tags and the cross-context
+        // decrypt assertions.
+        assert_eq!(ct_a.len(), 1);
+        assert_eq!(ct_b.len(), 2);
 
         // Trailing zeros must not be strippable either.
         let (_, tag_c) = encrypt(&key, &nonce, b"ab\0", b"c").unwrap();
@@ -5955,6 +6191,17 @@ mod tests {
         // Both must still round-trip under their own split.
         assert_eq!(decrypt(&key, &nonce, b"ab", &ct_a, &tag_a).unwrap(), b"c");
         assert_eq!(decrypt(&key, &nonce, b"a", &ct_b, &tag_b).unwrap(), b"bc");
+        // ...and neither may authenticate under the other's split. Round-tripping alone
+        // does not test the length fields: with one of them removed, each pair still
+        // decrypts correctly under its own context but a cross-split also succeeds.
+        assert!(
+            decrypt(&key, &nonce, b"ab", &ct_b, &tag_b).is_err(),
+            "the (\"a\", \"bc\") ciphertext authenticated under the (\"ab\", \"c\") split"
+        );
+        assert!(
+            decrypt(&key, &nonce, b"a", &ct_a, &tag_a).is_err(),
+            "the (\"ab\", \"c\") ciphertext authenticated under the (\"a\", \"bc\") split"
+        );
     }
 
     /// Every one of the 65 tag bytes must influence the ciphertext.
@@ -6186,6 +6433,41 @@ mod tests {
         let t1 = derive_tag(&k_in, &k_out, &nonce, b"ab", b"cde");
         let t2 = derive_tag(&k_in, &k_out, &nonce, b"abc", b"de");
         assert_ne!(t1, t2, "A||M must not be ambiguous");
+    }
+
+    /// The length fields are 64-bit, and the message is chunked by BLAKE3, at the
+    /// boundaries where a narrower field is still byte-identical for small inputs: a
+    /// `u16` length writes the same two bytes plus six zeros for every length below 65,536,
+    /// and the 1,024-byte BLAKE3 chunk boundary only moves the tree shape above that size.
+    #[test]
+    fn test_tag_length_fields_at_blake3_chunk_boundaries() {
+        let k_in = [0x5Au8; 32];
+        let k_out = [0x6Bu8; 32];
+        let nonce = [0x22u8; NONCE_LEN];
+        for msg_len in [1024usize, 1025, 65_536] {
+            let msg = alloc::vec![0xA5u8; msg_len];
+            let aad = b"len";
+            let mut inner = [0u8; 32];
+            let mut h_in = blake3::Hasher::new_keyed(&k_in);
+            h_in.update(&DOM_PRE);
+            h_in.update(&nonce);
+            h_in.update(&(aad.len() as u64).to_le_bytes());
+            h_in.update(&(msg_len as u64).to_le_bytes());
+            h_in.update(aad);
+            h_in.update(&msg);
+            h_in.finalize_xof().fill(&mut inner);
+            let mut want = [0u8; TAG_LEN];
+            let mut h_out = blake3::Hasher::new_keyed(&k_out);
+            h_out.update(&DOM_TAG);
+            h_out.update(&inner);
+            h_out.finalize_xof().fill(&mut want);
+            assert_eq!(
+                derive_tag(&k_in, &k_out, &nonce, aad, &msg),
+                want,
+                "the tag diverges at msg_len={msg_len}; a u16/u32 length field is \
+                 byte-identical to le64 for every shorter test case"
+            );
+        }
     }
 
     /// The length guard, tested directly.

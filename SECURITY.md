@@ -35,7 +35,9 @@ Anything that breaks the properties claimed in `README.md`:
   points with no `LockedKey` in sight. The crate header names that branch, alongside
   the decision and the witness fold, as one of the three secret-dependent branches it
   tolerates, and documents why it reveals no key bit under no-fault operation;
-- a reachable panic, or an unbounded allocation, from attacker-controlled input;
+- a reachable panic from attacker-controlled input. Allocation is a caller policy:
+  `decrypt_bounded` bounds the ciphertext, not the AAD, and capacity planning is
+  explicitly out of scope (see below);
 - unsoundness in the `unsafe` blocks — see `README.md` for what Miri, Kani and the
   sanitizer runs cover, and note that every block carries a `// SAFETY:` comment
   that a CI lint now enforces.

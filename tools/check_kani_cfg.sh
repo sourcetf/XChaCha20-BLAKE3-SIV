@@ -17,9 +17,27 @@
 set -euo pipefail
 
 export PATH="$HOME/.cargo/bin:$PATH"
+# Some Windows hosts ship a `python3` alias that exits nonzero before running any
+# code; `python` is the real interpreter there. CI's python3 satisfies the probe.
+if python3 -c 'pass' >/dev/null 2>&1; then
+  PYTHON=python3
+else
+  PYTHON=python
+fi
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
+
+# `mktemp -d` under Git Bash returns an MSYS path (`/tmp/...`), which a native
+# Windows Python cannot open. Convert only the paths handed to Python; the shell
+# and cargo keep using the MSYS forms below.
+win_path() {
+  if command -v cygpath >/dev/null 2>&1; then
+    cygpath -w "$1"
+  else
+    printf '%s' "$1"
+  fi
+}
 
 # The shim lives in the temp dir rather than in the repository, so it cannot be
 # picked up as a workspace member by the real build.
@@ -82,13 +100,18 @@ EOF
 mkdir -p "$WORK/crate"
 ( cd "$ROOT" && tar --exclude=./target --exclude=./.git --exclude='./mutants.out*' -cf - . ) \
   | ( cd "$WORK/crate" && tar -xf - )
-python3 - "$WORK/crate/Cargo.toml" "$WORK/shim/kani" <<'PY'
+"$PYTHON" - "$(win_path "$WORK/crate/Cargo.toml")" "$(win_path "$WORK/shim/kani")" <<'PY'
 import sys
 manifest, shim = sys.argv[1], sys.argv[2]
-s = open(manifest).read()
+# The path is embedded in a TOML basic string: a Windows backslash would start an
+# escape (`\U` is a unicode escape), so use forward slashes. UTF-8 is explicit
+# because the manifest's comments are not ASCII and Windows Python defaults to the
+# locale encoding.
+shim = shim.replace("\\", "/")
+s = open(manifest, encoding="utf-8").read()
 assert "[dependencies]" in s
 s = s.replace("[dependencies]", f'[dependencies]\nkani = {{ path = "{shim}" }}', 1)
-open(manifest, "w").write(s)
+open(manifest, "w", encoding="utf-8", newline="\n").write(s)
 PY
 
 cd "$WORK/crate"
@@ -101,7 +124,7 @@ cd "$WORK/crate"
 # parser cannot see is a failure in this gate too. 13 is the committed count; a
 # change that removes harnesses has to update this number *and* the matrix.
 COMMITTED_HARNESSES=13
-harness_count="$(python3 tools/kani_shards.py --count 2>"$WORK/kani-count.err" || true)"
+harness_count="$("$PYTHON" tools/kani_shards.py --count 2>"$WORK/kani-count.err" || true)"
 case "$harness_count" in
   ''|*[!0-9]*)
     echo "FAIL: could not count the Kani harnesses in src/proofs.rs:" >&2
@@ -148,11 +171,11 @@ fi
 CONTROL="$WORK/control"
 mkdir -p "$CONTROL"
 ( cd "$WORK/crate" && tar -cf - . ) | ( cd "$CONTROL" && tar -xf - )
-python3 - "$CONTROL/src/proofs.rs" <<'PLANTEOF'
+"$PYTHON" - "$(win_path "$CONTROL/src/proofs.rs")" <<'PLANTEOF'
 import sys
 
 p = sys.argv[1]
-s = open(p).read()
+s = open(p, encoding="utf-8").read()
 plant = s + """
 // Planted by tools/check_kani_cfg.sh. This file is compiled only when lib.rs's
 // `#[cfg(kani)] mod proofs;` pulls it in, so a copy that fails to compile here is
@@ -162,7 +185,7 @@ fn _kani_compile_control() -> u8 {
     "not a u8"
 }
 """
-open(p, "w").write(plant)
+open(p, "w", encoding="utf-8", newline="\n").write(plant)
 PLANTEOF
 set +e
 ( cd "$CONTROL" && RUSTFLAGS="--cfg kani" cargo check --release --quiet >/dev/null 2>&1 )

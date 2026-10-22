@@ -448,3 +448,29 @@ fn timing_screen_can_detect_a_real_difference() {
         mb - ma
     );
 }
+
+/// The two leak screens are the *only* thing this target asserts, and libtest's
+/// `--list` still names an `#[ignore]`d test. A future edit that marks either screen
+/// ignored would therefore satisfy a presence check while executing nothing. This guard
+/// is not ignored, so it fails in the same run.
+#[test]
+fn timing_screens_are_present_and_not_ignored() {
+    let source = include_str!("timing.rs");
+    assert!(
+        !source
+            .lines()
+            .any(|line| line.trim_start().starts_with("#[ignore")),
+        "a timing test is marked #[ignore]: `--list` still reports it, but the advisory \
+         job then passes without running the screen. Remove the attribute or teach the \
+         presence gate the difference."
+    );
+    for name in [
+        "fn timing_tag_position_screen_finds_no_gross_difference(",
+        "fn timing_does_not_depend_on_key_contents(",
+    ] {
+        assert!(
+            source.contains(name),
+            "the timing presence gate names `{name}`, but the function is gone"
+        );
+    }
+}

@@ -24,6 +24,7 @@ the reports are not a complete sweep), 3 = the reports could not be read at all.
 
 import argparse
 import json
+import re
 import sys
 
 # The order the tool prints, from the weakest layering to the strongest: each entry must be
@@ -59,6 +60,14 @@ def main(argv=None):
         )
 
     labels = sorted(reports[0].get("configs", {})) if reports else []
+    # Every configuration is part of the verdict. A report set that omits one used to skip
+    # that configuration's gate entirely -- one config, or six empty `"configs": {}`
+    # objects, printed success. The tool emits exactly these three labels.
+    if labels != sorted(ORDER):
+        problems.append(
+            f"expected configurations {sorted(ORDER)}, got {labels}; a report that omits a "
+            "configuration skips that layer's gate rather than proving it"
+        )
     for r in reports:
         if sorted(r.get("configs", {})) != labels:
             problems.append(f"shard {r.get('shard')} reports a different configuration set")
@@ -76,23 +85,32 @@ def main(argv=None):
             # `accepting_total = -100` on all six shards and got `-600 accepting total`
             # accepted); with the gate on the decision-scoped count it no longer changes a
             # verdict, but a report that cannot have been produced should not be read as a
-            # measurement at all.
-            for key in ("scanned", "covered_total", "accepting_total", "accepting_inside_decision"):
+            # measurement at all. `bool` is an `int` in Python, so reject it explicitly: a
+            # JSON `false` used to sum as zero.
+            for key in (
+                "scanned",
+                "covered_total",
+                "accepting_total",
+                "accepting_inside_decision",
+            ):
                 value = cfg.get(key)
-                if not isinstance(value, int) or value < 0:
+                if isinstance(value, bool) or not isinstance(value, int) or value < 0:
                     problems.append(
                         f"shard {r.get('shard')} ({label}): {key}={value!r} is not a count; "
                         "the shard reports were not produced by the tool"
                     )
         # Evidence binding: the counts alone can be written by hand, so each report carries
-        # the SHA-256 of the offset list its numbers were computed from. Rejecting a missing
-        # digest keeps the format from regressing to numbers; the duplicate check below is
-        # what makes a copied report visible (two shards cannot have swept the same bytes).
+        # the SHA-256 of the offset list its numbers were computed from. This is a tripwire,
+        # not a cryptographic proof against a hand-written report: the offset lists are not
+        # submitted with the report, so the digest cannot be recomputed here. Requiring the
+        # exact 64-hex shape still rejects a placeholder, a missing field, and the empty
+        # reports the earlier gate accepted.
         for label, cfg in r.get("configs", {}).items():
-            if not cfg.get("offsets_sha256"):
+            digest = cfg.get("offsets_sha256")
+            if not isinstance(digest, str) or re.fullmatch(r"[0-9a-f]{64}", digest) is None:
                 problems.append(
-                    f"shard {r.get('shard')} ({label}) carries no offsets_sha256: the report "
-                    "is not bound to the bytes it swept, so its numbers are unverifiable"
+                    f"shard {r.get('shard')} ({label}) carries no valid offsets_sha256: the "
+                    "report is not bound to the bytes it swept, so its numbers are unverifiable"
                 )
         digests = {
             (label, cfg.get("offsets_sha256"))

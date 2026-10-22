@@ -449,7 +449,7 @@ fn raw_string_prefix(b: &[u8]) -> Option<(usize, u8)> {
 /// assumption tree in §2.1, and the L1 reductions it cites have to be re-checked for the new
 /// use — which is what the failure message asks for.
 const PRIMITIVE_CALLS: &[(&str, usize)] = &[
-    ("hchacha20(", 1),
+    ("hchacha20_into(", 1),
     ("chacha20_keystream_raw(", 2),
     ("blake3_keyed_xof(", 1),
     ("blake3_keyed_multi(", 5),
@@ -790,12 +790,52 @@ fn the_derivation_nonce_does_not_use_xchacha20s_nul_padding() {
     // (which would evaluate ChaCha20 at the same domain point XChaCha20-Poly1305 uses)
     // and for a stale second half, while its four other assertions stayed green.
     assert!(
-        body.contains("let mut subkey = hchacha20(key, &nonce[0..16].try_into().unwrap());"),
+        body.contains("let mut subkey = [0u8; 32];\n    hchacha20_into(key, &nonce[0..16].try_into().unwrap(), &mut subkey);"),
         "the subkey must come from `HChaCha20(key, nonce[0..16])` -- that input slice is \
          what the different-ChaCha20-domain-point argument is about"
     );
     assert!(
         body.contains("subkey_nonce[4..12].copy_from_slice(&nonce[16..24]);"),
         "the continuation nonce's second half must come from `nonce[16..24]`"
+    );
+}
+
+/// Every Rust source file under `src/` is accounted for by the censuses, recursively.
+///
+/// This file counts primitive call sites in `src/lib.rs`; `src/witness.rs` is the
+/// independent implementation and `src/proofs.rs` is the Kani model, so neither is
+/// counted here (their own files pin them). What must not happen is a *new* file
+/// entering the build without any census reading it: a nested module
+/// (`src/extra/mod.rs`) is not a top-level `src/*.rs` entry, and the first version of
+/// this check would have missed it while every count here stayed green.
+#[test]
+fn every_source_file_is_accounted_for() {
+    fn collect(dir: &std::path::Path, base: &std::path::Path, out: &mut Vec<String>) {
+        for entry in std::fs::read_dir(dir).expect("src/ must be readable") {
+            let path = entry.expect("src/ entry must be readable").path();
+            if path.is_dir() {
+                collect(&path, base, out);
+            } else if path.extension().is_some_and(|ext| ext == "rs") {
+                let relative = path
+                    .strip_prefix(base)
+                    .expect("walked paths must stay under src/");
+                out.push(relative.to_string_lossy().replace('\\', "/"));
+            }
+        }
+    }
+
+    const ACCOUNTED: &[&str] = &["lib.rs", "proofs.rs", "witness.rs"];
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let mut found = Vec::new();
+    collect(&dir, &dir, &mut found);
+    found.sort();
+    let mut listed: Vec<String> = ACCOUNTED.iter().map(|s| (*s).to_string()).collect();
+    listed.sort();
+    assert_eq!(
+        found, listed,
+        "`src/` has {found:?} but the censuses account for {listed:?}. A source file that \
+         no census reads can hold primitive or counter call sites without changing any \
+         count; add it to the literal lists in this file and `counter_range.rs`, and \
+         decide which census owns its call sites."
     );
 }

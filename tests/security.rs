@@ -1361,8 +1361,11 @@ fn constant_cfg_attributes(source: &str) -> Vec<(usize, String)> {
 }
 
 /// The attribute texts **directly above** byte `at` in `body`, nearest first, stopping at
-/// the first line that is not an attribute. Blank lines end the run, so an attribute that
-/// belongs to an earlier statement is not attributed to this one; the same-line form
+/// the first line that is not an attribute or blank. Blank lines are skipped rather than
+/// ending the run: Rust attaches an attribute to the next item across blank lines, so
+/// `#[cfg(feature = "pure")]` followed by one blank line still deadens the wipe (measured).
+/// An attribute that belongs to an earlier statement is separated from this one by that
+/// statement, not by whitespace, so it is not attributed here. The same-line form
 /// (`#[cfg(any())] zeroize_array(…);`) is seen because the text before `at` then ends with
 /// the attribute itself.
 ///
@@ -1387,6 +1390,23 @@ fn preceding_attributes(body: &str, at: usize) -> Vec<(usize, &str)> {
         let start = body[..end].rfind('\n').map_or(0, |n| n + 1);
         let line = body[start..end].trim();
         let line_no = body[..start].matches('\n').count();
+        // Blank lines do not end the attribute run. Rust attaches an attribute to the
+        // next item regardless of blank lines between them, so treating a blank line as
+        // the end let `#[cfg(feature = "pure")]` followed by one blank line deaden a
+        // counted wipe while this scan saw no attribute at all (measured).
+        if line.is_empty() {
+            if start == 0 {
+                break;
+            }
+            end = start - 1;
+            continue;
+        }
+        // An attribute above a block opener applies to the whole block. Walk through the
+        // opener so `#[cfg(feature = "pure")] { wipe }` is seen; that multi-line form was
+        // a measured bypass of the earlier scan, which stopped at the `{` line. The
+        // attribute branches come first: a line can be both an attribute and an opener
+        // (`#[cfg(feature = "pure")] {`), and skipping it as an opener would lose the
+        // attribute this scan exists to see.
         if line.starts_with("#[") || line.starts_with("#![") {
             out.push((line_no, line));
             if start == 0 {
@@ -1396,6 +1416,12 @@ fn preceding_attributes(body: &str, at: usize) -> Vec<(usize, &str)> {
         } else if let Some(attr) = attribute_suffix(line) {
             out.push((line_no, attr));
             break;
+        } else if line.ends_with('{') {
+            if start == 0 {
+                break;
+            }
+            end = start - 1;
+            continue;
         } else {
             break;
         }
@@ -1603,7 +1629,19 @@ fn assert_wipes_are_not_deadened(
     let mut base = 0usize;
     while let Some(i) = body[base..].find(wipe) {
         let at = base + i;
-        for (line_no, attr) in preceding_attributes(body, at) {
+        // The table spells the call without its qualifier, but the source writes
+        // `crate::zeroize_array(...)`. Starting the attribute scan at the `zeroize_array`
+        // token reads a prefix that ends in `crate::`, so an attribute on the line *above
+        // the statement* looks like a non-attribute line and the wipe passes. Back up over
+        // the qualifier to make the whole statement the subject of the scan.
+        let mut stmt_at = at;
+        for qualifier in ["crate::", "self::", "super::"] {
+            if body[..stmt_at].ends_with(qualifier) {
+                stmt_at -= qualifier.len();
+                break;
+            }
+        }
+        for (line_no, attr) in preceding_attributes(body, stmt_at) {
             if let Some(finding) = attribute_finding(attr) {
                 panic!(
                     "`{name}`'s wipe `{wipe}` is directly preceded by `{attr}`: {finding}. An \
@@ -2026,7 +2064,10 @@ fn every_documented_wipe_has_a_witness() {
         Site {
             label: "Key::drop",
             marker: "impl Drop for Key {",
-            wipes: &[("self.zeroize();", 1, &[])],
+            // Fully qualified on purpose: `self.zeroize()` resolved to an inherent method
+            // if one were added, silently turning the drop wipe into a no-op (A1/L-40 in
+            // the external report). This row pins the qualified spelling.
+            wipes: &[("<Key as zeroize::Zeroize>::zeroize(self);", 1, &[])],
         },
         Site {
             label: "Page::drop (locked)",
@@ -2410,5 +2451,157 @@ fn every_documented_wipe_has_a_witness() {
          its two wipes left `security` 17/17 and every other gate green). This literal is \
          the list; adding a site means adding it here in the same change, and removing one \
          means saying so deliberately rather than by deleting a row."
+    );
+}
+
+/// The attribute scan must see an attribute through its block opener, including the
+/// same-line form where the opener and attribute share a line. The earlier scan stopped
+/// at `{`, so `#[cfg(feature = "pure")] { wipe }` compiled the wipe out while every
+/// count stayed green.
+#[test]
+fn block_attributes_are_seen_through_their_opener() {
+    for body in [
+        "#[cfg(any())]\n{\n    zeroize_array(&mut x);\n}\n",
+        "#[cfg(any())] {\n    zeroize_array(&mut x);\n}\n",
+        "#[cfg(feature = \"pure\")]\n\n{\n    zeroize_array(&mut x);\n}\n",
+    ] {
+        let at = body.find("zeroize_array").expect("fixture holds the wipe");
+        let attrs = preceding_attributes(body, at);
+        assert!(
+            attrs.iter().any(|(_, attr)| attr.contains("cfg")),
+            "the scan did not see the block's attribute:\n{body}"
+        );
+    }
+}
+
+/// A wipe hidden in a `macro_rules!` definition is never expanded, but a text scan still
+/// counts it. This was a measured bypass: putting `derive_material`'s wipes (or
+/// `Plaintext::drop`'s) in an unused macro left every count and `-D warnings` green.
+fn macro_bodies(source: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut rest = source;
+    while let Some(start) = rest.find("macro_rules!") {
+        let after = &rest[start..];
+        let Some(open) = after.find('{') else {
+            break;
+        };
+        let mut depth = 0usize;
+        let mut end = None;
+        for (offset, ch) in after[open..].char_indices() {
+            match ch {
+                '{' => depth += 1,
+                '}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        end = Some(open + offset);
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        let Some(end) = end else {
+            break;
+        };
+        out.push(after[..=end].to_string());
+        rest = &after[end + 1..];
+    }
+    out
+}
+
+#[test]
+fn no_wipe_is_hidden_in_an_unexpanded_macro() {
+    for (name, source) in [
+        ("src/lib.rs", non_test_source()),
+        (
+            "src/witness.rs",
+            strip_comments(include_str!("../src/witness.rs")),
+        ),
+        (
+            "src/proofs.rs",
+            strip_comments(include_str!("../src/proofs.rs")),
+        ),
+    ] {
+        for body in macro_bodies(&source) {
+            for marker in [
+                "zeroize_array(",
+                "zeroize_slice(",
+                "zeroize_raw(",
+                "scrub_stack(",
+            ] {
+                assert!(
+                    !body.contains(marker),
+                    "`{name}` hides `{marker}` inside an unexpanded `macro_rules!`; the \
+                     wipe count sees the text but no build executes it. Inline the calls \
+                     or make the macro invocation part of the counted path:\n{body}"
+                );
+            }
+        }
+    }
+}
+
+/// The scanners identify a function or `Drop` impl by a literal marker and read the first
+/// match. A decoy with the same marker earlier in the file can therefore satisfy every
+/// count while the real function's wipe is deleted. Each counted definition must be
+/// unique in the non-test source.
+#[test]
+fn counted_definitions_are_unique() {
+    let code = non_test_source();
+    for marker in [
+        "fn derive_material(",
+        "fn derive_tag(",
+        "fn derive_enc(",
+        "fn zeroize_raw(",
+        "fn accept_or_reject(",
+        "impl Drop for Plaintext {",
+        "impl Drop for Key {",
+        "pub fn encrypt(",
+        "pub fn encrypt_in_place_detached(",
+        "pub fn decrypt(",
+        "pub fn decrypt_bounded(",
+        "pub fn decrypt_in_place_detached(",
+    ] {
+        assert_eq!(
+            code.matches(marker).count(),
+            1,
+            "`{marker}` has more than one definition in the non-test source; a decoy \
+             earlier in the file can satisfy the wipe counts while the real definition's \
+             wipe is removed. Keep one definition, or teach the scanner to select it."
+        );
+    }
+}
+
+/// A source file under `src/` that this scanner does not know about can hold a
+/// wipe-bearing function with no witness at all. The list is literal; adding a file must
+/// be a deliberate change to the scanner, not a silent gap.
+#[test]
+fn every_source_file_is_accounted_for() {
+    fn collect(dir: &std::path::Path, base: &std::path::Path, out: &mut Vec<String>) {
+        for entry in std::fs::read_dir(dir).expect("src/ must be readable") {
+            let path = entry.expect("src/ entry must be readable").path();
+            if path.is_dir() {
+                collect(&path, base, out);
+            } else if path.extension().is_some_and(|ext| ext == "rs") {
+                let relative = path
+                    .strip_prefix(base)
+                    .expect("walked paths must stay under src/");
+                out.push(relative.to_string_lossy().replace('\\', "/"));
+            }
+        }
+    }
+
+    const SOURCES: &[&str] = &["lib.rs", "proofs.rs", "witness.rs"];
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let mut found = Vec::new();
+    collect(&dir, &dir, &mut found);
+    found.sort();
+    let mut listed: Vec<String> = SOURCES.iter().map(|s| (*s).to_string()).collect();
+    listed.sort();
+    assert_eq!(
+        found, listed,
+        "`src/` has {found:?} but this scanner accounts for {listed:?}. A new source file \
+         (including `src/<subdir>/mod.rs`, which a non-recursive scan misses) can hold \
+         wipes or call sites that none of the guards read; add it to the scanner or \
+         explain why it holds no secret-bearing code."
     );
 }
