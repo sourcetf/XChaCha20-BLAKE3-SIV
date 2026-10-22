@@ -91,6 +91,13 @@ jobs:
       # The tools' contract: "could not run" is exit 3, never 0, and the caller that
       # invokes them reports it as a skipped stage. A gate that regresses to exit 0
       # here fails this step rather than a summary line somewhere else.
+      #
+      # `gate_selftest.sh` drives `verify.sh`, whose first stage imports the Python
+      # `blake3` module; without it verify exits 1 for a missing dependency and the
+      # contract check cannot tell that from a contract failure. Same pinned release
+      # as the differential job.
+      - name: install the blake3 module for the gate self-test
+        run: python3 -m pip install --quiet "blake3==1.0.11"
       - name: gate contract (a gate that could not run must not exit 0)
         run: ./tools/gate_selftest.sh
 
@@ -205,11 +212,11 @@ jobs:
           # deliberately literal; a new integration test must be added here, and
           # `tests/README.md` is the human index for it.
           for target in \
-            tests/construction_inventory.rs tests/counter_range.rs tests/ctgrind.rs \
-            tests/decision.rs tests/decision_scope.rs tests/differential_reference.rs \
-            tests/locked.rs tests/mac_commitment.rs tests/plaintext_wipe.rs \
-            tests/security.rs tests/threads.rs tests/timing.rs tests/ultra.rs \
-            tests/variable_latency.rs; do
+            tests/blake3_fork_equivalence.rs tests/construction_inventory.rs \
+            tests/counter_range.rs tests/ctgrind.rs tests/decision.rs \
+            tests/decision_scope.rs tests/differential_reference.rs tests/locked.rs \
+            tests/mac_commitment.rs tests/plaintext_wipe.rs tests/security.rs \
+            tests/threads.rs tests/timing.rs tests/ultra.rs tests/variable_latency.rs; do
             if [ ! -f "$target" ]; then
               echo "::error::expected test target $target is missing"
               exit 1

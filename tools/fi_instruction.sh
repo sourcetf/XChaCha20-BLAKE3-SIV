@@ -238,7 +238,7 @@ print(exes[-1] if exes else "")
 detector_sensitivity_control() {
   local dir="$WORK/sensitivity"
   mkdir -p "$dir"
-  cp -r src tests benches Cargo.toml Cargo.lock "$dir/"
+  cp -r src tests blake3 benches Cargo.toml Cargo.lock "$dir/"
   python3 - "$dir/src/lib.rs" <<'PY'
 import sys
 

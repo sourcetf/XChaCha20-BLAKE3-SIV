@@ -53,6 +53,14 @@ REAL_RUSTUP_HOME="${RUSTUP_HOME:-$HOME/.rustup}"
 REAL_HOME="$HOME"
 CARGO_BIN_DIR="$(dirname "$(command -v cargo)")"
 
+# `verify.sh` is run below under throwaway HOMEs. Python's user-site directory moves
+# with HOME, so a `blake3` module installed by CI into the real user site would vanish
+# in those subprocesses. Keep the real path on PYTHONPATH explicitly.
+REAL_PY_SITE="$(python3 -c 'import site; print(site.getusersitepackages())' 2>/dev/null || true)"
+if [ -n "$REAL_PY_SITE" ]; then
+  export PYTHONPATH="$REAL_PY_SITE${PYTHONPATH:+:$PYTHONPATH}"
+fi
+
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 

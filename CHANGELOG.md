@@ -30,12 +30,12 @@ longer wraps; reproduced as `1` instead of `1 << 63`), and D-06 (`position` satu
 D-03's narrow-argument ABI issue and D-09's manually-constructed `Platform` variants
 remain documented upstream limitations; the parent path does not reach them.
 
-`[patch.crates-io]` is workspace-local. `cargo package` verifies against the crates.io
-`blake3` (the packaged manifest does not carry the patch), so a published artifact
-would not include these fixes until the fork is published under its own
-package/version and the dependency is switched. The crate is not on crates.io; the
-README and `Cargo.toml` say so explicitly. No wire-format bytes changed: the full
-default-feature and `--all-features` suites pass.
+`[patch.crates-io]` is workspace-local and the package is `publish = false`: the
+distribution is source-only, so a GitHub source archive carries `blake3/` and no
+crates.io package can silently resolve the unpatched crate. Enabling publication
+later requires publishing the fork under its own package/version and switching the
+dependency. No wire-format bytes changed: the full default-feature and `--all-features`
+suites pass.
 
 ### The sweep's children are contained, because an exploding fault was taking the runner with it
 

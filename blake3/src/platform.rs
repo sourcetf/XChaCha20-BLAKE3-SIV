@@ -212,7 +212,10 @@ impl Platform {
         flags_end: u8,
         out: &mut [u8],
     ) {
-        debug_assert_eq!(out.len(), inputs.len() * OUT_LEN);
+        debug_assert!(
+            out.len() >= inputs.len() * OUT_LEN,
+            "hash_many needs at least one 32-byte output per input"
+        );
         // The C/assembly kernels process a full SIMD group and then a 4/2/1-wide
         // tail. Their 2/4-wide loads read from `inputs[0]` at +16/+32/+48 bytes,
         // which is past the end of a 64-byte block at a page boundary. This was

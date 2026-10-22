@@ -394,8 +394,8 @@ if [ "$SELFTEST" -eq 1 ]; then
   WORK="$(mktemp -d)"
   trap 'rm -rf "$WORK"' EXIT
   mkdir -p "$WORK/tree"
-  cp -r src tests tools Cargo.toml Cargo.lock benches "$WORK/tree/" 2>/dev/null \
-    || cp -r src tests tools Cargo.toml Cargo.lock "$WORK/tree/"
+  cp -r src tests tools blake3 Cargo.toml Cargo.lock benches "$WORK/tree/" 2>/dev/null \
+    || cp -r src tests tools blake3 Cargo.toml Cargo.lock "$WORK/tree/"
 
   if ! python3 - "$WORK/tree" <<'PLANT'
 import sys
