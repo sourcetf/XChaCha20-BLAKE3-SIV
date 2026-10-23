@@ -427,13 +427,23 @@ fn fuzz_decrypt_never_panics_and_never_returns_plaintext() {
         // only when the round left the input intact, and then the buffer must be the
         // plaintext that was encrypted; a failure must zero the caller's buffer.
         macro_rules! in_place_contract {
-            ($buf_src:expr, $aad:expr, $tag:expr) => {{
+            ($buf_src:expr, $aad:expr, $tag:expr, $must_reject:expr) => {{
                 let mut buf = $buf_src.clone();
                 match decrypt_in_place_detached(&key, &nonce, $aad, &mut buf, &$tag) {
-                    Ok(()) => assert_eq!(
-                        buf, ct,
-                        "round {round}: the in-place path accepted but wrote different bytes"
-                    ),
+                    Ok(()) => {
+                        // `$must_reject` is true when this round corrupted the ciphertext,
+                        // the AAD or the tag. Asserting only `buf == ct` let a tampered
+                        // tag through: an implementation that ignored one tag bit would
+                        // return the correct plaintext and this arm would call it a pass.
+                        assert!(
+                            !$must_reject,
+                            "round {round}: the in-place path accepted a corrupted input"
+                        );
+                        assert_eq!(
+                            buf, ct,
+                            "round {round}: the in-place path accepted but wrote different bytes"
+                        );
+                    }
                     Err(e) => {
                         assert_eq!(e, Error::AuthenticationFailed);
                         assert!(
@@ -451,6 +461,7 @@ fn fuzz_decrypt_never_panics_and_never_returns_plaintext() {
         if round % 2 == 0 {
             let (real_ct, real_tag) = encrypt(&key, &nonce, &aad, &ct).unwrap();
             let mut t = real_tag;
+            let mut tag_tampered = false;
             if round % 4 == 0 {
                 // Corrupt exactly one thing.
                 match rng.below(3) {
@@ -459,12 +470,13 @@ fn fuzz_decrypt_never_panics_and_never_returns_plaintext() {
                         let mut c = real_ct.clone();
                         c[i] ^= 1;
                         assert!(decrypt(&key, &nonce, &aad, &c, &t).is_err());
-                        in_place_contract!(c, &aad, t);
+                        in_place_contract!(c, &aad, t, true);
                         continue;
                     }
                     1 => {
                         let i = rng.below(TAG_LEN);
                         t[i] ^= 1;
+                        tag_tampered = true;
                     }
                     _ => {
                         if !aad.is_empty() {
@@ -472,7 +484,7 @@ fn fuzz_decrypt_never_panics_and_never_returns_plaintext() {
                             let mut a = aad.clone();
                             a[i] ^= 1;
                             assert!(decrypt(&key, &nonce, &a, &real_ct, &t).is_err());
-                            in_place_contract!(real_ct, &a, t);
+                            in_place_contract!(real_ct, &a, t, true);
                             continue;
                         }
                     }
@@ -484,16 +496,25 @@ fn fuzz_decrypt_never_panics_and_never_returns_plaintext() {
             // legitimate only when this round left the input intact (the empty-AAD
             // branch above can), and then it has to be exactly the plaintext that was
             // encrypted -- a wrong plaintext under a matching tag would be a far
-            // worse finding than a panic.
+            // worse finding than a panic. When the tag was the thing corrupted, `Ok` is
+            // never legitimate: without this arm the test accepted a correct-looking
+            // plaintext under a flipped tag bit, so an implementation that ignored that
+            // bit passed.
             match decrypt(&key, &nonce, &aad, &real_ct, &t) {
-                Ok(pt) => assert_eq!(
-                    pt.as_slice(),
-                    ct.as_slice(),
-                    "round {round}: decrypt returned a plaintext that was never encrypted"
-                ),
+                Ok(pt) => {
+                    assert!(
+                        !tag_tampered,
+                        "round {round}: decrypt accepted a tag with one flipped bit"
+                    );
+                    assert_eq!(
+                        pt.as_slice(),
+                        ct.as_slice(),
+                        "round {round}: decrypt returned a plaintext that was never encrypted"
+                    );
+                }
                 Err(e) => assert_eq!(e, Error::AuthenticationFailed),
             }
-            in_place_contract!(real_ct, &aad, t);
+            in_place_contract!(real_ct, &aad, t, tag_tampered);
             continue;
         }
 
@@ -523,8 +544,20 @@ fn fuzz_decrypt_never_panics_and_never_returns_plaintext() {
             }
         }
 
+        // The in-place encrypt must produce the same wire output as the allocating
+        // one; `let _ = ...` only checked that it did not panic, so a wrong returned
+        // tag or an unmodified buffer went unnoticed here.
+        let (expected_ct, expected_tag) = encrypt(&key, &nonce, &aad, &ct).unwrap();
         let mut buf2 = ct.clone();
-        let _ = encrypt_in_place_detached(&key, &nonce, &aad, &mut buf2);
+        let tag2 = encrypt_in_place_detached(&key, &nonce, &aad, &mut buf2).unwrap();
+        assert_eq!(
+            buf2, expected_ct,
+            "round {round}: in-place encryption wrote different ciphertext"
+        );
+        assert_eq!(
+            tag2, expected_tag,
+            "round {round}: in-place encryption returned a different tag"
+        );
     }
 }
 // ── KAT regression lock ───────────────────────────────────────────────

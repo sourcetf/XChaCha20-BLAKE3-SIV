@@ -1417,7 +1417,8 @@ weight of the claims is visible:
 3. **A collision attack on BLAKE3's 256-bit chaining value cheaper than `2^128`, that can be
    mounted with the final block held fixed.** Kills the collision bound, and with it the
    nonce-reuse story (the two-time pad stops being negligible) — this is the most attractive
-   target for a practical attacker, because `2^128` is the smallest number in §4.5's table.
+   target for a practical attacker, because `2^128` is the smallest *classical* number in
+   §4.5's table (the quantum BHT row is smaller but model-dependent).
 4. **Anything that makes the target preimages cheap** — structure in BLAKE3's key-versus-message
    separation that a 520-bit tag *target* search could exploit, or the same in HChaCha20 for the
    256-bit `subkey`, which is what actually sets the key-commitment bound (§4.5). This is the

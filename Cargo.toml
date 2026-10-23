@@ -14,9 +14,9 @@ categories = ["cryptography", "no-std"]
 # tracked, non-dotfile file: the CI workflows, `tools/`, `tests/`, and (worst)
 # `mutants.out/`, whose logs carry developer host paths -- 102 files, and the count is
 # written as the arithmetic so it stays checkable rather than decaying: tracked files
-# (`git ls-files | wc -l` is 111 today) minus the 7 dotpaths and the nested `fuzz/`
+# (`git ls-files | wc -l` is 112 today) minus the 8 dotpaths and the nested `fuzz/`
 # package's 4 files, plus cargo's own two (`Cargo.toml.orig`, `.cargo_vcs_info.json`),
-# i.e. 111 - 7 - 4 + 2 = 102, most of them not part of the library a consumer builds.
+# i.e. 112 - 8 - 4 + 2 = 102, most of them not part of the library a consumer builds.
 # The allow list below is the crate plus the documents `README.md` links to; run
 # `cargo package --list` to verify it stays that way.
 #
@@ -103,6 +103,15 @@ getrandom = { version = "0.4", optional = true, default-features = false }
 # Either way the wire format is identical -- the KATs, the differential fixture
 # and `test_all_accelerated_paths_agree_on_a_boundary_corpus` pin the bytes, and
 # they run against both backends.
+#
+# **`blake3::platform` is hazmat; do not call it directly.** The vendored 1.8.7
+# fork (see `[patch.crates-io]` below) fixes the unsound `hash_many` tails, the
+# multi-block `xof_many` ABI, and the short-output `xof_many` write (a safe call
+# with `out.len()` in 1..=63 wrote a whole 64-byte block in release, up to 63 bytes
+# past the slice); the published 1.8.7 does not. This crate still does not call it:
+# it only uses `OutputReader::fill`, which passes `full_blocks * 64` and handles the
+# remainder through `fill_one_block` (confirmed with canaried slices of every length
+# 0..=130).
 blake3 = { version = "1.8", default-features = false, features = ["zeroize"] }
 
 # `zeroize` exists so BLAKE3's *internal* state can be wiped. The MAC key lives

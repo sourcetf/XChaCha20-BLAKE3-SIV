@@ -15,8 +15,12 @@ Then it applies the tool's own cross-configuration reading:
 
   * no accepting fault inside the decision in `hardened` or `ultra` -- the builds that must
     not accept a forged tag at all;
-  * each layer at least as good as the one below it (`ultra` <= `hardened` <= plain) in the
-    total accepting faults, which is the ordering the tool prints.
+  * the `bits` model's opt-out control is still breakable inside the decision, so the
+    sweep is reaching the decision at all.
+
+The per-configuration `accepting_total` values are printed but deliberately not compared:
+the three builds contain different code, and the totals are dominated by decoder
+desynchronisation in shared code, not by the layers. The decision-scoped count gates.
 
 Exit codes follow the repository's convention: 0 = the verdict holds, 1 = it does not (or
 the reports are not a complete sweep), 3 = the reports could not be read at all.
@@ -51,26 +55,38 @@ def main(argv=None):
     reports = [load(p) for p in args.reports]
     problems = []
 
-    # Completeness first. A missing shard is a failure, not less work.
-    ids = sorted(r.get("shard") for r in reports)
+    # Completeness first. A missing shard is a failure, not less work. The id is type-
+    # checked before sorting: a string or null used to raise `TypeError: '<' not supported
+    # between instances of 'str' and 'int'`, replacing the diagnosis with a traceback.
+    ids = []
+    for r in reports:
+        shard = r.get("shard")
+        if isinstance(shard, int) and not isinstance(shard, bool):
+            ids.append(shard)
+        else:
+            problems.append(
+                f"a report has shard={shard!r}, which is not an integer shard id"
+            )
+    ids.sort()
     if ids != list(range(1, args.shards + 1)):
         problems.append(
             f"expected one report per shard for shards 1..{args.shards}, got {ids}"
             + (" (a shard that did not run must fail the verdict, not shrink the sweep)" if len(ids) != args.shards else "")
         )
 
-    labels = sorted(reports[0].get("configs", {})) if reports else []
-    # Every configuration is part of the verdict. A report set that omits one used to skip
-    # that configuration's gate entirely -- one config, or six empty `"configs": {}`
-    # objects, printed success. The tool emits exactly these three labels.
-    if labels != sorted(ORDER):
-        problems.append(
-            f"expected configurations {sorted(ORDER)}, got {labels}; a report that omits a "
-            "configuration skips that layer's gate rather than proving it"
-        )
+    # The configuration set is fixed, not whatever the first report happens to carry.
+    # Taking it from `reports[0]` let a report set with `"configs": {}` (or only the
+    # default build) skip every loop below and print the success message with rc 0 -- a
+    # sweep with no measurements read as a verified one. The tool emits exactly these
+    # three labels, and every report must carry all of them.
+    labels = sorted(ORDER)
     for r in reports:
-        if sorted(r.get("configs", {})) != labels:
-            problems.append(f"shard {r.get('shard')} reports a different configuration set")
+        got = sorted(r.get("configs", {}))
+        if got != labels:
+            problems.append(
+                f"shard {r.get('shard')} reports configurations {got}; the sweep must "
+                f"carry all of {labels}"
+            )
         if r.get("model") != args.model:
             problems.append(
                 f"shard {r.get('shard')} ran the {r.get('model')} model, not {args.model}"
@@ -107,7 +123,17 @@ def main(argv=None):
         # reports the earlier gate accepted.
         for label, cfg in r.get("configs", {}).items():
             digest = cfg.get("offsets_sha256")
-            if not isinstance(digest, str) or re.fullmatch(r"[0-9a-f]{64}", digest) is None:
+            scanned = cfg.get("scanned")
+            # A slice can legitimately be empty when `--quick` narrows the region and
+            # there are more shards than bytes; the tool then writes a null digest. That
+            # is acceptable only when the report itself says it scanned nothing.
+            empty_slice = (
+                isinstance(scanned, int)
+                and not isinstance(scanned, bool)
+                and scanned == 0
+            )
+            valid_digest = isinstance(digest, str) and re.fullmatch(r"[0-9a-f]{64}", digest) is not None
+            if not valid_digest and not (empty_slice and digest is None):
                 problems.append(
                     f"shard {r.get('shard')} ({label}) carries no valid offsets_sha256: the "
                     "report is not bound to the bytes it swept, so its numbers are unverifiable"
@@ -163,6 +189,14 @@ def main(argv=None):
             )
             continue
         total = totals.pop()
+        if not isinstance(total, int) or isinstance(total, bool) or total <= 0:
+            # A shard refuses to produce a report for an empty covered range, so zero here
+            # means the report was not produced by the tool (or the region vanished
+            # between runs); zero bytes swept must never read as a pass.
+            problems.append(
+                f"{label}: the region's size is {total!r}, not a positive count"
+            )
+            continue
         scanned = sum(r["configs"][label].get("scanned", 0) for r in reports)
         if scanned != total:
             hint = (

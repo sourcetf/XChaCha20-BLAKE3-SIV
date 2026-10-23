@@ -939,7 +939,11 @@ fn locked_key_is_actually_locked() {
         }
     };
     let held = LockedKey::locked_bytes().expect("VmLck is readable on Linux");
-    unlock_range(key.as_bytes().as_ptr(), 32);
+    // SAFETY: this probe deliberately violates the API contract to measure the live
+    // pages: it unlocks the range the key occupies. The key is not used afterwards for
+    // any cryptographic operation, and the `LockedKey` is dropped at the end of the
+    // test (where the second unlock is a no-op).
+    unsafe { unlock_range(key.as_bytes().as_ptr(), 32) };
     let after_unlocking_live = LockedKey::locked_bytes().expect("VmLck is readable on Linux");
     assert!(
         after_unlocking_live < held,

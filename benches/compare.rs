@@ -57,6 +57,18 @@ fn bench_encrypt(c: &mut Criterion) {
                 &pt[..],
                 "xchacha20-blake3-siv round trip, size {size}"
             );
+            // The arm actually timed below is the in-place one; validate that shape
+            // too, not only the allocating call above.
+            let mut buf = pt.clone();
+            let in_place_tag = encrypt_in_place_detached(&key, &nonce24, aad, &mut buf).unwrap();
+            assert_eq!(
+                buf, ct,
+                "xchacha20-blake3-siv in-place ciphertext differs, size {size}"
+            );
+            assert_eq!(
+                in_place_tag, tag,
+                "xchacha20-blake3-siv in-place tag differs, size {size}"
+            );
             let mut buf = pt.clone();
             let tag = xcp
                 .encrypt_in_place_detached(&nonce24.into(), aad, &mut buf)
@@ -170,6 +182,15 @@ fn bench_decrypt(c: &mut Criterion) {
             "xchacha20-blake3-siv tagged decrypt, size {size}"
         );
         {
+            // The timed arm is the in-place one; validate it as well as the allocating
+            // call above.
+            let mut buf = siv_ct.clone();
+            decrypt_in_place_detached(&key, &nonce24, aad, &mut buf, &siv_tag).unwrap();
+            assert_eq!(
+                buf, pt,
+                "xchacha20-blake3-siv in-place decrypt, size {size}"
+            );
+
             let mut buf = xcp_ct.clone();
             xcp.decrypt_in_place_detached(&nonce24.into(), aad, &mut buf, &xcp_tag)
                 .unwrap();

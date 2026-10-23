@@ -69,3 +69,32 @@ fn xof_many_multiblock_matches_portable() {
         assert_eq!(got, want, "xof_many diverged at {blocks} block(s)");
     }
 }
+
+/// The safe API accepts a short output slice. The single-block AVX-512 path wrote a
+/// whole 64-byte block for a 1..=63-byte request in release (the `debug_assert` was
+/// compiled out), up to 63 bytes past the caller's slice. The fork computes the
+/// partial block through `compress_xof`; this test canaries the write and checks the
+/// prefix against the portable implementation for every length.
+#[test]
+fn xof_many_short_output_stays_in_bounds_and_matches_portable() {
+    let cv = [0x0102_0304u32; 8];
+    let block = [0x5Au8; 64];
+    let platform = Platform::detect();
+
+    for len in 1..64usize {
+        let mut backing = [0xAAu8; 64];
+        platform.xof_many(&cv, &block, 64, 9, 0x44, &mut backing[..len]);
+        assert!(
+            backing[len..].iter().all(|&b| b == 0xAA),
+            "xof_many wrote past a {len}-byte output slice"
+        );
+    }
+
+    for len in 0..=130usize {
+        let mut got = vec![0u8; len];
+        let mut want = vec![0u8; len];
+        platform.xof_many(&cv, &block, 64, 9, 0x44, &mut got);
+        Platform::portable().xof_many(&cv, &block, 64, 9, 0x44, &mut want);
+        assert_eq!(got, want, "short xof_many diverged at len={len}");
+    }
+}

@@ -246,13 +246,23 @@ echo "building a static test binary..."
 # the source unchanged cargo would call the target Fresh and hand that file back.
 # Deleting it costs one relink (measured ~5 s) and heals such a tree.
 rm -f "$DEPS_DIR"/ctgrind-*
-BIN="$(RUSTFLAGS="-C target-feature=+crt-static -C strip=none -C debuginfo=2" \
+build_log="$(mktemp)"
+if ! BIN="$(RUSTFLAGS="-C target-feature=+crt-static -C strip=none -C debuginfo=2" \
   cargo test --release --target "$TARGET" --test ctgrind --no-run --message-format=json \
-    "${CARGO_ARGS[@]+"${CARGO_ARGS[@]}"}" 2>/dev/null | cargo_ctgrind_executable)"
+    "${CARGO_ARGS[@]+"${CARGO_ARGS[@]}"}" 2>"$build_log" | cargo_ctgrind_executable)"; then
+  # Under `set -euo pipefail` the bare assignment used to exit with cargo's status
+  # inside the command substitution, so this message never printed and cargo's
+  # diagnostics went to /dev/null -- and verify.sh saw 101 rather than the tool's 1.
+  echo "could not build the ctgrind test binary:" >&2
+  tail -20 "$build_log" >&2
+  exit 1
+fi
 [ -n "$BIN" ] || {
   echo "could not find the ctgrind test binary: cargo reported no executable for it" >&2
+  tail -20 "$build_log" >&2
   exit 1
 }
+rm -f "$build_log"
 echo "binary: $BIN"
 
 # ── 1. The negative control must be detected ───────────────────────────
@@ -352,7 +362,10 @@ fi
 # to report either -- so the count is the only thing that says the check ran at
 # all. (Measured: renaming one test in tests/ctgrind.rs turned this whole stage
 # into a silent no-op.)
-if ! printf '%s\n' "$out" | grep -qE '^test result: ok\. 4 passed'; then
+# Here-string, not `printf | grep -q`: under `pipefail`, grep exiting at its first
+# match can give printf SIGPIPE (141), which reads as "the four tests did not run"
+# when they did.
+if ! grep -qE '^test result: ok\. 4 passed' <<<"$out"; then
   echo "FAIL: the four named constant-time tests did not all run -- a renamed or" >&2
   echo "      moved test makes this check pass while testing nothing. Output was:" >&2
   printf '%s\n' "$out" | tail -25 >&2
@@ -394,8 +407,8 @@ if [ "$SELFTEST" -eq 1 ]; then
   WORK="$(mktemp -d)"
   trap 'rm -rf "$WORK"' EXIT
   mkdir -p "$WORK/tree"
-  cp -r src tests tools Cargo.toml Cargo.lock benches "$WORK/tree/" 2>/dev/null \
-    || cp -r src tests tools Cargo.toml Cargo.lock "$WORK/tree/"
+  cp -r src tests tools blake3 Cargo.toml Cargo.lock benches "$WORK/tree/" 2>/dev/null \
+    || cp -r src tests tools blake3 Cargo.toml Cargo.lock "$WORK/tree/"
 
   if ! python3 - "$WORK/tree" <<'PLANT'
 import sys

@@ -1023,7 +1023,11 @@ jobs:
               echo "## Features resolved in this build"
               echo
               echo '```'
-              cargo tree --edges normal $flags | head -20
+              # `CARGO_TERM_COLOR=never`: `CARGO_TERM_COLOR=always` is set for the
+              # workflow, and raw ANSI escapes in a released README are not markdown.
+              # `sed -n '1,20p'` reads the whole pipe (unlike `head`, which can give cargo
+              # SIGPIPE under `pipefail`) and still caps the quote at 20 lines.
+              CARGO_TERM_COLOR=never cargo tree --edges normal $flags | sed -n '1,20p'
               echo '```'
               echo
               echo "See \`CONFIGURATIONS.md\` (also attached) for what each configuration adds and"

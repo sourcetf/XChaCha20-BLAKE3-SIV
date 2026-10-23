@@ -823,7 +823,12 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     needs: [wide-sweep, wide-sweep-bits]
-    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    # `!cancelled()` is required: without a status-check function, GitHub ANDs an
+    # implicit `success()` into any `if` on a job with `needs`, so a failed shard would
+    # skip the verdict entirely -- even though each shard uploads its report with
+    # `if: always()` precisely so the verdict can name the missing slice. The verdict
+    # then fails on its own (the reports are incomplete); it does not need to fail here.
+    if: (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && !cancelled()
     permissions:
       contents: read
       actions: read  # `gh run download` reads this run's artifacts

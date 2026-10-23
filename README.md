@@ -377,10 +377,10 @@ not cryptographic hardness.
 **The reduction, written out.** [SECURITY-ANALYSIS.md](SECURITY-ANALYSIS.md) is the
 mathematical treatment: the construction as a tuple of functions, each assumption as an
 explicit game, the SIV/DAE theorem with its five-hop reduction and concrete bound
-(`q²/2^257 + q·2^-256` plus the PRF advantages — `3·Adv^{A3}` for the two-level tag
-and the key derivation, with **no** `L3.6` term since `v0.3` removed it; the `q·2^-256` term is
-the offline key-guess route to a forgery, which dominates the `q·2^-520` fresh-tag guess, so
-that smaller term is not shown), every
+(`q²/2^257 + q·2^-256 + q·2^-520` plus the PRF advantages — `2·Adv^{A1} + Adv^{A2} + 3·Adv^{A3}`
+(ChaCha20, HChaCha20, and the two-level keyed BLAKE3), with **no** `L3.6` term since `v0.3`
+removed it; the `q·2^-256` term is
+the offline key-guess route to a forgery, which dominates the `q·2^-520` fresh-tag guess), every
 pair of uses of one
 primitive enumerated with what separates it, and a falsification table — what would refute
 each claim, which refutations have been attempted, and which are out of reach of any test.
@@ -602,7 +602,7 @@ second implementation on ("What the witness is" prices that loss).
 | `hardened` (moved here from `dual-mac`) | a fault inside the shared constant-time comparison (a shortened loop, a corrupted bound): the second gate `AND`s a differently *written* comparison (an 8-byte fold into a `u64`, rather than `subtle`'s per-byte loop), so one fault reaches only one of the two shapes and a forgery needs two faults | **+1.4 ns** per decryption, measured (0.1% at 64 B). It was `dual-mac`-only until the two numbers were put side by side: this cost against a hand-modelled change from "forgery accepted after 2,573 attempts" to "no forgery in 2,000,000" |
 | `dual-mac` | the tag being pinned to a constant or to the received tag — the one model the two gates fail *together* on | +30% at 64 B, +40% at 1 KiB, +24% at 1 MiB on decryption (a +21–40% range); +6–25% on a round trip (the two ranges `Cargo.toml` and the changelog state). An independent build measured the same layer higher on its own harness (1.69–1.81x at 1 KiB, and +43–44% on the *encrypt* side at 64 B, where the fixed `scrub_stack` cost dominates); `performance.md` says how far these ratios move between builds |
 | `dual-mac` | key residue surviving in stack frames a wipe does not reach — the inner key `k_in`, left by the dependency's by-value temporaries rather than a frame this crate can name, plus the `blake3` dependency's XOF output (a run of `enc_key ‖ enc_nonce`) and, under `pure`, the outer key `k_out` (4,096-byte scan; the list, with the measured lengths, is in "What this crate cannot fix for you"): `scrub_stack()` overwrites the 16 KiB below the entry point after the last derivation | ~16 KiB of volatile stores, ~0.5–1 µs per operation, **and a 16,408-byte frame — 32 KiB of thread stack in all**, the published budget. Measured on a thread with a 32 KiB stack: the default build still runs after 16 KiB of the stack is already consumed, this one does not survive 8 KiB. A caller that spawns threads with small stacks must size them for it — the scrub is a 16 KiB frame, so it can fault the thread it is protecting. The budget is public as `stack_requirement_bytes()`: **32 KiB** under `dual-mac` (zero elsewhere), which is that frame plus the ordinary frames around it (~10 KiB in the same measurement, which overflowed a 24,576-byte thread and fitted in 26,624) with margin, and `the_reported_stack_requirement_is_sufficient` measures that a thread given that budget plus the test's documented margin (64 KiB in release, 1 MiB in debug) survives a round trip — so what it pins is that the constant does not understate by more than the margin, not that it is exact |
-| `witness` (in `ultra` only) | a fault aimed at the **derivation arithmetic both tag computations share** — `derive_tag`, the keyed BLAKE3 under it, and the SIMD kernels: the one model `dual-mac` alone cannot close, and where every accepting fault the sweep finds in the `hardened` build sits | decryption costs **2.7x at 64 B, 4.0x at 1 KiB, 11.0x at 64 KiB, 12.4x at 1 MiB** against the default configuration, and the round trip 2.2x/2.8x/6.1x/6.5x in place or 2.5x/3.3x/6.6x/7.1x allocating (re-measured after the witness's residue-wipe pass) (measured; the four tables are in [`performance.md`](performance.md), and that file's "what the `ultra` layer costs" table is the one to read for this row). It is a *scalar* implementation, so its cost is per byte, and on the encrypt side it is present **only on the allocating `encrypt`** — see "What the witness is" for why the in-place path does not carry it. It does not make the *totals* in the fault table zero — it removes accepting faults from the decision and from the shared derivation, and the `ultra` build has a handful elsewhere (§§) |
+| `witness` (in `ultra` only) | a fault aimed at the **derivation arithmetic both tag computations share** — `derive_tag`, the keyed BLAKE3 under it, and the SIMD kernels: the one model `dual-mac` alone cannot close, and where every accepting fault the sweep finds in the `hardened` build sits | the **`ultra` mode it is part of** costs **2.7x at 64 B, 4.0x at 1 KiB, 11.0x at 64 KiB, 12.4x at 1 MiB** against the default configuration, and the round trip 2.2x/2.8x/6.1x/6.5x in place or 2.5x/3.3x/6.6x/7.1x allocating (re-measured after the witness's residue-wipe pass) (measured; the four tables are in [`performance.md`](performance.md), and that file's "what the `ultra` layer costs" table is the one to read for this row). Those figures are the whole bundle, not this row alone: measured against `ultra` minus the witness (§), the **witness layer itself** is 1.45x at 64 B, 2.14x at 1 KiB, 6.3x at 64 KiB and 9.2x at 1 MiB on decryption (30.1→20.8, 259→121, 1462→232, 1767→192 MiB/s). It is a *scalar* implementation, so its cost is per byte, and on the encrypt side it is present **only on the allocating `encrypt`** — see "What the witness is" for why the in-place path does not carry it. It does not make the *totals* in the fault table zero — it removes accepting faults from the decision and from the shared derivation, and the `ultra` build has a handful elsewhere (§§) |
 | `locked` | key pages readable out of **swap** or a **core dump** | ~7 µs once per key (`mlock`+`munlock`), not per message. The key is heap-allocated so its address is stable: `mlock` is address-based, and a key returned by value moves after being locked, which left this layer protecting a dead stack slot |
 | `locked` | a **hardware fault or bit flip in the key page** turning into a silent wrong key | `+42 ns` per use, measured: an 8-byte BLAKE3 tag of the key is stored beside it and checked (constant time) on every `as_bytes()`, so a corrupted page panics at the first use instead of decrypting with a key that is not the caller's. It does not detect a fault that rewrites the tag too, nor one outside the key-and-tag region (the rest of the page is never read) |
 | `locked` | a **debugger** attaching to the process, or another process reading its memory | two `prctl` calls in one opt-in function — `PR_GET_DUMPABLE` to read the previous state it returns, then `PR_SET_DUMPABLE` to clear it — via `locked::deny_debugging()`, after which the kernel refuses `PTRACE_MODE_ATTACH` (and `/proc/<pid>/mem`) even to the same user without `CAP_SYS_PTRACE`. Not automatic, not even under `ultra`, because it is *process* policy — it also disables core dumps and breaks crash reporters, which is the application's call rather than a library's |
@@ -1032,12 +1032,12 @@ works unprivileged, and the emulator is extracted into `~/.local/bin`.
   AddressSanitizer.
 - **Cross-architecture execution** — four configurations are *executed* under
   qemu, not merely type-checked. On x86 the aarch64 (NEON) backend is compiled
-  out entirely, so `qemu-aarch64` is the only *qemu* execution of it (the Miri
-  cross-interpretation below is the other); `qemu-i386`
-  is the only place the 32-bit code paths run, where `usize` is 32 bits and every
-  length calculation takes a different route; `qemu-ppc64` is the only place
-  the code runs **compiled** on a **big-endian** machine (Miri's s390x pass is
-  the interpreted one), where the `from_le_bytes`/
+  out entirely, so `qemu-aarch64` is the only *per-push* execution of it (the
+  scheduled Deep checks also run an `arm64` job natively on `ubuntu-24.04-arm`);
+  `qemu-i386` is the only place the 32-bit code paths run, where `usize` is 32 bits
+  and every length calculation takes a different route; `qemu-ppc64` is the only
+  place the code is *compiled and executed* on a **big-endian** machine (Miri also
+  interprets the s390x build), where the `from_le_bytes`/
   `to_le_bytes` conversions are no longer identity functions; and `qemu-riscv64`
   is a second 64-bit non-x86 target, running the scalar-only configuration.
   (`qemu-riscv64`'s link needs its own recipe — a self-contained musl link with
@@ -1052,14 +1052,16 @@ works unprivileged, and the emulator is extracted into `~/.local/bin`.
   which is the byte-order sensitive one).
 - **Kani** — bounded model checking of the construction shape: that the domain,
   key and both lengths reach the hash in the layout the spec fixes for the
-  three-part inner shape; that a key change moves *some* output byte (the
-  key-change harness is one-sided, so no harness checks all 65); that every AAD
-  and message byte reaches the tag; and that `derive_enc` consumes all 65 tag
-  bytes (so the ciphertext commits to all 520 bits). Two boundaries: the
-  **nonce** is not *varied* by any symbolic harness; it is pinned instead by the
-  concrete comparison in `tag_matches_the_model_on_a_concrete_input`, which
-  rebuilds the head with the nonce in it and compares all 65 tag bytes, so a
-  regression that dropped the nonce from the head fails there (and by
+  three-part inner shape; that a key change moves *some* output byte (that
+  harness is one-sided; the concrete `tag_matches_the_model_with_*` comparisons
+  check all 65); that every AAD and message byte reaches the tag; and that
+  `derive_enc` consumes all 65 tag bytes (so the ciphertext commits to all 520
+  bits), including the byte-order case the perturbation harness cannot see. Two
+  boundaries: the **nonce** is symbolic but not read back by the stub, so its
+  *value* is not asserted by a symbolic harness; it is pinned instead by the
+  concrete `tag_matches_the_model_with_*` comparisons, which rebuild the head with
+  the nonce in it and compare all 65 tag bytes, so a regression that dropped the
+  nonce from the head fails there (and by
   `test_tag_matches_blake3_over_the_documented_input` on the same input); and the
   contiguous one-part hash shape (2 KiB–64 KiB) is reached by no harness (its
   stub assertions are documentation, and the shape equivalence is pinned by

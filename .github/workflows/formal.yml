@@ -148,10 +148,12 @@ jobs:
         run: |
           set -euo pipefail
 
-          # Every harness name is passed explicitly, and Kani errors with
-          # "Failed to match the following harness(es)" if a name does not
-          # exist. So a typo or a renamed harness fails loudly here rather than
-          # quietly reducing what was proven.
+          # Every harness name is passed explicitly, but Kani does not fail when
+          # *one of several* --harness filters matches nothing: with a valid and
+          # a bogus name it exits 0 having verified the valid one (measured on
+          # Kani 0.68.0, this workflow's pin). A renamed or cfg-disabled harness
+          # would therefore shrink the shard silently. The summary below is
+          # checked against the number of names requested instead.
           # `-j`: Kani's default is one harness at a time, which leaves the
           # runner's cores idle. The harnesses in a shard are independent, and
           # the per-shard job count is in tools/kani_shards.py along with the
@@ -174,4 +176,37 @@ jobs:
           # `--features pure`: keep the proofs on BLAKE3's portable backend, the
           # configuration they were developed against (Kani never reaches BLAKE3
           # -- every harness stubs the one seam -- but it does build it).
-          cargo kani "${args[@]}"
+          log="$(mktemp)"
+          trap 'rm -f "$log"' EXIT
+          set +e
+          cargo kani "${args[@]}" 2>&1 | tee "$log"
+          rc=${PIPESTATUS[0]}
+          set -e
+          if [ "$rc" -ne 0 ]; then
+            exit "$rc"
+          fi
+
+          # Kani reports its own count: "Complete - N successfully verified
+          # harnesses, F failures, T total." T must equal the number of names
+          # passed above, or a name that matched nothing reduced the shard while
+          # the job stayed green.
+          summary="$(grep -E 'Complete - [0-9]+ successfully verified harnesses, [0-9]+ failures, [0-9]+ total' "$log" | tail -n 1 || true)"
+          if [ -z "$summary" ]; then
+            echo "FAIL: Kani printed no 'Complete - ...' summary, so the number of" >&2
+            echo "      harnesses actually verified cannot be checked." >&2
+            exit 1
+          fi
+          counts="$(sed -nE 's/.*Complete - ([0-9]+) successfully verified harnesses, ([0-9]+) failures, ([0-9]+) total.*/\1 \2 \3/p' <<<"$summary")"
+          if [ -z "$counts" ]; then
+            echo "FAIL: could not parse Kani's summary: $summary" >&2
+            exit 1
+          fi
+          read -r verified failed total <<<"$counts"
+          if [ "$failed" -ne 0 ] || [ "$total" -ne "$n" ]; then
+            echo "FAIL: this shard requested $n harness(es) and Kani reports" >&2
+            echo "      $verified verified, $failed failed, $total total. A name that" >&2
+            echo "      matched no harness (renamed, cfg-disabled, commented out) is" >&2
+            echo "      silently dropped by Kani when another name matches." >&2
+            exit 1
+          fi
+          echo "Kani verified all $verified requested harness(es)."

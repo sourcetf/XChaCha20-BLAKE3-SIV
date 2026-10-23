@@ -94,10 +94,19 @@ def vectors(count, seed):
 
 
 def example_binary():
-    """Path `cargo build` writes the example to, honouring CARGO_TARGET_DIR."""
+    """Path `cargo build` writes the example to, honouring the target knobs.
+
+    `CARGO_BUILD_TARGET` nests the artifacts one level deeper
+    (`target/<triple>/release/...`); without it this function looks in
+    `target/release/...`, finds either nothing (traceback, exit 1 instead of the
+    documented exit 3) or a stale binary from an earlier non-triple build.
+    """
     target = os.environ.get("CARGO_TARGET_DIR") or os.path.join(ROOT, "target")
     if not os.path.isabs(target):
         target = os.path.join(ROOT, target)
+    triple = os.environ.get("CARGO_BUILD_TARGET")
+    if triple:
+        target = os.path.join(target, triple)
     return os.path.join(target, "release", "examples", "xsiv_stdin")
 
 
@@ -122,13 +131,19 @@ def run_crate(pairs, features):
         )
         for key, nonce, aad, msg in pairs
     ]
-    proc = subprocess.run(
-        [binary],
-        cwd=ROOT,
-        input="\n".join(lines) + "\n",
-        capture_output=True,
-        text=True,
-    )
+    try:
+        proc = subprocess.run(
+            [binary],
+            cwd=ROOT,
+            input="\n".join(lines) + "\n",
+            capture_output=True,
+            text=True,
+        )
+    except OSError as exc:
+        # Could not execute the built path (e.g. a target-directory mismatch). That
+        # is the tool failing to run, not a differential mismatch: exit 3.
+        print(f"could not run: could not execute {binary}: {exc}", file=sys.stderr)
+        sys.exit(3)
     if proc.returncode != 0:
         # `cargo run` used to collapse this into "could not run" (exit 3), which verify.sh
         # turns into a skip -- so a panic on some input, a real defect, was reported as a

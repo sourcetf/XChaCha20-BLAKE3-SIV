@@ -84,6 +84,11 @@ xchacha20-blake3-siv = { path = "$ROOT", features = ["locked"] }
 # run the blake3-only attribution control with the same wipe discipline.
 blake3 = { version = "1.8", default-features = false, features = ["zeroize"] }
 zeroize = "1"
+# The parent reaches the patched 1.8.7 through a path patch; a standalone manifest
+# does not inherit it, so without this the tool would measure the crates.io release
+# (and its integrity-tag control would come from a different BLAKE3 build).
+[patch.crates-io]
+blake3 = { path = "$ROOT/blake3" }
 [profile.release]
 opt-level = 3
 lto = true
@@ -592,8 +597,14 @@ cd "$WORK"
 # before -- so a build failure (cargo exits 101) was reported as "residue changed", which
 # is a measurement claim about a run that never happened.
 rc=0
+# `--offline`: verify.sh --tools runs after the crate has been built, so its
+# dependencies are already in the local cargo cache. Without the flag cargo updates
+# the registry index first and the measurement fails on a network-less host with
+# rc=1 -- a "residue changed" reading for a build that never ran. (Measured by the
+# audit that reported this: rc=1, and the same run rc=0 under
+# CARGO_NET_OFFLINE=true.) A direct first-time run needs `cargo fetch` once.
 # shellcheck disable=SC2086
-cargo run --release --quiet $FEATURES || rc=$?
+cargo run --release --quiet --offline $FEATURES || rc=$?
 if [ "$rc" -ne 0 ] && [ "$rc" -ne 1 ]; then
   echo "SKIPPED: the measurement could not run (cargo exited $rc; see above)" >&2
   exit 3

@@ -44,8 +44,8 @@
 //!    error rather than a genuine counterexample. Harnesses therefore compare
 //!    scalars or short fields instead of whole slices.
 //!
-//! Ten of the thirteen harnesses carry an explicit `#[kani::unwind]`; the other
-//! three contain no loops.  The bounds are deliberately generous, and the
+//! Fifteen of the seventeen harnesses carry an explicit `#[kani::unwind]`; the
+//! other two contain no loops.  The bounds are deliberately generous, and the
 //! unwinding assertions they turn on are what make a bound that is ever too low
 //! fail the harness rather than silently truncate the loop it guards.
 //!
@@ -72,7 +72,7 @@
 //!   `tests/differential_reference.rs`), and
 //! * the avalanche / nonce-misuse / key-commitment tests in `lib.rs`.
 //!
-//! # Two limits of this suite, so a green run is not over-read
+//! # Four limits of this suite, so a green run is not over-read
 //!
 //! 1. **The MAC is stubbed in every harness that reaches it.** Kani cannot run
 //!    the real BLAKE3 — its CPU-feature detection lowers to inline asm, which
@@ -83,15 +83,31 @@
 //!    on reading the function and on the release disassembly showing both calls
 //!    emitted, not on a proof.
 //! 2. **The model bounds the assertion strength.** It folds each input byte into
-//!    a positional accumulator, and a *symbolic* harness requiring *every* output
+//!    a position-sensitive accumulator (see `fold_byte`), and a *symbolic* harness
+//!    requiring *every* output
 //!    byte to move when a whole field changes could not be unrolled in reasonable
 //!    time (measured: over 18 minutes for one harness). The symbolic harnesses
 //!    here therefore state one-sided properties; full-width coverage comes from
-//!    the concrete comparison in `tag_matches_the_model_on_a_concrete_input` (all
-//!    65 bytes, one input), and from the KATs and
+//!    the concrete comparison in `tag_matches_the_model_with_*` (all
+//!    65 bytes, for each of the four empty/non-empty AAD/message shapes), and
+//!    from the KATs and
 //!    `test_tag_matches_blake3_over_the_documented_input` in `lib.rs`, which
 //!    compares all 65 tag bytes against an independently assembled input with the
-//!    real BLAKE3.
+//!    real BLAKE3. The model is *not* an anchor to BLAKE3: a change made in both
+//!    `model_blake3_keyed_multi` and the implementation is invisible to every
+//!    harness here. That is why the real-BLAKE3 KAT, not this suite, is what pins
+//!    the primitive's output.
+//! 3. **`src/witness.rs` has no harness.** Kani runs without `ultra`, and that
+//!    module is the `ultra` build's independent second implementation. Its
+//!    conformance is covered by `tests/ultra.rs`, the differential sweeps in
+//!    `lib.rs`'s tests and the source-shape counts — not by a proof. A harness here
+//!    would also be the wrong shape: the module's own BLAKE3 is a second
+//!    implementation whose correctness question is differential, not a bounded-model
+//!    property.
+//! 4. **The zeroization stubs mean Kani does not prove the wipes.** Most harnesses
+//!    replace `zeroize_array` with a no-op so a functional property does not pay for
+//!    volatile stores it never reads. Deleting a production wipe is caught by
+//!    `tests/security.rs`'s exact source-shape counts, not here.
 
 use super::*;
 use alloc::vec;
@@ -181,8 +197,11 @@ fn zeroize_slice_clears_unaligned_window() {
 // **roughly 33-61 s depending on host and flags** — 37 s re-measured on this machine,
 // 33.2 s on the auditor's host, and 1:01 on the CI runner with `--extra-pointer-checks`
 // (the figure `tools/kani_shards.py` records for the same shard) — so none of those is
-// exact for another host. The whole shard set (13 harnesses) runs in ~875 s with the
-// slowest single harness at ~460 s (an audit measured the suite). The
+// exact for another host. The original thirteen-harness shard set ran in ~875 s with
+// the slowest single harness at ~460 s (an audit measured the suite). The suite is now
+// seventeen harnesses: the four concrete tag comparisons are one shape each in their
+// own `tag-concrete` shard (a single four-shape harness measured ~17 minutes under
+// CBMC), and the concrete `derive_enc` comparison took 46 s on the audit host. The
 // *design* is unchanged — the permutation and the wipe are still stubbed where the
 // property does not need them, because symbolic-key harnesses over the real rounds
 // still do not terminate — but the numbers above are history, not current costs.
@@ -540,7 +559,7 @@ fn max_msg_size_boundary_matches_counter_capacity() {
 // above is not read as more than it is: the nonce `N` occupies `head[8..32]` and no
 // symbolic harness varies it (the stub checks the domain prefix, the head length and
 // the two length fields).  A regression that dropped `N` from the head is caught by
-// the concrete comparison in `tag_matches_the_model_on_a_concrete_input` (which
+// the concrete comparison in `tag_matches_the_model_with_*` (which
 // reconstructs the head, nonce included) and by
 // `test_tag_matches_blake3_over_the_documented_input` with the real BLAKE3; the
 // symbolic harnesses alone would not see it.
@@ -566,7 +585,7 @@ fn max_msg_size_boundary_matches_counter_capacity() {
 //     ignores a caller-visible key.  It cannot say *which* secret reaches which
 //     internal call — the symbolic keys are interchangeable, so a swapped
 //     `k_in`/`k_out` inside `derive_tag` passes every symbolic harness (the
-//     concrete `tag_matches_the_model_on_a_concrete_input` is the one that catches
+//     concrete `tag_matches_the_model_with_*` is the one that catches
 //     it), and `derive_enc`'s key choice is never compared against a model
 //     evaluation at any call site here.
 
@@ -618,21 +637,48 @@ static MODEL_BLAKE3_CALLS: AtomicUsize = AtomicUsize::new(0);
 ///     harnesses, and `derive_enc`'s key choice is never compared with a model
 ///     evaluation here.  See the shard's "two further limits" note above.
 ///   * **Any single-byte edit to the input is visible.**  Each input byte is
-///     XORed into one accumulator slot, and the output byte at that slot is a
-///     function of it, so changing one byte by a nonzero amount changes the
-///     output.  An earlier version folded only a 24-byte prefix of each part,
+///     mixed with its position and XORed into one accumulator slot; for a fixed
+///     position the mix is a bijection in the byte, so changing one byte by a
+///     nonzero amount changes that slot's output byte.  An earlier version folded
+///     only a 24-byte prefix of each part,
 ///     which silently weakened `derive_enc_reads_every_tag_byte`: that call site
 ///     feeds 73 bytes (`DOM_ENC` || 65-byte tag), so tag bytes past the prefix
 ///     could not affect the output at all.
 ///   * **The total input length is in the output**, so truncation or extension
 ///     is visible even when no individual byte is edited.
 ///
+/// A byte's contribution depends on **where** it sits, not only on its value.
+///
+/// The first version XORed the raw byte into a slot (`acc[n % out_len] ^= b`). XOR
+/// is commutative, so two bytes sharing a slot canceled when they were swapped: an
+/// audit swapped `tag[0]` and `tag[44]` in `derive_enc` (both land in slot 8 of 44)
+/// and `derive_enc_reads_every_tag_byte` stayed SUCCESSFUL while the KATs failed.
+/// Adding the position before rotating by a position-dependent amount makes the fold
+/// position-sensitive: for fixed `position` the map is a bijection in `b` (a
+/// single-byte edit still always shows), and swapping bytes at two positions gives
+/// different slot contents except for contrived pairs.
+///
+/// Addition rather than multiplication on purpose: a multiply by a constant is
+/// another 8-bit operation to bit-blast in every model call, and an earlier attempt
+/// at this fix made the symbolic tag harness run for tens of minutes. Add + rotate
+/// is position-sensitive at the same cost class as the XOR it replaces.
+///
+/// It is still not injective over *simultaneous* edits -- a 65-byte output cannot
+/// distinguish arbitrary 80-byte inputs -- and it is not BLAKE3; those limits stay
+/// in the paragraph above and are why the real function is anchored to BLAKE3's
+/// official vectors.
+fn fold_byte(b: u8, position: usize) -> u8 {
+    b.wrapping_add(position as u8)
+        .rotate_left((position % 8) as u32)
+}
+
 /// What it deliberately does *not* model: collisions between *simultaneous*
-/// compensating edits (two different bytes landing in the same slot can cancel,
-/// since a 65-byte output cannot distinguish 80 folded bytes injectively), and
-/// BLAKE3's actual cryptographic strength.  Every harness here perturbs one byte
-/// at a time, so the first limit is not reachable; the second is the reason the
-/// real function is anchored to BLAKE3's official vectors instead.
+/// compensating edits (two different bytes landing in the same slot can still
+/// cancel, since a 65-byte output cannot distinguish 80 folded bytes injectively),
+/// and BLAKE3's actual cryptographic strength. The fold is position-sensitive
+/// (`fold_byte`), so a plain swap of two bytes is visible; the harnesses themselves
+/// perturb one byte at a time. The second limit is the reason the real function is
+/// anchored to BLAKE3's official vectors instead.
 fn model_blake3_keyed_multi(key: &[u8; 32], parts: &[&[u8]], out: &mut [u8]) {
     MODEL_BLAKE3_CALLS.fetch_add(1, Ordering::Relaxed);
     // ── Assert the call shape, directly on the arguments ──
@@ -737,12 +783,12 @@ fn model_blake3_keyed_multi(key: &[u8; 32], parts: &[&[u8]], out: &mut [u8]) {
 
     // The key first, as a leading segment of the stream.
     for b in key.iter() {
-        acc[n % out_len] ^= *b;
+        acc[n % out_len] ^= fold_byte(*b, n);
         n += 1;
     }
     for p in parts {
         for b in p.iter() {
-            acc[n % out_len] ^= *b;
+            acc[n % out_len] ^= fold_byte(*b, n);
             n += 1;
         }
     }
@@ -763,7 +809,7 @@ fn model_blake3_keyed_multi(key: &[u8; 32], parts: &[&[u8]], out: &mut [u8]) {
 /// The tag must be **computed through the exact two-level construction** the model
 /// encodes: this harness pins the call graph and the input layout, plus that the stubbed
 /// hash is reached at all. The returned tag's *value* is compared against a
-/// reconstruction by `tag_matches_the_model_on_a_concrete_input` below — an earlier
+/// reconstruction by the `tag_matches_the_model_with_*` harnesses below — an earlier
 /// revision of this comment read as though this harness made that comparison, and it
 /// does not (see the paragraph on what its own assertion can and cannot do).
 ///
@@ -777,8 +823,8 @@ fn model_blake3_keyed_multi(key: &[u8; 32], parts: &[&[u8]], out: &mut [u8]) {
 /// prefixes, the head length, both encoded lengths against the actual parts, and
 /// the output widths — so a length, domain separator or digest dropped from
 /// either hash fails those assertions.  The nonce bytes themselves are not read
-/// back by the stub (the shard note above says the same); the concrete harness
-/// below reconstructs the head including the nonce.  The outer input being
+/// back by the stub (the shard note above says the same); the concrete harnesses
+/// below reconstruct the head including the nonce.  The outer input being
 /// exactly `DOM_TAG || X` is what pins the master key's removal from the hash
 /// input and the two-level shape.
 ///
@@ -787,22 +833,24 @@ fn model_blake3_keyed_multi(key: &[u8; 32], parts: &[&[u8]], out: &mut [u8]) {
 /// returned a constant without reaching the hash would satisfy a harness that only
 /// inspects the return value — which is what the earlier version did. The harness
 /// therefore requires the hash to have been reached, through the call counter the
-/// stub increments, and adds a nonzero-output smoke check. What its own assertion
-/// cannot do is compare the tag against a reconstruction; that is
-/// `tag_matches_the_model_on_a_concrete_input` below, and the layout catches above
-/// all live in the stub's per-call assertions.
+/// stub increments. What its own assertion cannot do is compare the tag against a
+/// reconstruction; that is the `tag_matches_the_model_with_*` harnesses below, and
+/// the layout catches above all live in the stub's per-call assertions. (An earlier
+/// revision also folded the returned tag into a byte and asserted it was nonzero;
+/// that is tautological here — the outer call's `DOM_TAG` occupies tag bytes 32..40
+/// — so it was removed rather than left reading as a check.)
 ///
 /// **Two kinds of shape, doing two different jobs.** The four symbolic shapes
 /// exercise the four input combinations under the stub's per-call assertions
 /// (and the counter), but with symbolic keys they cannot say *which* secret
 /// reaches which hash — nothing symbolic distinguishes "inner keyed by `k_in`"
 /// from "inner keyed by `k_out`", and the nonce is only *present*, not read back.
-/// `tag_matches_the_model_on_a_concrete_input` covers both: it reconstructs the whole
-/// expected tag through the model on one concrete input and compares all `TAG_LEN`
-/// bytes, which catches a swapped `k_in`/`k_out` or a tag truncated past byte 40. (It
-/// is a separate harness, not a block here: the reconstruction is affordable only
-/// because it is concrete, and adding it to this symbolic harness pushed its CBMC run
-/// past fifteen minutes — measured.)
+/// The `tag_matches_the_model_with_*` harnesses cover both: each reconstructs the
+/// whole expected tag through the model on one concrete input and compares all
+/// `TAG_LEN` bytes, which catches a swapped `k_in`/`k_out` or a tag truncated past byte
+/// 40. (They are separate harnesses, not blocks here: the reconstruction is affordable
+/// only because it is concrete, and adding it to this symbolic harness pushed its CBMC
+/// run past fifteen minutes — measured.)
 ///
 /// Four shapes of input: all-zero lengths, both non-empty (where the two encoded
 /// lengths differ, 4 vs 8, so a mix-up between the length fields cannot hide),
@@ -846,7 +894,7 @@ fn tag_is_keyed_hash_of_the_whole_context() {
     // layout assertion. What this harness shows is therefore narrower than the
     // paragraph that used to stand here claimed: the macro below only smoke-checks
     // that the tag is non-zero, and the reconstruction-and-compare lives in
-    // `tag_matches_the_model_on_a_concrete_input`, which rebuilds the tag from the
+    // `tag_matches_the_model_with_*`, which rebuilds the tag from the
     // model on a concrete input and compares all `TAG_LEN` bytes -- that is where a
     // dropped field (the nonce included) or a wrong field order is caught.
     //
@@ -858,20 +906,16 @@ fn tag_is_keyed_hash_of_the_whole_context() {
     // keys the model folds *one of* them into each hash, and nothing symbolic says
     // which value belongs to the inner hash and which to the outer one, so a
     // `derive_tag` that swapped `k_in` and `k_out` (or truncated the output) still
-    // produces a nonzero tag here.  `tag_matches_the_model_on_a_concrete_input`
+    // produces a nonzero tag here.  `tag_matches_the_model_with_*`
     // is the harness that reconstructs the expected tag and compares all `TAG_LEN`
     // bytes; an earlier revision of this comment claimed this macro did that, and
     // it did not.
     macro_rules! shape {
         ($a:expr, $m:expr) => {{
-            let tag = derive_tag(&k_in, &k_out, &nonce, $a, $m);
-            let mut nz = 0u8;
-            for b in tag.iter() {
-                nz |= *b;
-            }
-            // A smoke check on the stub and the output buffer: a tag of all
-            // zeros would mean the model's fold produced nothing.
-            assert!(nz != 0);
+            // The value is unused on purpose: the proof is the stub's per-call
+            // assertions plus the counter below. A `nonzero` check on the tag was
+            // tautological (the outer call writes `DOM_TAG` into bytes 32..40).
+            let _ = derive_tag(&k_in, &k_out, &nonce, $a, $m);
         }};
     }
 
@@ -891,56 +935,113 @@ fn tag_is_keyed_hash_of_the_whole_context() {
     assert!(MODEL_BLAKE3_CALLS.load(Ordering::Relaxed) >= 8);
 }
 
-/// The tag, compared byte for byte against the model, on one **concrete** input.
+/// Shared body for the four concrete tag-comparison harnesses below.
 ///
-/// Why this is a harness of its own rather than a block inside the symbolic one: with
+/// Why concrete inputs at all, rather than a block in the symbolic harness: with
 /// symbolic keys the model folds whatever key it is handed, so nothing in the proof says
 /// which of the two secrets belongs to the inner hash and which to the outer one — a
-/// `derive_tag` that swapped `k_in`/`k_out` passed every harness in this shard (an audit
-/// measured it). Concrete inputs make the expected tag computable *here*, so the
-/// comparison covers all `TAG_LEN` bytes and catches both the swap and a tag truncated
-/// at the call site. Mixing the block into the symbolic harness pushed its CBMC run past
-/// fifteen minutes (measured) because that harness is the expensive one; separated, the
-/// concrete proof is cheap and the symbolic one keeps its previous cost.
+/// `derive_tag` that swapped `k_in`/`k_out` passed every symbolic harness in this shard
+/// (an audit measured it). Concrete inputs make the expected tag computable *here*, so
+/// the comparison covers all `TAG_LEN` bytes and catches both the swap and a tag
+/// truncated at the call site.
 ///
-/// What it does not generalise: the nonce is one fixed value here (the symbolic shapes
-/// and the in-crate KATs cover variation), and it proves one input rather than all of
-/// them. It is a structural regression check — the tag must be the model evaluated on
-/// the documented construction — not a statement about every input.
+/// Why four separate harnesses: one harness that walked four shapes in a loop cost
+/// ~17 minutes under CBMC (measured: the `for` over differently-sized slices merged the
+/// shapes into one symbolic-length slice), while each single-shape harness is a few
+/// minutes and the `tag-concrete` shard runs four at once. The four shapes are all
+/// combinations of empty/non-empty AAD and message; a specialization conditioned on an
+/// empty field is invisible to the symbolic shapes, which only assert `nz != 0`.
+macro_rules! assert_tag_matches_model {
+    ($k_in:expr, $k_out:expr, $nonce:expr, $aad:expr, $msg:expr) => {{
+        let k_in: &[u8; 32] = $k_in;
+        let k_out: &[u8; 32] = $k_out;
+        let nonce: &[u8; NONCE_LEN] = $nonce;
+        let aad: &[u8] = $aad;
+        let msg: &[u8] = $msg;
+        let got = derive_tag(k_in, k_out, nonce, aad, msg);
+
+        // The documented input, rebuilt here exactly as the specification writes it.
+        let mut head = [0u8; HEAD_LEN];
+        head[..8].copy_from_slice(&DOM_PRE);
+        head[8..8 + NONCE_LEN].copy_from_slice(nonce);
+        head[8 + NONCE_LEN..16 + NONCE_LEN].copy_from_slice(&(aad.len() as u64).to_le_bytes());
+        head[16 + NONCE_LEN..24 + NONCE_LEN].copy_from_slice(&(msg.len() as u64).to_le_bytes());
+
+        let mut x = [0u8; 32];
+        model_blake3_keyed_multi(k_in, &[&head, aad, msg], &mut x);
+        let mut outer = [0u8; OUTER_LEN];
+        outer[..8].copy_from_slice(&DOM_TAG);
+        outer[8..].copy_from_slice(&x);
+        let mut want = [0u8; TAG_LEN];
+        model_blake3_keyed_multi(k_out, &[&outer], &mut want);
+
+        // Folded into one byte rather than `assert_eq!`, which would lower to `memcmp`
+        // and inflate the unwind bound (same reason as elsewhere here).
+        let mut diff = 0u8;
+        for i in 0..TAG_LEN {
+            diff |= got[i] ^ want[i];
+        }
+        assert!(diff == 0);
+    }};
+}
+
+/// The tag matches the model byte for byte with a non-empty AAD and message.
+///
+/// What these harnesses do not generalise: the nonce is one fixed value (the symbolic
+/// shapes and the in-crate KATs cover variation), and these are four fixed inputs. They
+/// are structural regression checks — the tag must be the model evaluated on the
+/// documented construction — not a statement about every input.
 #[kani::proof]
 #[kani::stub(blake3_keyed_multi, model_blake3_keyed_multi)]
 #[kani::stub(zeroize_array, noop_zeroize_array)]
 #[kani::unwind(130)]
-fn tag_matches_the_model_on_a_concrete_input() {
-    let k_in_c = [0x11u8; 32];
-    let k_out_c = [0x22u8; 32];
-    let nonce_c = [0x33u8; NONCE_LEN];
-    let aad_c: &[u8] = b"aad!";
-    let msg_c: &[u8] = b"message!";
-    let got = derive_tag(&k_in_c, &k_out_c, &nonce_c, aad_c, msg_c);
+fn tag_matches_the_model_with_nonempty_aad_and_message() {
+    assert_tag_matches_model!(
+        &[0x11u8; 32],
+        &[0x22u8; 32],
+        &[0x33u8; NONCE_LEN],
+        b"aad!",
+        b"message!"
+    );
+}
 
-    // The documented input, rebuilt here exactly as the specification writes it.
-    let mut head = [0u8; HEAD_LEN];
-    head[..8].copy_from_slice(&DOM_PRE);
-    head[8..8 + NONCE_LEN].copy_from_slice(&nonce_c);
-    head[8 + NONCE_LEN..16 + NONCE_LEN].copy_from_slice(&(aad_c.len() as u64).to_le_bytes());
-    head[16 + NONCE_LEN..24 + NONCE_LEN].copy_from_slice(&(msg_c.len() as u64).to_le_bytes());
+/// The tag matches the model with an **empty AAD** and a non-empty message.
+#[kani::proof]
+#[kani::stub(blake3_keyed_multi, model_blake3_keyed_multi)]
+#[kani::stub(zeroize_array, noop_zeroize_array)]
+#[kani::unwind(130)]
+fn tag_matches_the_model_with_empty_aad() {
+    assert_tag_matches_model!(
+        &[0x11u8; 32],
+        &[0x22u8; 32],
+        &[0x33u8; NONCE_LEN],
+        b"",
+        b"message!"
+    );
+}
 
-    let mut x = [0u8; 32];
-    model_blake3_keyed_multi(&k_in_c, &[&head, aad_c, msg_c], &mut x);
-    let mut outer = [0u8; OUTER_LEN];
-    outer[..8].copy_from_slice(&DOM_TAG);
-    outer[8..].copy_from_slice(&x);
-    let mut want = [0u8; TAG_LEN];
-    model_blake3_keyed_multi(&k_out_c, &[&outer], &mut want);
+/// The tag matches the model with a non-empty AAD and an **empty message**.
+#[kani::proof]
+#[kani::stub(blake3_keyed_multi, model_blake3_keyed_multi)]
+#[kani::stub(zeroize_array, noop_zeroize_array)]
+#[kani::unwind(130)]
+fn tag_matches_the_model_with_empty_message() {
+    assert_tag_matches_model!(
+        &[0x11u8; 32],
+        &[0x22u8; 32],
+        &[0x33u8; NONCE_LEN],
+        b"aad!",
+        b""
+    );
+}
 
-    // Folded into one byte rather than `assert_eq!`, which would lower to `memcmp` and
-    // inflate the unwind bound (same reason as elsewhere here).
-    let mut diff = 0u8;
-    for i in 0..TAG_LEN {
-        diff |= got[i] ^ want[i];
-    }
-    assert!(diff == 0);
+/// The tag matches the model with an **empty AAD and an empty message**.
+#[kani::proof]
+#[kani::stub(blake3_keyed_multi, model_blake3_keyed_multi)]
+#[kani::stub(zeroize_array, noop_zeroize_array)]
+#[kani::unwind(130)]
+fn tag_matches_the_model_with_empty_aad_and_message() {
+    assert_tag_matches_model!(&[0x11u8; 32], &[0x22u8; 32], &[0x33u8; NONCE_LEN], b"", b"");
 }
 
 /// A change to either derived key must change the tag.
@@ -956,7 +1057,7 @@ fn tag_matches_the_model_on_a_concrete_input() {
 /// a whole field exceeded 18 minutes (measured, twice). The full-width property is covered
 /// instead by `test_tag_matches_blake3_over_the_documented_input` in `lib.rs`, which runs
 /// the **real** BLAKE3 and compares all 65 bytes, and by
-/// `tag_matches_the_model_on_a_concrete_input`. (`derive_enc_reads_every_tag_byte`
+/// `tag_matches_the_model_with_*`. (`derive_enc_reads_every_tag_byte`
 /// below does *not* cover it: that harness never calls `derive_tag`.
 #[kani::proof]
 #[kani::stub(blake3_keyed_multi, model_blake3_keyed_multi)]
@@ -1003,6 +1104,11 @@ fn tag_changes_when_the_key_changes() {
 /// reaches this function is a tag byte the ciphertext does not commit to.  The
 /// previous construction had exactly that hole (`tag[28..32]` was unused); the
 /// new one must not.
+///
+/// **Scope:** this is a perturbation property, not byte-order coverage. A swap of two
+/// tag bytes leaves every individual-byte edit detectable, so it passed here; the
+/// concrete comparison in `derive_enc_matches_the_model_on_a_concrete_input` is what
+/// pins the order.
 #[kani::proof]
 #[kani::stub(blake3_keyed_multi, model_blake3_keyed_multi)]
 #[kani::stub(zeroize_array, noop_zeroize_array)]
@@ -1045,6 +1151,54 @@ fn derive_enc_reads_every_tag_byte() {
     // the proof depended on it.)
 }
 
+/// `derive_enc`'s output, compared against the model on a **concrete** input.
+///
+/// The perturbation harness above cannot see a *permutation* of the tag bytes. Swapping
+/// two bytes that fold into the same model slot leaves the model's output unchanged,
+/// and the harness only asserts that some output byte moves when one input byte is
+/// perturbed -- which a swap preserves. An audit's `input.swap(8, 8 + 44)` in
+/// `derive_enc` therefore passed it while the KATs failed.
+///
+/// This harness reconstructs the documented input (`DOM_ENC || tag`) from the tag it
+/// hands in, evaluates the model itself, and compares all 44 output bytes. With the
+/// position-sensitive `fold_byte`, the expected value now changes when the
+/// implementation reorders the tag, so the swap fails here.
+#[kani::proof]
+#[kani::stub(blake3_keyed_multi, model_blake3_keyed_multi)]
+#[kani::stub(zeroize_array, noop_zeroize_array)]
+#[kani::unwind(130)]
+fn derive_enc_matches_the_model_on_a_concrete_input() {
+    let enc_seed = [0x5Au8; 32];
+    let mut tag = [0u8; TAG_LEN];
+    let mut i = 0usize;
+    while i < TAG_LEN {
+        tag[i] = (i as u8).wrapping_mul(7).wrapping_add(3);
+        i += 1;
+    }
+
+    let mut k = [0u8; 32];
+    let mut n = [0u8; 12];
+    derive_enc(&enc_seed, &tag, &mut k, &mut n);
+
+    // The documented input, rebuilt here rather than read from what `derive_enc`
+    // passed to the stub.
+    let mut input = [0u8; 8 + TAG_LEN];
+    input[..8].copy_from_slice(&DOM_ENC);
+    input[8..].copy_from_slice(&tag);
+    let mut want = [0u8; 44];
+    model_blake3_keyed_multi(&enc_seed, &[&input], &mut want);
+
+    // Folded into one byte rather than `assert_eq!`, as elsewhere here.
+    let mut diff = 0u8;
+    for i in 0..32 {
+        diff |= k[i] ^ want[i];
+    }
+    for i in 0..12 {
+        diff |= n[i] ^ want[32 + i];
+    }
+    assert!(diff == 0);
+}
+
 /// A change to the associated data or to the message must change the tag, for
 /// **every** byte position of either — at a fixed input size.
 ///
@@ -1054,7 +1208,7 @@ fn derive_enc_reads_every_tag_byte() {
 /// position beyond a naive 1-byte prefix. **The lengths are part of the fixed
 /// domain**: a defect conditioned on a longer input (a byte dropped only when
 /// `len > 4`) is outside this symbolic harness, which is why the in-crate sweeps
-/// `test_tag_covers_every_aad_and_message_byte` (200-byte AAD, 300-byte message)
+/// `test_tag_covers_every_aad_and_message_byte` (200-byte AAD, 1100-byte message)
 /// and `test_tag_depends_on_every_aad_byte` (1100-byte AAD) run the real BLAKE3
 /// over every position. (An earlier revision of this line said "three-byte and
 /// four-byte inputs"; the three-byte inputs are in

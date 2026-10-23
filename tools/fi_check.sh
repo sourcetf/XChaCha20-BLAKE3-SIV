@@ -58,8 +58,8 @@ trap 'rc=$?; if [ "$rc" -eq 0 ]; then rm -rf "$WORK"; else echo "fault-campaign 
 # has to come along or the manifest does not resolve at all.
 copy_tree() {
   mkdir -p "$1"
-  cp -r src tests benches Cargo.toml Cargo.lock "$1/" 2>/dev/null || true
-  cp -r src tests benches Cargo.toml Cargo.lock "$1/"
+  cp -r src tests benches blake3 Cargo.toml Cargo.lock "$1/" 2>/dev/null || true
+  cp -r src tests benches blake3 Cargo.toml Cargo.lock "$1/"
 }
 
 # Require the run's log to show that tests actually ran.
@@ -94,8 +94,16 @@ assert_tests_ran() {  # <log> <row name>
 # already failing for an unrelated reason. Cached because copying and building the tree
 # is the expensive part of this campaign, and several rows share a configuration.
 declare -A BASELINE_PASSES=()
+# One log per (features, target). A single shared `baseline.log` meant a cached
+# `no` was later re-read after another key's build had overwritten it: an
+# environmental failure could be reported as a real one, or a real one as exit 3.
+baseline_log_path() {  # <features> <test target>
+  printf '%s/baseline-%s.log' "$WORK" \
+    "$(printf '%s|%s' "$1" "$2" | tr -c 'a-zA-Z0-9' '_')"
+}
 baseline_passes() {  # <features> <test target>
-  local key="$1|$2"
+  local key="$1|$2" log
+  log="$(baseline_log_path "$1" "$2")"
   if [ -z "${BASELINE_PASSES[$key]:-}" ]; then
     local dir="$WORK/baseline-$(printf '%s' "$key" | tr -c 'a-zA-Z0-9' '_')"
     copy_tree "$dir"
@@ -104,8 +112,8 @@ baseline_passes() {  # <features> <test target>
       # shellcheck disable=SC2206
       args+=($1)
     fi
-    if ( cd "$dir" && CARGO_TARGET_DIR="$dir/target" cargo test "${args[@]}" ) > "$WORK/baseline.log" 2>&1; then
-      assert_tests_ran "$WORK/baseline.log" "baseline($key)"
+    if ( cd "$dir" && CARGO_TARGET_DIR="$dir/target" cargo test "${args[@]}" ) > "$log" 2>&1; then
+      assert_tests_ran "$log" "baseline($key)"
       BASELINE_PASSES[$key]=yes
     else
       BASELINE_PASSES[$key]=no
@@ -116,7 +124,7 @@ baseline_passes() {  # <features> <test target>
 
 # A row: run <name> <features> <detector test target> <expected: pass|fail> <patch fn>
 run_row() {
-  local name="$1" features="$2" target="$3" expect="$4" patch="$5"
+  local name="$1" features="$2" target="$3" expect="$4" patch="$5" baseline_log
   local dir="$WORK/$name"
   copy_tree "$dir"
   "$patch" "$dir"
@@ -161,14 +169,15 @@ run_row() {
     # disk, a build killed by the kernel) is "could not run", not "the detector is broken
     # on unmutated source". Measured: with /tmp at 100% a baseline `cargo test` died in 3.5
     # seconds with an empty log and this branch reported the row as a vacuous-pass risk.
+    baseline_log="$(baseline_log_path "$features" "$target")"
     if grep -qE 'No space left on device|error: could not write|ENOSPC|fatal signal 7|SIGBUS' \
-        "$WORK/baseline.log" 2>/dev/null; then
+        "$baseline_log" 2>/dev/null; then
       printf 'SKIPPED %-19s the baseline build ran out of disk or was killed, so this row\n' "$name" >&2
-      printf '                        did not run -- see %s\n' "$LOG_KEEP/baseline.log" >&2
+      printf '                        did not run -- see %s\n' "$baseline_log" >&2
       exit 3
     fi
     printf 'FAIL %-22s the detector already fails on an UNMUTATED tree, so this row\n' "$name" >&2
-    printf '                        would pass vacuously -- see %s\n' "$LOG_KEEP/baseline.log" >&2
+    printf '                        would pass vacuously -- see %s\n' "$baseline_log" >&2
     exit 1
   fi
 

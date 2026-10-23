@@ -121,9 +121,9 @@ cd "$WORK/crate"
 # satisfied because its plant lived in lib.rs). The count is taken from the same
 # source-derived parser the Formal matrix is planned with -- `tools/kani_shards.py
 # --count`, run on the copy -- rather than a second regex here, so a harness that
-# parser cannot see is a failure in this gate too. 13 is the committed count; a
+# parser cannot see is a failure in this gate too. 17 is the committed count; a
 # change that removes harnesses has to update this number *and* the matrix.
-COMMITTED_HARNESSES=13
+COMMITTED_HARNESSES=17
 harness_count="$("$PYTHON" tools/kani_shards.py --count 2>"$WORK/kani-count.err" || true)"
 case "$harness_count" in
   ''|*[!0-9]*)
@@ -139,6 +139,62 @@ if [ "$harness_count" -lt "$COMMITTED_HARNESSES" ]; then
   exit 1
 fi
 echo "harness count: $harness_count (>= the $COMMITTED_HARNESSES committed)"
+# The count is only as trustworthy as the parser that produces it, so the parser's
+# rejection rules get a control of their own. Each shape below once inflated the count
+# while leaving the harness uncompiled: a cfg above or below the marker (including one
+# separated by a comment), and a harness inside a block comment.
+"$PYTHON" - "$ROOT/tools/kani_shards.py" <<'PY'
+import os
+import shutil
+import subprocess
+import sys
+import tempfile
+
+parser = sys.argv[1]
+base = "#[kani::proof]\nfn real_one() {}\n"
+cases = [
+    ("an ordinary harness", base, True, "1"),
+    ("a cfg above the marker", "#[cfg(any())]\n#[kani::proof]\nfn g() {}\n", False, None),
+    ("a cfg above the marker past a comment",
+     "#[cfg(any())]\n// why\n#[kani::proof]\nfn g() {}\n", False, None),
+    ("a cfg between the marker and the fn",
+     "#[kani::proof]\n#[cfg(any())]\nfn g() {}\n", False, None),
+    ("a cfg before the marker on its line",
+     "#[cfg(any())] #[kani::proof]\nfn g() {}\n", False, None),
+    ("a block-commented harness",
+     "/* #[kani::proof]\nfn hidden() {} */\n" + base, True, "1"),
+    ("a legal whitespace spelling",
+     "# [ kani :: proof ]\nfn spaced() {}\n", True, "1"),
+    ("an attribute before the marker",
+     "#[kani::unwind(9)] #[kani::proof] fn prefixed() {}\n", True, "1"),
+    ("a cfg_attr the parser cannot place",
+     "#[cfg_attr(kani, kani::proof)]\nfn indirect() {}\n", False, None),
+]
+for name, source, ok, expected in cases:
+    with tempfile.TemporaryDirectory() as root:
+        os.makedirs(os.path.join(root, "tools"))
+        os.makedirs(os.path.join(root, "src"))
+        shutil.copy(parser, os.path.join(root, "tools", "kani_shards.py"))
+        with open(os.path.join(root, "src", "proofs.rs"), "w") as fh:
+            fh.write(source)
+        proc = subprocess.run(
+            [sys.executable, os.path.join(root, "tools", "kani_shards.py"), "--count"],
+            capture_output=True,
+            text=True,
+        )
+    if ok:
+        if proc.returncode != 0 or proc.stdout.strip() != expected:
+            sys.exit(
+                f"FAIL: parser control '{name}' expected count {expected}, got rc="
+                f"{proc.returncode} out={proc.stdout!r} err={proc.stderr!r}"
+            )
+    elif proc.returncode == 0:
+        sys.exit(
+            f"FAIL: parser control '{name}' was counted as a harness that Kani would "
+            f"build (out={proc.stdout!r})"
+        )
+print("parser controls: cfg/comment shapes that hide a harness are rejected")
+PY
 echo "type-checking #[cfg(kani)] harnesses against a no-op Kani shim..."
 # Judge by cargo's exit status, not by grepping its output. The first version of
 # this script piped cargo into `grep -E "^error"` inside an `if`, and `set -o

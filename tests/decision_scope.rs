@@ -1109,6 +1109,42 @@ fn the_second_gate_uses_two_comparison_shapes_wherever_the_gates_are_built() {
          not one of them twice:\n{}",
         fold[0]
     );
+    // The loops themselves, not only their bodies. Changing `i + 8` to `i + 16`, or
+    // stepping by 16, leaves every line pinned above present while the fold compares
+    // only about half of the tag; running the tail loop first makes the word loop dead
+    // for the same effect. Pin the bounds, the steps, and their order.
+    for (line, what) in [
+        ("let mut i = 0usize;", "the index starts at zero"),
+        (
+            "while i + 8 <= TAG_LEN",
+            "the word loop covers whole 8-byte words",
+        ),
+        ("i += 8;", "the word loop advances one word"),
+        (
+            "while i < TAG_LEN",
+            "the tail loop covers the remaining byte(s)",
+        ),
+        ("i += 1;", "the tail loop advances one byte"),
+    ] {
+        assert_eq!(
+            flat.matches(line).count(),
+            1,
+            "`ct_eq_independent` must contain `{line}` exactly once ({what}): a changed \
+             bound or step leaves every XOR line intact while the fold compares fewer \
+             bytes of the tag:\n{}",
+            fold[0]
+        );
+    }
+    let word_loop = flat.find("while i + 8 <= TAG_LEN").unwrap();
+    let word_step = flat.find("i += 8;").unwrap();
+    let tail_loop = flat.find("while i < TAG_LEN").unwrap();
+    let tail_step = flat.find("i += 1;").unwrap();
+    assert!(
+        word_loop < word_step && word_step < tail_loop && tail_loop < tail_step,
+        "the word loop must run (and advance) before the tail loop: running the tail \
+         loop first leaves the word loop dead, so only one byte is compared:\n{}",
+        fold[0]
+    );
     // The accumulator comparison must be the function's *return expression*, not a
     // discarded computation followed by a constant: compare the last non-empty line of
     // the body (comments and the closing brace removed), as the `plain & also` pin above.
@@ -1286,20 +1322,55 @@ fn the_decision_outcome_is_fail_closed() {
         3,
         "one second check per call site"
     );
+    // `black_box` between the declarations and the call is what keeps both pre-sets in
+    // the machine code: without it LLVM deletes the `decision0` store (measured on
+    // release asm: only `decision1` was initialised). Pin its presence and position, so
+    // a refactor cannot silently return to the one-slot codegen while this text-only
+    // test stays green.
+    let flat = code.split_whitespace().collect::<Vec<_>>().join(" ");
+    assert_eq!(
+        flat.matches(
+            "core::hint::black_box(&mut decision0); core::hint::black_box(&mut decision1);"
+        )
+        .count(),
+        3,
+        "each call site must make both pre-sets observable with `black_box`, or the \
+         optimizer deletes the `decision0` store"
+    );
     {
-        let default_call =
-            "    #[cfg(not(feature = \"hardened\"))]\n    accept_or_reject(auth_ok, \
+        let flat_init = init.split_whitespace().collect::<Vec<_>>().join(" ");
+        let default_call = "#[cfg(not(feature = \"hardened\"))] accept_or_reject(auth_ok, \
                             auth_ok, &mut decision0, &mut decision1);";
-        let hardened_call = "    #[cfg(feature = \"hardened\")]\n    accept_or_reject(gates.0, \
+        let hardened_call = "#[cfg(feature = \"hardened\")] accept_or_reject(gates.0, \
                              gates.1, &mut decision0, &mut decision1);";
         // Two, not one: since the decision no longer touches the buffer, both entry
-        // points carry the same three lines, so one pattern covers both -- and a count
-        // of 2 is what says so.
-        let sequence = format!("{init}\n{default_call}\n{hardened_call}");
+        // points carry the same lines, so one pattern covers both -- and a count of 2 is
+        // what says so. Flattened because comments between the lines are stripped to
+        // blank lines by `non_test_source`, which is not part of the order being pinned.
+        let sequence = format!(
+            "{flat_init} core::hint::black_box(&mut decision0); \
+             core::hint::black_box(&mut decision1); {default_call} {hardened_call}"
+        );
         assert_eq!(
-            code.matches(sequence.as_str()).count(),
+            flat.matches(sequence.as_str()).count(),
             2,
             "both entry points must carry the fail-closed sequence:\n{sequence}"
+        );
+    }
+    // `encrypt`'s `ultra` cross-check has one gate, so it does not share the two-arm
+    // sequence above; pin its own declaration/black_box/call order.
+    {
+        let flat_init = init.split_whitespace().collect::<Vec<_>>().join(" ");
+        let sequence = format!(
+            "{flat_init} core::hint::black_box(&mut decision0); \
+             core::hint::black_box(&mut decision1); \
+             accept_or_reject(agree, agree, &mut decision0, &mut decision1);"
+        );
+        assert_eq!(
+            flat.matches(sequence.as_str()).count(),
+            1,
+            "`encrypt`'s ultra cross-check must pre-set both slots through `black_box` \
+             before the call:\n{sequence}"
         );
     }
 

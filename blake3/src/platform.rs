@@ -212,7 +212,11 @@ impl Platform {
         flags_end: u8,
         out: &mut [u8],
     ) {
-        debug_assert_eq!(out.len(), inputs.len() * OUT_LEN);
+        // `out` may be larger than this group's output: the tree code passes the
+        // caller's buffer, which can hold more chaining values than one batch. The
+        // portable implementation already states the contract as `>=`; an `==` here
+        // failed every debug-mode test through `compress_subtree_wide`.
+        debug_assert!(out.len() >= inputs.len() * OUT_LEN);
         // The C/assembly kernels process a full SIMD group and then a 4/2/1-wide
         // tail. Their 2/4-wide loads read from `inputs[0]` at +16/+32/+48 bytes,
         // which is past the end of a 64-byte block at a page boundary. This was
@@ -375,6 +379,30 @@ impl Platform {
         flags: u8,
         out: &mut [u8],
     ) {
+        // The safe API accepts any output length, but the SIMD/assembly paths below
+        // write whole 64-byte blocks. A partial final block is computed with
+        // `compress_xof` and copied as a prefix; the assembly must never see it. (The
+        // single-block AVX-512 path writes a full block even when `out` is shorter:
+        // the audit measured up to 63 bytes past a 1..=63-byte slice in release, where
+        // the old `debug_assert` below was compiled out.)
+        if out.len() % BLOCK_LEN != 0 {
+            let mut block_index = 0u64;
+            let mut written = 0usize;
+            while written < out.len() {
+                let produced = self.compress_xof(
+                    cv,
+                    block,
+                    block_len,
+                    counter.wrapping_add(block_index),
+                    flags,
+                );
+                let take = core::cmp::min(BLOCK_LEN, out.len() - written);
+                out[written..written + take].copy_from_slice(&produced[..take]);
+                written += take;
+                block_index += 1;
+            }
+            return;
+        }
         debug_assert_eq!(0, out.len() % BLOCK_LEN, "whole blocks only");
         if out.is_empty() {
             // The current assembly implementation always outputs at least 1 block.

@@ -204,10 +204,16 @@ const DIVISION_METHODS: &[&str] = &[
 /// cached value, one tests the `EINTR` return of the auxv read, and the read is inside a
 /// second `loop`. These depend on a public kernel fact and a syscall result, not on
 /// secret content.
+///
+/// `if` 46 -> 47, `while` 10 -> 14 and `for` 26 -> 25 when `locked_bytes` switched from
+/// UTF-8 line parsing to `parse_vmlck`: the `for line in text.lines()` and its
+/// `if let Some(rest)` were replaced by four `while`s (line scan, spaces, digits,
+/// accumulation) and the line-start/empty-field checks. All are boundary tests on a
+/// public buffer, and none reads key, nonce, AAD or message content.
 const CONTROL_FLOW: &[(&str, usize)] = &[
-    ("if", 46),
-    ("while", 10),
-    ("for", 26),
+    ("if", 47),
+    ("while", 14),
+    ("for", 25),
     ("loop", 2),
     ("match", 9),
 ];

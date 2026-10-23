@@ -754,10 +754,12 @@ impl PartialEq<&Plaintext> for Plaintext {
 }
 
 /// The `Eq` marker, which an audit pointed out was missing while the `PartialEq` impls
-/// were present. It adds no comparison: it only lets a generic caller use a `Plaintext`
-/// (or [`Key`], or `locked::LockedKey`) as a map key or satisfy a `T: Eq` bound. It is
-/// sound because the equality above is byte equality, hence reflexive and total — the
-/// types carry no hidden state a comparison could miss.
+/// were present. It adds no comparison: it only lets a generic caller satisfy a
+/// `T: Eq` bound with a `Plaintext` (or [`Key`], or `locked::LockedKey`). It does
+/// **not** make the type a map key: there is deliberately no `Hash` or `Ord`, so neither
+/// `HashMap<Plaintext, _>` nor `BTreeMap<Plaintext, _>` compiles. It is sound because
+/// the equality above is byte equality, hence reflexive and total — the types carry no
+/// hidden state a comparison could miss.
 impl Eq for Plaintext {}
 
 impl Drop for Plaintext {
@@ -958,9 +960,9 @@ impl core::fmt::Debug for Key {
 /// # The construction itself needs no randomness
 ///
 /// [`encrypt`] is a deterministic function of `(key, nonce, aad, plaintext)`:
-/// every subkey, the tag and the keystream are derived from the key with
-/// ChaCha20/HChaCha20, and the tag binds the associated data and the message
-/// directly.  Nothing is drawn from a random source internally — which is exactly
+/// the subkeys and the keystream come from ChaCha20/HChaCha20, while the tag is
+/// the two-level keyed-BLAKE3 construction (it binds the associated data and the
+/// message directly, and the encryption key/nonce are derived from it).  Nothing is drawn from a random source internally — which is exactly
 /// what makes the known-answer vectors and the formal harnesses meaningful,
 /// since there is no hidden entropy dependency to mock out or to fail at run
 /// time.
@@ -1159,12 +1161,23 @@ pub mod locked {
     /// architectures returns `ENOSYS`, so `cfg!(target_os = "linux")` alone would report
     /// support on (say) i686 and then fail at the first call. A caller that branches on
     /// this has to be told the truth.
-    pub const SUPPORTED: bool =
-        cfg!(target_os = "linux") && cfg!(any(target_arch = "x86_64", target_arch = "aarch64"));
+    ///
+    /// The pointer width is part of the test: the raw syscall numbers below are the
+    /// 64-bit tables (`unistd_64.h` / `asm-generic`), and the x32 ABI
+    /// (`x86_64-unknown-linux-gnux32`) shares `target_arch = "x86_64"` while using
+    /// 32-bit pointers and a `__X32_SYSCALL_BIT`-tagged number space. Reporting
+    /// support there would make every call fail with `ENOSYS` or, worse, call the
+    /// wrong service. The layer is disabled instead.
+    pub const SUPPORTED: bool = cfg!(all(
+        target_os = "linux",
+        any(target_arch = "x86_64", target_arch = "aarch64"),
+        target_pointer_width = "64"
+    ));
 
     #[cfg(all(
         target_os = "linux",
-        any(target_arch = "x86_64", target_arch = "aarch64")
+        any(target_arch = "x86_64", target_arch = "aarch64"),
+        target_pointer_width = "64"
     ))]
     mod imp {
 
@@ -1314,7 +1327,18 @@ pub mod locked {
         /// contract, is the exception: `mlock` fails at the hole and the pages before it
         /// stay locked and charged, so a caller that passes such a range must read `Err` as
         /// "part of the range may now be locked" and release it with [`unlock_range`].
-        pub fn lock_range(ptr: *const u8, len: usize) -> Result<(), isize> {
+        ///
+        /// # Safety
+        ///
+        /// `ptr` must be the address of a live allocation of at least `len` bytes that
+        /// stays allocated and does not move for the duration of the call, and the
+        /// caller must be entitled to lock the whole page range covering it (the kernel
+        /// rounds the range out). The bytes are not dereferenced here, but the syscall's
+        /// argument has to name a real mapping for the operation to mean what it says.
+        /// The function was a safe `fn` with this contract only in prose; a safe caller
+        /// could pass a dangling pointer. Its sibling [`unlock_range`] could also unlock
+        /// and make dumpable a range it never locked, so both are `unsafe` now.
+        pub unsafe fn lock_range(ptr: *const u8, len: usize) -> Result<(), isize> {
             if len == 0 {
                 return Ok(());
             }
@@ -1410,7 +1434,16 @@ pub mod locked {
         /// the whole page range **and** `munlock`s.
         ///
         /// Idempotent for an unlocked range.
-        pub fn unlock_range(ptr: *const u8, len: usize) {
+        ///
+        /// # Safety
+        ///
+        /// `ptr`/`len` must describe a live allocation. The range must have been locked
+        /// by [`lock_range`] (or otherwise belong to the caller in the sense that losing
+        /// its lock and dump exclusion is intended), and the caller must accept that the
+        /// operation is **page-granular and not range-local**: every page covering the
+        /// range is unlocked *and* made dumpable, including a `VM_DONTDUMP` that some
+        /// other caller set on a page shared with unrelated data.
+        pub unsafe fn unlock_range(ptr: *const u8, len: usize) {
             if len == 0 {
                 return;
             }
@@ -1720,30 +1753,92 @@ pub mod locked {
             unsafe {
                 let _ = syscall2(NR_CLOSE, fd, 0);
             }
-            let text = core::str::from_utf8(&buf).ok()?;
-            for line in text.lines() {
-                if let Some(rest) = line.strip_prefix("VmLck:") {
-                    let kb: u64 = rest.split_whitespace().next()?.parse().ok()?;
-                    return Some(kb * 1024);
+            parse_vmlck(&buf)
+        }
+
+        /// Extract the `VmLck:` value (in bytes) from a `/proc/self/status` image.
+        ///
+        /// Parse bytes, not UTF-8. `comm` is writable through `prctl(PR_SET_NAME)` and
+        /// may hold non-UTF-8 bytes; decoding the whole file used to fail on those and
+        /// return `None`, indistinguishable from the kernel refusing to report. Only
+        /// the `VmLck:` line is read, and only its ASCII digits are parsed. Split from
+        /// `locked_bytes` so the parsing can be unit-tested with bytes a real process
+        /// cannot easily produce (`vmlck_tests` below).
+        fn parse_vmlck(buf: &[u8]) -> Option<u64> {
+            const NEEDLE: &[u8] = b"VmLck:";
+            let n = buf.len();
+            let mut i = 0usize;
+            while i + NEEDLE.len() <= n {
+                if (i == 0 || buf[i - 1] == b'\n') && &buf[i..i + NEEDLE.len()] == NEEDLE {
+                    let mut j = i + NEEDLE.len();
+                    while j < n && (buf[j] == b' ' || buf[j] == b'\t') {
+                        j += 1;
+                    }
+                    let start = j;
+                    while j < n && buf[j].is_ascii_digit() {
+                        j += 1;
+                    }
+                    if j == start {
+                        return None;
+                    }
+                    let mut kb = 0u64;
+                    let mut k = start;
+                    while k < j {
+                        kb = kb.checked_mul(10)?.checked_add((buf[k] - b'0') as u64)?;
+                        k += 1;
+                    }
+                    return Some(kb.saturating_mul(1024));
                 }
+                i += 1;
             }
             None
+        }
+
+        #[cfg(test)]
+        mod vmlck_tests {
+            use super::parse_vmlck;
+
+            #[test]
+            fn parses_vmlck_even_when_comm_is_not_utf8() {
+                // A `comm` of 0xFF 0xFE 0x80 made the old `str::from_utf8` decoding of
+                // the whole file fail, so a live, locked process reported `None` -- the
+                // same answer as "the kernel refused".
+                let status = b"Name:\t\xff\xfe\x80\nState:\tS (sleeping)\nVmLck:\t   16 kB\n";
+                assert_eq!(parse_vmlck(status), Some(16 * 1024));
+            }
+
+            #[test]
+            fn parses_tabs_and_zero() {
+                assert_eq!(parse_vmlck(b"VmLck:\t0 kB\n"), Some(0));
+                assert_eq!(parse_vmlck(b"VmLck: 12345 kB\n"), Some(12_345 * 1024));
+            }
+
+            #[test]
+            fn requires_a_line_start_and_digits() {
+                assert_eq!(parse_vmlck(b"XVmLck:\t 8 kB\n"), None);
+                assert_eq!(parse_vmlck(b"VmLck:\t kB\n"), None);
+                assert_eq!(parse_vmlck(b"VmLck:\n"), None);
+                assert_eq!(parse_vmlck(b""), None);
+            }
         }
     }
 
     #[cfg(all(
         target_os = "linux",
-        any(target_arch = "x86_64", target_arch = "aarch64")
+        any(target_arch = "x86_64", target_arch = "aarch64"),
+        target_pointer_width = "64"
     ))]
     pub(crate) use imp::page_size_pub;
     #[cfg(all(
         target_os = "linux",
-        any(target_arch = "x86_64", target_arch = "aarch64")
+        any(target_arch = "x86_64", target_arch = "aarch64"),
+        target_pointer_width = "64"
     ))]
     pub(crate) use imp::unlock_range_with;
     #[cfg(all(
         target_os = "linux",
-        any(target_arch = "x86_64", target_arch = "aarch64")
+        any(target_arch = "x86_64", target_arch = "aarch64"),
+        target_pointer_width = "64"
     ))]
     pub use imp::{deny_debugging, is_dumpable, lock_range, locked_bytes, unlock_range};
 
@@ -1751,9 +1846,10 @@ pub mod locked {
     /// cannot mistake a no-op for protection.
     #[cfg(not(all(
         target_os = "linux",
-        any(target_arch = "x86_64", target_arch = "aarch64")
+        any(target_arch = "x86_64", target_arch = "aarch64"),
+        target_pointer_width = "64"
     )))]
-    pub fn lock_range(_ptr: *const u8, _len: usize) -> Result<(), isize> {
+    pub unsafe fn lock_range(_ptr: *const u8, _len: usize) -> Result<(), isize> {
         Err(-38) // ENOSYS
     }
     /// Unsupported on this target: nothing was ever locked, so there is nothing to undo.
@@ -1763,13 +1859,15 @@ pub mod locked {
     /// i686, where the module compiles its unsupported arm.)
     #[cfg(not(all(
         target_os = "linux",
-        any(target_arch = "x86_64", target_arch = "aarch64")
+        any(target_arch = "x86_64", target_arch = "aarch64"),
+        target_pointer_width = "64"
     )))]
-    pub fn unlock_range(_ptr: *const u8, _len: usize) {}
+    pub unsafe fn unlock_range(_ptr: *const u8, _len: usize) {}
     /// Unsupported on this target: `None`, because there is no `VmLck` to read.
     #[cfg(not(all(
         target_os = "linux",
-        any(target_arch = "x86_64", target_arch = "aarch64")
+        any(target_arch = "x86_64", target_arch = "aarch64"),
+        target_pointer_width = "64"
     )))]
     pub fn locked_bytes() -> Option<u64> {
         None
@@ -1781,7 +1879,8 @@ pub mod locked {
     /// it is not.
     #[cfg(not(all(
         target_os = "linux",
-        any(target_arch = "x86_64", target_arch = "aarch64")
+        any(target_arch = "x86_64", target_arch = "aarch64"),
+        target_pointer_width = "64"
     )))]
     pub fn deny_debugging() -> Result<u32, isize> {
         Err(-38) // ENOSYS
@@ -1790,7 +1889,8 @@ pub mod locked {
     /// Unsupported on this target: `None`, because there is no flag to read.
     #[cfg(not(all(
         target_os = "linux",
-        any(target_arch = "x86_64", target_arch = "aarch64")
+        any(target_arch = "x86_64", target_arch = "aarch64"),
+        target_pointer_width = "64"
     )))]
     pub fn is_dumpable() -> Option<bool> {
         None
@@ -1804,7 +1904,8 @@ pub mod locked {
     /// mislead anyone.
     #[cfg(not(all(
         target_os = "linux",
-        any(target_arch = "x86_64", target_arch = "aarch64")
+        any(target_arch = "x86_64", target_arch = "aarch64"),
+        target_pointer_width = "64"
     )))]
     pub(crate) fn page_size_pub() -> Option<usize> {
         Some(16 * 1024)
@@ -1814,7 +1915,8 @@ pub mod locked {
     /// Kept as a compiling stub because `LockedKey::drop` is compiled on every target.
     #[cfg(not(all(
         target_os = "linux",
-        any(target_arch = "x86_64", target_arch = "aarch64")
+        any(target_arch = "x86_64", target_arch = "aarch64"),
+        target_pointer_width = "64"
     )))]
     pub(crate) fn unlock_range_with(_ps: usize, _ptr: *const u8, _len: usize) {}
 
@@ -1933,7 +2035,9 @@ pub mod locked {
         pub fn new(key: &[u8; crate::KEY_LEN]) -> Result<Self, isize> {
             let mut page = Page::new().ok_or(-12isize /* ENOMEM */)?;
             // Lock the whole page first; on failure `page` is freed by its own `Drop`.
-            lock_range(page.as_ptr(), page.len())?;
+            // SAFETY: `page` owns a live page-sized allocation for as long as `Self`,
+            // and this call is the only consumer of it at this point.
+            unsafe { lock_range(page.as_ptr(), page.len())? };
             page.bytes_mut()[..crate::KEY_LEN].copy_from_slice(key);
             let mut tag = [0u8; KEY_TAG_LEN];
             integrity_tag(&key[..], &mut tag);
@@ -2259,8 +2363,17 @@ unsafe fn zeroize_raw(ptr: *mut u8, len: usize) {
 /// Overwrite the stack region the key derivations just used (the `dual-mac` layer;
 /// `ultra` includes it).
 ///
-/// Every named local in this crate is wiped, and `tools/stack_residue.sh` confirms
-/// that the master key never survives in the call-chain stack region.  What *does*
+/// Every named **byte buffer** this crate owns at function scope is wiped, and
+/// `tools/stack_residue.sh` confirms that the master key never survives in the
+/// call-chain stack region. What is *not* reachable by a volatile store, and is
+/// therefore outside this claim, is a value the compiler keeps in an architectural
+/// register or an unnamed spill slot: the scalar quarter-round words
+/// (`chacha20_rounds`'s `a`/`b`/`c`/`d`), and the SIMD transposes' `t*`/`s*`
+/// temporaries. `zeroize_xmm`/`zeroize_ymm`/`zeroize_neon` wipe the named state
+/// arrays (`x`, `orig`, `w`) they are handed; they cannot clear XMM/YMM/NEON
+/// registers. An audit measured that making those three helpers no-ops leaves the
+/// functional tests green -- they are residue measures, not behaviour -- so this
+/// paragraph, not the test suite, is what states their scope. What *does*
 /// survive is derived material in frames a wipe does not reach: the **whole 32-byte
 /// `k_in`**, left by the dependency's by-value temporaries (the `Hasher::new_keyed`
 /// return and the `ChunkState` built from the key — the copies the comment on
@@ -2386,8 +2499,9 @@ fn derive_material(
 /// `out.len()` bytes of `BLAKE3_keyed(key, parts[0] || parts[1] || ...)`, in
 /// BLAKE3's XOF mode.
 ///
-/// This is the **single seam** through which every keyed-BLAKE3 use in the crate
-/// passes.  That matters for two reasons:
+/// This is the **single seam** through which every keyed-BLAKE3 use of the `blake3`
+/// dependency in this crate passes (the `ultra` witness is a separate implementation,
+/// not a second caller).  That matters for two reasons:
 ///
 /// * The formal harnesses stub exactly this function.  Two separate call sites
 ///   reaching into `blake3` directly would leave one of them unmodelled, and a
@@ -2396,10 +2510,10 @@ fn derive_material(
 ///   assembly, which CBMC rejects.  Stubbing one seam removes all of it.
 ///
 /// Taking a slice of parts rather than one concatenated buffer keeps the key out
-/// of a growable heap allocation: the callers pass fixed-size stack arrays.
-/// `derive_tag` does build one contiguous buffer for mid-sized messages (it is
-/// measurably faster, see there); that buffer is exact-sized and wiped before it
-/// is dropped, so no copy of the key is stranded.
+/// of a growable heap allocation: the callers pass stack arrays. `derive_tag` does
+/// build one contiguous buffer for mid-sized messages (it is measurably faster, see
+/// there); that buffer is exact-sized and wiped before it is dropped, so no copy of
+/// the key is stranded.
 fn blake3_keyed_multi(key: &[u8; 32], parts: &[&[u8]], out: &mut [u8]) {
     let mut hasher = blake3::Hasher::new_keyed(key);
     for p in parts {
@@ -2499,8 +2613,9 @@ const TAG_CONCAT_MIN: usize = 2_048;
 ///   768-bit one an earlier revision of this comment claimed.  In `v0.2` the
 ///   `K`-in-input step made a subkey collision harmless (the tags still differed);
 ///   here it is not harmless.  That is a route in the *attacker-chosen* commitment
-///   game, which `SECURITY-ANALYSIS.md` §4.5 does not price; the *target* bound this
-///   crate does claim — a given ciphertext, `≈ 2^-256` per candidate key, the `subkey`
+///   game, which `SECURITY-ANALYSIS.md` §4.5 prices at `2^128` (the key route:
+///   both openings recover the *same* plaintext); the *target* bound this crate
+///   does claim — a given ciphertext, `≈ 2^-256` per candidate key, the `subkey`
 ///   preimage — is untouched.
 /// * **Lengths are encoded and every field is fixed width.** BLAKE3 is not
 ///   vulnerable to length extension (its finalisation is flagged, unlike
@@ -2680,7 +2795,9 @@ fn check_lengths(msg_len: usize, aad_len: usize) -> Result<(), Error> {
 /// Allocate a zeroed buffer of `len` bytes for an allocating entry point.
 ///
 /// Fallible on purpose, and **both** allocating entry points go through it: [`decrypt`]
-/// for the recovered plaintext and [`encrypt`] for the ciphertext.  `vec![0u8; n]` calls
+/// for the recovered plaintext and [`encrypt`] for the ciphertext. `decrypt_in_place_detached`
+/// also uses it for its two `ultra` witness buffers, the only other caller-sized
+/// allocations this crate makes.  `vec![0u8; n]` calls
 /// the allocation-error handler, which aborts the process — so with a plain `vec!` an
 /// unlucky size turns a request into a kill the application cannot catch, instead of an
 /// [`Error::AllocationFailed`] it can report and move past.
@@ -2761,6 +2878,14 @@ pub fn encrypt(
         // outcome, leaves a rejection standing.
         let mut decision0: Result<(), Error> = Err(Error::AuthenticationFailed);
         let mut decision1: Result<(), Error> = Err(Error::AuthenticationFailed);
+        // `black_box` makes both pre-sets observable. Without it LLVM sees that
+        // `accept_or_reject` writes `out0` on both paths and deletes the `decision0`
+        // store -- the release asm then carries only the `decision1` pre-set, so "two
+        // rejections written before the call" holds in the source and not in the
+        // machine code. An opaque use of the slot forces the initialisation before
+        // the call at every optimisation level.
+        core::hint::black_box(&mut decision0);
+        core::hint::black_box(&mut decision1);
         accept_or_reject(agree, agree, &mut decision0, &mut decision1);
         if decision0.is_err() {
             crate::zeroize_array(&mut k_in);
@@ -2982,9 +3107,11 @@ fn ct_eq_independent(a: &[u8; TAG_LEN], b: &[u8; TAG_LEN]) -> subtle::Choice {
 //    (`je` 0x84 / `jne` 0x85) and its target is a few bits away from any address in
 //    the function. That residual is measured with `tools/fi_instruction.sh --bits`
 //    and published in the README's table rather than claimed away.
-//  * the *caller* wipes the buffer on any rejection, not this function. One wipe
-//    site, on the path every rejection takes -- including the one a skipped call
-//    leaves behind, which this function would never see.
+//  * the *caller* wipes the buffer on any rejection, not this function. The wipe is
+//    in the caller, on the path every rejection takes -- including the one a skipped
+//    call leaves behind, which this function would never see. (Each entry point has
+//    one wipe per rejection check, two in all, not one: the first check can reject
+//    before the second is read.)
 //  * there is exactly one body, with the `hardened` gates *inside* it rather than a
 //    second `#[cfg]`-selected definition of the same function. Two bodies would be
 //    two functions to a mutation campaign that does not evaluate `cfg`
@@ -3223,6 +3350,9 @@ pub fn decrypt(
 
     let mut decision0: Result<(), Error> = Err(Error::AuthenticationFailed);
     let mut decision1: Result<(), Error> = Err(Error::AuthenticationFailed);
+    // Keep both pre-sets in the machine code; see the matching comment in `encrypt`.
+    core::hint::black_box(&mut decision0);
+    core::hint::black_box(&mut decision1);
     #[cfg(not(feature = "hardened"))]
     accept_or_reject(auth_ok, auth_ok, &mut decision0, &mut decision1);
     #[cfg(feature = "hardened")]
@@ -3490,6 +3620,9 @@ pub fn decrypt_in_place_detached(
 
     let mut decision0: Result<(), Error> = Err(Error::AuthenticationFailed);
     let mut decision1: Result<(), Error> = Err(Error::AuthenticationFailed);
+    // Keep both pre-sets in the machine code; see the matching comment in `encrypt`.
+    core::hint::black_box(&mut decision0);
+    core::hint::black_box(&mut decision1);
     #[cfg(not(feature = "hardened"))]
     accept_or_reject(auth_ok, auth_ok, &mut decision0, &mut decision1);
     #[cfg(feature = "hardened")]
@@ -4771,8 +4904,17 @@ mod tests {
     #[cfg(target_arch = "x86_64")]
     #[test]
     fn test_x86_simd_kernels_match_scalar() {
-        let key = [0x55u8; 32];
-        let nonce = [0x66u8; 12];
+        // Non-uniform key and nonce: with all-equal bytes a swapped key word index or a
+        // lane permutation can leave the output unchanged, hiding the bug in this
+        // isolated test (the random-key boundary corpus would still catch it).
+        let mut key = [0u8; 32];
+        for (i, b) in key.iter_mut().enumerate() {
+            *b = (i as u8).wrapping_mul(37).wrapping_add(11);
+        }
+        let mut nonce = [0u8; 12];
+        for (i, b) in nonce.iter_mut().enumerate() {
+            *b = (i as u8).wrapping_mul(13).wrapping_add(7);
+        }
         for &ctr in &[0u32, 1, 9, 0xFFFF_FFF0] {
             // SSE2: 4 blocks = 256 bytes
             let mut out4 = [0u8; 256];
@@ -4802,8 +4944,15 @@ mod tests {
     #[cfg(target_arch = "aarch64")]
     #[test]
     fn test_aarch64_neon_kernel_matches_scalar() {
-        let key = [0x77u8; 32];
-        let nonce = [0x88u8; 12];
+        // Non-uniform, for the same reason as the x86 test above.
+        let mut key = [0u8; 32];
+        for (i, b) in key.iter_mut().enumerate() {
+            *b = (i as u8).wrapping_mul(41).wrapping_add(3);
+        }
+        let mut nonce = [0u8; 12];
+        for (i, b) in nonce.iter_mut().enumerate() {
+            *b = (i as u8).wrapping_mul(17).wrapping_add(5);
+        }
         for &ctr in &[0u32, 1, 9, 0xFFFF_FFF0] {
             let mut out4 = [0u8; 256];
             // SAFETY: NEON is part of the ARMv8-A baseline.
@@ -5857,12 +6006,18 @@ mod tests {
         let (ct1, tag1) = encrypt(&key, &nonce, aad, &pt1).unwrap();
         assert_ne!(ct0, ct1);
         assert_ne!(tag0, tag1);
-        let ct_bits = differing_bits(&ct0, &ct1);
-        assert!(
-            ct_bits > 256 * 8 / 4,
-            "plaintext bit flip changed only {ct_bits} of {} ciphertext bits",
-            256 * 8
-        );
+        // Per 64-byte block, not only over the whole message. A stuck 64-byte region
+        // in a 256-byte message leaves 192 bytes moving at ~50% -- 37.5% of the whole,
+        // which passed the old 25% bound (measured by fixing the last block). A block
+        // that ignores the input now fails on its own.
+        for (i, (a, b)) in ct0.chunks(64).zip(ct1.chunks(64)).enumerate() {
+            let bits = differing_bits(a, b);
+            assert!(
+                bits > (a.len() * 8 / 4) as u32,
+                "plaintext bit flip left ciphertext block {i} nearly unchanged: {bits} of {} bits",
+                a.len() * 8
+            );
+        }
 
         // Flip one bit of the key: everything must change.
         let mut key1 = key;
@@ -5871,8 +6026,11 @@ mod tests {
         assert_ne!(ct0, ct2);
         assert_ne!(tag0, tag2);
         let bits = differing_bits(&tag0, &tag2);
+        // 40%, not 25%: with 520 tag bits the expectation is 260 and the standard
+        // deviation ~11, so 208 is over four standard deviations below the mean and
+        // does not make this probabilistic test flaky.
         assert!(
-            bits > (TAG_LEN * 8 / 4) as u32,
+            bits > (TAG_LEN * 8 * 2 / 5) as u32,
             "key bit flip changed only {bits} of {} tag bits",
             TAG_LEN * 8
         );
@@ -5890,7 +6048,7 @@ mod tests {
         assert_ne!(tag0, tag4);
         let bits = differing_bits(&tag0, &tag4);
         assert!(
-            bits > (TAG_LEN * 8 / 4) as u32,
+            bits > (TAG_LEN * 8 * 2 / 5) as u32,
             "aad bit flip changed only {bits} of {} tag bits",
             TAG_LEN * 8
         );
@@ -6350,7 +6508,11 @@ mod tests {
         let key = [0x71u8; 32];
         let nonce = [0x93u8; NONCE_LEN];
         let aad: Vec<u8> = (0..200u32).map(|i| (i % 256) as u8).collect();
-        let msg: Vec<u8> = (0..300u32).map(|i| (i % 251) as u8).collect();
+        // Past BLAKE3's 1024-byte chunk boundary. The default build has no other
+        // per-position message sweep: truncating the message to 1024 bytes used to
+        // leave this test green and was caught only by the boundary digest (and by
+        // `ultra`'s witness), so positions above 1024 are covered here.
+        let msg: Vec<u8> = (0..1100u32).map(|i| (i % 251) as u8).collect();
 
         let (_, tag0) = encrypt(&key, &nonce, &aad, &msg).unwrap();
 

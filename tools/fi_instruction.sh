@@ -238,7 +238,7 @@ print(exes[-1] if exes else "")
 detector_sensitivity_control() {
   local dir="$WORK/sensitivity"
   mkdir -p "$dir"
-  cp -r src tests benches Cargo.toml Cargo.lock "$dir/"
+  cp -r src tests benches blake3 Cargo.toml Cargo.lock "$dir/"
   python3 - "$dir/src/lib.rs" <<'PY'
 import sys
 
@@ -254,21 +254,32 @@ if s.count(a) != 1 or s.count(b) != 1:
              % (s.count(a), a, s.count(b), b))
 open(p, "w").write(s.replace(a, "true", 1).replace(b, "true", 1))
 PY
-  local bin
+  local bin build_log="$WORK/sensitivity-build.log"
+  # `if ! ...`, not a bare assignment: under `set -euo pipefail` a cargo failure exits
+  # the script inside the command substitution, so the diagnosis below was dead code
+  # and cargo's stderr (sent to /dev/null) was the only account of what went wrong.
   # shellcheck disable=SC2086
-  bin="$(cd "$dir" && CARGO_TARGET_DIR="$WORK/sensitivity/target" \
+  if ! bin="$(cd "$dir" && CARGO_TARGET_DIR="$WORK/sensitivity/target" \
            cargo test --release --test decision --no-run \
-             --config 'profile.release.strip=false' --message-format=json 2>/dev/null \
-         | cargo_decision_executable)"
+             --config 'profile.release.strip=false' --message-format=json 2>"$build_log" \
+         | cargo_decision_executable)"; then
+    echo "FAIL: the detector sensitivity control could not build the forced-accept copy" >&2
+    tail -20 "$build_log" >&2
+    exit 1
+  fi
   [ -n "$bin" ] || {
     echo "FAIL: the detector sensitivity control could not build the forced-accept copy" >&2
+    tail -20 "$build_log" >&2
     exit 1
   }
   set +e
   local out rc
   out="$("$bin" "$DECISION_TEST" 2>&1)"; rc=$?
   set -e
-  if ! printf '%s\n' "$out" | grep -q "forged tag accepted"; then
+  # Here-string, not `printf | grep -q`: grep exits at its first match, and under
+  # `pipefail` a large `$out` gives printf SIGPIPE (141), which reads as "the control
+  # reported no forgery" -- a false failure of the guard on the sweep.
+  if ! grep -q "forged tag accepted" <<<"$out"; then
     echo "FAIL: the decision test is not sensitive to an accepted forgery: a copy whose" >&2
     echo "      accept_or_reject accepts everything was run and '$DECISION_TEST' did NOT" >&2
     echo "      report it (binary exit $rc). Every fault below would read as 'rejected'" >&2
@@ -350,6 +361,25 @@ check_scan_witness_shard() {  # <label> <expected-ranges> <nshards> <owned indic
   union="$(mktemp)"
   cat "$WORK"/shard-"$label"-*.bin.scanned_offsets 2>/dev/null | sort -n -u > "$union" || true
   if [ ! -s "$union" ]; then
+    # A slice can legitimately be empty: `--quick` narrows the region to a handful of
+    # bytes, and with more shards than bytes some slices own none. Distinguish that
+    # from a sweep that recorded nothing by counting the offsets *this invocation owns*
+    # in the ranges the driver independently extracted. Only non-empty ownership with an
+    # empty file is the could-not-run case.
+    local owned_total
+    owned_total="$(awk -v nshards="$nshards" -v owned="$owned" '
+      BEGIN {
+        nm = split(owned, m, " ")
+        for (k = 1; k <= nm; k++) mine[m[k]] = 1
+        base = 0; total = 0
+      }
+      { for (l = 0; l < $2; l++) if (((base + l) % nshards) in mine) total++; base += $2 }
+      END { print total }
+    ' "$expected")"
+    if [ "$owned_total" -eq 0 ]; then
+      rm -f "$union"
+      return 0
+    fi
     echo "FAILED: the sweep recorded no examined offset at all, so the map below would" >&2
     echo "         describe a sweep that did not happen. That is a could-not-run (3), not" >&2
     echo "         a verdict -- and zero accepting faults from a zero-instruction sweep is" >&2

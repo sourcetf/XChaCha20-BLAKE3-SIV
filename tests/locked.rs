@@ -247,10 +247,13 @@ fn smaps_reports_locks() -> bool {
     // are initialised and nothing else aliases them.
     let probe = unsafe { core::slice::from_raw_parts_mut(aligned as *mut u8, 4096) };
     let ptr = probe.as_ptr() as usize;
-    match xchacha20_blake3_siv::locked::lock_range(probe.as_ptr(), probe.len()) {
+    // SAFETY: `probe` is a live, exclusively borrowed page inside `backing`, and it
+    // stays alive until after the unlock below.
+    match unsafe { xchacha20_blake3_siv::locked::lock_range(probe.as_ptr(), probe.len()) } {
         Ok(()) => {
             let reported = locked_kb_at(ptr).unwrap_or(0) > 0;
-            xchacha20_blake3_siv::locked::unlock_range(probe.as_ptr(), probe.len());
+            // SAFETY: the range was just locked above, and `probe` is still live.
+            unsafe { xchacha20_blake3_siv::locked::unlock_range(probe.as_ptr(), probe.len()) };
             reported
         }
         // Nothing can be locked here at all; `lock_or_skip` has already dealt with that.
@@ -728,7 +731,8 @@ fn unlocking_restores_core_dump_inclusion() {
          exclusion it sets from one that was already there: {before}"
     );
 
-    match xchacha20_blake3_siv::locked::lock_range(buf.as_ptr(), buf.len()) {
+    // SAFETY: `buf` is a live, exclusively owned allocation for the rest of this test.
+    match unsafe { xchacha20_blake3_siv::locked::lock_range(buf.as_ptr(), buf.len()) } {
         Ok(()) => {}
         Err(e) => {
             assert!(
@@ -773,7 +777,8 @@ fn unlocking_restores_core_dump_inclusion() {
         // *failure* unless `XSIV_ALLOW_UNOBSERVABLE_DUMP_FLAGS=1` records the gap: an
         // audit measured this branch returning `ok` with nothing observed, which is
         // indistinguishable in a test report from having verified the effect.
-        xchacha20_blake3_siv::locked::unlock_range(buf.as_ptr(), buf.len());
+        // SAFETY: `buf` was locked above and is still live.
+        unsafe { xchacha20_blake3_siv::locked::unlock_range(buf.as_ptr(), buf.len()) };
         assert!(
             allow_unobservable_dump_flags(),
             "VmFlags does not report `lo` for the mapping that holds the buffer, so this \
@@ -800,7 +805,8 @@ fn unlocking_restores_core_dump_inclusion() {
          syscalls and only one of them is the lock. flags: {locked}"
     );
 
-    xchacha20_blake3_siv::locked::unlock_range(buf.as_ptr(), buf.len());
+    // SAFETY: `buf` was locked above and is still live.
+    unsafe { xchacha20_blake3_siv::locked::unlock_range(buf.as_ptr(), buf.len()) };
 
     let unlocked = flags_at(ptr).expect("smaps is readable");
     assert!(
@@ -840,7 +846,7 @@ const LIB: &str = include_str!("../src/lib.rs");
 /// that is textually *after* the module, because the cut is at the module's first
 /// line, not at its closing brace: a production function appended below the test
 /// module (legal Rust, compiled in normal builds) is skipped entirely. Measured: a
-/// second syscall-backed `pub fn lock_range(` carrying `NR_MLOCK`, appended after the
+/// second syscall-backed `pub unsafe fn lock_range(` carrying `NR_MLOCK`, appended after the
 /// test module, left this file's suite green, though
 /// `the_dump_advice_is_issued_on_the_right_range` asserts there is exactly one such
 /// definition. It also hid a `mod tests {` *mentioned in a comment* before the real
@@ -1359,7 +1365,7 @@ fn the_integrity_tag_is_wiped_in_both_callers() {
     // the key in an ordinary, swappable page until `mlock` returns; a preemption in that
     // window can send the page to swap, which is exactly what this layer prevents.
     let lock = new
-        .find("lock_range(page.as_ptr(), page.len())?;")
+        .find("lock_range(page.as_ptr(), page.len())? }")
         .expect("LockedKey::new no longer calls lock_range");
     let key_copy = new
         .find("page.bytes_mut()[..crate::KEY_LEN].copy_from_slice(key);")
@@ -1549,7 +1555,7 @@ fn the_dump_advice_is_issued_on_the_right_range() {
 
     // Two definitions each: the real one, and the `ENOSYS` stub for other targets. The
     // real one is the block that names the syscall.
-    let lock: Vec<String> = brace_blocks("pub fn lock_range(")
+    let lock: Vec<String> = brace_blocks("pub unsafe fn lock_range(")
         .into_iter()
         .filter(|b| b.contains("NR_MLOCK"))
         .collect();
