@@ -121,9 +121,9 @@ cd "$WORK/crate"
 # satisfied because its plant lived in lib.rs). The count is taken from the same
 # source-derived parser the Formal matrix is planned with -- `tools/kani_shards.py
 # --count`, run on the copy -- rather than a second regex here, so a harness that
-# parser cannot see is a failure in this gate too. 17 is the committed count; a
+# parser cannot see is a failure in this gate too. 19 is the committed count; a
 # change that removes harnesses has to update this number *and* the matrix.
-COMMITTED_HARNESSES=17
+COMMITTED_HARNESSES=19
 harness_count="$("$PYTHON" tools/kani_shards.py --count 2>"$WORK/kani-count.err" || true)"
 case "$harness_count" in
   ''|*[!0-9]*)

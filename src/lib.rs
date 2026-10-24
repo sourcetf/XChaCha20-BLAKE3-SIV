@@ -4515,7 +4515,11 @@ mod proofs;
 ///
 /// Private: it is an implementation detail of the `ultra` feature, not API. See the module
 /// documentation for what a second implementation does and does not buy.
-#[cfg(feature = "ultra")]
+///
+/// `kani` is the proof build's cfg, not a feature: normal builds (`cargo` with any feature
+/// set) still compile this module only under `ultra`. The Kani permit exists so the
+/// concrete cross-implementation harness can call it; it changes no production boundary.
+#[cfg(any(feature = "ultra", kani))]
 mod witness;
 
 #[cfg(test)]

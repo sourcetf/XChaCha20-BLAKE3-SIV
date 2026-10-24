@@ -44,7 +44,7 @@
 //!    error rather than a genuine counterexample. Harnesses therefore compare
 //!    scalars or short fields instead of whole slices.
 //!
-//! Fifteen of the seventeen harnesses carry an explicit `#[kani::unwind]`; the
+//! Seventeen of the nineteen harnesses carry an explicit `#[kani::unwind]`; the
 //! other two contain no loops.  The bounds are deliberately generous, and the
 //! unwinding assertions they turn on are what make a bound that is ever too low
 //! fail the harness rather than silently truncate the loop it guards.
@@ -94,20 +94,23 @@
 //!    `test_tag_matches_blake3_over_the_documented_input` in `lib.rs`, which
 //!    compares all 65 tag bytes against an independently assembled input with the
 //!    real BLAKE3. The model is *not* an anchor to BLAKE3: a change made in both
-//!    `model_blake3_keyed_multi` and the implementation is invisible to every
-//!    harness here. That is why the real-BLAKE3 KAT, not this suite, is what pins
-//!    the primitive's output.
-//! 3. **`src/witness.rs` has no harness.** Kani runs without `ultra`, and that
-//!    module is the `ultra` build's independent second implementation. Its
-//!    conformance is covered by `tests/ultra.rs`, the differential sweeps in
-//!    `lib.rs`'s tests and the source-shape counts — not by a proof. A harness here
-//!    would also be the wrong shape: the module's own BLAKE3 is a second
-//!    implementation whose correctness question is differential, not a bounded-model
-//!    property.
-//! 4. **The zeroization stubs mean Kani does not prove the wipes.** Most harnesses
-//!    replace `zeroize_array` with a no-op so a functional property does not pay for
-//!    volatile stores it never reads. Deleting a production wipe is caught by
-//!    `tests/security.rs`'s exact source-shape counts, not here.
+//!    `model_blake3_keyed_multi` and the implementation is invisible to the symbolic
+//!    harnesses. The concrete witness anchor below makes that two-codebase event
+//!    necessary, and the real-BLAKE3 KAT pins the primitive's output.
+//! 3. **The witness is anchored concretely, not symbolically.** `src/witness.rs` is
+//!    compiled for Kani by the same `cfg` that enables the proof build, and
+//!    `tag_matches_the_independent_witness_on_a_concrete_input` compares `derive_tag`
+//!    (with the hash seam stubbed to the witness) against `witness::tag` on a concrete
+//!    input. A layout, domain or key-choice change in the main path now fails against a
+//!    second implementation even if the XOR model were changed with it. The witness's
+//!    own BLAKE3 is still not anchored to BLAKE3 by Kani (real BLAKE3 uses inline asm);
+//!    the real-BLAKE3 KAT is that anchor. The witness anchor is the suite's most
+//!    expensive concrete harness (~3:44 measured), so it has its own shard.
+//! 4. **`zeroize_array` is proved, but call sites are source-counted.** The generic
+//!    helper has `zeroize_array_clears_all_bytes`; most functional harnesses still stub
+//!    it so they do not pay for volatile stores they never read. Whether a production
+//!    call is present is not a Kani property — `tests/security.rs`'s exact source-shape
+//!    counts are the device for that.
 
 use super::*;
 use alloc::vec;
@@ -136,6 +139,22 @@ fn zeroize_slice_clears_all_bytes() {
     crate::zeroize_slice(&mut buf);
 
     for b in buf.iter() {
+        assert_eq!(*b, 0u8);
+    }
+}
+
+/// `zeroize_array` must clear an array of the kind the crate passes it.
+///
+/// The functional harnesses stub `zeroize_array` out so a proof does not pay for volatile
+/// stores it never reads. That left the generic helper itself without a proof of its own;
+/// this harness supplies one. It does not and cannot prove that a call site is present --
+/// `tests/security.rs`'s exact source-shape counts are the device for that.
+#[kani::proof]
+#[kani::unwind(40)]
+fn zeroize_array_clears_all_bytes() {
+    let mut value: [u8; 32] = kani::any();
+    crate::zeroize_array(&mut value);
+    for b in value.iter() {
         assert_eq!(*b, 0u8);
     }
 }
@@ -199,9 +218,10 @@ fn zeroize_slice_clears_unaligned_window() {
 // (the figure `tools/kani_shards.py` records for the same shard) — so none of those is
 // exact for another host. The original thirteen-harness shard set ran in ~875 s with
 // the slowest single harness at ~460 s (an audit measured the suite). The suite is now
-// seventeen harnesses: the four concrete tag comparisons are one shape each in their
+// nineteen harnesses: the four concrete tag comparisons are one shape each in their
 // own `tag-concrete` shard (a single four-shape harness measured ~17 minutes under
-// CBMC), and the concrete `derive_enc` comparison took 46 s on the audit host. The
+// CBMC), the concrete `derive_enc` comparison took 46 s on the audit host, and the
+// witness anchor took 3:44 in its own `witness-anchor` shard. The
 // *design* is unchanged — the permutation and the wipe are still stubbed where the
 // property does not need them, because symbolic-key harnesses over the real rounds
 // still do not terminate — but the numbers above are history, not current costs.
@@ -1042,6 +1062,60 @@ fn tag_matches_the_model_with_empty_message() {
 #[kani::unwind(130)]
 fn tag_matches_the_model_with_empty_aad_and_message() {
     assert_tag_matches_model!(&[0x11u8; 32], &[0x22u8; 32], &[0x33u8; NONCE_LEN], b"", b"");
+}
+
+/// Stub `blake3_keyed_multi` with the independent witness implementation.
+///
+/// Unlike `model_blake3_keyed_multi`, this is a real keyed BLAKE3 implementation
+/// (`src/witness.rs`), so the comparison below anchors the construction to a second
+/// codebase rather than to a fold that could be changed in step with `derive_tag`.
+fn witness_keyed_multi(key: &[u8; 32], parts: &[&[u8]], out: &mut [u8]) {
+    let mut hasher = crate::witness::Hasher::new_keyed(key);
+    for part in parts {
+        hasher.update(part);
+    }
+    hasher.finalize_xof(out);
+}
+
+/// The tag from `derive_tag` must equal the independent witness's tag on **concrete**
+/// inputs. One non-empty shape is enough to pin the layout and key choice; the model
+/// harnesses cover the four empty/non-empty combinations, and a second witness shape
+/// would double a proof that is already the suite's most expensive concrete one.
+///
+/// The symbolic harnesses stub the hash with the XOR model, so a change made in both the
+/// model and `derive_tag` is invisible. Here the seam is the witness, a separate
+/// from-scratch implementation with its own BLAKE3, and the expected tag is computed by
+/// `witness::tag` directly. A layout, key-choice or domain-string change in `derive_tag`
+/// alone fails; both implementations changing identically is a much narrower event. The
+/// witness itself is still not anchored to BLAKE3 under Kani (the real BLAKE3 uses inline
+/// asm), but `test_tag_matches_blake3_over_the_documented_input` runs the real primitive.
+///
+/// This is also the witness module's Kani coverage: it executes `Hasher`, `keyed_xof` and
+/// `tag` on concrete inputs.
+#[kani::proof]
+#[kani::stub(blake3_keyed_multi, witness_keyed_multi)]
+#[kani::stub(zeroize_array, noop_zeroize_array)]
+#[kani::unwind(70)]
+fn tag_matches_the_independent_witness_on_a_concrete_input() {
+    let k_in = [0x11u8; 32];
+    let k_out = [0x22u8; 32];
+    let nonce = [0x33u8; NONCE_LEN];
+
+    macro_rules! compare_shape {
+        ($aad:expr, $msg:expr) => {{
+            let aad: &[u8] = $aad;
+            let msg: &[u8] = $msg;
+            let got = derive_tag(&k_in, &k_out, &nonce, aad, msg);
+            let want = crate::witness::tag(&k_in, &k_out, &nonce, aad, msg);
+            let mut diff = 0u8;
+            for i in 0..TAG_LEN {
+                diff |= got[i] ^ want[i];
+            }
+            assert!(diff == 0);
+        }};
+    }
+
+    compare_shape!(b"a", b"m");
 }
 
 /// A change to either derived key must change the tag.

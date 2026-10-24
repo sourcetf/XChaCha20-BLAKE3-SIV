@@ -1062,11 +1062,14 @@ works unprivileged, and the emulator is extracted into `~/.local/bin`.
   concrete `tag_matches_the_model_with_*` comparisons, which rebuild the head with
   the nonce in it and compare all 65 tag bytes, so a regression that dropped the
   nonce from the head fails there (and by
-  `test_tag_matches_blake3_over_the_documented_input` on the same input); and the
+  `test_tag_matches_blake3_over_the_documented_input` on the same input); the
+  construction is also compared against `src/witness.rs`, the independent
+  `ultra` implementation, by a concrete harness, so a layout or key-choice change
+  cannot be hidden by changing the XOR model with it; and the
   contiguous one-part hash shape (2 KiB–64 KiB) is reached by no harness (its
   stub assertions are documentation, and the shape equivalence is pinned by
-  `test_both_tag_call_shapes_hash_the_same_bytes`). Plus the ChaCha20 counter sequencing, zeroization
-  and length-limit harnesses. `-Z stubbing` is required, and the MAC is stubbed
+  `test_both_tag_call_shapes_hash_the_same_bytes`). Plus the ChaCha20 counter sequencing,
+  length-limit harnesses, and a proof of `zeroize_array` itself. `-Z stubbing` is required, and the MAC is stubbed
   through a single seam so no call site can escape the model. The suite runs with
   CBMC's extra pointer checks, in parallel shards — those checks were
   unaffordable on a hosted runner until the tag harness's input shapes became

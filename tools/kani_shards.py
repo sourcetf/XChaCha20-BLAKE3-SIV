@@ -64,6 +64,10 @@ SHARDS = [
     # single most expensive harness in the suite, while the others are small
     # enough to pair up.
     ("permutation", ["hchacha20_"], 1),
+    # The witness anchor: a concrete cross-implementation comparison that took 3:44
+    # measured on the audit host. Its own sequential shard keeps it parallel with the
+    # others instead of stretching the tag shard; see the harness's doc comment.
+    ("witness-anchor", ["tag_matches_the_independent_witness"], 1),
     # The four concrete tag comparisons, one per empty/non-empty AAD/message shape.
     # Their prefix must be tested before the broad `tag_` entry below. One harness per
     # shape rather than one four-shape harness: CBMC took ~17 minutes on the merged

@@ -110,6 +110,7 @@ use crate::{DOM_ENC, DOM_PRE, DOM_TAG, NONCE_LEN, SUBKEY_DOMAIN, TAG_LEN};
 /// place and there is nothing to free at all — which also means a keyed call performs **no
 /// heap allocation** and cannot abort on an allocation refusal (see `CvStack`'s doc).
 #[inline(never)]
+#[cfg(not(kani))]
 fn wipe<T>(value: &mut T) {
     let bytes = core::mem::size_of::<T>();
     let p = value as *mut T as *mut u8;
@@ -121,8 +122,17 @@ fn wipe<T>(value: &mut T) {
     core::sync::atomic::compiler_fence(core::sync::atomic::Ordering::SeqCst);
 }
 
+/// Kani-only no-op. The concrete witness harness compares hash/tag values, not wipes, and
+/// the 64-byte volatile loops otherwise dominate its CBMC cost. `zeroize_array`'s own
+/// harness covers the crate's wipe primitive; the witness's internal copies are not part
+/// of the property under test here.
+#[cfg(kani)]
+#[inline(never)]
+fn wipe<T>(_value: &mut T) {}
+
 /// Volatile-zero a `u32` array.
 #[inline(never)]
+#[cfg(not(kani))]
 fn wipe_words(words: &mut [u32]) {
     for w in words.iter_mut() {
         // SAFETY: `w` is a live `u32`; a volatile store needs no more than that.
@@ -130,6 +140,11 @@ fn wipe_words(words: &mut [u32]) {
     }
     core::sync::atomic::compiler_fence(core::sync::atomic::Ordering::SeqCst);
 }
+
+/// Kani-only no-op; see the matching `wipe` above.
+#[cfg(kani)]
+#[inline(never)]
+fn wipe_words(_words: &mut [u32]) {}
 
 // ── ChaCha20 (RFC 8439) ───────────────────────────────────────────────
 

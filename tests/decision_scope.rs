@@ -1614,18 +1614,25 @@ fn the_decision_outcome_is_fail_closed() {
         1,
         "`encrypt` must cross-check the tag with the independent implementation"
     );
-    // The declaration is `#[cfg(feature = "ultra")] mod witness;`: a bare
-    // `LIB.contains("mod witness;")` held in every build while proving nothing about the
-    // `ultra` build (and would also hold if the module were compiled into the opt-out
-    // baseline, changing the documented feature set). Pin the gated declaration, which is
-    // the text the `ultra` build compiles. Read through `non_test`, not `LIB`: the raw
+    // The declaration is `#[cfg(any(feature = "ultra", kani))] mod witness;`. `kani` is
+    // the proof build's cfg, never set by cargo, so the production boundary is still the
+    // `ultra` feature; the Kani arm exists so the concrete cross-implementation harness can
+    // call the witness. Pin the gated declaration and require exactly one declaration, so a
+    // second ungated one cannot sit beside it. Read through `non_test`, not `LIB`: the raw
     // file let an ungated `mod witness;` sit beside a block comment carrying the old
     // attribute, so the gate could be deleted while this stayed green.
+    assert_eq!(
+        non_test.matches("mod witness;").count(),
+        1,
+        "the independent implementation must be declared exactly once, as the gated module \
+         `witness`"
+    );
     assert!(
-        non_test.contains("#[cfg(feature = \"ultra\")]\nmod witness;"),
+        non_test.contains("#[cfg(any(feature = \"ultra\", kani))]\nmod witness;"),
         "the independent implementation must be declared as the `ultra`-gated module \
-         `witness`: a bare `mod witness;` would compile it into every build, and a missing \
-         gate would silently move the feature boundary"
+         `witness` (with the `kani` arm for its proof harness only): a bare `mod witness;` \
+         would compile it into every build, and a missing gate would silently move the \
+         feature boundary"
     );
     // `encrypt`'s cross-check goes through the same function rather than comparing and
     // branching at its own call site: as an `if !bool::from(..ct_eq(..))` it is a branch on
