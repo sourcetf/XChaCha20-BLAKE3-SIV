@@ -77,6 +77,16 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           shared-key: lint
+      # `tools/gate_selftest.sh` drives `verify.sh`'s failure paths, and stage 1 of
+      # verify.sh runs `tools/ref_impl.py`, which imports Python's `blake3`. Without
+      # the module verify.sh fails before reaching the guard the selftest is checking,
+      # so the selftest reports "failing for an unrelated reason". Pinned to the same
+      # release as the differential jobs.
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
+        with:
+          python-version: "3.x"
+      - name: install the blake3 module for the gate selftest
+        run: python3 -m pip install --quiet "blake3==1.0.11"
 
       - name: cargo fmt
         run: cargo fmt --all --check
