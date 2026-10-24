@@ -52,6 +52,16 @@ REAL_CARGO_HOME="${CARGO_HOME:-$HOME/.cargo}"
 REAL_RUSTUP_HOME="${RUSTUP_HOME:-$HOME/.rustup}"
 REAL_HOME="$HOME"
 CARGO_BIN_DIR="$(dirname "$(command -v cargo)")"
+# The restricted PATHs below deliberately drop the job's Python prefix to control
+# which `cargo` runs. Python's reference dependency is not part of that experiment:
+# keep the interpreter that `python3` resolves to (setup-python on CI) on the probes'
+# PATH, and pin the user-site base so a throwaway HOME does not hide a `blake3`
+# installed with `pip --user`.
+PYTHON_BIN_DIR="$(dirname "$(command -v python3)")"
+PYTHON_USER_BASE="$(python3 -m site --user-base 2>/dev/null || true)"
+if [ -n "$PYTHON_USER_BASE" ]; then
+  export PYTHONUSERBASE="$PYTHON_USER_BASE"
+fi
 
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
@@ -127,7 +137,7 @@ hidden_run() {  # prints output, returns the tool's status
   # `CARGO_HOME` and `RUSTUP_HOME` are passed through explicitly: hiding `HOME`
   # hides the toolchain too, and this check is about the valgrind lookup, not about
   # whether rustup can find its own state.
-  out=$(PATH="$STUB:$CARGO_BIN_DIR:/usr/bin:/bin" HOME="$HIDDEN_HOME" \
+  out=$(PATH="$STUB:$CARGO_BIN_DIR:$PYTHON_BIN_DIR:/usr/bin:/bin" HOME="$HIDDEN_HOME" \
         CARGO_HOME="$REAL_CARGO_HOME" RUSTUP_HOME="$REAL_RUSTUP_HOME" \
         VALGRIND=/nonexistent "$@" 2>&1)
   rc=$?
@@ -181,7 +191,7 @@ check_exit_3 "tools/mutation_check.sh" bash tools/mutation_check.sh ctgrind
 HOME_OK="$(make_fake_home 0)"
 set +e
 vs_out="$(XSIV_IN_GATE_SELFTEST=1 \
-          PATH="$HOME_OK/.cargo/bin:$STUB:$CARGO_BIN_DIR:/usr/bin:/bin" HOME="$HOME_OK" \
+          PATH="$HOME_OK/.cargo/bin:$STUB:$CARGO_BIN_DIR:$PYTHON_BIN_DIR:/usr/bin:/bin" HOME="$HOME_OK" \
           VALGRIND=/nonexistent timeout 300 bash ./verify.sh --ctgrind 2>&1)"
 vs_rc=$?
 set -e
@@ -212,7 +222,7 @@ fi
 #    `tools/fi_check.sh` satisfied the old form of this check (an audit's point).
 HOME_FAIL="$(make_fake_home 1)"
 set +e
-fi_out="$(HOME="$HOME_FAIL" PATH="$HOME_FAIL/.cargo/bin:/usr/bin:/bin" \
+fi_out="$(HOME="$HOME_FAIL" PATH="$HOME_FAIL/.cargo/bin:$PYTHON_BIN_DIR:/usr/bin:/bin" \
           timeout 300 bash tools/fi_check.sh 2>&1)"
 fi_rc=$?
 set -e
@@ -250,7 +260,7 @@ fi
 #    separately exercised.
 HOME_ZERO="$(make_zero_test_home)"
 set +e
-zero_out="$(HOME="$HOME_ZERO" PATH="$HOME_ZERO/.cargo/bin:/usr/bin:/bin" \
+zero_out="$(HOME="$HOME_ZERO" PATH="$HOME_ZERO/.cargo/bin:$PYTHON_BIN_DIR:/usr/bin:/bin" \
             timeout 300 bash tools/fi_check.sh 2>&1)"
 zero_rc=$?
 set -e
@@ -291,7 +301,7 @@ fi
 #    run reaches its summary with the stage counted as passed.
 set +e
 miri_out="$(XSIV_IN_GATE_SELFTEST=1 \
-            PATH="$HOME_OK/.cargo/bin:$STUB:$CARGO_BIN_DIR:/usr/bin:/bin" HOME="$HOME_OK" \
+            PATH="$HOME_OK/.cargo/bin:$STUB:$CARGO_BIN_DIR:$PYTHON_BIN_DIR:/usr/bin:/bin" HOME="$HOME_OK" \
             timeout 300 bash ./verify.sh --miri 2>&1)"
 miri_rc=$?
 set -e
@@ -322,7 +332,7 @@ fi
 #    right, the status alone cannot say which of the two happened.
 HOME_101="$(make_fake_home 101)"
 set +e
-sr_out="$(HOME="$HOME_101" PATH="$HOME_101/.cargo/bin:/usr/bin:/bin" \
+sr_out="$(HOME="$HOME_101" PATH="$HOME_101/.cargo/bin:$PYTHON_BIN_DIR:/usr/bin:/bin" \
           timeout 300 bash tools/stack_residue.sh 2>&1)"
 sr_rc=$?
 set -e
@@ -372,7 +382,7 @@ FAKE
 chmod +x "$FAKEVG/valgrind" "$FAKEVG/setarch"
 rm -f "$WORK/vgcount"
 set +e
-cp_out="$(HOME="$HOME_OK" PATH="$FAKEVG:$HOME_OK/.cargo/bin:/usr/bin:/bin" \
+cp_out="$(HOME="$HOME_OK" PATH="$FAKEVG:$HOME_OK/.cargo/bin:$PYTHON_BIN_DIR:/usr/bin:/bin" \
           VALGRIND="$FAKEVG/valgrind" FAKE_VG_COUNTER="$WORK/vgcount" \
           timeout 300 bash tools/cache_profile.sh --trace 4 2>&1)"
 cp_rc=$?
@@ -407,7 +417,7 @@ cat tests/ctgrind.supp > "$VCOPY/tests/ctgrind.supp"
 printf '\n# planted by tools/gate_selftest.sh: a frame that is not the decision\nfun:decrypt\n' \
   >> "$VCOPY/tests/ctgrind.supp"
 set +e
-supp_out="$(HOME="$HOME_OK" PATH="$FAKEVG:$HOME_OK/.cargo/bin:/usr/bin:/bin" \
+supp_out="$(HOME="$HOME_OK" PATH="$FAKEVG:$HOME_OK/.cargo/bin:$PYTHON_BIN_DIR:/usr/bin:/bin" \
             VALGRIND="$FAKEVG/valgrind" timeout 300 bash "$VCOPY/tools/ctgrind.sh" 2>&1)"
 supp_rc=$?
 set -e
@@ -436,7 +446,7 @@ fi
 #    run here, the guard's `exit 1` is (the message check below says which fired).
 set +e
 zero_vs_out="$(XSIV_IN_GATE_SELFTEST=1 \
-               PATH="$HOME_ZERO/.cargo/bin:$STUB:$CARGO_BIN_DIR:/usr/bin:/bin" HOME="$HOME_ZERO" \
+               PATH="$HOME_ZERO/.cargo/bin:$STUB:$CARGO_BIN_DIR:$PYTHON_BIN_DIR:/usr/bin:/bin" HOME="$HOME_ZERO" \
                timeout 300 bash ./verify.sh 2>&1)"
 zero_vs_rc=$?
 set -e
