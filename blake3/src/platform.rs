@@ -223,11 +223,12 @@ impl Platform {
         // reproduced with a guard page: two inputs, `Platform::detect()` = AVX512,
         // STATUS_ACCESS_VIOLATION in the 2-wide tail.
         //
-        // Keep the fast kernels for the complete groups and send the remainder
-        // (fewer than one full group) to the portable implementation. The resulting
-        // chaining values are identical; only the tail's throughput changes. This
-        // also makes `inputs.is_empty()` a no-op instead of an unbounded assembly
-        // loop.
+        // Only the 64-byte parent blocks are affected: for a 1 KiB chunk input the
+        // +48-byte load is still inside the input, so an unconditional fallback to
+        // portable made every 4 KiB message's chunk hashing scalar (the audit
+        // measured 3.3x slower keyed BLAKE3 at 4 KiB). The tail is therefore routed
+        // per input width, and the 64-byte case uses the SSE2/SSE4.1 kernels, whose
+        // tails were measured not to over-read.
         let degree = self.simd_degree();
         let full = (inputs.len() / degree) * degree;
         if full > 0 {
@@ -247,7 +248,7 @@ impl Platform {
                 IncrementCounter::Yes => counter.wrapping_add(full as u64),
                 IncrementCounter::No => counter,
             };
-            portable::hash_many(
+            self.hash_many_tail(
                 &inputs[full..],
                 key,
                 tail_counter,
@@ -258,6 +259,94 @@ impl Platform {
                 &mut out[full * OUT_LEN..],
             );
         }
+    }
+
+    /// Hash fewer than one full SIMD group without the AVX2/AVX-512 over-read.
+    ///
+    /// The over-read is not specific to 64-byte inputs: the 32/64-byte loads of the
+    /// AVX2/AVX-512 kernels can cross the end of the **last block of any input**, and a
+    /// 1 KiB chunk at a page boundary faults just as a 64-byte parent block did in the
+    /// audit's reproducer. The 16-byte loads of the SSE2/SSE4.1 kernels stay inside the
+    /// block (`+48..+64`), so every x86 tail uses those 4-wide kernels; complete groups
+    /// still use the widest kernel. Non-x86 tails stay portable.
+    fn hash_many_tail<const N: usize>(
+        &self,
+        inputs: &[&[u8; N]],
+        key: &CVWords,
+        counter: u64,
+        increment_counter: IncrementCounter,
+        flags: u8,
+        flags_start: u8,
+        flags_end: u8,
+        out: &mut [u8],
+    ) {
+        debug_assert!(!inputs.is_empty());
+        #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+        {
+            match self {
+                Platform::SSE41 | Platform::AVX2 => unsafe {
+                    crate::sse41::hash_many(
+                        inputs,
+                        key,
+                        counter,
+                        increment_counter,
+                        flags,
+                        flags_start,
+                        flags_end,
+                        out,
+                    )
+                },
+                // The variant is absent when BLAKE3's Rust-only backends are selected
+                // (`pure`); AVX2 still exists there, and the SSE4.1 path is the safe
+                // 4-wide tail for it.
+                #[cfg(blake3_avx512_ffi)]
+                Platform::AVX512 => unsafe {
+                    crate::sse41::hash_many(
+                        inputs,
+                        key,
+                        counter,
+                        increment_counter,
+                        flags,
+                        flags_start,
+                        flags_end,
+                        out,
+                    )
+                },
+                Platform::SSE2 => unsafe {
+                    crate::sse2::hash_many(
+                        inputs,
+                        key,
+                        counter,
+                        increment_counter,
+                        flags,
+                        flags_start,
+                        flags_end,
+                        out,
+                    )
+                },
+                _ => portable::hash_many(
+                    inputs,
+                    key,
+                    counter,
+                    increment_counter,
+                    flags,
+                    flags_start,
+                    flags_end,
+                    out,
+                ),
+            }
+        }
+        #[cfg(not(any(target_arch = "x86", target_arch = "x86_64")))]
+        portable::hash_many(
+            inputs,
+            key,
+            counter,
+            increment_counter,
+            flags,
+            flags_start,
+            flags_end,
+            out,
+        );
     }
 
     fn hash_many_simd<const N: usize>(
@@ -418,7 +507,7 @@ impl Platform {
             for out_block in out.chunks_exact_mut(BLOCK_LEN) {
                 let out_array: &mut [u8; BLOCK_LEN] = out_block.try_into().unwrap();
                 *out_array = self.compress_xof(cv, block, block_len, counter, flags);
-                counter += 1;
+                counter = counter.wrapping_add(1);
             }
             return;
         }
@@ -437,7 +526,7 @@ impl Platform {
                     // TODO: Use array_chunks_mut here once that's stable.
                     let out_array: &mut [u8; BLOCK_LEN] = out_block.try_into().unwrap();
                     *out_array = self.compress_xof(cv, block, block_len, counter, flags);
-                    counter += 1;
+                    counter = counter.wrapping_add(1);
                 }
             }
         }

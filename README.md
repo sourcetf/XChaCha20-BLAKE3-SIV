@@ -30,9 +30,11 @@ note on `encrypt_in_place_detached`.
 > **Bound your input before you decrypt.** `decrypt` allocates a plaintext buffer as large
 > as the ciphertext it is handed, so the call holds ciphertext **and** plaintext — at least
 > twice the message in memory. When `48 + len(A) + len(M)` falls in 2 KiB..=64 KiB,
-> `derive_tag` also allocates a bounded concatenation buffer, making the default peak
-> **three times** the message; `ultra`'s witness adds a second plaintext, making it **four
-> times** in that window. The format's ceiling (`MAX_MSG_SIZE`, 256 GiB) is not a
+> `derive_tag` also allocates a bounded concatenation buffer, so the default peak in that
+> window is **`3·len(M) + len(A) + 48`** bytes (ciphertext, plaintext, and the exact-sized
+> concat buffer); `ultra`'s witness adds a second plaintext, making it
+> **`4·len(M) + len(A) + 48`**. When the AAD dominates, the multiple of the message is not
+> the useful figure. The format's ceiling (`MAX_MSG_SIZE`, 256 GiB) is not a
 > safe one: it is the largest message the *construction* supports, not the largest a
 > service should accept. A caller whose message length comes off the wire must cap it
 > itself: `decrypt_bounded(key, nonce, aad, ciphertext, tag, max_len)` enforces the
@@ -602,7 +604,7 @@ second implementation on ("What the witness is" prices that loss).
 | `hardened` (moved here from `dual-mac`) | a fault inside the shared constant-time comparison (a shortened loop, a corrupted bound): the second gate `AND`s a differently *written* comparison (an 8-byte fold into a `u64`, rather than `subtle`'s per-byte loop), so one fault reaches only one of the two shapes and a forgery needs two faults | **+1.4 ns** per decryption, measured (0.1% at 64 B). It was `dual-mac`-only until the two numbers were put side by side: this cost against a hand-modelled change from "forgery accepted after 2,573 attempts" to "no forgery in 2,000,000" |
 | `dual-mac` | the tag being pinned to a constant or to the received tag — the one model the two gates fail *together* on | +30% at 64 B, +40% at 1 KiB, +24% at 1 MiB on decryption (a +21–40% range); +6–25% on a round trip (the two ranges `Cargo.toml` and the changelog state). An independent build measured the same layer higher on its own harness (1.69–1.81x at 1 KiB, and +43–44% on the *encrypt* side at 64 B, where the fixed `scrub_stack` cost dominates); `performance.md` says how far these ratios move between builds |
 | `dual-mac` | key residue surviving in stack frames a wipe does not reach — the inner key `k_in`, left by the dependency's by-value temporaries rather than a frame this crate can name, plus the `blake3` dependency's XOF output (a run of `enc_key ‖ enc_nonce`) and, under `pure`, the outer key `k_out` (4,096-byte scan; the list, with the measured lengths, is in "What this crate cannot fix for you"): `scrub_stack()` overwrites the 16 KiB below the entry point after the last derivation | ~16 KiB of volatile stores, ~0.5–1 µs per operation, **and a 16,408-byte frame — 32 KiB of thread stack in all**, the published budget. Measured on a thread with a 32 KiB stack: the default build still runs after 16 KiB of the stack is already consumed, this one does not survive 8 KiB. A caller that spawns threads with small stacks must size them for it — the scrub is a 16 KiB frame, so it can fault the thread it is protecting. The budget is public as `stack_requirement_bytes()`: **32 KiB** under `dual-mac` (zero elsewhere), which is that frame plus the ordinary frames around it (~10 KiB in the same measurement, which overflowed a 24,576-byte thread and fitted in 26,624) with margin, and `the_reported_stack_requirement_is_sufficient` measures that a thread given that budget plus the test's documented margin (64 KiB in release, 1 MiB in debug) survives a round trip — so what it pins is that the constant does not understate by more than the margin, not that it is exact |
-| `witness` (in `ultra` only) | a fault aimed at the **derivation arithmetic both tag computations share** — `derive_tag`, the keyed BLAKE3 under it, and the SIMD kernels: the one model `dual-mac` alone cannot close, and where every accepting fault the sweep finds in the `hardened` build sits | the **`ultra` mode it is part of** costs **2.7x at 64 B, 4.0x at 1 KiB, 11.0x at 64 KiB, 12.4x at 1 MiB** against the default configuration, and the round trip 2.2x/2.8x/6.1x/6.5x in place or 2.5x/3.3x/6.6x/7.1x allocating (re-measured after the witness's residue-wipe pass) (measured; the four tables are in [`performance.md`](performance.md), and that file's "what the `ultra` layer costs" table is the one to read for this row). Those figures are the whole bundle, not this row alone: measured against `ultra` minus the witness (§), the **witness layer itself** is 1.45x at 64 B, 2.14x at 1 KiB, 6.3x at 64 KiB and 9.2x at 1 MiB on decryption (30.1→20.8, 259→121, 1462→232, 1767→192 MiB/s). It is a *scalar* implementation, so its cost is per byte, and on the encrypt side it is present **only on the allocating `encrypt`** — see "What the witness is" for why the in-place path does not carry it. It does not make the *totals* in the fault table zero — it removes accepting faults from the decision and from the shared derivation, and the `ultra` build has a handful elsewhere (§§) |
+| `witness` (in `ultra` only) | a fault aimed at the **derivation arithmetic both tag computations share** — `derive_tag`, the keyed BLAKE3 under it, and the SIMD kernels: the one model `dual-mac` alone cannot close, and where every accepting fault the sweep finds in the `hardened` build sits | the **`ultra` mode it is part of**, re-measured after the vendored-BLAKE3 tail fix, costs **2.4x at 64 B, 2.4x at 1 KiB, 4.3x at 64 KiB and 4.8x at 1 MiB** against the default configuration on allocating encryption (the only encrypt path that carries the witness), and **2.8x/4.1x/9.8x/14.3x** on decryption. Those are the whole bundle, not this row alone; [`performance.md`](performance.md)'s post-fork table is the current source, and its older ultra-minus-witness measurement put the **witness layer itself** at 1.45x at 64 B, 2.14x at 1 KiB, 6.3x at 64 KiB and 9.2x at 1 MiB on decryption. The witness is a complete scalar second implementation, so this is a design cost rather than a main-path regression. It is a *scalar* implementation, so its cost is per byte, and on the encrypt side it is present **only on the allocating `encrypt`** — see "What the witness is" for why the in-place path does not carry it. It does not make the *totals* in the fault table zero — it removes accepting faults from the decision and from the shared derivation, and the `ultra` build has a handful elsewhere (§§) |
 | `locked` | key pages readable out of **swap** or a **core dump** | ~7 µs once per key (`mlock`+`munlock`), not per message. The key is heap-allocated so its address is stable: `mlock` is address-based, and a key returned by value moves after being locked, which left this layer protecting a dead stack slot |
 | `locked` | a **hardware fault or bit flip in the key page** turning into a silent wrong key | `+42 ns` per use, measured: an 8-byte BLAKE3 tag of the key is stored beside it and checked (constant time) on every `as_bytes()`, so a corrupted page panics at the first use instead of decrypting with a key that is not the caller's. It does not detect a fault that rewrites the tag too, nor one outside the key-and-tag region (the rest of the page is never read) |
 | `locked` | a **debugger** attaching to the process, or another process reading its memory | two `prctl` calls in one opt-in function — `PR_GET_DUMPABLE` to read the previous state it returns, then `PR_SET_DUMPABLE` to clear it — via `locked::deny_debugging()`, after which the kernel refuses `PTRACE_MODE_ATTACH` (and `/proc/<pid>/mem`) even to the same user without `CAP_SYS_PTRACE`. Not automatic, not even under `ultra`, because it is *process* policy — it also disables core dumps and breaks crash reporters, which is the application's call rather than a library's |
@@ -838,9 +840,10 @@ deployment.
   large as its ciphertext argument, so the peak is at least twice the message — the
   ciphertext the caller already holds, plus the plaintext. When
   `48 + len(A) + len(M)` falls in 2 KiB..=64 KiB, `derive_tag` also allocates a bounded
-  concatenation buffer, so the default peak is three times the message; under `ultra`
-  the witness adds a second recovered-plaintext buffer, so that window peaks at four
-  times (three times outside it). The format's own
+  concatenation buffer, so that window peaks at `3·len(M) + len(A) + 48` bytes; under
+  `ultra` the witness adds a second recovered-plaintext buffer, so `4·len(M) + len(A) + 48`
+  (outside the window, the concat buffer is absent and the peak is `2·len(M)` plus the
+  small fixed buffers). The format's own
   ceiling is `MAX_MSG_SIZE` (256 GiB, public, so a caller can check before it trusts a
   length off the wire; `decrypt_bounded` enforces a ciphertext policy limit before the
   allocation, but does not bound the AAD). Both allocating entry points are fallible,
@@ -849,11 +852,12 @@ deployment.
   cannot catch — but a request the kernel *accepts* can still be OOM-killed while the
   buffer is written to, and no in-process library can prevent that. A service that
   reads unbounded input has to cap it.
-  All of these buffers are allocated up front, before any key material exists, and
-  fallibly —
-  `tests/security.rs::every_allocation_happens_before_any_derivation` pins both halves
-  of that, because the `?` on an allocation taken after a derivation returns through
-  live keys without wiping them (a defect this crate has now had twice).
+  The entry points' caller-sized buffers (the ciphertext, the plaintext, and `ultra`'s
+  witness copies) are allocated before any key material exists and fallibly;
+  `tests/security.rs::every_allocation_happens_before_any_derivation` pins that. The
+  concatenation buffer inside `derive_tag` is allocated after `derive_material`, but its
+  `try_reserve_exact` refusal falls back to the three-part hash rather than returning, so
+  an allocation refusal there cannot return through live keys.
 - **A failed in-place decryption destroys the caller's buffer.** By design: the
   unverified plaintext must not be readable out of it, so it is wiped to zeros
   before the error is returned. Retry logic needs the ciphertext again; `decrypt`
@@ -1032,8 +1036,9 @@ works unprivileged, and the emulator is extracted into `~/.local/bin`.
   AddressSanitizer.
 - **Cross-architecture execution** — four configurations are *executed* under
   qemu, not merely type-checked. On x86 the aarch64 (NEON) backend is compiled
-  out entirely, so `qemu-aarch64` is the only *per-push* execution of it (the
-  scheduled Deep checks also run an `arm64` job natively on `ubuntu-24.04-arm`);
+  out entirely, so `qemu-aarch64` is the only *per-push* execution of it (a manually
+  dispatched Deep checks run also executes an `arm64` job natively on
+  `ubuntu-24.04-arm`; the scheduled run does not, see `deep.yml`);
   `qemu-i386` is the only place the 32-bit code paths run, where `usize` is 32 bits
   and every length calculation takes a different route; `qemu-ppc64` is the only
   place the code is *compiled and executed* on a **big-endian** machine (Miri also
@@ -1155,29 +1160,35 @@ fixes for defects that are not reachable through the lock and cannot be fixed fr
 dependent crate:
 
 - **D-01 (Medium, guard-page reproduced).** The AVX2/AVX-512 `hash_many` 2/4-wide
-  tail loads from `inputs[0]` at +16/+32/+48 bytes. With a 64-byte input ending at a
-  readable page and the next page inaccessible, `Platform::hash_many` with two inputs
-  crashed with `STATUS_ACCESS_VIOLATION` on this host (`Platform::detect()` =
-  AVX512). The fork sends complete SIMD groups to the kernels and the remainder
-  (fewer than one full group) to the portable implementation; the chaining values are
-  identical. `cargo run --release --example blake3_guard_probe` is the reproducer:
-  against crates.io 1.8.7 it dies at `n=2`; against this fork it returns for
-  `n=2,3,4,8`. `tests/blake3_fork_equivalence.rs` compares the split against
-  `Platform::portable()` for 0..=17 inputs and both counter modes.
+  tail loads from `inputs[0]` at +16/+32/+48 bytes, crossing the last 64-byte block
+  of any input. With a 64-byte input ending at a readable page and the next page
+  inaccessible, `Platform::hash_many` with two inputs crashed with
+  `STATUS_ACCESS_VIOLATION` on this host (`Platform::detect()` = AVX512). The fork
+  keeps complete SIMD groups on the widest kernel and sends sub-group tails to the
+  4-wide SSE2/SSE4.1 kernels (16-byte loads stay inside the block); the chaining
+  values are identical. The first fix routed every tail to portable and cost ~3.3x
+  at 4 KiB keyed BLAKE3 (audit V-01); the current routing restores it.
+  `cargo run --release --example blake3_guard_probe` is the Windows reproducer, and
+  `tests/blake3_fork_equivalence.rs` has a Linux `PROT_NONE` guard-page test plus a
+  comparison against `Platform::portable()` for 0..=40 inputs at both 64 B and
+  1 KiB and both counter modes.
 - **D-02 (Low).** The unix AVX-512 multi-block `xof_many` does not zero-extend
   `block_len`/`flags`; the fork uses the documented `compress_xof` loop for every
   request longer than one block. The equivalence test checks 1..=4 blocks against
   portable.
-- **D-04/D-05/D-06 (Low).** `Hasher::reset` now clears the hazmat
+- **D-04/D-05/D-06/V-03 (Low).** `Hasher::reset` now clears the hazmat
   `initial_chunk_counter`; `left_subtree_len` uses `div_ceil` so `u64::MAX` does not
   overflow; `OutputReader::position` saturates instead of overflowing at the end of
-  the addressable stream.
+  the addressable stream; and the Rust backends' counter increments wrap like the
+  assembly at `u64::MAX` instead of panicking in debug builds.
 
 The patch is a **workspace-local** `[patch.crates-io]`, not a published dependency:
 `cargo package` still resolves `blake3 = "1.8"` from crates.io, so a published
-artifact would not contain these fixes. The crate is not on crates.io; a release is
-blocked until the fork is published under its own package/version and the dependency
-is switched to it. That caveat is repeated in `Cargo.toml`.
+artifact would not contain these fixes. The same applies to **path and git consumers
+of this crate**: Cargo only applies `[patch]` in the workspace root, so their
+resolution also uses crates.io. The crate is not on crates.io; a release is blocked
+until the fork is published under its own package/version and the dependency is
+switched to it. That caveat is repeated in `Cargo.toml`.
 
 ## Layout
 

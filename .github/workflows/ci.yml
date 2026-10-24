@@ -215,9 +215,10 @@ jobs:
           # deliberately literal; a new integration test must be added here, and
           # `tests/README.md` is the human index for it.
           for target in \
-            tests/construction_inventory.rs tests/counter_range.rs tests/ctgrind.rs \
-            tests/decision.rs tests/decision_scope.rs tests/differential_reference.rs \
-            tests/locked.rs tests/mac_commitment.rs tests/plaintext_wipe.rs \
+            tests/blake3_fork_equivalence.rs tests/construction_inventory.rs \
+            tests/counter_range.rs tests/ctgrind.rs tests/decision.rs \
+            tests/decision_scope.rs tests/differential_reference.rs tests/locked.rs \
+            tests/mac_commitment.rs tests/plaintext_drop.rs tests/plaintext_wipe.rs \
             tests/security.rs tests/threads.rs tests/timing.rs tests/ultra.rs \
             tests/variable_latency.rs; do
             if [ ! -f "$target" ]; then
@@ -225,6 +226,37 @@ jobs:
               exit 1
             fi
           done
+          # File existence is not a built target: `autotests = false` (or a deleted
+          # `[[test]]`) leaves every file in place while cargo builds none of them, and
+          # the per-target run guard then sees zero headers and the zero-pass guard sees
+          # its exemptions. Compare cargo's own target set with the same list, and refuse
+          # an extra target as well so a new test cannot be added without the pin.
+          python3 - <<'PY'
+          import json, subprocess, sys
+          expected = {
+              "blake3_fork_equivalence", "construction_inventory", "counter_range",
+              "ctgrind", "decision", "decision_scope", "differential_reference",
+              "locked", "mac_commitment", "plaintext_drop", "plaintext_wipe",
+              "security", "threads", "timing", "ultra", "variable_latency",
+          }
+          meta = json.loads(
+              subprocess.check_output(["cargo", "metadata", "--no-deps", "--format-version", "1"])
+          )
+          targets = {
+              t["name"]
+              for package in meta["packages"]
+              for t in package["targets"]
+              if "test" in t["kind"]
+          }
+          missing = sorted(expected - targets)
+          unexpected = sorted(targets - expected)
+          if missing or unexpected:
+              print(
+                  f"::error::test target pin is out of date; missing={missing} unexpected={unexpected}",
+                  file=sys.stderr,
+              )
+              sys.exit(1)
+          PY
           log="${RUNNER_TEMP:-/tmp}/cargo-test-${{ strategy.job-index }}.log"
           cargo test ${{ matrix.args }} -- --skip timing 2>&1 | tee "$log"
           # A test target whose run reported **zero passed** executed nothing, even if it

@@ -30,6 +30,58 @@ tables. `v0.3`'s extra keyed-BLAKE3 call and extra ChaCha20 derivation block are
 per-message cost**, so the change shows at the small sizes and is inside the noise floor from
 16 KiB up.
 
+## Post-vendored-BLAKE3 re-measurement (2026-10-24)
+
+The tables below were measured for `v0.3`, **before** BLAKE3's 1.8.7 fork was
+vendored. The fork's first `hash_many` fix sent every sub-SIMD-group tail to
+`portable::hash_many`; the audit measured 4 KiB keyed BLAKE3 ~3.3x slower as a result.
+The fork now sends tails to the safe 4-wide SSE2/SSE4.1 kernels and keeps complete
+groups on AVX2/AVX-512 (`blake3/PATCHES.md`, D-01). A Linux guard-page test
+(`tests/blake3_fork_equivalence.rs::hash_many_tail_does_not_cross_a_guard_page`)
+covers both the 64-byte and 1 KiB routes.
+
+`cargo bench --bench compare -- --sample-size 10`, same host and release profile,
+ratio against RustCrypto's `XChaCha20Poly1305` (> 1 means this crate is faster):
+
+| Message | **hardened enc** | **hardened dec** |
+| --- | --- | --- |
+| 64 B | **1.24x** | 1.02x |
+| 256 B | **1.11x** | 0.86x |
+| 1 KiB | **0.90x** | 0.76x |
+| 4 KiB | **0.89x** | 0.90x |
+| 5 KiB (non-power-of-two) | 0.82x | 0.75x |
+| 16 KiB | **1.32x** | 1.06x |
+| 64 KiB | **1.08x** | 1.20x |
+| 1 MiB | **1.31x** | 1.28x |
+
+The hardened build is therefore at parity or ahead from 16 KiB up and within
+~10–25% at 4–5 KiB; the remaining small-message gap is the extra keyed-BLAKE3
+tag and per-message KDF the construction performs, not the tail fallback. The
+old table below remains the record for the opt-out and `ultra` v0.3 measurements.
+
+`ultra` is a separate question. `examples/bench_aead.rs` uses the allocating
+`encrypt` (the only encrypt path that carries the witness) and `decrypt` (both
+decrypt paths carry it), against the hardened build:
+
+| Message | ultra/hardened enc | ultra/hardened dec |
+| --- | --- | --- |
+| 64 B | 0.42x | 0.35x |
+| 256 B | 0.43x | 0.31x |
+| 1 KiB | 0.42x | 0.25x |
+| 4 KiB | 0.34x | 0.15x |
+| 16 KiB | 0.23x | 0.11x |
+| 64 KiB | 0.23x | 0.10x |
+| 1 MiB | 0.21x | 0.07x |
+
+This is not a missed optimization in the main path: the witness is a complete
+from-scratch **scalar** second implementation (its own ChaCha20 and BLAKE3), and its
+cost is per byte. A bound of "no more than 50% slower than hardened" is not reachable
+by tuning the existing code; it would require a SIMD second implementation or
+narrowing what the witness recomputes — both are design changes to the `ultra`
+layer, not fixes to the construction. In-place encryption deliberately does not carry
+the witness, so its `ultra` cost is the hardened cost plus the other ultra layers;
+only the allocating encrypt and both decrypts pay the scalar witness.
+
 ## The three configurations, measured
 
 **Three `cargo bench` runs per configuration**, each pinned to one core (`taskset -c 3`), with

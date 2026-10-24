@@ -171,7 +171,7 @@ pub fn hash_many<const N: usize>(
             (&mut output[..OUT_LEN]).try_into().unwrap(),
         );
         if increment_counter.yes() {
-            counter += 1;
+            counter = counter.wrapping_add(1);
         }
     }
 }

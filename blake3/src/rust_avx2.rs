@@ -288,24 +288,24 @@ unsafe fn load_counters(counter: u64, increment_counter: IncrementCounter) -> (_
     unsafe {
         (
             set8(
-                counter_low(counter + (mask & 0)),
-                counter_low(counter + (mask & 1)),
-                counter_low(counter + (mask & 2)),
-                counter_low(counter + (mask & 3)),
-                counter_low(counter + (mask & 4)),
-                counter_low(counter + (mask & 5)),
-                counter_low(counter + (mask & 6)),
-                counter_low(counter + (mask & 7)),
+                counter_low(counter.wrapping_add(mask & 0)),
+                counter_low(counter.wrapping_add(mask & 1)),
+                counter_low(counter.wrapping_add(mask & 2)),
+                counter_low(counter.wrapping_add(mask & 3)),
+                counter_low(counter.wrapping_add(mask & 4)),
+                counter_low(counter.wrapping_add(mask & 5)),
+                counter_low(counter.wrapping_add(mask & 6)),
+                counter_low(counter.wrapping_add(mask & 7)),
             ),
             set8(
-                counter_high(counter + (mask & 0)),
-                counter_high(counter + (mask & 1)),
-                counter_high(counter + (mask & 2)),
-                counter_high(counter + (mask & 3)),
-                counter_high(counter + (mask & 4)),
-                counter_high(counter + (mask & 5)),
-                counter_high(counter + (mask & 6)),
-                counter_high(counter + (mask & 7)),
+                counter_high(counter.wrapping_add(mask & 0)),
+                counter_high(counter.wrapping_add(mask & 1)),
+                counter_high(counter.wrapping_add(mask & 2)),
+                counter_high(counter.wrapping_add(mask & 3)),
+                counter_high(counter.wrapping_add(mask & 4)),
+                counter_high(counter.wrapping_add(mask & 5)),
+                counter_high(counter.wrapping_add(mask & 6)),
+                counter_high(counter.wrapping_add(mask & 7)),
             ),
         )
     }
@@ -430,7 +430,7 @@ pub unsafe fn hash_many<const N: usize>(
             );
         }
         if increment_counter.yes() {
-            counter += DEGREE as u64;
+            counter = counter.wrapping_add(DEGREE as u64);
         }
         inputs = &inputs[DEGREE..];
         out = &mut out[DEGREE * OUT_LEN..];

@@ -1320,10 +1320,10 @@ impl Hasher {
                 self.push_cv(left_cv, self.chunk_state.chunk_counter);
                 self.push_cv(
                     right_cv,
-                    self.chunk_state.chunk_counter + (subtree_chunks / 2),
+                    self.chunk_state.chunk_counter.wrapping_add(subtree_chunks / 2),
                 );
             }
-            self.chunk_state.chunk_counter += subtree_chunks;
+            self.chunk_state.chunk_counter = self.chunk_state.chunk_counter.wrapping_add(subtree_chunks);
             input = &input[subtree_len..];
         }
 
@@ -1707,7 +1707,7 @@ impl OutputReader {
         buf[..take].copy_from_slice(&output_bytes[..take]);
         self.position_within_block += take as u8;
         if self.position_within_block == BLOCK_LEN as u8 {
-            self.inner.counter += 1;
+            self.inner.counter = self.inner.counter.wrapping_add(1);
             self.position_within_block = 0;
         }
         // Advance the dest buffer. mem::take() is a borrowck workaround.
@@ -1751,7 +1751,7 @@ impl OutputReader {
                 self.inner.flags | ROOT,
                 &mut buf[..full_blocks_len],
             );
-            self.inner.counter += full_blocks as u64;
+            self.inner.counter = self.inner.counter.wrapping_add(full_blocks as u64);
             buf = &mut buf[full_blocks * BLOCK_LEN..];
         }
 

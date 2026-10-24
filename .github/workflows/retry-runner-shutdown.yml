@@ -55,8 +55,13 @@ jobs:
         run: |
           set -euo pipefail
           jobs="$(mktemp)"
+          # Keep the name as well as the id: the aggregate verdict job fails *because*
+          # the shards are missing, so its own annotation is a normal "FAIL" and it
+          # must not veto a re-run of the shutdown-stopped shards (CI-01 in the audit).
+          # Cancelled jobs are included for classification; `rerun-failed-jobs` decides
+          # what GitHub itself will re-run.
           gh api --paginate "repos/$REPO/actions/runs/$RUN_ID/jobs?per_page=100" \
-            --jq '.jobs[] | select(.conclusion == "failure") | .id' > "$jobs"
+            --jq '.jobs[] | select(.conclusion == "failure" or .conclusion == "cancelled") | "\(.id)\t\(.name)"' > "$jobs"
           if [ ! -s "$jobs" ]; then
             echo "No failed jobs to consider."
             exit 0
@@ -71,7 +76,17 @@ jobs:
           # 39639772764). A verdict or a FAIL line matches none of these.
           infra=0
           other=0
-          while read -r id; do
+          derived=0
+          while IFS=$'\t' read -r id name; do
+            # The verdict job aggregates the shards: when a shard was stopped by the
+            # runner, the verdict necessarily fails on the missing report, and its
+            # annotation says so in ordinary FAIL words. It is exempt from the
+            # classification, but only counts as recoverable when at least one real
+            # infra failure exists (checked below); a verdict-only failure is a finding.
+            if [ "$name" = "wide audit (sweep verdicts)" ]; then
+              derived=$((derived + 1))
+              continue
+            fi
             notes="$(gh api --paginate "repos/$REPO/check-runs/$id/annotations" --jq '.[].message')"
             # `case`, not `printf ... | grep -q`: under `pipefail` grep exits at its
             # first match, a large annotation set gives printf SIGPIPE, and the
@@ -93,5 +108,10 @@ jobs:
             echo "$other failed job(s) were not stopped by the runner; leaving the run red."
             exit 0
           fi
-          echo "Re-running $infra job(s) stopped by the runner (attempt $((RUN_ATTEMPT)))."
+          if [ "$infra" -eq 0 ]; then
+            # Only the derived verdict failed: that is its own finding, not lost work.
+            echo "No job carries a runner-shutdown annotation (derived verdict job: $derived); leaving the run red."
+            exit 0
+          fi
+          echo "Re-running $infra job(s) stopped by the runner plus $derived derived verdict job(s) (attempt $((RUN_ATTEMPT)))."
           gh api -X POST "repos/$REPO/actions/runs/$RUN_ID/rerun-failed-jobs"

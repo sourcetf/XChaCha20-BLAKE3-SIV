@@ -8,6 +8,52 @@ green push to `main` — which are build artefacts of that job, not construction
 
 ## Unreleased
 
+### The BLAKE3 tail fallback cost 3.3x on small messages; the new tail routing restores parity
+
+The vendored BLAKE3 fork's first D-01 fix sent **every** sub-SIMD-group tail to
+`portable::hash_many`. That was safe but made 4 KiB keyed BLAKE3 ~3.3x slower (the
+audit's V-01): a 4 KiB message hashes four 1 KiB chunks and many 64-byte parent nodes,
+and every one of those tail calls became scalar. The hardened AEAD at 4 KiB fell to
+~289 MiB/s encrypt / ~107 MiB/s decrypt.
+
+The tail is now routed by the width that matters: complete SIMD groups keep the widest
+kernel (AVX-512/AVX2/NEON), sub-group tails use the 4-wide SSE2/SSE4.1 kernels on x86
+(their 16-byte loads stay inside the final block, unlike the 32/64-byte AVX loads), and
+non-x86 tails stay portable. The first version of this routing used the widest kernel
+for 1 KiB tails too; a Linux `PROT_NONE` guard-page test (`tests/blake3_fork_equivalence.rs`)
+caught that the AVX loads cross the last block of *any* input, so the SSE path is used
+for both widths.
+
+Measured after the fix on this host (`cargo bench --bench compare -- --sample-size 10`,
+ratio to XChaCha20-Poly1305): hardened is **1.24x enc / 1.02x dec at 64 B, 0.89x / 0.90x
+at 4 KiB, 1.32x / 1.06x at 16 KiB and 1.31x / 1.28x at 1 MiB** — parity or ahead from
+16 KiB up, within ~10-25% at 4-5 KiB. The `performance.md` post-fork table is current;
+the old three-configuration tables remain as the v0.3 record.
+
+`ultra` is unchanged in kind: its witness is a complete from-scratch **scalar**
+implementation, so allocating encrypt/decrypt are 0.21-0.42x / 0.07-0.35x of hardened.
+That is a feature-design cost, not a main-path optimization miss; meeting a
+50%-of-hardened bound would require a SIMD second implementation or narrowing what the
+witness recomputes. In-place encryption does not carry the witness and stays at the
+hardened cost plus the other ultra layers.
+
+Also fixed from the same audit: the Rust backends' `hash_many`/`xof_many` counters wrap
+at `u64::MAX` like the assembly instead of panicking in debug (V-03); the Linux guard-page
+test now covers the D-01 over-read on both input widths (V-04); the CI test-target pin
+compares `cargo metadata`'s target set, including the new `blake3_fork_equivalence` and
+`plaintext_drop` tests, instead of only checking files exist (CI-02); the retry workflow
+exempts the derived `wide audit (sweep verdicts)` job so a shutdown-stopped shard is
+re-run rather than vetoed by the verdict's own FAIL (CI-01); and
+`decrypt_failure_wipes_internal_plaintext` now requires the plaintext-sized buffer to be
+deallocated, so a `mem::forget` leak cannot pass the residue check vacuously (K-03).
+The `PATCHES.md`, README and `performance.md` claims about the tail fallback are updated
+with the measurements.
+
+Verified: `cargo test --all-features` (69 lib + every integration target, 0 failed),
+`--no-default-features` (54 lib), the guard-page test under default/`pure`/all features,
+`blake3_fork_equivalence` 7/7, `cargo bench --bench compare`, clippy `-D warnings`, fmt,
+and `cargo package` verify.
+
 ### The audit of `4e424b3`: the pre-set LLVM deleted, an unenforced safety contract, and five proof/test gaps
 
 An independent line-by-line audit of `4e424b3` found no construction or runtime cryptographic defect — its 8,157 differential vectors, 27,624 tamper attempts, primitive cross-checks, KATs, ctgrind, Miri and fuzz runs agree with the suite here. It did find that several *claims* were stronger than their devices, and a set of test-strength gaps. The in-crate findings are fixed:
@@ -114,7 +160,7 @@ The same pass changed `docs.rs` metadata to build **all** features instead of a 
 
 A previous revision of this job ran `--quick` — the decision region alone — to fit a hosted runner's budget. The measurement behind it was real (the sweep step of `Deep checks` #183 ran 2 h 47 min and was killed with the job at five hours; the full region measures about five hours on such a runner) and the conclusion was not: cutting the region removes exactly the evidence the sweep exists for, because its motivating finding — six single-byte faults in `decrypt` that skipped the call and accepted a forgery — came from *outside* the decision. Coverage is not a knob; the budget was the thing to change.
 
-So the work is sharded instead. `tools/fi_instruction.sh --shard I/N --report FILE` sweeps 1/N of every configuration's bytes (core-slices `I-1, I-1+N, …` of the `JOBS*N` the run would otherwise use), and a shard-aware form of the tool's own witness checks each slice: every offset recorded must lie in a covered range and belong to a slice the invocation owns, and each range must have yielded exactly the offsets it owns — a shard cannot sweep another's bytes, skip its own, or sweep a stride the map does not have. `tools/fi_instruction_verdict.py` then reproduces the unsharded verdict from the shards' reports and **refuses an incomplete sweep**: one report per shard exactly, every shard agreeing on the region's size, the summed scanned counts equal to it, no accepting fault inside the decision in `hardened`/`ultra`, and each layer at least as good as the one below. A missing shard is a failure, not a smaller sweep. `Deep checks` runs it as a twenty-way matrix (`wide-sweep`), each shard uploading its numbers, with `wide-verdict` doing the arithmetic.
+So the work is sharded instead. `tools/fi_instruction.sh --shard I/N --report FILE` sweeps 1/N of every configuration's bytes (core-slices `I-1, I-1+N, …` of the `JOBS*N` the run would otherwise use), and a shard-aware form of the tool's own witness checks each slice: every offset recorded must lie in a covered range and belong to a slice the invocation owns, and each range must have yielded exactly the offsets it owns — a shard cannot sweep another's bytes, skip its own, or sweep a stride the map does not have. `tools/fi_instruction_verdict.py` then reproduces the unsharded verdict from the shards' reports and **refuses an incomplete sweep**: one report per shard exactly, every shard agreeing on the region's size, the summed scanned counts equal to it, no accepting fault inside the decision in `hardened`/`ultra`, and the `bits` model's opt-out control still breakable inside the decision (the totals are printed but not compared). A missing shard is a failure, not a smaller sweep. `Deep checks` runs it as a twenty-way matrix (`wide-sweep`), each shard uploading its numbers, with `wide-verdict` doing the arithmetic.
 
 Measured locally: an unsharded `--quick` run and the three shards of `N = 3` agree exactly — 9+8+8 = 25 of 25 bytes per hardened configuration and 6+6+6 = 18 of 18 for the opt-out build, each shard's witness clean; the verdict passes on all three reports, fails on two of three with the missing-shard hint, and fails on a report carrying an accepting fault inside the decision. A full-mode shard (`1/6`) sweeps exactly a sixth of each configuration (hardened 1074 of 6442, plain 833 of 4995, ultra 1935 of 11609) and the unsharded `--quick --bits` path is unchanged.
 

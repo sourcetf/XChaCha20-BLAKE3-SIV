@@ -60,7 +60,7 @@ defended against" in `README.md`:
   fault-injection bench;
 - **physical side channels** beyond the constant-time code paths — power, EM, and
   cache-timing measurements on real hardware;
-- **denial of service**, which no countermeasure in this crate attempts;
+- **denial of service**, which no countermeasure in this crate attempts; note that `decrypt_in_place_detached`'s rejection path wipes the caller's buffer in O(n) (the cost is the wipe, not an allocation), and `MAX_MSG_SIZE` (256 GiB) is a format ceiling, not a service policy;
 - **nonce reuse by the caller**, and the application's own protocol. The
   construction is misuse-resistant, which is a fail-safe for an occasional slip,
   not a licence to reuse a nonce;

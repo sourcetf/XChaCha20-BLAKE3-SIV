@@ -171,10 +171,9 @@ fn zeroize_array_clears_all_bytes() {
 /// "unwinding assertion loop 2" failure rather than a counterexample.  Nothing
 /// is lost by shrinking it: `off` still sweeps all eight misalignments and `len`
 /// still reaches 15, so a window with `off > 0` exercises the byte-prefix path
-/// and (when `len >= 8 + off`) at least one full `usize` chunk write.  At this
-/// size at most two chunk stores fit, and only an aligned 16-byte window reaches
-/// two; the longer multi-chunk iteration is covered by the 64-byte unit test in
-/// `lib.rs`, not here.
+/// and (when `len >= 8 + off`) at least one full `usize` chunk write. `len` is at
+/// most 15 here, so at most **one** chunk store fits; the longer multi-chunk
+/// iteration is covered by the 64-byte unit test in `lib.rs`, not here.
 #[kani::proof]
 #[kani::unwind(24)]
 fn zeroize_slice_clears_unaligned_window() {
@@ -675,8 +674,10 @@ static MODEL_BLAKE3_CALLS: AtomicUsize = AtomicUsize::new(0);
 /// and `derive_enc_reads_every_tag_byte` stayed SUCCESSFUL while the KATs failed.
 /// Adding the position before rotating by a position-dependent amount makes the fold
 /// position-sensitive: for fixed `position` the map is a bijection in `b` (a
-/// single-byte edit still always shows), and swapping bytes at two positions gives
-/// different slot contents except for contrived pairs.
+/// single-byte edit still always shows), and a swap changes the result unless the
+/// specific byte pair collides (the audit found 21 colliding pairs for one slot pair).
+/// Byte order is therefore not *proved* by this heuristic; the concrete harness and the
+/// real-BLAKE3 KAT are the authority for it.
 ///
 /// Addition rather than multiplication on purpose: a multiply by a constant is
 /// another 8-bit operation to bit-blast in every model call, and an earlier attempt

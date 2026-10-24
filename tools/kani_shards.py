@@ -85,7 +85,7 @@ SHARDS = [
 
 def is_cfg_attr(attr):
     """True for an attribute that can remove its item from the build."""
-    return re.search(r"#\[\s*cfg\s*\(|cfg_attr\s*\(", attr) is not None
+    return re.search(r"#\s*!?\s*\[\s*cfg\s*\(|cfg_attr\s*\(", attr) is not None
 
 
 def strip_block_comments(text):
@@ -149,6 +149,21 @@ def harnesses():
         # a name Kani never builds. Strip block comments (nested, newlines preserved so
         # line-number cross-checks stay usable) before looking for harnesses.
         lines = strip_block_comments(fh.read()).splitlines()
+
+    # No `cfg` belongs in proofs.rs at all: the module gate is `#[cfg(kani)]` in lib.rs,
+    # and a cfg anywhere here can remove a harness while the line scan still counts it.
+    # Reject the whole shape (outer module, inner `#![cfg]`, multi-line, whitespace
+    # spellings) instead of trying to attribute it to the right harness.
+    for line in lines:
+        stripped = line.strip()
+        if stripped.startswith("//"):
+            continue
+        if re.search(r"#\s*!?\s*\[\s*cfg", stripped):
+            raise SystemExit(
+                "error: src/proofs.rs carries a cfg attribute; the harness module is"
+                " gated in lib.rs, and a cfg here can hide a harness from the Kani"
+                " build while this parser still counts it: " + stripped
+            )
 
     names = []
     armed = False

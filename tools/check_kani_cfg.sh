@@ -169,6 +169,14 @@ cases = [
      "#[kani::unwind(9)] #[kani::proof] fn prefixed() {}\n", True, "1"),
     ("a cfg_attr the parser cannot place",
      "#[cfg_attr(kani, kani::proof)]\nfn indirect() {}\n", False, None),
+    ("a cfg on an enclosing module",
+     "#[cfg(any())]\nmod h {\n#[kani::proof]\nfn f() {}\n}\n", False, None),
+    ("an inner cfg",
+     "#![cfg(any())]\n#[kani::proof]\nfn f() {}\n", False, None),
+    ("a whitespace cfg spelling",
+     "# [cfg(any())]\n#[kani::proof]\nfn f() {}\n", False, None),
+    ("a multi-line cfg",
+     "#[cfg(\n any()\n)]\n#[kani::proof]\nfn f() {}\n", False, None),
 ]
 for name, source, ok, expected in cases:
     with tempfile.TemporaryDirectory() as root:

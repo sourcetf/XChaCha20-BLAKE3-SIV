@@ -11,14 +11,12 @@ rust-version = "1.85"
 keywords = ["cryptography", "aead", "xchacha20", "blake3", "siv"]
 categories = ["cryptography", "no-std"]
 # What the published `.crate` contains. Without this, `cargo package` ships every
-# tracked, non-dotfile file: the CI workflows, `tools/`, `tests/`, and (worst)
-# `mutants.out/`, whose logs carry developer host paths -- 102 files, and the count is
-# written as the arithmetic so it stays checkable rather than decaying: tracked files
-# (`git ls-files | wc -l` is 112 today) minus the 8 dotpaths and the nested `fuzz/`
-# package's 4 files, plus cargo's own two (`Cargo.toml.orig`, `.cargo_vcs_info.json`),
-# i.e. 112 - 8 - 4 + 2 = 102, most of them not part of the library a consumer builds.
+# tracked, non-dotfile file: the CI workflows, `tools/`, `tests/`, the vendored
+# `blake3/` tree, and (worst) `mutants.out/`, whose logs carry developer host paths.
 # The allow list below is the crate plus the documents `README.md` links to; run
-# `cargo package --list` to verify it stays that way.
+# `cargo package --list` to verify it, rather than trusting a hand-maintained total
+# (which decayed as tests and the vendored tree were added). Cargo always includes
+# the manifest and the `readme` file.
 #
 # `Cargo.toml` and the `readme` file are not listed: cargo always includes them.
 # Naming `README.md` here would also sweep in `tests/README.md` -- include globs
@@ -64,9 +62,11 @@ getrandom = { version = "0.4", optional = true, default-features = false }
 # selects its Rust-intrinsics backends; without it, BLAKE3 uses its C/assembly
 # SIMD kernels where the target has them. Measured on x86_64 (Ryzen 9 7945HX,
 # release+LTO) with `examples/bench_aead.rs`, whose size sweep includes the 1 MiB
-# point: 966 -> 766 MiB/s at 4 KiB, 2540 -> 2053 MiB/s at 1 MiB, and the
-# head-to-head in `benches/compare.rs` puts the whole crate from ~30% behind
-# RustCrypto's XChaCha20-Poly1305 at 4-64 KiB to parity or ahead.
+# point: 966 -> 766 MiB/s at 4 KiB, 2540 -> 2053 MiB/s at 1 MiB. The head-to-head
+# in `benches/compare.rs`, re-measured after the vendored fork's `hash_many` tail
+# fix, puts the hardened crate within ~10-25% of RustCrypto's
+# XChaCha20-Poly1305 at 4-5 KiB and at parity or ahead from 16 KiB up
+# (`performance.md` has the current table).
 #
 # Portability is not lost, because BLAKE3's build script *falls back* to the Rust
 # backends when no compiler is available for the target (`support == NoCompiler`).
@@ -151,6 +151,9 @@ proptest = { version = "1", default-features = false, features = ["std", "bit-se
 # compares operands through `subtle::ConstantTimeEq` directly to check the
 # primitive the tag comparison rests on.
 subtle = { version = "2.6.1", default-features = false }
+# The vendored-BLAKE3 guard-page regression test (`hash_many` must not read past a
+# 64-byte block into a PROT_NONE page) needs `mprotect`/`mmap` on Linux.
+libc = "0.2"
 # NOTE: no `rand` dependency.  proptest brings its own generator, and the fuzz
 # loop in `tests/security.rs` uses a small deterministic PRNG defined there, so a
 # failure is reproducible from a seed without a third-party RNG in the tree.

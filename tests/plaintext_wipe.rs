@@ -25,6 +25,12 @@ static WATCH_PTR: AtomicUsize = AtomicUsize::new(0);
 static WATCH_LEN: AtomicUsize = AtomicUsize::new(0);
 static WATCH_ANY: AtomicBool = AtomicBool::new(false);
 static SAW_RESIDUE: AtomicBool = AtomicBool::new(false);
+/// The first allocation of `WATCH_LEN` bytes made while `ARM_ALLOC` is set; the failure
+/// path's plaintext buffer. `SAW_WATCHED_FREE` is its liveness witness: without it a
+/// `mem::forget` of the buffer passes the residue check by never freeing anything.
+static ARM_ALLOC: AtomicBool = AtomicBool::new(false);
+static WATCH_ALLOC_PTR: AtomicUsize = AtomicUsize::new(0);
+static SAW_WATCHED_FREE: AtomicBool = AtomicBool::new(false);
 /// libtest runs the tests in a binary concurrently; the watch state is global.
 static SERIAL: Mutex<()> = Mutex::new(());
 
@@ -33,11 +39,36 @@ static SERIAL: Mutex<()> = Mutex::new(());
 // is of the length recorded by the test, which is within the allocation the test owns.
 unsafe impl GlobalAlloc for WatchAlloc {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        // SAFETY: the caller's contract for `alloc` is forwarded verbatim to `System`.
-        unsafe { System.alloc(layout) }
+        // SAFETY: the caller of `GlobalAlloc::alloc` upholds the layout contract, and this
+        // forwards it unchanged to the system allocator.
+        let ptr = unsafe { System.alloc(layout) };
+        if ARM_ALLOC.load(Ordering::SeqCst)
+            && layout.size() == WATCH_LEN.load(Ordering::SeqCst)
+            && WATCH_ALLOC_PTR.load(Ordering::SeqCst) == 0
+        {
+            WATCH_ALLOC_PTR.store(ptr as usize, Ordering::SeqCst);
+        }
+        ptr
+    }
+
+    unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
+        // SAFETY: the caller of `GlobalAlloc::realloc` guarantees that `ptr` is currently
+        // allocated with `layout`; the arguments are forwarded to the system allocator.
+        let new = unsafe { System.realloc(ptr, layout, new_size) };
+        if ARM_ALLOC.load(Ordering::SeqCst)
+            && new_size == WATCH_LEN.load(Ordering::SeqCst)
+            && WATCH_ALLOC_PTR.load(Ordering::SeqCst) == 0
+        {
+            WATCH_ALLOC_PTR.store(new as usize, Ordering::SeqCst);
+        }
+        new
     }
 
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+        if WATCH_ALLOC_PTR.load(Ordering::SeqCst) == ptr as usize {
+            SAW_WATCHED_FREE.store(true, Ordering::SeqCst);
+            WATCH_ALLOC_PTR.store(0, Ordering::SeqCst);
+        }
         let watch = WATCH_PTR.load(Ordering::SeqCst);
         let any = WATCH_ANY.load(Ordering::SeqCst);
         if any || (watch != 0 && watch == ptr as usize) {
@@ -113,12 +144,24 @@ fn decrypt_failure_wipes_internal_plaintext() {
     bad_tag[0] ^= 1;
 
     SAW_RESIDUE.store(false, Ordering::SeqCst);
+    SAW_WATCHED_FREE.store(false, Ordering::SeqCst);
+    WATCH_ALLOC_PTR.store(0, Ordering::SeqCst);
     WATCH_LEN.store(message.len(), Ordering::SeqCst);
+    ARM_ALLOC.store(true, Ordering::SeqCst);
     WATCH_ANY.store(true, Ordering::SeqCst);
     let error = decrypt(&key, &nonce, aad, &ciphertext, &bad_tag).unwrap_err();
     WATCH_ANY.store(false, Ordering::SeqCst);
+    ARM_ALLOC.store(false, Ordering::SeqCst);
 
     assert_eq!(error, Error::AuthenticationFailed);
+    // Liveness: the failure path must actually free the buffer it decrypted into. Without
+    // this, `mem::forget(plaintext)` leaks it and the residue assertion below passes by
+    // never seeing a deallocation at all.
+    assert!(
+        SAW_WATCHED_FREE.load(Ordering::SeqCst),
+        "a failed decrypt never deallocated the plaintext-sized buffer it allocated, so \
+         the residue check below would be vacuous (a leaked buffer is not a wiped one)"
+    );
     assert!(
         !SAW_RESIDUE.load(Ordering::SeqCst),
         "a failed decrypt deallocated a buffer still containing the unverified \

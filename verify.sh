@@ -385,8 +385,9 @@ if [ "$KANI_ONLY" -eq 0 ]; then
   # stage's own tool, not this list, is what covers it), and `locked`/`ultra`
   # (whole files `#![cfg(feature = ...)]`-gated off when the feature is not on,
   # which is why each is promised only by the invocation that turns its feature on).
-  suite_targets="lib construction_inventory counter_range decision decision_scope \
-differential_reference mac_commitment security threads variable_latency"
+  suite_targets="lib blake3_fork_equivalence construction_inventory counter_range \
+decision decision_scope differential_reference mac_commitment plaintext_drop \
+plaintext_wipe security threads variable_latency"
   step "3. test suite"
   # The timing screen is its own target (step 3c) and runs exactly once, there.
   # `cargo test --release` runs every target -- including tests/timing.rs -- and so do
