@@ -318,15 +318,27 @@ jobs:
             esac
           }
           trace_selftest() {
-            local rc=0
-            "$@" || rc=$?
-            if [ "$rc" -ne 0 ]; then
+            local attempt rc=0
+            for attempt in 1 2; do
+              rc=0
+              "$@" || rc=$?
+              if [ "$rc" -eq 0 ]; then
+                return 0
+              fi
+              # Exit 3 can be a layout that this particular planted-copy run could
+              # not hold; one retry distinguishes that from a detector that never
+              # concludes. A self-test that runs and misses stays exit 1 and is not
+              # retried (repetition must not turn a finding green).
+              if [ "$rc" -eq 3 ] && [ "$attempt" -eq 1 ]; then
+                echo "RETRY: $* could not hold a trace layout on attempt 1 (exit 3)"
+                continue
+              fi
               echo "FAILED: $* (exit $rc); the trace-mode self-test must conclude, not skip" >&2
               exit "$rc"
-            fi
+            done
           }
           trace ./tools/cache_profile.sh --trace 12
-          trace_selftest ./tools/cache_profile.sh --selftest --trace
+          trace_selftest ./tools/cache_profile.sh --selftest 4 --trace
           trace env XSIV_FEATURES=ultra ./tools/cache_profile.sh --trace 12
 
   audit:
