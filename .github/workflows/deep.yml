@@ -302,10 +302,9 @@ jobs:
       # touched, not just how many misses there were -- but it needs valgrind's
       # lackey tool. `continue-on-error: true` swallowed both "could not run" (exit
       # 3) and a real leak (exit 1), which made this the one detector in the repo
-      # that could never fail. Instead, map exit 3 to an explicit skip and let any
-      # other non-zero exit fail the job: the script distinguishes the two, so this
-      # step must too. (The `--selftest` run turns its inner "could not run" into
-      # exit 1 by design -- a self-test that cannot conclude is not a pass.)
+      # that could never fail. Instead, map exit 3 to an explicit skip for the
+      # measurements, and require the self-test to **conclude**: a self-test that
+      # cannot run has not validated the detector, so exit 3 there is a failure.
       - name: address-trace differential (needs lackey)
         run: |
           set -euo pipefail
@@ -318,8 +317,16 @@ jobs:
               *) echo "FAILED: $* (exit $rc)" >&2; exit "$rc" ;;
             esac
           }
+          trace_selftest() {
+            local rc=0
+            "$@" || rc=$?
+            if [ "$rc" -ne 0 ]; then
+              echo "FAILED: $* (exit $rc); the trace-mode self-test must conclude, not skip" >&2
+              exit "$rc"
+            fi
+          }
           trace ./tools/cache_profile.sh --trace 12
-          trace ./tools/cache_profile.sh --selftest --trace
+          trace_selftest ./tools/cache_profile.sh --selftest --trace
           trace env XSIV_FEATURES=ultra ./tools/cache_profile.sh --trace 12
 
   audit:

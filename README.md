@@ -1164,14 +1164,16 @@ dependent crate:
   of any input. With a 64-byte input ending at a readable page and the next page
   inaccessible, `Platform::hash_many` with two inputs crashed with
   `STATUS_ACCESS_VIOLATION` on this host (`Platform::detect()` = AVX512). The fork
-  keeps complete SIMD groups on the widest kernel and sends sub-group tails to the
-  4-wide SSE2/SSE4.1 kernels (16-byte loads stay inside the block); the chaining
-  values are identical. The first fix routed every tail to portable and cost ~3.3x
-  at 4 KiB keyed BLAKE3 (audit V-01); the current routing restores it.
-  `cargo run --release --example blake3_guard_probe` is the Windows reproducer, and
-  `tests/blake3_fork_equivalence.rs` has a Linux `PROT_NONE` guard-page test plus a
-  comparison against `Platform::portable()` for 0..=40 inputs at both 64 B and
-  1 KiB and both counter modes.
+  keeps complete SIMD groups on the widest kernel; on AVX-512 an 8..=15-input tail
+  peels one safe 8-wide `hash8` group, and the final 1..=7 inputs use the 4-wide
+  SSE2/SSE4.1 kernels (their 16-byte loads end at +64). The chaining values are
+  identical. The first fix routed every tail to portable and cost ~3.3x at 4 KiB
+  keyed BLAKE3 (audit V-01); the current routing restores it.
+  `cargo run --release --example blake3_guard_probe` is the Windows/Linux reproducer,
+  and `tests/blake3_fork_equivalence.rs` has a Linux `PROT_NONE` guard-page test,
+  distinct-lane comparisons against `Platform::portable()` for 0..=40 inputs at both
+  64 B and 1 KiB and both counter modes, and an independent `compress_xof` reference
+  for `xof_many` (so the same loop is not on both sides).
 - **D-02 (Low).** The unix AVX-512 multi-block `xof_many` does not zero-extend
   `block_len`/`flags`; the fork uses the documented `compress_xof` loop for every
   request longer than one block. The equivalence test checks 1..=4 blocks against

@@ -1956,7 +1956,9 @@ pub mod locked {
     ///
     /// `LockedKey::new` fails when the OS refuses (`ENOMEM` from `RLIMIT_MEMLOCK` is the
     /// usual one), rather than silently leaving the key unprotected: the whole point is
-    /// that the caller knows which of the two states it is in.
+    /// that the caller knows which of the two states it is in. If the kernel page size
+    /// cannot be read from `/proc/self/auxv`, it returns `ENOSYS` rather than mislabelling
+    /// that environment failure as `ENOMEM`; an impossible `Layout` is `EINVAL`.
     /// The key lives in a page of its own so its address is **stable**.
     ///
     /// This is not an optimisation, it is what makes the lock mean anything.
@@ -2033,7 +2035,7 @@ pub mod locked {
         /// successful `mlock` covers it; the kernel can silently skip special VMAs
         /// (hugetlb, DAX, secretmem), and those are not the mappings used here.
         pub fn new(key: &[u8; crate::KEY_LEN]) -> Result<Self, isize> {
-            let mut page = Page::new().ok_or(-12isize /* ENOMEM */)?;
+            let mut page = Page::new()?;
             // Lock the whole page first; on failure `page` is freed by its own `Drop`.
             // SAFETY: `page` owns a live page-sized allocation for as long as `Self`,
             // and this call is the only consumer of it at this point.
@@ -2221,19 +2223,23 @@ pub mod locked {
     }
 
     impl Page {
-        fn new() -> Option<Self> {
+        fn new() -> Result<Self, isize> {
             // Fail closed when the kernel page size cannot be established. A guessed
             // alignment is not safe on a 16/64 KiB-page kernel: the lock would cover a
-            // kernel page shared with unrelated allocations.
-            let ps = page_size_pub()?;
-            let layout = alloc::alloc::Layout::from_size_align(ps, ps).ok()?;
+            // kernel page shared with unrelated allocations. Report the environment
+            // failure as ENOSYS, matching `lock_range`; only a genuine null allocation
+            // is ENOMEM, so callers do not mistake an unreadable `/proc` for a memory
+            // limit and retry the wrong thing.
+            let ps = page_size_pub().ok_or(-38isize /* ENOSYS */)?;
+            let layout = alloc::alloc::Layout::from_size_align(ps, ps)
+                .map_err(|_| -22isize /* EINVAL */)?;
             // SAFETY: `layout` has a non-zero size (one page), which is all this call
             // requires; the result is checked for null and freed with the same layout.
             let ptr = unsafe { alloc::alloc::alloc_zeroed(layout) };
             if ptr.is_null() {
-                None
+                Err(-12isize /* ENOMEM */)
             } else {
-                Some(Page {
+                Ok(Page {
                     ptr,
                     layout,
                     page_size: ps,
@@ -3794,7 +3800,13 @@ fn chacha20_block(key: &[u8; 32], counter: u32, nonce: &[u8; 12]) -> [u8; 64] {
 ///
 /// Only the SIMD modules use this, and they are compiled out under Kani, so it
 /// is gated to match and does not become dead code there.
-#[cfg(all(any(target_arch = "x86_64", target_arch = "aarch64"), not(kani)))]
+#[cfg(all(
+    any(
+        target_arch = "x86_64",
+        all(target_arch = "aarch64", target_feature = "neon")
+    ),
+    not(kani)
+))]
 #[inline]
 fn chacha20_state_words(key: &[u8; 32], counter: u32, nonce: &[u8; 12]) -> [u32; 16] {
     let mut s = [0u32; 16];
@@ -4945,7 +4957,12 @@ mod tests {
     }
 
     /// Same isolation test for the NEON kernel.
-    #[cfg(target_arch = "aarch64")]
+    ///
+    /// The module it calls is gated on `target_feature = "neon"` as well as the
+    /// architecture: aarch64 without NEON (for example
+    /// `aarch64-unknown-none-softfloat`, or `-C target-feature=-neon`) falls back
+    /// to the scalar path, and this test must compile out with the module.
+    #[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
     #[test]
     fn test_aarch64_neon_kernel_matches_scalar() {
         // Non-uniform, for the same reason as the x86 test above.

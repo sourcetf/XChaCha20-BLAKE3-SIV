@@ -238,7 +238,9 @@ pure = ["blake3/pure"]
 # BLAKE3 1.8.7 has an out-of-bounds read in the AVX2/AVX-512 2/4-wide `hash_many`
 # tail (reproduced with a guard page: `Platform::detect()` = AVX512, two inputs at a
 # page boundary -> STATUS_ACCESS_VIOLATION). The vendored copy in `blake3/` contains
-# the fix; the patch is what makes every dependency (normal and dev) use it.
+# the fix; the patch is what makes this workspace's dependencies (normal and dev) use
+# it. `fuzz/` is a separate workspace and carries the same `[patch.crates-io]` entry
+# itself; without that duplicate, the fuzz targets silently link crates.io 1.8.7.
 #
 # A crates.io release cannot carry this path patch: `[patch]` applies only while
 # building this workspace, and a published crate would resolve `blake3 = "1.8"` from

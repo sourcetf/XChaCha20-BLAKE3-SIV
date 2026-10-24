@@ -231,8 +231,13 @@ jobs:
           # the per-target run guard then sees zero headers and the zero-pass guard sees
           # its exemptions. Compare cargo's own target set with the same list, and refuse
           # an extra target as well so a new test cannot be added without the pin.
+          #
+          # A name alone is still not a run: metadata keeps listing a target with
+          # `test = false`, a `[[test]]` whose `path` points somewhere else, or one
+          # whose `required-features` are not enabled on a given leg. Check those fields
+          # too; otherwise the pin passes while cargo runs nothing for that target.
           python3 - <<'PY'
-          import json, subprocess, sys
+          import json, os, subprocess, sys
           expected = {
               "blake3_fork_equivalence", "construction_inventory", "counter_range",
               "ctgrind", "decision", "decision_scope", "differential_reference",
@@ -242,17 +247,34 @@ jobs:
           meta = json.loads(
               subprocess.check_output(["cargo", "metadata", "--no-deps", "--format-version", "1"])
           )
-          targets = {
-              t["name"]
-              for package in meta["packages"]
+          packages = meta["packages"]
+          tests = {
+              t["name"]: t
+              for package in packages
               for t in package["targets"]
               if "test" in t["kind"]
           }
-          missing = sorted(expected - targets)
-          unexpected = sorted(targets - expected)
-          if missing or unexpected:
+          missing = sorted(expected - set(tests))
+          unexpected = sorted(set(tests) - expected)
+          disabled = sorted(name for name, t in tests.items() if not t.get("test", True))
+          wrong_path = sorted(
+              name for name, t in tests.items()
+              if os.path.basename(t["src_path"]) != name + ".rs"
+              or os.path.basename(os.path.dirname(t["src_path"])) != "tests"
+          )
+          requires_features = sorted(
+              name for name, t in tests.items() if t.get("required-features")
+          )
+          libs = [
+              t for package in packages for t in package["targets"] if "lib" in t["kind"]
+          ]
+          lib_tests_off = not any(t.get("test", True) for t in libs)
+          if missing or unexpected or disabled or wrong_path or requires_features or lib_tests_off:
               print(
-                  f"::error::test target pin is out of date; missing={missing} unexpected={unexpected}",
+                  "::error::test target pin is out of date or not runnable; "
+                  f"missing={missing} unexpected={unexpected} disabled={disabled} "
+                  f"wrong_path={wrong_path} requires_features={requires_features} "
+                  f"lib_tests_off={lib_tests_off}",
                   file=sys.stderr,
               )
               sys.exit(1)
@@ -277,29 +299,29 @@ jobs:
           # pattern while the plain `test result:` line does, so every summary looked
           # unattributable and every leg failed).
           sed -E $'s/\x1b\\[[0-9;]*[A-Za-z]//g; s/\r$//' "$log" > "$RUNNER_TEMP/cargo-test-clean.log"
-          awk '
-            # `     Running unittests src/lib.rs (…)` and `     Running tests/foo.rs (…)`
-            # differ in field count (the lib target has the kind and then the path; an
-            # integration target has the path and then the binary). Take the first field
-            # that ends in `.rs`, which is the path in both shapes -- `$2` is `unittests`
-            # for the lib and the path for the rest, `$3` is the reverse, and either mistake
-            # made the summary unattributable.
-            /^[[:space:]]*Running / {
-              target = ""
-              for (k = 1; k <= NF; k++) if ($k ~ /\.rs$/) { target = $k; break }
-              next
-            }
-            /^[[:space:]]*Doc-tests / { target = "doc-tests"; next }
-            /^test result:/ {
-              p = $4 + 0; f = $6 + 0; i = $8 + 0; x = $12 + 0
-              if (p == 0) {
-                if (target == "") target = "<unattributed>"
-                printf "%s\t%d\t%d\t%d\n", target, p, i, x
-                n++
+          # One definition, used by the real log and by the positive control below.
+          # A separate inline awk in the control can pass while the real parser stops
+          # matching, which is the failure this control exists to catch.
+          zero_scan() {
+            awk '
+              /^[[:space:]]*Running / {
+                target = ""
+                for (k = 1; k <= NF; k++) if ($k ~ /\.rs$/) { target = $k; break }
+                next
               }
-            }
-            END { exit (n > 0) ? 0 : 1 }
-          ' "$RUNNER_TEMP/cargo-test-clean.log" > "$RUNNER_TEMP/zero-targets.txt" || true
+              /^[[:space:]]*Doc-tests / { target = "doc-tests"; next }
+              /^test result:/ {
+                p = $4 + 0; f = $6 + 0; i = $8 + 0; x = $12 + 0
+                if (p == 0) {
+                  if (target == "") target = "<unattributed>"
+                  printf "%s\t%d\t%d\t%d\n", target, p, i, x
+                  n++
+                }
+              }
+              END { exit (n > 0) ? 0 : 1 }
+            ' "$1"
+          }
+          zero_scan "$RUNNER_TEMP/cargo-test-clean.log" > "$RUNNER_TEMP/zero-targets.txt" || true
           if [ -s "$RUNNER_TEMP/zero-targets.txt" ]; then
             bad=0
             while IFS=$'\t' read -r target p i x; do
@@ -364,13 +386,15 @@ jobs:
           # way it just did -- a pattern that stops matching is indistinguishable from a
           # suite that is clean.
           vacuous="$(mktemp)"
-          printf 'test result: ok. 0 passed; 0 failed; 7 ignored; 0 measured; 0 filtered out\n' > "$vacuous"
-          if awk '/^test result:/ { if ($4 + 0 == 0) bad = 1 } END { exit bad ? 0 : 1 }' "$vacuous"; then
-            echo "positive control: a 0-passed summary (even with ignored tests) is rejected, so the guard can fail"
-          else
-            echo "::error::the zero-test guard did not reject a vacuous summary -- it cannot fail, so it proves nothing"
-            exit 1
-          fi
+          printf '     Running tests/vacuous.rs (target/debug/deps/vacuous)\ntest result: ok. 0 passed; 0 failed; 7 ignored; 0 measured; 0 filtered out\n' > "$vacuous"
+          control="$(zero_scan "$vacuous" || true)"
+          case "$control" in
+            *"tests/vacuous.rs"*)
+              echo "positive control: the real parser detects a 0-passed summary (even with ignored tests), so the guard can fail" ;;
+            *)
+              echo "::error::the zero-test parser did not detect a vacuous summary -- it cannot fail, so it proves nothing (output: $control)"
+              exit 1 ;;
+          esac
           rm -f "$vacuous"
 
   timing-instrument:
@@ -935,7 +959,10 @@ jobs:
           for leg in 'profile: release, default features' \
                      'profile: release, no default features' \
                      'profile: release, ultra'; do
-            if ! grep -q -- "- $leg\$" .github/workflows/ci.yml; then
+            # The line must start with list indentation then `- `; an unanchored
+            # substring match accepts `          # - profile: ...`, which is exactly
+            # how a commented-out matrix row would sail through this gate.
+            if ! grep -qE "^[[:space:]]*- ${leg}\$" .github/workflows/ci.yml; then
               echo "::error::the test matrix no longer contains a '- $leg' entry, so this release would not be gated on that configuration"
               exit 1
             fi

@@ -131,6 +131,22 @@ STUB
   printf '%s\n' "$home"
 }
 
+# Check 8's stub: a *named* test binary that reports zero passed. The bare summary
+# above makes verify.sh take its "no Running headers" fallback, so it cannot exercise
+# the per-target loop (a deleted/renamed target is the case that loop exists for).
+make_zero_target_home() {
+  local home="$WORK/home-zero-target"
+  mkdir -p "$home/.cargo/bin"
+  cat > "$home/.cargo/bin/cargo" <<'STUB'
+#!/bin/sh
+printf '%s\n' '     Running tests/decision.rs (target/release/deps/decision)'
+printf '%s\n' 'test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s'
+exit 0
+STUB
+  chmod +x "$home/.cargo/bin/cargo"
+  printf '%s\n' "$home"
+}
+
 hidden_run() {  # prints output, returns the tool's status
   local out rc
   set +e
@@ -259,6 +275,7 @@ fi
 #    present the baseline call site is never reached under this stub, so it is not
 #    separately exercised.
 HOME_ZERO="$(make_zero_test_home)"
+HOME_ZERO_TARGET="$(make_zero_target_home)"
 set +e
 zero_out="$(HOME="$HOME_ZERO" PATH="$HOME_ZERO/.cargo/bin:$PYTHON_BIN_DIR:/usr/bin:/bin" \
             timeout 300 bash tools/fi_check.sh 2>&1)"
@@ -439,14 +456,15 @@ fi
 # 8. The main test stages' zero-test guard must fire. `cargo test` exits 0 when every
 #    test target is empty or filtered out, printing "test result: ok. 0 passed" -- a
 #    vacuous green for the stage that carries the advertised unit + differential suite.
-#    The `cargo` stub that succeeds and prints exactly that line (`make_zero_test_home`)
-#    is what a suite whose tests were all deleted, emptied or `#![cfg]`-ed away looks
-#    like from the caller's side. `XSIV_IN_GATE_SELFTEST=1` keeps this check from
-#    re-running the gate self-test itself; the skip it records is not what fails the
-#    run here, the guard's `exit 1` is (the message check below says which fired).
+#    The stub names a real target (`Running tests/decision.rs`) and then reports zero
+#    passed for it, so verify.sh takes its per-target branch rather than the bare-summary
+#    fallback: the deleted/renamed-target guard is the one this check must exercise.
+#    `XSIV_IN_GATE_SELFTEST=1` keeps this check from re-running the gate self-test
+#    itself; the skip it records is not what fails the run here, the guard's `exit 1`
+#    is (the message check below says which fired).
 set +e
 zero_vs_out="$(XSIV_IN_GATE_SELFTEST=1 \
-               PATH="$HOME_ZERO/.cargo/bin:$STUB:$CARGO_BIN_DIR:$PYTHON_BIN_DIR:/usr/bin:/bin" HOME="$HOME_ZERO" \
+               PATH="$HOME_ZERO_TARGET/.cargo/bin:$STUB:$CARGO_BIN_DIR:$PYTHON_BIN_DIR:/usr/bin:/bin" HOME="$HOME_ZERO_TARGET" \
                timeout 300 bash ./verify.sh 2>&1)"
 zero_vs_rc=$?
 set -e
@@ -463,7 +481,7 @@ elif ! printf '%s\n' "$zero_vs_out" | grep -q 'cargo test run for'; then
   printf '%s\n' "$zero_vs_out" | tail -5 | sed 's/^/      | /' >&2
   fail=1
 else
-  echo "  ok: verify.sh -> exit $zero_vs_rc when the whole test run reports 0 passed"
+  echo "  ok: verify.sh -> exit $zero_vs_rc when a named target reports 0 passed"
 fi
 
 echo
@@ -474,8 +492,8 @@ fi
 echo "gate contract: the tools checked here answer exit 3 under hidden tooling;"
 echo "               verify.sh fails a stage it was asked for that did not run, and"
 echo "               its Miri ran-count guard fails a run that reports no passed"
-echo "               test; its main test stages fail a run in which the whole suite"
-echo "               reported 0 passed; stack_residue.sh answers 3 for a build that"
+echo "               test; its main test stages fail a run in which a named target"
+echo "               reports 0 passed; stack_residue.sh answers 3 for a build that"
 echo "               cannot run; the cache-profile trace mode refuses a verdict on a"
 echo "               layout it cannot hold; the ctgrind suppression validator rejects"
 echo "               a widened entry; a campaign that cannot run does not report"

@@ -435,13 +435,17 @@ plaintext_wipe security threads variable_latency"
   # `ultra` is in the feature list alongside `pure` so the witness is type-checked for
   # these targets too; stage 5 below *executes* it on all four of its own targets.
   # (`pure` is what makes BLAKE3's C kernels unnecessary here; see stage 5.)
-  if rustup target list --installed 2>/dev/null | grep -q aarch64-unknown-linux-gnu; then
+  # Captured once, not piped through `grep -q`: this script sets `pipefail`, and
+  # `grep -q` exits at the first match, which can give rustup's still-writing stdout
+  # SIGPIPE (141) and make an installed target look missing.
+  installed_targets="$(rustup target list --installed 2>/dev/null || true)"
+  if grep -qx 'aarch64-unknown-linux-gnu' <<< "$installed_targets"; then
     cargo check --target aarch64-unknown-linux-gnu --all-targets --features ultra,pure
   else
     skip "aarch64-unknown-linux-gnu type-check" "target not installed"
     echo "         (rustup target add aarch64-unknown-linux-gnu)"
   fi
-  if rustup target list --installed 2>/dev/null | grep -q aarch64-unknown-linux-musl; then
+  if grep -qx 'aarch64-unknown-linux-musl' <<< "$installed_targets"; then
     cargo check --target aarch64-unknown-linux-musl --all-targets --features ultra,pure
   else
     skip "aarch64-unknown-linux-musl type-check" "target not installed"
@@ -450,7 +454,7 @@ plaintext_wipe security threads variable_latency"
   # riscv64 has no SIMD backend compiled at all, so this type-checks the
   # scalar-only configuration.  Stage 5 (`--cross-exec`) also links and executes
   # it; this entry stays because it is cheap and runs without qemu.
-  if rustup target list --installed 2>/dev/null | grep -q riscv64gc-unknown-linux-musl; then
+  if grep -qx 'riscv64gc-unknown-linux-musl' <<< "$installed_targets"; then
     cargo check --target riscv64gc-unknown-linux-musl --all-targets --features ultra,pure
   else
     skip "riscv64gc-unknown-linux-musl type-check" "target not installed"
@@ -513,7 +517,7 @@ if [ "$RUN_CROSS_EXEC" -eq 1 ]; then
     # x86_64/aarch64, and this stage exists to execute *this crate's* SIMD code,
     # not BLAKE3's; the wire format is identical either way. `ultra` is added to the
     # build below, where the reason is written out.
-    if ! rustup target list --installed 2>/dev/null | grep -qx "$target"; then
+    if ! grep -qx "$target" <<< "$installed_targets"; then
       skip "$target execution" "the target is not installed (rustup target add $target)"
       echo "           rustup target add $target"
       continue
@@ -603,10 +607,14 @@ if [ "$RUN_CROSS_EXEC" -eq 1 ]; then
     # The same two sanity greps CI's cross-exec step carries: a non-empty parse can
     # still be a *partial* one, and a partial list would execute and count a subset of
     # the built suite as if it were all of it.
-    printf '%s\n' "$exes" | grep -q 'xchacha20_blake3_siv-' \
-      || { echo "the Executable parse for $target found no library test binary -- the cargo output format may have changed" >&2; exit 1; }
-    printf '%s\n' "$exes" | grep -q 'differential_reference-' \
-      || { echo "the Executable parse for $target found no differential binary -- the cargo output format may have changed" >&2; exit 1; }
+    case "$exes" in
+      *xchacha20_blake3_siv-*) ;;
+      *) echo "the Executable parse for $target found no library test binary -- the cargo output format may have changed" >&2; exit 1 ;;
+    esac
+    case "$exes" in
+      *differential_reference-*) ;;
+      *) echo "the Executable parse for $target found no differential binary -- the cargo output format may have changed" >&2; exit 1 ;;
+    esac
     ran=0
     for bin in $exes; do
       case "$(basename "$bin")" in timing-*|ctgrind-*) continue ;; esac
@@ -842,7 +850,7 @@ if [ "$RUN_TSAN" -eq 1 ]; then
   # `-Zbuild-std` runs under: `rustup component list --installed` without
   # `--toolchain` answers for the default toolchain, so a machine with rust-src
   # only on stable would pass this guard and then fail the build.
-  if cargo +nightly --version >/dev/null 2>&1 && rustup component list --installed --toolchain nightly 2>/dev/null | grep -q '^rust-src'; then
+  if cargo +nightly --version >/dev/null 2>&1 && grep -E '^rust-src' >/dev/null <<< "$(rustup component list --installed --toolchain nightly 2>/dev/null)"; then
     tools/tsan.sh
   else
     skip "ThreadSanitizer" "needs the nightly toolchain and rust-src (rustup component add rust-src)"

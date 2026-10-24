@@ -223,12 +223,13 @@ impl Platform {
         // reproduced with a guard page: two inputs, `Platform::detect()` = AVX512,
         // STATUS_ACCESS_VIOLATION in the 2-wide tail.
         //
-        // Only the 64-byte parent blocks are affected: for a 1 KiB chunk input the
-        // +48-byte load is still inside the input, so an unconditional fallback to
-        // portable made every 4 KiB message's chunk hashing scalar (the audit
-        // measured 3.3x slower keyed BLAKE3 at 4 KiB). The tail is therefore routed
-        // per input width, and the 64-byte case uses the SSE2/SSE4.1 kernels, whose
-        // tails were measured not to over-read.
+        // The over-read is not limited to 64-byte parent blocks: a 1 KiB chunk whose
+        // last block ends at a page boundary faults on the same +16/+32/+48 loads. An
+        // unconditional fallback to portable was safe but made every 4 KiB message's
+        // chunk hashing scalar (the audit measured 3.3x slower keyed BLAKE3 at 4 KiB).
+        // The tail is therefore routed by width: 8..=15 inputs use the safe 8-wide
+        // AVX-512 kernel on that platform, and the final 1..=7 use SSE2/SSE4.1, whose
+        // 16-byte loads end at +64.
         let degree = self.simd_degree();
         let full = (inputs.len() / degree) * degree;
         if full > 0 {
@@ -264,11 +265,13 @@ impl Platform {
     /// Hash fewer than one full SIMD group without the AVX2/AVX-512 over-read.
     ///
     /// The over-read is not specific to 64-byte inputs: the 32/64-byte loads of the
-    /// AVX2/AVX-512 kernels can cross the end of the **last block of any input**, and a
-    /// 1 KiB chunk at a page boundary faults just as a 64-byte parent block did in the
-    /// audit's reproducer. The 16-byte loads of the SSE2/SSE4.1 kernels stay inside the
-    /// block (`+48..+64`), so every x86 tail uses those 4-wide kernels; complete groups
-    /// still use the widest kernel. Non-x86 tails stay portable.
+    /// AVX2/AVX-512 2/4-wide tails can cross the end of the **last block of any input**,
+    /// and a 1 KiB chunk at a page boundary faults just as a 64-byte parent block did in
+    /// the audit's reproducer. The 16-byte loads of the SSE2/SSE4.1 kernels stay inside
+    /// the block (`+48..+64`), so the final 1..=7 x86 inputs use those 4-wide kernels.
+    /// An AVX-512 tail of 8..=15 first peels off one safe 8-wide group (`hash8` loads
+    /// also end at +64); complete groups still use the widest kernel. Non-x86 tails stay
+    /// portable.
     fn hash_many_tail<const N: usize>(
         &self,
         inputs: &[&[u8; N]],
@@ -283,6 +286,42 @@ impl Platform {
         debug_assert!(!inputs.is_empty());
         #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
         {
+            // AVX-512's 8-wide kernel is safe at both input widths: its loads are
+            // 16-byte vectors at +0/+16/+32/+48 of each 64-byte block, ending exactly
+            // at the block's last byte. The original D-01 over-read was in the 2/4-wide
+            // tails, not in `hash8`. Route 8..=15 inputs through it before falling back
+            // to SSE for the last 1..=7, which restores the 8..15-chunk batch
+            // throughput without reintroducing the guard-page fault.
+            #[cfg(blake3_avx512_ffi)]
+            if matches!(self, Platform::AVX512) && inputs.len() >= 8 {
+                self.hash_many_simd(
+                    &inputs[..8],
+                    key,
+                    counter,
+                    increment_counter,
+                    flags,
+                    flags_start,
+                    flags_end,
+                    &mut out[..8 * OUT_LEN],
+                );
+                if inputs.len() == 8 {
+                    return;
+                }
+                let rest_counter = match increment_counter {
+                    IncrementCounter::Yes => counter.wrapping_add(8),
+                    IncrementCounter::No => counter,
+                };
+                return self.hash_many_tail(
+                    &inputs[8..],
+                    key,
+                    rest_counter,
+                    increment_counter,
+                    flags,
+                    flags_start,
+                    flags_end,
+                    &mut out[8 * OUT_LEN..],
+                );
+            }
             match self {
                 Platform::SSE41 | Platform::AVX2 => unsafe {
                     crate::sse41::hash_many(

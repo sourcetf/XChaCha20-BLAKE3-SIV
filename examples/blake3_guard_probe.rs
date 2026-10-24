@@ -59,10 +59,35 @@ fn guarded_block() -> &'static [u8; 64] {
     }
 }
 
-#[cfg(not(windows))]
+#[cfg(unix)]
 fn guarded_block() -> &'static [u8; 64] {
-    // This host is Windows; keep the probe compiling elsewhere without pretending to
-    // establish the guard-page property.
+    use std::alloc::{alloc, Layout};
+
+    const PAGE: usize = 4096;
+    let layout = Layout::from_size_align(2 * PAGE, PAGE).expect("layout");
+    // SAFETY: a fresh two-page allocation; the first page is initialised and the
+    // second is made inaccessible. The allocation is intentionally leaked for the
+    // process lifetime, because the probe hands out a `'static` reference into it.
+    unsafe {
+        let base = alloc(layout);
+        assert!(!base.is_null(), "two-page allocation failed");
+        std::ptr::write_bytes(base, 0xA5, PAGE);
+        let guard = base.add(PAGE);
+        assert_eq!(
+            libc::mprotect(guard.cast(), PAGE, libc::PROT_NONE),
+            0,
+            "mprotect(PROT_NONE) failed"
+        );
+        &*(guard.sub(64) as *const [u8; 64])
+    }
+}
+
+#[cfg(not(any(windows, unix)))]
+fn guarded_block() -> &'static [u8; 64] {
+    // No guard page on this platform: the probe still exercises the call shape, but
+    // it cannot claim the boundary property. The Linux/Windows paths above and the
+    // `PROT_NONE` test in `tests/blake3_fork_equivalence.rs` are the real checks.
+    println!("note: no guard page on this platform; this run is a smoke test only");
     Box::leak(Box::new([0xA5u8; 64]))
 }
 

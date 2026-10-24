@@ -8,6 +8,31 @@ green push to `main` — which are build artefacts of that job, not construction
 
 ## Unreleased
 
+### Audit follow-up: backend, build, fuzz and verification-gate defects
+
+- The vendored `hash_many` tail now peels one safe 8-wide AVX-512 group before the
+  final 1..=7 inputs go to SSE. The previous all-SSE tail was safe but sent 8..=15
+  chunk batches to two-to-four 4-wide groups; the guard-page and differential tests
+  now exercise every backend the host can execute, including distinct input lanes and
+  an independent `compress_xof` reference for `xof_many`.
+- `fuzz/` is a separate workspace, so it never inherited the parent's
+  `[patch.crates-io]`; its lockfile linked crates.io BLAKE3 1.8.7 and the ASan
+  campaign exercised none of the fork's fixes. It now carries the same path patch,
+  and `fuzz/Cargo.lock` resolves the vendored package.
+- aarch64 without NEON (`-C target-feature=-neon`, soft-float targets) no longer
+  references the NEON-only helper or test: both are gated on the feature the module
+  requires, matching the scalar fallback.
+- `LockedKey::new` reports a failed `/proc/self/auxv` page-size read as `ENOSYS`
+  (matching `lock_range`) and an impossible `Layout` as `EINVAL`, instead of
+  mislabelling both as `ENOMEM`.
+- Verification gates: the Kani parser joins legal multi-line attributes and rejects
+  multi-line `cfg`; the CI target pin checks `test`, `src_path`, `required-features`
+  and the lib target; the release matrix match no longer accepts a commented-out row;
+  `verify.sh` no longer uses `grep -q` at the end of a `pipefail` pipeline; the deep
+  trace self-test treats exit 3 as a failure; the zero-test positive control runs the
+  real parser; and `gate_selftest.sh` drives verify's per-target zero-pass guard with a
+  named target instead of its unattributed fallback.
+
 ### The BLAKE3 tail fallback cost 3.3x on small messages; the new tail routing restores parity
 
 The vendored BLAKE3 fork's first D-01 fix sent **every** sub-SIMD-group tail to
