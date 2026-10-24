@@ -597,14 +597,18 @@ cd "$WORK"
 # before -- so a build failure (cargo exits 101) was reported as "residue changed", which
 # is a measurement claim about a run that never happened.
 rc=0
-# `--offline`: verify.sh --tools runs after the crate has been built, so its
-# dependencies are already in the local cargo cache. Without the flag cargo updates
-# the registry index first and the measurement fails on a network-less host with
-# rc=1 -- a "residue changed" reading for a build that never ran. (Measured by the
-# audit that reported this: rc=1, and the same run rc=0 under
-# CARGO_NET_OFFLINE=true.) A direct first-time run needs `cargo fetch` once.
+# Prefer `--offline` when this standalone project can resolve from the local cargo
+# cache: verify.sh --tools runs after the crate has been built, and an offline host
+# should not need the network. A cold CI runner has no index yet (this job does not
+# build the crate first), so `cargo fetch --offline` fails there and the run falls
+# back to the normal online path. Unconditionally passing `--offline` made the job
+# fail with "no matching package named `zeroize`" before any measurement ran.
+offline_flag=""
+if cargo fetch --offline >/dev/null 2>&1; then
+  offline_flag=--offline
+fi
 # shellcheck disable=SC2086
-cargo run --release --quiet --offline $FEATURES || rc=$?
+cargo run --release --quiet $offline_flag $FEATURES || rc=$?
 if [ "$rc" -ne 0 ] && [ "$rc" -ne 1 ]; then
   echo "SKIPPED: the measurement could not run (cargo exited $rc; see above)" >&2
   exit 3

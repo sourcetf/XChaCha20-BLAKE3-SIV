@@ -1627,8 +1627,8 @@ pub mod locked {
             }
             let fd = fd as usize;
             let mut buf = [0u8; 512];
-            // SAFETY: `buf` is a live local of exactly the length passed.
             let n = loop {
+                // SAFETY: `buf` is a live local of exactly the length passed.
                 let n = unsafe { syscall3(NR_READ, fd, buf.as_mut_ptr() as usize, buf.len()) };
                 if n != -4 {
                     break n;
