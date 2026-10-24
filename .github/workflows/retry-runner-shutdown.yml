@@ -16,7 +16,7 @@ name: Retry a run the runner shut down
 # the platform rebalancing hosts, not anything the job does -- the logs show the sweep
 # progressing normally right up to the shutdown signal, with no OOM, disk or tool error.
 #
-# What this does, and what it deliberately does not: it re-runs the failed jobs of such a
+# What this does, and what it deliberately does not: it re-runs the stopped jobs of such a
 # run, once, bounded, and **only when every failed job carries one of the runner's own
 # shutdown annotations**. A job that failed with a verdict -- the sweep's FAIL lines, a
 # test failure, a tool error, the verdict job's arithmetic -- carries a different
@@ -24,6 +24,12 @@ name: Retry a run the runner shut down
 # repetition. The retried run's own conclusion is the one that counts, and `Deep checks`'
 # verdict job still requires all twenty reports per model, so coverage is unchanged: the
 # re-run replaces work an evicted runner took with it, nothing else.
+#
+# A job the runner stopped may be reported as `cancelled`, not `failure`.
+# `rerun-failed-jobs` is documented for *failed* jobs; whether it also re-runs cancelled
+# ones is not guaranteed. When a classified job is cancelled, this workflow therefore
+# uses `runs/{id}/rerun` (all jobs) instead, which definitely restores every stopped job.
+# All-jobs is more expensive, but it is only chosen for the runner-shutdown case.
 #
 # The attempt bound (`run_attempt < 5`) is what keeps this from looping: GitHub increments
 # it on every re-run, so a fleet that keeps evicting runners gives up after four retries
@@ -35,7 +41,7 @@ on:
     types: [completed]
 
 permissions:
-  actions: write  # `rerun-failed-jobs`
+  actions: write  # `runs/{id}/rerun` and `rerun-failed-jobs`
   checks: read    # `check-runs/{id}/annotations`, where the shutdown wording lives
 
 jobs:
@@ -55,13 +61,12 @@ jobs:
         run: |
           set -euo pipefail
           jobs="$(mktemp)"
-          # Keep the name as well as the id: the aggregate verdict job fails *because*
-          # the shards are missing, so its own annotation is a normal "FAIL" and it
-          # must not veto a re-run of the shutdown-stopped shards (CI-01 in the audit).
-          # Cancelled jobs are included for classification; `rerun-failed-jobs` decides
-          # what GitHub itself will re-run.
+          # Keep the name and conclusion as well as the id: the aggregate verdict job
+          # fails *because* the shards are missing, so its own annotation is a normal
+          # "FAIL" and it must not veto a re-run of the shutdown-stopped shards (CI-01
+          # in the audit). The conclusion decides which re-run endpoint is safe.
           gh api --paginate "repos/$REPO/actions/runs/$RUN_ID/jobs?per_page=100" \
-            --jq '.jobs[] | select(.conclusion == "failure" or .conclusion == "cancelled") | "\(.id)\t\(.name)"' > "$jobs"
+            --jq '.jobs[] | select(.conclusion == "failure" or .conclusion == "cancelled") | "\(.id)\t\(.name)\t\(.conclusion)"' > "$jobs"
           if [ ! -s "$jobs" ]; then
             echo "No failed jobs to consider."
             exit 0
@@ -75,9 +80,10 @@ jobs:
           # stops (measured: 5 lost-communication, 10 canceled and 1 exit 143 in run
           # 39639772764). A verdict or a FAIL line matches none of these.
           infra=0
+          cancelled_infra=0
           other=0
           derived=0
-          while IFS=$'\t' read -r id name; do
+          while IFS=$'\t' read -r id name conclusion; do
             # The verdict job aggregates the shards: when a shard was stopped by the
             # runner, the verdict necessarily fails on the missing report, and its
             # annotation says so in ordinary FAIL words. It is exempt from the
@@ -95,6 +101,9 @@ jobs:
             case "$notes" in
               *"received a shutdown signal"*|*"lost communication with the server"*|*"The operation was canceled"*|*"exit code 143"*)
                 infra=$((infra + 1))
+                if [ "$conclusion" = "cancelled" ]; then
+                  cancelled_infra=$((cancelled_infra + 1))
+                fi
                 ;;
               *)
                 other=$((other + 1))
@@ -113,5 +122,13 @@ jobs:
             echo "No job carries a runner-shutdown annotation (derived verdict job: $derived); leaving the run red."
             exit 0
           fi
-          echo "Re-running $infra job(s) stopped by the runner plus $derived derived verdict job(s) (attempt $((RUN_ATTEMPT)))."
-          gh api -X POST "repos/$REPO/actions/runs/$RUN_ID/rerun-failed-jobs"
+          if [ "$cancelled_infra" -gt 0 ]; then
+            # `rerun-failed-jobs` is documented for failed jobs; a runner-stopped job
+            # can be reported as cancelled, and that endpoint is not guaranteed to
+            # restore it. `/rerun` re-runs every job, so no stopped shard is left out.
+            echo "Re-running all jobs because $cancelled_infra of $infra runner-stopped job(s) are cancelled, plus $derived derived verdict job(s) (attempt $((RUN_ATTEMPT)))."
+            gh api -X POST "repos/$REPO/actions/runs/$RUN_ID/rerun"
+          else
+            echo "Re-running $infra failed job(s) stopped by the runner plus $derived derived verdict job(s) (attempt $((RUN_ATTEMPT)))."
+            gh api -X POST "repos/$REPO/actions/runs/$RUN_ID/rerun-failed-jobs"
+          fi

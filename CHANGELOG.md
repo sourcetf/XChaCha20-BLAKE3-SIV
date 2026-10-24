@@ -32,6 +32,12 @@ green push to `main` — which are build artefacts of that job, not construction
   trace self-test treats exit 3 as a failure; the zero-test positive control runs the
   real parser; and `gate_selftest.sh` drives verify's per-target zero-pass guard with a
   named target instead of its unattributed fallback.
+- The runner-shutdown retry uses `runs/{id}/rerun` (all jobs) when a classified job is
+  `cancelled`, because `rerun-failed-jobs` is documented for failed jobs and is not
+  guaranteed to restore a cancelled shard; failed-only shutdowns keep the narrower
+  endpoint. `verify.sh --kani` uses `-j 2`, matching the sharded formal runs, after the
+  all-core default triggered Kani 0.68's internal `No exit code?` panic on a 32-core
+  host.
 
 ### The BLAKE3 tail fallback cost 3.3x on small messages; the new tail routing restores parity
 

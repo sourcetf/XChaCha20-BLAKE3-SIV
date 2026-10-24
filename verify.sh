@@ -238,6 +238,14 @@ qemu_identity_ok() {  # <path> <expected emulator name>
   return 0
 }
 
+# Captured once for both the cross-compilation type-checks (stage 4) and the qemu
+# execution stage (stage 5). `--kani-only --cross-exec` skips stage 4, so capturing
+# this inside stage 4 left `installed_targets` unset and silently skipped every
+# qemu target. Not piped through `grep -q`: this script sets `pipefail`, and `grep -q`
+# exits at the first match, which can give rustup's still-writing stdout SIGPIPE
+# (141) and make an installed target look missing.
+installed_targets="$(rustup target list --installed 2>/dev/null || true)"
+
 if [ "$KANI_ONLY" -eq 0 ]; then
   step "1. reference implementation self-checks"
   if command -v python3 >/dev/null 2>&1 && python3 -c "import blake3" 2>/dev/null; then
@@ -435,10 +443,6 @@ plaintext_wipe security threads variable_latency"
   # `ultra` is in the feature list alongside `pure` so the witness is type-checked for
   # these targets too; stage 5 below *executes* it on all four of its own targets.
   # (`pure` is what makes BLAKE3's C kernels unnecessary here; see stage 5.)
-  # Captured once, not piped through `grep -q`: this script sets `pipefail`, and
-  # `grep -q` exits at the first match, which can give rustup's still-writing stdout
-  # SIGPIPE (141) and make an installed target look missing.
-  installed_targets="$(rustup target list --installed 2>/dev/null || true)"
   if grep -qx 'aarch64-unknown-linux-gnu' <<< "$installed_targets"; then
     cargo check --target aarch64-unknown-linux-gnu --all-targets --features ultra,pure
   else
@@ -1204,7 +1208,12 @@ if [ "$RUN_KANI" -eq 1 ]; then
     # `tee` so the output still streams (Kani is slow) while the summary is read back;
     # `set -o pipefail` (top of file) makes a non-zero `cargo kani` fail the pipeline,
     # which the `if !` sees.
-    if ! cargo kani -j --output-format=terse --features pure -Z stubbing -Z unstable-options \
+    # `-j 2`, not Kani's "one job per core" default: on a 32-core host with a
+    # large symbolic harness, the default run of all 19 harnesses hit Kani
+    # 0.68.0's internal `No exit code?` panic after 11/19; `-j 2` completed
+    # 19/19. The per-shard job counts in `tools/kani_shards.py` are bounded for
+    # the same memory reason. `--output-format=terse` is required by `-j > 1`.
+    if ! cargo kani -j 2 --output-format=terse --features pure -Z stubbing -Z unstable-options \
          --extra-pointer-checks 2>&1 | tee "$kani_log"; then
       echo "FAILED: cargo kani exited non-zero" >&2
       exit 1

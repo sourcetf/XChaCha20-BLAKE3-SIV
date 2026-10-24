@@ -25,9 +25,10 @@ computed `compress_xof` blocks; short `xof_many` outputs canaried for 1..=63 and
 compared with the same independent reference for 0..=130; `reset` after a hazmat
 offset; and `left_subtree_len(u64::MAX)`. The fixed and unfixed `hash_many`/`xof_many`
 outputs are byte-identical for valid inputs. Throughput after the D-01 routing is back
-within the registry build at 1 KiB/16 KiB/64 KiB/1 MiB; the 4 KiB cell is ~10-15%
-behind the registry (see `performance.md` and its fresh table), and the restored
-AVX-512 8-wide tail keeps 8..=15-chunk batches on `hash8`.
+within the registry build at 1 KiB/16 KiB/64 KiB/1 MiB; the 4 KiB cell is about
+10-20% behind the registry depending on host load (the audit measured 17-20% at load
+about 10, inside its noise floor; see `performance.md`), and the restored AVX-512
+8-wide tail keeps 8..=15-chunk batches on `hash8`.
 
 **Publication caveat.** A crates.io package does not carry this `[patch]`; the parent
 `cargo package` resolves `blake3 = "1.8"` from crates.io. Publishing the fixed crate
