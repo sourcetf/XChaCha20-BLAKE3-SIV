@@ -858,7 +858,7 @@ impl core::fmt::Debug for Plaintext {
 /// `Key` from a function, passing it by value, or assigning it to another binding
 /// can leave a copy in a dead stack slot that is never dropped and never wiped.
 /// Use the generated key in place, or keep it in a stable allocation such as
-/// [`locked::LockedKey`] where moves copy only a pointer. This is a property of
+/// `locked::LockedKey` where moves copy only a pointer. This is a property of
 /// any inline zeroizing type; it is stated here because the convenience wrapper
 /// makes it easy to assume otherwise.
 ///
@@ -1133,7 +1133,7 @@ pub mod random {
     /// The key comes back in a [`Key`], which zeroizes the copy it owns on drop. The
     /// return value is moved, and a move copies the 32 inline bytes; a dead
     /// moved-from stack slot can therefore retain a copy that no `Drop` reaches.
-    /// Keep the key in one place, or use [`locked::LockedKey`] for a stable
+    /// Keep the key in one place, or use `locked::LockedKey` for a stable
     /// heap-located copy. On failure nothing escapes: the intermediate buffer is
     /// wiped ([`fill`]'s guarantee) and the `Key` is dropped.
     ///
