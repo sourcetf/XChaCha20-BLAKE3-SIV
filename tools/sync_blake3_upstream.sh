@@ -122,6 +122,18 @@ mkdir -p blake3/upstream-sync
 cp "$WORK/local-patches.diff" "$WORK/upstream-changes.diff" "$WORK/combined.diff" \
   "$WORK/PATCHES.local.md" blake3/upstream-sync/
 
+# The parent declares `version + path` so cargo-deny does not classify the path
+# dependency as a wildcard. Keep that annotation in step with the imported crate.
+python3 - "$ROOT/Cargo.toml" "$CURRENT" "$LATEST" <<'PY'
+import sys
+path, old, new = sys.argv[1], sys.argv[2], sys.argv[3]
+s = open(path, encoding="utf-8").read()
+needle = f'blake3 = {{ version = "{old}", path = "blake3"'
+replacement = f'blake3 = {{ version = "{new}", path = "blake3"'
+assert s.count(needle) == 2, s.count(needle)
+open(path, "w", encoding="utf-8", newline="\n").write(s.replace(needle, replacement))
+PY
+
 local_files="$(grep -c '^diff ' "$WORK/local-patches.diff" || true)"
 upstream_files="$(grep -c '^diff ' "$WORK/upstream-changes.diff" || true)"
 cat > blake3/UPSTREAM-SYNC.md <<EOF
@@ -149,7 +161,7 @@ EOF
 cargo metadata --format-version 1 >/dev/null
 cargo metadata --manifest-path fuzz/Cargo.toml --format-version 1 >/dev/null
 
-git add -A blake3 Cargo.lock fuzz/Cargo.lock
+git add -A blake3 Cargo.toml Cargo.lock fuzz/Cargo.lock
 git diff --cached --stat blake3 fuzz/Cargo.lock | tail -20
 git commit -m "blake3: import upstream $LATEST for comparison" \
   -m "Draft comparison candidate: upstream source is unpatched; see blake3/UPSTREAM-SYNC.md and blake3/upstream-sync/ for the local-patch, upstream-change and combined diffs."
