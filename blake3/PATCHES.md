@@ -15,6 +15,7 @@ The parent `Cargo.toml` depends on this directory **directly by path**; it does 
 | D-05 (Low) | `src/hazmat.rs` | `left_subtree_len` uses `div_ceil(2)`, so `u64::MAX + 1` no longer wraps. Reproduced as `1` instead of `1 << 63`. |
 | D-06 (Low) | `src/lib.rs` | `OutputReader::position` uses saturating arithmetic at the end of the addressable stream. |
 | V-03 (Low, debug) | `src/portable.rs`, `src/rust_sse2.rs`, `src/rust_sse41.rs`, `src/wasm32_simd.rs`, `src/platform.rs`, `src/lib.rs` | `hash_many`/`xof_many` and `OutputReader::fill_one_block` use wrapping counter increments. `counter += 1` panicked in debug at `u64::MAX` while the assembly kernels wrapped silently. |
+| Dependency maintenance | `Cargo.toml`, `Cargo.toml.orig`, `Cargo.lock` | `constant_time_eq` 0.4.2 -> 0.6.1 (Dependabot #13), which adds `rustversion`. Upstream 1.8.7 pins 0.4.2; this is a dependency update, not an upstream security fix. It appears in `local-patches.diff` during an upstream sync and must be re-evaluated then. |
 
 Regression tests live in the parent, `tests/blake3_fork_equivalence.rs`: `hash_many`
 against portable on every backend the host can execute (portable, SSE2, SSE4.1, AVX2,
