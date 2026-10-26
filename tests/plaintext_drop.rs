@@ -58,6 +58,9 @@ fn plaintext_buffer_is_zeroed_before_it_is_freed() {
     WATCH.store(control.as_ptr() as usize, Ordering::SeqCst);
     WIPED.store(true, Ordering::SeqCst);
     drop(control);
+    // Disarm immediately. Leaving this address watched would read whatever allocation
+    // reuses it (possibly before it is initialized) on a later deallocation.
+    WATCH.store(0, Ordering::SeqCst);
     assert!(
         !WIPED.load(Ordering::SeqCst),
         "control failed: the allocator did not observe a non-zero buffer at free time, \
@@ -74,6 +77,7 @@ fn plaintext_buffer_is_zeroed_before_it_is_freed() {
     WATCH.store(pt.as_ptr() as usize, Ordering::SeqCst);
     WIPED.store(false, Ordering::SeqCst);
     drop(pt);
+    WATCH.store(0, Ordering::SeqCst);
 
     assert!(
         WIPED.load(Ordering::SeqCst),

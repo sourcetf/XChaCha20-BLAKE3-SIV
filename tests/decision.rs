@@ -20,7 +20,7 @@
 //! rejected, through both entry points, at the sizes where the tag is hashed in
 //! one buffer and where it is hashed in three parts.
 use xchacha20_blake3_siv::{
-    decrypt, decrypt_in_place_detached, encrypt, encrypt_in_place_detached, TAG_LEN,
+    decrypt, decrypt_in_place_detached, encrypt, encrypt_in_place_detached, Error, TAG_LEN,
 };
 
 const KEY: [u8; 32] = [0x11; 32];
@@ -164,4 +164,47 @@ fn a_tag_from_one_message_must_not_authenticate_another() {
 
     // The genuine pair still works, so the rejections above are the forgery.
     assert_eq!(decrypt(&KEY, &NONCE, AAD, &ct_a, &tag_a).unwrap(), a);
+}
+
+/// A rejected in-place decrypt must leave the caller's buffer wiped, not holding the
+/// unauthenticated plaintext it temporarily recovered. Only an assertion on the buffer
+/// itself can see that: `is_err()` is satisfied equally by a correct rejection and by a
+/// rejection that forgot the wipe.
+#[test]
+fn rejected_in_place_decrypt_wipes_the_caller_buffer() {
+    for len in [0usize, 1, 63, 64, 65, 1024] {
+        let pt = vec![0xA7u8; len];
+        let (ct, tag) = encrypt(&KEY, &NONCE, AAD, &pt).unwrap();
+
+        // Valid tag, corrupted ciphertext.
+        let mut buf = ct.clone();
+        if !buf.is_empty() {
+            buf[0] ^= 1;
+        }
+        if len > 0 {
+            assert_eq!(
+                decrypt_in_place_detached(&KEY, &NONCE, AAD, &mut buf, &tag).unwrap_err(),
+                Error::AuthenticationFailed,
+                "a corrupted ciphertext must fail authentication (len {len})"
+            );
+            assert!(
+                buf.iter().all(|&b| b == 0),
+                "a rejected in-place decrypt left the recovered plaintext in the caller's buffer (len {len})"
+            );
+        }
+
+        // Corrupted tag, valid ciphertext. This path covers the empty message too.
+        let mut bad_tag = tag;
+        bad_tag[0] ^= 1;
+        let mut buf = ct.clone();
+        assert_eq!(
+            decrypt_in_place_detached(&KEY, &NONCE, AAD, &mut buf, &bad_tag).unwrap_err(),
+            Error::AuthenticationFailed,
+            "a corrupted tag must fail authentication (len {len})"
+        );
+        assert!(
+            buf.iter().all(|&b| b == 0),
+            "a rejected in-place decrypt left the recovered plaintext in the caller's buffer (len {len})"
+        );
+    }
 }

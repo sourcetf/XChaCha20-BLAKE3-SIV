@@ -8,6 +8,9 @@ license = "CC0-1.0 OR Apache-2.0 OR Apache-2.0 WITH LLVM-exception"
 documentation = "https://docs.rs/blake3"
 readme = "README.md"
 edition = "2024"
+# Patched fork, source-only with the parent repository.
+publish = false
+rust-version = "1.85"
 
 [features]
 default = ["std"]

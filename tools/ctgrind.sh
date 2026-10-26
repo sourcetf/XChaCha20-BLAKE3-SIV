@@ -182,6 +182,9 @@ SUPP_BAD="$(printf '%s\n' "$SUPP_FUNS" | grep -v 'accept_or_reject' | grep . || 
 SUPP_OTHER="$(grep -v '^[[:space:]]*#' "$SUPP" | grep -v '^[[:space:]]*$' \
   | grep -vE '^[[:space:]]*(\{|\}|Memcheck:[A-Za-z0-9_:.-]+|[A-Za-z0-9_.-]+)[[:space:]]*$' \
   | grep -vE '^[[:space:]]*fun:(accept_or_reject|[A-Za-z0-9_$.*?]*16accept_or_reject)[[:space:]]*$' || true)"
+# A bare `...` is valgrind's any-frames wildcard and would widen the single
+# suppression to every call made by accept_or_reject. The general rule above rejects
+# it (it is neither a block marker nor a `fun:` line), so no exception is needed.
 if [ "$SUPP_COUNT" -lt 1 ] || [ -n "$SUPP_BAD" ] || [ -n "$SUPP_OTHER" ]; then
   echo "FAIL: tests/ctgrind.supp must suppress accept_or_reject and nothing else." >&2
   echo "      A frame naming anything else permits every branch in that function" >&2

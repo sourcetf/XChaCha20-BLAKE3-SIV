@@ -8,6 +8,68 @@ green push to `main` — which are build artefacts of that job, not construction
 
 ## Unreleased
 
+### Full-tree re-audit after the vendored-BLAKE3 migration
+
+No wire-format byte changed. The changes below close defects and verification gaps
+found by a fresh line-by-line audit of the crate, the vendored BLAKE3 fork, every
+direct/dev/build dependency, the tests, tooling, workflows and release path.
+
+- **Production code.** `LockedKey::new` rejects an unsupported target with `ENOSYS`
+  before allocating a page; `lock_range`'s failure rollback now unlocks before
+  `MADV_DODUMP` (a leaked exclusion is recoverable, a locked-and-dumpable key is not);
+  the independent tag fold (`ct_eq_independent`) passes the accumulator through
+  `core::hint::black_box` on every step so LLVM cannot turn it into an early-exit
+  comparison; `encrypt`'s `ultra` cross-check now fills its two gate slots with two
+  independently shaped comparisons instead of one `Choice` twice; and the `VmLck`
+  parser takes the kernel's last line-start field, so a newline injected through
+  `comm` cannot spoof the accounting.
+- **Tests.** Removed two test-only reads of dropped/deallocated storage; the drop wipe
+  is now observed inside `Drop` through test-only instrumentation. Added direct
+  520-bit tests for both gate shapes (a constant fold or a shortened loop now fails),
+  in-place failure-buffer wipe checks, equal-length message-swap coverage, full
+  byte/bit tag sweeps, and an explicit stack-budget assertion. The plaintext allocator
+  witnesses no longer scan unrelated freed buffers, and the `ctgrind` suppression
+  parser now rejects a bare `...` wildcard.
+- **Vendored BLAKE3.** `Platform` is an opaque struct over a private enum, closing the
+  safe-API hole where `Platform::AVX512` could execute unsupported instructions; the
+  AVX2 tail falls back to portable when SSE4.1 is absent; `hash_many` asserts its
+  whole-block input and output-length contracts in release; `guts::ChunkState::update`
+  rejects more than one chunk; `Output::root_hash` uses its counter; and `copy_wide`'s
+  stack buffer is 16 KiB. The fork sets `publish = false` and `rust-version = "1.85"`,
+  tracks its own lock, and vendors upstream's `reference_impl` and test vectors so its
+  43-test suite runs in CI. `.cargo-ok` and the misleading pristine
+  `.cargo_vcs_info.json` are removed. `PATCHES.md` now lists V-03 in `rust_avx2.rs`,
+  the safe-API hardening, the remaining C/assembly limitations, and the provenance of
+  the added test files.
+- **Dependencies.** `aead` and `chacha20poly1305` no longer enable their default
+  `rand_core`/`getrandom` features in test builds, removing a second legacy RNG stack
+  from `Cargo.lock`; the root and fuzz locks were regenerated. A CI check resolves the
+  graph and fails unless exactly one `blake3` is present, it is the path package, its
+  `publish` is disabled, and the parent's default feature set still contains
+  `hardened`.
+- **CI/release.** Every cargo command now uses `--locked`; the release checkout does
+  not persist the write token; the three bundles are proven to carry three distinct
+  rlibs; a `.crate` in `dist/` is refused; the release gate includes a Windows
+  all-features run and a bare-metal `no_std` check. The timing presence gate runs its
+  source guard, the `ctgrind` zero-pass exemption requires all five ignored tests, the
+  Miri floor is derived from the same target, Kani's version is asserted, and the
+  retry workflow ignores fork-controlled annotations and timeout cancellations.
+- **Upstream sync.** The sync script verifies the crates.io SHA-256, requires a clean
+  relevant tree, works in a detached worktree (local uncommitted work is untouched),
+  reports a branch that exists without an open PR instead of silently disabling the
+  alarm, uses a scoped commit identity, checks `gh`, and preserves the local patch
+  notes. The workflow runs only for `main`.
+- **Fault-injection tooling.** `fi_instruction` now classifies every acceptance
+  assertion in `tests/decision.rs` as an accepting fault, not a crash; `fi_check`
+  recognises OOM/SIGKILL build failures as "could not run"; and `tsan.sh` distinguishes
+  a sanitizer that could not run from one that reported no race.
+- **Documentation.** Corrected contradicted claims: the `Key` move-copy caveat, zeroed
+  RNG failure output, release-profile constant-time/zeroization scope, `ultra` memory
+  peaks and allocation behaviour, in-place failure wiping, 64-bit nonce counters,
+  current `hardened` performance ratios, `pure`'s measured cost, audit/Kani counts,
+  source-only release contents, cross-protocol keystream wording, and `SECURITY.md`'s
+  scope references.
+
 ### BLAKE3 is a direct path dependency; crates.io is no longer in the graph
 
 The maintained fork in `blake3/` is now a direct `path` dependency of both the parent
@@ -130,8 +192,10 @@ AVX-512 `xof_many` now uses the documented `compress_xof` loop, tested for 1..=4
 blocks), D-04 (`reset` clears the hazmat initial chunk counter, reproduced as a
 `finalize` assertion failure before the fix), D-05 (`left_subtree_len(u64::MAX)` no
 longer wraps; reproduced as `1` instead of `1 << 63`), and D-06 (`position` saturates).
-D-03's narrow-argument ABI issue and D-09's manually-constructed `Platform` variants
-remain documented upstream limitations; the parent path does not reach them.
+D-03's narrow-argument ABI issue remains a documented upstream limitation. D-09's
+safe-API hole is closed in this fork: `Platform` is now an opaque struct over a private
+enum, and only the feature-checked constructors can name a backend, so safe code cannot
+select an ISA the CPU lacks. The parent path reaches neither issue.
 
 The fork is a direct path dependency in both the parent and the fuzz workspace; there
 is no crates.io `blake3` fallback. The package is `publish = false`, and CI no longer
@@ -239,7 +303,7 @@ Five adversarial passes were pointed at this tree — at the guards the previous
 The report (a fifth, independent, line-by-line pass, delivered as
 `XChaCha20-BLAKE3-SIV_独立逐行审计报告_92c85ad.md`) came back with the cryptography
 clean by its own independent measurements — 5,411 differential comparisons against a self-written
-reference across three configurations with **0 mismatches**, the witness's independence confirmed, 13/13
+reference across three configurations with **0 mismatches**, the witness's independence confirmed, 19/19
 Kani harnesses with no vacuity — and one release blocker, seven HIGH items and eleven MEDIUM ones in the
 verification apparatus and the documents. Every item was reproduced here before it was accepted, and
 every fix was verified in both directions: the mutation must fail, the clean tree must pass. **No item
@@ -334,8 +398,9 @@ changed a byte of the wire format, and none was a defect in the construction.**
 so the README's two `version = "0.1"` snippets pointed at nothing. Both now say so and give the `git`
 line that works today, and `[package.metadata.docs.rs] features = ["ultra"]` was added because a default
 `cargo doc` renders neither `locked` nor `random` (measured both ways). Publishing to a registry is an
-irreversible outward-facing step that belongs to the maintainer, not to CI; the release job already
-attaches the `.crate` to a GitHub Release per green push.
+irreversible outward-facing step that belongs to the maintainer, not to CI; the release job
+builds and attaches three configuration bundles to a GitHub Release per green push, and
+produces no `.crate`.
 
 **What this round found by itself, beyond the report**
 
@@ -353,7 +418,7 @@ attaches the `.crate` to a GitHub Release per green push.
   `tests/README.md`'s row were moved together, which is what that table is for.
 
 **Verified here**: `check.sh --fast` rc 0 (83 s) and, with `--ctgrind --tools --kani`,
-`verify.sh` — stages 1–4, Kani 13/13 with the new count guard, ctgrind, the mutation campaign (all
+`verify.sh` — stages 1–4, Kani 19/19 with the new count guard, ctgrind, the mutation campaign (all
 mutations caught) and the fault-injection campaign, plus the tool gates — the suites green in each
 configuration the guards are compiled under (lib 50, security 16, differential 7, decision_scope 7,
 locked 11, ultra 8, counter_range 4, variable_latency 3). Each adopted item carries the two-direction
@@ -1123,7 +1188,7 @@ below are the ones that changed something here. **No wire-format change.**
   half, the release/no-default decrypt paths' 8–12 bytes of `enc_nonce`) and the finding that no
   configuration probed left both a whole `k_in` and a whole `k_out` within reach.
 
-### `AUDIT-RESPONSE.md`: the disposition of all four third-party reports
+### `AUDIT-RESPONSE.md`: the disposition of all five third-party reports
 
 The four reports (the 366-finding line-by-line audit, and the 26-, 58- and 32-finding
 incremental rounds) now have one document in the repository root that maps every finding class
@@ -3599,7 +3664,7 @@ both counts printed.
     refuses (`RLIMIT_MEMLOCK` is the usual reason). Raw syscalls, because the crate is
     `no_std`; the numbers come from the kernel's headers, and `tests/ultra.rs` checks the
     &shy;implementation by reading the kernel's own `VmLck` accounting back.
-- `pure` is deliberately **not** part of `ultra`: it costs 24-32% and buys no security.
+- `pure` is deliberately **not** part of `ultra`: it costs about 19-21% of throughput at the measured points and buys no security.
 - The README's `ultra` section states the per-layer cost (all measured) and, in the same
   place, the five attack models that remain out of reach for *any* software build, so the
   feature cannot be read as total immunity.

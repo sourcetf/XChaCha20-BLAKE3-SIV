@@ -9,9 +9,11 @@
 //! present in a block that is about to be handed back to the allocator.
 //!
 //! The test is deliberately about the *returned* plaintext, the allocation an attacker
-//! with a use-after-free or an allocator bug would read. The witness's and the KDF's
-//! stack buffers are covered separately by `tools/stack_residue.sh` and the `ultra`
-//! `scrub_stack`; this test covers the heap copy the public API hands to the caller.
+//! with a use-after-free or an allocator bug would read. Stack residue is a different
+//! witness: `tools/stack_residue.sh` checks the master key and the `locked` integrity
+//! tag (not the derived per-message values), and `ultra`'s `scrub_stack` is a
+//! best-effort overwrite. This test covers the heap copy the public API hands to the
+//! caller.
 
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -23,7 +25,6 @@ struct WatchAlloc;
 
 static WATCH_PTR: AtomicUsize = AtomicUsize::new(0);
 static WATCH_LEN: AtomicUsize = AtomicUsize::new(0);
-static WATCH_ANY: AtomicBool = AtomicBool::new(false);
 static SAW_RESIDUE: AtomicBool = AtomicBool::new(false);
 /// The first allocation of `WATCH_LEN` bytes made while `ARM_ALLOC` is set; the failure
 /// path's plaintext buffer. `SAW_WATCHED_FREE` is its liveness witness: without it a
@@ -65,25 +66,34 @@ unsafe impl GlobalAlloc for WatchAlloc {
     }
 
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
-        if WATCH_ALLOC_PTR.load(Ordering::SeqCst) == ptr as usize {
+        let watched_alloc = WATCH_ALLOC_PTR.load(Ordering::SeqCst);
+        if watched_alloc == ptr as usize {
             SAW_WATCHED_FREE.store(true, Ordering::SeqCst);
-            WATCH_ALLOC_PTR.store(0, Ordering::SeqCst);
         }
         let watch = WATCH_PTR.load(Ordering::SeqCst);
-        let any = WATCH_ANY.load(Ordering::SeqCst);
-        if any || (watch != 0 && watch == ptr as usize) {
+        // Inspect only the two pointers the test itself recorded. Scanning every buffer
+        // of a matching size (the earlier `WATCH_ANY`) read allocations the test did not
+        // own -- potentially uninitialized memory -- and could report a false residue.
+        if (watch != 0 && watch == ptr as usize)
+            || (watched_alloc != 0 && watched_alloc == ptr as usize)
+        {
             let len = WATCH_LEN.load(Ordering::SeqCst);
             if layout.size() >= len && len != 0 {
-                // SAFETY: `ptr` is the allocation being deallocated and `len` is no larger
-                // than its layout size, so the range is inside that allocation.
+                // SAFETY: `ptr` is the allocation being deallocated, `len` is no larger
+                // than its layout size, and both the successful `Plaintext` and the
+                // failure-path buffer are fully initialized (plaintext + wipe) before
+                // this deallocation.
                 let bytes = unsafe { std::slice::from_raw_parts(ptr, len) };
                 if bytes.contains(&0xA7) {
                     SAW_RESIDUE.store(true, Ordering::SeqCst);
                 }
             }
-            if watch == ptr as usize {
-                WATCH_PTR.store(0, Ordering::SeqCst);
-            }
+        }
+        if watched_alloc == ptr as usize {
+            WATCH_ALLOC_PTR.store(0, Ordering::SeqCst);
+        }
+        if watch == ptr as usize {
+            WATCH_PTR.store(0, Ordering::SeqCst);
         }
         // SAFETY: the pointer/layout pair is the one being deallocated, forwarded to
         // `System` exactly once.
@@ -148,9 +158,7 @@ fn decrypt_failure_wipes_internal_plaintext() {
     WATCH_ALLOC_PTR.store(0, Ordering::SeqCst);
     WATCH_LEN.store(message.len(), Ordering::SeqCst);
     ARM_ALLOC.store(true, Ordering::SeqCst);
-    WATCH_ANY.store(true, Ordering::SeqCst);
     let error = decrypt(&key, &nonce, aad, &ciphertext, &bad_tag).unwrap_err();
-    WATCH_ANY.store(false, Ordering::SeqCst);
     ARM_ALLOC.store(false, Ordering::SeqCst);
 
     assert_eq!(error, Error::AuthenticationFailed);

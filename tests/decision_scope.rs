@@ -1081,6 +1081,9 @@ fn the_second_gate_uses_two_comparison_shapes_wherever_the_gates_are_built() {
     // (`acc |= x & 0;`), which leaves `ct_eq_independent` returning constant true and
     // silently removes the single-fault defence these two shapes exist for. Pin the exact
     // fold lines instead, whitespace-flattened so rustfmt's line breaks are not the subject.
+    // The accumulator is passed through `black_box` on every step: without that, LLVM can
+    // turn the OR-fold into an early-exit comparison and reintroduce the leak this shape
+    // exists to avoid.
     let fold = brace_blocks("fn ct_eq_independent(");
     assert_eq!(fold.len(), 1, "one `ct_eq_independent` expected");
     let fold_code = strip_comments(&fold[0]);
@@ -1097,16 +1100,16 @@ fn the_second_gate_uses_two_comparison_shapes_wherever_the_gates_are_built() {
         fold[0]
     );
     assert!(
-        flat.contains("acc |= x;"),
-        "the word must be accumulated into the running value: `acc |= x;` is the \
-         accumulation; a masked `acc |= x & 0;` is a constant and passed the substring \
-         checks this test used to make:\n{}",
+        flat.contains("acc = core::hint::black_box(acc | x);"),
+        "the word must be accumulated into the running value through the optimizer \
+         barrier: a masked `acc | x & 0` is a constant and passes weaker substring \
+         checks; a bare `acc |= x` can be compiled to an early exit:\n{}",
         fold[0]
     );
     assert!(
-        flat.contains("acc |= (a[i] ^ b[i]) as u64;"),
+        flat.contains("acc = core::hint::black_box(acc | (a[i] ^ b[i]) as u64);"),
         "the tail byte must XOR the same position of both tags into the accumulator, \
-         not one of them twice:\n{}",
+         through the same barrier:\n{}",
         fold[0]
     );
     // The loops themselves, not only their bodies. Changing `i + 8` to `i + 16`, or
@@ -1168,8 +1171,9 @@ fn the_second_gate_uses_two_comparison_shapes_wherever_the_gates_are_built() {
 
 /// The fold's accumulator must be the value the final comparison sees.
 ///
-/// Everything pinned about `ct_eq_independent` above is a *line*: the two `acc |= …;`
-/// accumulations, the exact XOR operands, and the return `acc.ct_eq(&0u64)`. An audit kept
+/// Everything pinned about `ct_eq_independent` above is a *line*: the two
+/// barrier-wrapped accumulations, the exact XOR operands, and the return
+/// `acc.ct_eq(&0u64)`. An audit kept
 /// every one of those lines and inserted `let acc = 0u64;` between the tail loop and the
 /// return: the OR-ed bytes are then dead, the function returns the constant
 /// `0u64.ct_eq(&0u64)`, and the whole suite stays green (measured on a copy) -- the fold is
@@ -1192,7 +1196,7 @@ fn the_fold_accumulator_is_the_compared_value() {
     // subject of these assertions.
     let flat = code.split_whitespace().collect::<Vec<_>>().join(" ");
 
-    // Declared once, and `mut` -- the two `acc |= …` lines write it, and a non-`mut`
+    // Declared once, and `mut` -- the two accumulation lines write it, and a non-`mut`
     // accumulator cannot be the one they write.
     assert_eq!(
         flat.matches("let mut acc = 0u64;").count(),
@@ -1220,11 +1224,12 @@ fn the_fold_accumulator_is_the_compared_value() {
          every pinned line intact):\n{}",
         fold[0]
     );
-    // Every mention of `acc` is one of the fold's four statements: the declaration, the
-    // two accumulations, the comparison. A fifth mention is a shadow binding, a
-    // cancel/zero (`acc &= 0;`, `acc ^= acc;`), or a move of the compared value away from
-    // the accumulator -- each leaves the fold constant or dependent on something other
-    // than both tags.
+    // Every mention of `acc` is one of the fold's six statements: the declaration, the
+    // two reads/writes inside the barrier calls, the two reads of the accumulator inside
+    // those calls, and the comparison. Anything else is a shadow binding, a cancel/zero
+    // (`acc &= 0;`, `acc ^= acc;`), or a move of the compared value away from the
+    // accumulator -- each leaves the fold constant or dependent on something other than
+    // both tags.
     assert_eq!(
         code.match_indices("acc")
             .filter(|(at, _)| {
@@ -1234,11 +1239,12 @@ fn the_fold_accumulator_is_the_compared_value() {
                     && !after.is_some_and(|c| c.is_alphanumeric() || c == '_')
             })
             .count(),
-        4,
-        "`ct_eq_independent` must mention the accumulator exactly four times -- the \
-         declaration, the two accumulations, and the final comparison. Any other mention \
-         (`let acc = 0u64;`, `acc = 0;`, `acc &= 0;`, ...) is a write that discards the \
-         folded bits before they are compared:\n{}",
+        6,
+        "`ct_eq_independent` must mention the accumulator exactly six times -- the \
+         declaration, the two barrier-wrapped accumulations (each names `acc` on both \
+         sides), and the final comparison. Any other mention (`let acc = 0u64;`, \
+         `acc = 0;`, `acc &= 0;`, ...) is a write that discards the folded bits before \
+         they are compared:\n{}",
         fold[0]
     );
     // The compared binding is the accumulator, and the comparison follows the fold. (The
@@ -1254,7 +1260,7 @@ fn the_fold_accumulator_is_the_compared_value() {
         .rfind("acc.ct_eq(&0u64)")
         .expect("asserted present above");
     let last_accum = code
-        .rfind("acc |=")
+        .rfind("acc = core::hint::black_box(acc |")
         .expect("the fold must accumulate into `acc`");
     let accum_end = statement_end(&code, last_accum);
     assert!(
@@ -1364,7 +1370,7 @@ fn the_decision_outcome_is_fail_closed() {
         let sequence = format!(
             "{flat_init} core::hint::black_box(&mut decision0); \
              core::hint::black_box(&mut decision1); \
-             accept_or_reject(agree, agree, &mut decision0, &mut decision1);"
+             accept_or_reject(agree, agree2, &mut decision0, &mut decision1);"
         );
         assert_eq!(
             flat.matches(sequence.as_str()).count(),
@@ -1637,10 +1643,10 @@ fn the_decision_outcome_is_fail_closed() {
     // `encrypt`'s cross-check goes through the same function rather than comparing and
     // branching at its own call site: as an `if !bool::from(..ct_eq(..))` it is a branch on
     // the tag, which no suppression entry covers (valgrind reported it: one report inside
-    // `encrypt`, `tools/ctgrind.sh --features ultra`). One call, both slots from the same
-    // `Choice`, so the decision has exactly one definition in the crate.
+    // `encrypt`, `tools/ctgrind.sh --features ultra`). One call, with the second slot using
+    // the independently shaped fold, so the decision has exactly one definition in the crate.
     assert_eq!(
-        non_test.matches("accept_or_reject(agree, agree,").count(),
+        non_test.matches("accept_or_reject(agree, agree2,").count(),
         1,
         "`ultra`'s encrypt-side cross-check must go through the one suppressed decision"
     );

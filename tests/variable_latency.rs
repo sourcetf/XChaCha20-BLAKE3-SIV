@@ -210,8 +210,11 @@ const DIVISION_METHODS: &[&str] = &[
 /// `if let Some(rest)` were replaced by four `while`s (line scan, spaces, digits,
 /// accumulation) and the line-start/empty-field checks. All are boundary tests on a
 /// public buffer, and none reads key, nonce, AAD or message content.
+///
+/// `if` 47 -> 48 when `LockedKey::new` began rejecting unsupported targets before
+/// allocating its page: that branch tests a compile-time constant, not secret content.
 const CONTROL_FLOW: &[(&str, usize)] = &[
-    ("if", 47),
+    ("if", 48),
     ("while", 14),
     ("for", 25),
     ("loop", 2),

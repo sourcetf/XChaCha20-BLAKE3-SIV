@@ -44,10 +44,19 @@
 //!    error rather than a genuine counterexample. Harnesses therefore compare
 //!    scalars or short fields instead of whole slices.
 //!
-//! Seventeen of the nineteen harnesses carry an explicit `#[kani::unwind]`; the
-//! other two contain no loops.  The bounds are deliberately generous, and the
+//! Sixteen of the nineteen harnesses carry an explicit `#[kani::unwind]`; the other
+//! three contain no loops.  The bounds are deliberately generous, and the
 //! unwinding assertions they turn on are what make a bound that is ever too low
 //! fail the harness rather than silently truncate the loop it guards.
+//!
+//! Two scope limits are worth stating rather than leaving to inference. Kani builds
+//! the `cfg(kani)` path, in which the SIMD dispatch blocks are excluded, so the
+//! stream harnesses verify the scalar loop and the KATs/Miri/differential tests
+//! cover the kernels. The stream harnesses also stub `chacha20_block_into`, so their
+//! property is counter sequencing and buffer use, not the permutation; the
+//! permutation is pinned by the KATs. The zeroize harnesses prove that every byte is
+//! zero after the call, not that the compiler kept a volatile store (disassembly,
+//! ctgrind and `tools/stack_residue.sh` cover that property).
 //!
 //! # What this suite can and cannot establish
 //!
@@ -447,7 +456,7 @@ fn hchacha20_matches_draft_vector() {
 //   HChaCha20 and BLAKE3-official vectors before it emits anything.
 // * `test_message_swap_under_a_reused_nonce_is_rejected`,
 //   `test_tag_changes_when_only_the_key_changes`,
-//   `test_decrypt_does_not_leak_plaintext_on_failure`,
+//   `test_decrypt_reports_authentication_failure_without_returning_plaintext`,
 //   `test_detached_rejects_tampering_and_wipes`, the `test_avalanche_*`
 //   diffusion checks, and the construction pins
 //   (`test_blake3_keyed_matches_official_vectors`,

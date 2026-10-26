@@ -59,10 +59,16 @@ export RUSTFLAGS="-Zsanitizer=thread"
 args=(-Zbuild-std --target x86_64-unknown-linux-gnu --release --features pure)
 
 echo "=== 1/2 negative control: a deliberate race must be reported ==="
+control_rc=0
 cargo +nightly test "${args[@]}" --test threads -- --ignored deliberate_race_is_detected \
-  > "$out" 2>&1 || true
+  > "$out" 2>&1 || control_rc=$?
 if grep -q "WARNING: ThreadSanitizer: data race" "$out"; then
   echo "OK: the control's race was reported (the sanitizer is in the binary)"
+elif [ "$control_rc" -ne 0 ]; then
+  echo "FAIL: the ThreadSanitizer control could not run (exit $control_rc), so this" >&2
+  echo "stage proves nothing. This is not a race verdict. Full output:" >&2
+  cat "$out" >&2
+  exit 3
 else
   echo "FAIL: ThreadSanitizer reported no race for a deliberate one." >&2
   echo "That is the vacuous case: this script cannot say anything about the real" >&2

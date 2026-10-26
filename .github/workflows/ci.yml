@@ -89,14 +89,63 @@ jobs:
         run: python3 -m pip install --quiet "blake3==1.0.11"
 
       - name: cargo fmt
-        run: cargo fmt --all --check
+        run: |
+          cargo fmt --all --check
+          cargo fmt --manifest-path blake3/Cargo.toml -- --check
 
       # Both feature sets: `rng` gates a public module, so a warning there
       # would otherwise only surface once someone enabled the feature.
       - name: clippy (default features)
-        run: cargo clippy --all-targets -- -D warnings
+        run: cargo clippy --locked --all-targets -- -D warnings
       - name: clippy (all features)
-        run: cargo clippy --all-targets --all-features -- -D warnings
+        run: cargo clippy --locked --all-targets --all-features -- -D warnings
+
+      # The source-only policy depends on two manifests staying in a shape that no
+      # registry dependency can silently replace. Check the resolved graph, not the
+      # source text: exactly one `blake3`, reached by the local path, and the parent's
+      # default feature set still includes `hardened`.
+      - name: dependency provenance and default feature set
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json, subprocess, os
+          from pathlib import Path
+
+          def metadata(*args):
+              out = subprocess.check_output(
+                  ["cargo", "metadata", "--locked", "--format-version", "1", *args],
+                  text=True,
+              )
+              return json.loads(out)
+
+          root = metadata("--all-features")
+          fuzz = metadata("--manifest-path", "fuzz/Cargo.toml")
+
+          for label, m in (("root", root), ("fuzz", fuzz)):
+              blake3 = [p for p in m["packages"] if p["name"] == "blake3"]
+              assert len(blake3) == 1, f"{label}: expected exactly one blake3 package, found {len(blake3)}"
+              pkg = blake3[0]
+              assert pkg["source"] is None, f"{label}: blake3 is not the path package: {pkg['source']!r}"
+              assert Path(pkg["manifest_path"]).parent.name == "blake3", pkg["manifest_path"]
+              assert pkg["publish"] == [], f"{label}: vendored blake3 must keep publish = false"
+
+          root_pkg = next(p for p in root["packages"] if p["name"] == "xchacha20-blake3-siv")
+          assert "hardened" in root_pkg["features"].get("default", []), (
+              "the default feature set lost hardened; the shipped default would be the "
+              "single-gate build"
+          )
+          print("dependency graph: one path blake3, publish disabled, default includes hardened")
+          PY
+          # Any lock change here means the build and the audited lock are different
+          # dependency sets. `--locked` above should already have refused, so this also
+          # catches a tool that rewrote a lock without failing.
+          git diff --exit-code -- Cargo.lock fuzz/Cargo.lock blake3/Cargo.lock
+
+      - name: "vendored BLAKE3: own test suite"
+        run: |
+          set -euo pipefail
+          cargo test --locked --manifest-path blake3/Cargo.toml
+          cargo test --locked --release --manifest-path blake3/Cargo.toml --features pure
 
       # The tools' contract: "could not run" is exit 3, never 0, and the caller that
       # invokes them reports it as a skipped stage. A gate that regresses to exit 0
@@ -114,7 +163,7 @@ jobs:
 
       # Catches broken intra-doc links, which are invisible to `cargo test`.
       - name: rustdoc
-        run: cargo doc --no-deps --all-features
+        run: cargo doc --locked --no-deps --all-features
         env:
           RUSTDOCFLAGS: -D warnings
 
@@ -124,7 +173,7 @@ jobs:
       # unconditionally, so the crate failed to build exactly where `no_std`
       # users would hit it. Cheap to check, so check it.
       - name: build with no default features
-        run: cargo check --no-default-features --all-targets
+        run: cargo check --locked --no-default-features --all-targets
 
   test:
     name: test (${{ matrix.profile }})
@@ -277,7 +326,7 @@ jobs:
               sys.exit(1)
           PY
           log="${RUNNER_TEMP:-/tmp}/cargo-test-${{ strategy.job-index }}.log"
-          cargo test ${{ matrix.args }} -- --skip timing 2>&1 | tee "$log"
+          cargo test --locked ${{ matrix.args }} -- --skip timing 2>&1 | tee "$log"
           # A test target whose run reported **zero passed** executed nothing, even if it
           # reported ignored tests: marking the whole target `#[ignore]` is the same
           # vacuous result as emptying it. The exemptions below are only the targets that
@@ -337,9 +386,16 @@ jobs:
                   echo "note: tests/timing.rs is skipped in this step by --skip timing and runs in the timing jobs" ;;
                 # `tests/ctgrind.rs` is all `#[ignore]`d outside the static valgrind build,
                 # so a zero-passed summary is legitimate here and the static configuration is
-                # the one that checks it.
+                # the one that checks it. Require the five ignored tests to still be there:
+                # deleting the file's tests would otherwise also produce a zero-passed
+                # summary, which is exactly the vacuous case this guard exists for.
                 tests/ctgrind.rs)
-                  echo "note: tests/ctgrind.rs reported no tests outside the static valgrind build" ;;
+                  if [ "${i:-0}" -lt 5 ]; then
+                    echo "::error::tests/ctgrind.rs reported 0 passed but only $i ignored tests; the valgrind tests were removed or filtered out"
+                    bad=1
+                  else
+                    echo "note: tests/ctgrind.rs is valgrind-only; $i ignored tests are still present"
+                  fi ;;
                 # `tests/locked.rs` and `tests/ultra.rs` are whole-file `#![cfg(feature)]`
                 # gates. A zero-passed summary is legitimate only in a leg that does *not*
                 # enable the gating feature; in the leg that turns it on -- including through
@@ -394,6 +450,47 @@ jobs:
           esac
           rm -f "$vacuous"
 
+  windows:
+    name: windows (MSVC, all features)
+    # The Windows assembly is selected by build.rs and was the platform on which
+    # D-01's guard-page fault was first reproduced; no other job compiles it. The
+    # `locked` tests skip on this platform by design, and `ultra` exercises the
+    # witness and the non-Linux stubs.
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        with:
+          shared-key: windows
+      - name: cargo test (all features, release)
+        run: cargo test --locked --release --all-features -- --skip timing
+      - name: cargo check (no default features)
+        run: cargo check --locked --no-default-features --all-targets
+
+  no-std:
+    name: no_std target (thumbv7em)
+    # `--no-default-features --all-targets` on a host with std only proves the source
+    # does not reference std directly; it does not build the dependency graph for a
+    # target where std does not exist. This is the configuration the README calls
+    # `no_std` support, so compile it.
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        with:
+          toolchain: stable
+          targets: thumbv7em-none-eabihf
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        with:
+          shared-key: no-std
+      - name: cargo check
+        run: cargo check --locked --no-default-features --lib --target thumbv7em-none-eabihf
+
   timing-instrument:
     name: timing instrument (blocking)
     runs-on: ubuntu-latest
@@ -434,7 +531,7 @@ jobs:
         run: |
           set -euo pipefail
           work="${RUNNER_TEMP:-${TMPDIR:-/tmp}}"
-          cargo test --release --test timing -- timing_screen_can_detect_a_real_difference \
+          cargo test --locked --release --test timing -- timing_screen_can_detect_a_real_difference \
             2>&1 | tee "$work/timing-instrument.log"
           count="$(grep -E 'test result:' "$work/timing-instrument.log" | tail -1 \
             | sed -n 's/.* \([0-9][0-9]*\) passed.*/\1/p' || true)"
@@ -455,7 +552,11 @@ jobs:
         run: |
           set -euo pipefail
           work="${RUNNER_TEMP:-${TMPDIR:-/tmp}}"
-          cargo test --release --test timing -- --list | tee "$work/timing-list.log"
+          # Run the source-level guard itself. `--list` still names ignored tests, so the
+          # list check below is necessary but not sufficient; the guard rejects an ignore
+          # or cfg attribute on either screen (including cfg_attr spellings).
+          cargo test --locked --release --test timing -- --exact timing_screens_are_present_and_not_ignored
+          cargo test --locked --release --test timing -- --list | tee "$work/timing-list.log"
           for name in \
             timing_tag_position_screen_finds_no_gross_difference \
             timing_does_not_depend_on_key_contents; do
@@ -497,7 +598,7 @@ jobs:
 
       # Release, because the target is `#![cfg(not(debug_assertions))]`.
       - name: timing screen
-        run: cargo test --release --test timing
+        run: cargo test --locked --release --test timing
 
   msrv:
     name: minimum supported Rust version
@@ -526,7 +627,7 @@ jobs:
       # t ~ 11 with no possible cause, against a threshold of 10), so it must not
       # gate a job whose subject is the minimum toolchain.
       - name: build and test at the declared MSRV
-        run: cargo test --release --all-features -- --skip timing
+        run: cargo test --locked --release --all-features -- --skip timing
 
       # Deliberately NOT running clippy here. An MSRV is a statement about the
       # language and library API surface, which is what building and testing
@@ -577,7 +678,7 @@ jobs:
           shared-key: cross-${{ matrix.target }}
 
       - name: cargo check
-        run: cargo check --target ${{ matrix.target }} --all-targets --all-features
+        run: cargo check --locked --target ${{ matrix.target }} --all-targets --all-features
 
   # Cross-architecture execution. aarch64 is the only place the NEON backend
   # runs at all (it is compiled out on x86), and i686 is the only place the
@@ -697,7 +798,7 @@ jobs:
           # The `grep -q` guards are what would have caught all three: a parse that matches
           # nothing is not the same as a build that produced nothing, and "count > 0" accepts
           # any non-empty parse, including a wrong one.
-          CARGO_TERM_COLOR=never cargo test --target ${{ matrix.target }} --release \
+          CARGO_TERM_COLOR=never cargo test --locked --target ${{ matrix.target }} --release \
             --no-run --features ultra,pure 2>&1 | tee "$work/build.log"
           sed -n 's/^ *Executable .*(\(.*\))$/\1/p' "$work/build.log" > "$work/executables.txt"
           count="$(grep -c . "$work/executables.txt" || true)"
@@ -897,7 +998,7 @@ jobs:
     # instrument had rotted could still cut a release -- contradicting this comment.
     # The two advisory jobs (`timing`, `stack-residue`) are `continue-on-error: true`
     # and are deliberately not gates.
-    needs: [lint, test, msrv, cross, cross-exec, differential, timing-instrument, supply-chain]
+    needs: [lint, test, windows, no-std, msrv, cross, cross-exec, differential, timing-instrument, supply-chain]
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     permissions:
@@ -908,6 +1009,11 @@ jobs:
           # Full history so the generated notes can be compared against the
           # previous release.
           fetch-depth: 0
+          # This job has `contents: write` for the release API only. A persisted
+          # credential would put that token in `.git/config` while every build
+          # script (including the vendored BLAKE3 build.rs and registry crates)
+          # runs. No step here pushes over git.
+          persist-credentials: false
 
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
         with:
@@ -933,9 +1039,9 @@ jobs:
       - name: build the three configurations, and prove the matrix still names them
         run: |
           set -euo pipefail
-          cargo build --release --no-default-features
-          cargo build --release
-          cargo build --release --features ultra
+          cargo build --locked --release --no-default-features
+          cargo build --locked --release
+          cargo build --locked --release --features ultra
           # The `- ` prefix *and* the `$` anchor are both load-bearing, not cosmetic.
           # Without them the search string matches *this loop's own literals* on the
           # lines above (so the grep always succeeds and the guard can never fire --
@@ -976,6 +1082,8 @@ jobs:
           set -euo pipefail
           short="$(git rev-parse --short=12 HEAD)"
           mkdir -p dist
+          digests="${RUNNER_TEMP:-/tmp}/rlib-digests.txt"
+          : > "$digests"
 
           # A fixed vector, run through the crate's own audit CLI: one line of four
           # space-separated hex fields (`key_hex nonce_hex aad_hex msg_hex`, see the example's
@@ -1004,9 +1112,17 @@ jobs:
             # the per-bundle tables would have been identical. With `--lib` each iteration
             # rewrites the root rlib to the matching feature set: the three digests are
             # then distinct (verified by running this loop locally).
-            cargo build --release $flags --lib --example xsiv_stdin
+            # Remove any previous root rlib first: if cargo leaves a stale metadata-hashed
+            # artifact in target/release, `ls | head -1` would digest the wrong build.
+            rm -f target/release/libxchacha20_blake3_siv*.rlib
+            cargo build --locked --release $flags --lib --example xsiv_stdin
             bin="target/release/examples/xsiv_stdin"
             rlib="$(ls target/release/libxchacha20_blake3_siv*.rlib | head -1)"
+            # Capture the digest of the rlib produced by this iteration. The three
+            # configurations must not ship the same binary: the regression this guards
+            # against is a missing `--lib` leaving the previous configuration's rlib in
+            # place, which the KAT equality check cannot see.
+            sha256sum "$rlib" | cut -d' ' -f1 >> "$digests"
 
             name="xsiv-${short}-${cfg}"
             mkdir -p "dist/$name"
@@ -1085,7 +1201,7 @@ jobs:
               # workflow, and raw ANSI escapes in a released README are not markdown.
               # `sed -n '1,20p'` reads the whole pipe (unlike `head`, which can give cargo
               # SIGPIPE under `pipefail`) and still caps the quote at 20 lines.
-              CARGO_TERM_COLOR=never cargo tree --edges normal $flags | sed -n '1,20p'
+              CARGO_TERM_COLOR=never cargo tree --locked --edges normal $flags | sed -n '1,20p'
               echo '```'
               echo
               echo "See \`CONFIGURATIONS.md\` (also attached) for what each configuration adds and"
@@ -1096,6 +1212,15 @@ jobs:
             echo "  wrote dist/$name.tar.gz ($(stat -c%s "dist/$name.tar.gz") bytes)"
           done
           ls -l dist/*.tar.gz
+          # Three configurations, three distinct compiled libraries. If a future edit
+          # drops `--lib` (or reuses one build), the three bundles can still carry the
+          # same rlib; the KAT is config-independent and would not catch it.
+          if [ "$(sort -u "$digests" | wc -l)" -ne 3 ]; then
+            echo "::error::the three configuration builds produced fewer than three distinct rlib digests:"
+            cat "$digests"
+            exit 1
+          fi
+          echo "three distinct rlib digests:" && cat "$digests"
 
       - name: write the configuration manifest
         run: |
@@ -1116,7 +1241,9 @@ jobs:
           Each row is gated on a named leg of the \`test\` matrix at this commit
           (\`release, default features\`, \`release, no default features\`, \`release, ultra\`), plus the
           cross-target and qemu executions, the differential fixture against the independent
-          reference, and the formal proofs in \`formal.yml\` (which are not a release gate).
+          reference, and the formal proofs in \`formal.yml\` and the scheduled Deep
+          checks (Miri, ctgrind, TSAN, fuzzing, wide sweeps) run separately and are
+          **not** release gates.
 
           The wire format is **identical across the three**: the KATs, the differential fixture and
           the accelerated-path corpus pin the same bytes in every configuration, and this release
@@ -1158,6 +1285,14 @@ jobs:
           # manifest is: a release that silently shipped only the default build would be the
           # failure this whole step exists to prevent.
           shopt -s nullglob
+          # Source-only distribution: a `.crate` must never be produced or attached.
+          # `publish = false` stops publishing, but not `cargo package`; this refuses
+          # an artifact from any future packaging step before it reaches the release.
+          crates=(dist/*.crate)
+          if [ "${#crates[@]}" -ne 0 ]; then
+            echo "::error::a .crate artifact was produced despite the source-only policy: ${crates[*]}"
+            exit 1
+          fi
           bundles=(dist/*.tar.gz)
           if [ "${#bundles[@]}" -ne 3 ]; then
             echo "::error::expected three configuration bundles in dist/, found ${#bundles[@]}: ${bundles[*]}"
@@ -1205,8 +1340,9 @@ jobs:
           differential fixture
           re-checked against the independent reference implementation.
 
-          The formal proofs in \`.github/workflows/formal.yml\` run separately and
-          are not a gate for this release.
+          The formal proofs in \`.github/workflows/formal.yml\` and the scheduled Deep
+          checks (Miri, ctgrind, TSAN, fuzzing, wide sweeps) run separately and are
+          **not** gates for this release. The gate is the ci.yml job set named above.
 
           > **Wire format.** This construction is bespoke and not byte-compatible
           > with anything else: a two-level keyed-BLAKE3 65-byte tag over the
@@ -1222,4 +1358,4 @@ jobs:
             --title "XChaCha20-BLAKE3-SIV ${short}" \
             --notes-file notes.md \
             --latest \
-            "${crates[@]}" "$manifest" "${bundles[@]}"
+            "$manifest" "${bundles[@]}"

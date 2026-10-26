@@ -14,7 +14,7 @@ echo
 
 case "${MODE}" in
   release|debug)
-    cargo build --"${MODE}"
+    cargo build --locked --"${MODE}"
     ;;
   *)
     echo "未知模式: ${MODE} (可选: release | debug)" >&2

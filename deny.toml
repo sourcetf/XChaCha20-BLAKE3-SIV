@@ -76,9 +76,9 @@ feature-depth = 1
 # More documentation for the advisories section can be found here:
 # https://embarkstudios.github.io/cargo-deny/checks/advisories/cfg.html
 [advisories]
-# Pointed at a local clone: this network cannot reach github.com reliably, and
-# the RustSec database must be fetched some other way (see tests/README.md).
-db-path = "/tmp/adb/dbs"
+# Use cargo-deny's default cache under CARGO_HOME. A machine-specific absolute
+# `db-path` (this file used to name `/tmp/adb/dbs`) is not portable and trusts a
+# path outside the repository.
 db-urls = ["https://github.com/rustsec/advisory-db"]
 # A list of advisory IDs to ignore. Note that ignored advisories will still
 # output a note when they are encountered.

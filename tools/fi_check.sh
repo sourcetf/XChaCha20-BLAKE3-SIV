@@ -151,7 +151,7 @@ run_row() {
   # convention the rest of this repository uses for a stage that did not happen, which
   # `verify.sh` records as a skipped stage instead of a failure.
   if ! ( cd "$dir" && CARGO_TARGET_DIR="$dir/target" cargo test --no-run "${args[@]}" ) > "$WORK/$name.build.log" 2>&1; then
-    if grep -qE 'No space left on device|error: could not write|ENOSPC|fatal signal 7|SIGBUS' "$WORK/$name.build.log"; then
+    if grep -qE 'No space left on device|error: could not write|ENOSPC|fatal signal 7|SIGBUS|signal: 9|SIGKILL|out of memory|Killed' "$WORK/$name.build.log"; then
       printf 'SKIPPED %-19s the build ran out of disk or was killed by the kernel, so this\n' "$name" >&2
       printf '                        row did not run -- see %s\n' "$LOG_KEEP/$name.build.log" >&2
       exit 3

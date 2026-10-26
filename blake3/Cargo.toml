@@ -28,6 +28,11 @@ documentation = "https://docs.rs/blake3"
 readme = "README.md"
 license = "CC0-1.0 OR Apache-2.0 OR Apache-2.0 WITH LLVM-exception"
 repository = "https://github.com/BLAKE3-team/BLAKE3"
+# This directory is a patched fork distributed only as source with the parent
+# repository. Publishing it under upstream's name and version would ship the
+# local modifications as pristine `blake3 1.8.7`.
+publish = false
+rust-version = "1.85"
 
 [package.metadata.docs.rs]
 features = [
@@ -118,6 +123,9 @@ version = "0.13.0"
 
 [dev-dependencies.page_size]
 version = "0.6.0"
+
+[dev-dependencies.reference_impl]
+path = "reference_impl"
 
 [dev-dependencies.rand]
 version = "0.10.0"

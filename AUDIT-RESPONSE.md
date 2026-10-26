@@ -1,4 +1,4 @@
-# Audit response — the four third-party reviews of revision `8ae80ce` (and, in §5, the line-by-line report against `92c85ad`)
+# Audit response — the five third-party reviews of revision `8ae80ce` (and, in §5, the line-by-line report against `92c85ad`)
 
 Four reports were produced against revision `8ae80ce` (construction `v0.3`), and this document
 records what was done with each finding: what was **fixed** (with the commit and the evidence),
@@ -285,7 +285,7 @@ record skips, not passes — and the reports' own measurements are the substitut
   tamper attempts, the window corpus, AAD/message extremes, and libFuzzer runs — all negative.
 * Feature matrix: every configuration builds, tests and produces identical wire bytes; i686 and
   aarch64 execute under qemu; `overflow-checks` changes nothing observable.
-* Verification tools: Kani 13/13 SUCCESSFUL (the twelve the reports measured plus the concrete tag comparison added in `8dcc09e`); Miri with no UB (including full `--lib` and
+* Verification tools: Kani 19/19 SUCCESSFUL (the twelve the reports measured plus the concrete tag comparison in `8dcc09e` and the later witness/zeroization harnesses); Miri with no UB (including full `--lib` and
   per-test runs); TSAN clean with its control detected; `cargo-audit`/`cargo-deny` clean; the
   coverage floor passes.
 * Structural scale experiments (a 352-bit equality from one call chain, `b0`/`b1` segment
@@ -380,7 +380,7 @@ record skips, not passes — and the reports' own measurements are the substitut
 That report's own independent measurement came back clean on the construction: 5,411 differential
 comparisons against a self-written reference across three configurations with **0 mismatches** (34
 lengths × 7 AAD lengths, the 1999/2000/65488/65489 boundaries and 8 MiB among them), the witness's
-independence confirmed adversarially, 13/13 Kani harnesses with no vacuity, and its own conclusion
+independence confirmed adversarially, 19/19 Kani harnesses with no vacuity, and its own conclusion
 that no implementation defect breaks confidentiality or integrity. Everything it raised was in the
 verification apparatus and the documents. Every item below was **reproduced in this tree** before
 being accepted, and every fix was verified in both directions — the mutation must fail, the clean
@@ -428,8 +428,9 @@ entry for this round.
 * **B-1's framing as a defect to be fixed before 1.0.** The documentation half was a real defect and
   is fixed (§5.1). The remainder is not a defect but a release decision: publishing to crates.io is
   irreversible, requires the maintainer's credentials, and is not something CI should do on a push —
-  this repository's release job attaches the `.crate` it builds to a GitHub Release instead, and the
-  README now says exactly that. The version (`0.1.0`) and the `Unreleased` changelog heading are
+  this repository's release job attaches three source-built configuration bundles to a
+  GitHub Release instead (no `.crate` is produced), and the README now says exactly that.
+  The version (`0.1.0`) and the `Unreleased` changelog heading are
   consequences of not having released, not evidence of a mistake.
 
 ### 5.3 Found by this round, beyond the report
@@ -447,7 +448,7 @@ entry for this round.
 ### 5.4 The state this section describes
 
 The tree carries all of it: `check.sh --fast` green, and `verify.sh --ctgrind --tools --kani` green
-(stages 1–4, Kani 13/13 with the new count guard, ctgrind, the mutation campaign with every mutation
+(stages 1–4, Kani 19/19 with the new count guard, ctgrind, the mutation campaign with every mutation
 caught, the fault-injection campaign, and the tool-level gates), `Deep checks` dispatched for the
 commit. What is *not* claimed: the 4000-vector wide differential, the Miri Tree-Borrows sweep, the
 fuzz soak and the cross-execution matrix were not re-run here — they are the scheduled job's, and its

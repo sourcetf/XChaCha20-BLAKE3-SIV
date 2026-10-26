@@ -245,6 +245,95 @@ fn hash_many_tail_does_not_cross_a_guard_page() {
     }
 }
 
+/// The same guard-page witness on Windows, where the original D-01 fault was first
+/// reproduced. The Linux test's `mprotect` is not available there, so this uses
+/// `VirtualAlloc`/`VirtualProtect` from kernel32 in a self-contained test.
+#[cfg(target_os = "windows")]
+#[test]
+fn hash_many_tail_does_not_cross_a_guard_page_windows() {
+    use core::ffi::c_void;
+
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn VirtualAlloc(
+            lpaddress: *mut c_void,
+            dwsize: usize,
+            flallocationtype: u32,
+            flprotect: u32,
+        ) -> *mut c_void;
+        fn VirtualProtect(
+            lpaddress: *mut c_void,
+            dwsize: usize,
+            flnewprotect: u32,
+            lpfloldprotect: *mut u32,
+        ) -> i32;
+        fn VirtualFree(lpaddress: *mut c_void, dwsize: usize, dwfreetype: u32) -> i32;
+    }
+
+    const MEM_COMMIT: u32 = 0x1000;
+    const MEM_RESERVE: u32 = 0x2000;
+    const MEM_RELEASE: u32 = 0x8000;
+    const PAGE_READWRITE: u32 = 0x04;
+    const PAGE_NOACCESS: u32 = 0x01;
+    let page = 4096usize;
+
+    // SAFETY: `VirtualAlloc` returns a two-page region or null (checked). The first
+    // page is written before references are formed; the second is made inaccessible
+    // only for the duration of the calls, and the region is released exactly once.
+    unsafe {
+        let base = VirtualAlloc(
+            core::ptr::null_mut(),
+            2 * page,
+            MEM_COMMIT | MEM_RESERVE,
+            PAGE_READWRITE,
+        );
+        assert!(!base.is_null(), "VirtualAlloc failed");
+        core::ptr::write_bytes(base.cast::<u8>(), 0xA5, page);
+        let guard = base.cast::<u8>().add(page);
+        let mut old = 0u32;
+        assert_ne!(
+            VirtualProtect(guard.cast(), page, PAGE_NOACCESS, &mut old),
+            0,
+            "VirtualProtect(PAGE_NOACCESS) failed"
+        );
+
+        let key = [0x0102_0304u32; 8];
+        let mut out = [0u8; 40 * 32];
+        for platform in platforms_to_test() {
+            for &n in &[1usize, 2, 3, 4, 5, 6, 7, 8, 15, 16, 17, 23, 24, 31, 32, 40] {
+                let block: &[u8; 64] = &*guard.sub(64).cast::<[u8; 64]>();
+                let inputs = vec![block; n];
+                platform.hash_many(
+                    &inputs,
+                    &key,
+                    0,
+                    IncrementCounter::Yes,
+                    0,
+                    0,
+                    0,
+                    &mut out[..n * 32],
+                );
+            }
+            for &n in &[1usize, 2, 3, 4, 5, 8, 9, 15, 16] {
+                let block: &[u8; 1024] = &*guard.sub(1024).cast::<[u8; 1024]>();
+                let inputs = vec![block; n];
+                platform.hash_many(
+                    &inputs,
+                    &key,
+                    7,
+                    IncrementCounter::No,
+                    0x11,
+                    0x22,
+                    0x33,
+                    &mut out[..n * 32],
+                );
+            }
+        }
+
+        assert_ne!(VirtualFree(base, 0, MEM_RELEASE), 0, "VirtualFree failed");
+    }
+}
+
 /// `hash_many` must match the assembly's silent wrap at `u64::MAX`.
 ///
 /// The portable and Rust-SIMD implementations used `counter += 1`, which panics in a

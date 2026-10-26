@@ -41,7 +41,13 @@ cfg_if::cfg_if! {
 }
 
 #[derive(Clone, Copy, Debug)]
-pub enum Platform {
+pub struct Platform(PlatformKind);
+
+/// The implementation chosen by [`Platform::detect`] or one of its checked
+/// constructors. Private on purpose: a caller cannot name an ISA its CPU does not
+/// implement and hand it to a safe hashing method.
+#[derive(Clone, Copy, Debug)]
+enum PlatformKind {
     Portable,
     #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
     SSE2,
@@ -64,7 +70,7 @@ impl Platform {
     pub fn detect() -> Self {
         #[cfg(miri)]
         {
-            return Platform::Portable;
+            return Platform(PlatformKind::Portable);
         }
 
         #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
@@ -72,48 +78,48 @@ impl Platform {
             #[cfg(blake3_avx512_ffi)]
             {
                 if avx512_detected() {
-                    return Platform::AVX512;
+                    return Platform(PlatformKind::AVX512);
                 }
             }
             if avx2_detected() {
-                return Platform::AVX2;
+                return Platform(PlatformKind::AVX2);
             }
             if sse41_detected() {
-                return Platform::SSE41;
+                return Platform(PlatformKind::SSE41);
             }
             if sse2_detected() {
-                return Platform::SSE2;
+                return Platform(PlatformKind::SSE2);
             }
         }
         // We don't use dynamic feature detection for NEON. If the "neon"
         // feature is on, NEON is assumed to be supported.
         #[cfg(blake3_neon)]
         {
-            return Platform::NEON;
+            return Platform(PlatformKind::NEON);
         }
         #[cfg(blake3_wasm32_simd)]
         {
-            return Platform::WASM32_SIMD;
+            return Platform(PlatformKind::WASM32_SIMD);
         }
-        Platform::Portable
+        Platform(PlatformKind::Portable)
     }
 
     pub fn simd_degree(&self) -> usize {
-        let degree = match self {
-            Platform::Portable => 1,
+        let degree = match self.0 {
+            PlatformKind::Portable => 1,
             #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-            Platform::SSE2 => 4,
+            PlatformKind::SSE2 => 4,
             #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-            Platform::SSE41 => 4,
+            PlatformKind::SSE41 => 4,
             #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-            Platform::AVX2 => 8,
+            PlatformKind::AVX2 => 8,
             #[cfg(blake3_avx512_ffi)]
             #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-            Platform::AVX512 => 16,
+            PlatformKind::AVX512 => 16,
             #[cfg(blake3_neon)]
-            Platform::NEON => 4,
+            PlatformKind::NEON => 4,
             #[cfg(blake3_wasm32_simd)]
-            Platform::WASM32_SIMD => 4,
+            PlatformKind::WASM32_SIMD => 4,
         };
         debug_assert!(degree <= MAX_SIMD_DEGREE);
         degree
@@ -127,29 +133,31 @@ impl Platform {
         counter: u64,
         flags: u8,
     ) {
-        match self {
-            Platform::Portable => portable::compress_in_place(cv, block, block_len, counter, flags),
+        match self.0 {
+            PlatformKind::Portable => {
+                portable::compress_in_place(cv, block, block_len, counter, flags)
+            }
             // Safe because detect() checked for platform support.
             #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-            Platform::SSE2 => unsafe {
+            PlatformKind::SSE2 => unsafe {
                 crate::sse2::compress_in_place(cv, block, block_len, counter, flags)
             },
             // Safe because detect() checked for platform support.
             #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-            Platform::SSE41 | Platform::AVX2 => unsafe {
+            PlatformKind::SSE41 | PlatformKind::AVX2 => unsafe {
                 crate::sse41::compress_in_place(cv, block, block_len, counter, flags)
             },
             // Safe because detect() checked for platform support.
             #[cfg(blake3_avx512_ffi)]
             #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-            Platform::AVX512 => unsafe {
+            PlatformKind::AVX512 => unsafe {
                 crate::avx512::compress_in_place(cv, block, block_len, counter, flags)
             },
             // No NEON compress_in_place() implementation yet.
             #[cfg(blake3_neon)]
-            Platform::NEON => portable::compress_in_place(cv, block, block_len, counter, flags),
+            PlatformKind::NEON => portable::compress_in_place(cv, block, block_len, counter, flags),
             #[cfg(blake3_wasm32_simd)]
-            Platform::WASM32_SIMD => {
+            PlatformKind::WASM32_SIMD => {
                 crate::wasm32_simd::compress_in_place(cv, block, block_len, counter, flags)
             }
         }
@@ -163,29 +171,29 @@ impl Platform {
         counter: u64,
         flags: u8,
     ) -> [u8; 64] {
-        match self {
-            Platform::Portable => portable::compress_xof(cv, block, block_len, counter, flags),
+        match self.0 {
+            PlatformKind::Portable => portable::compress_xof(cv, block, block_len, counter, flags),
             // Safe because detect() checked for platform support.
             #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-            Platform::SSE2 => unsafe {
+            PlatformKind::SSE2 => unsafe {
                 crate::sse2::compress_xof(cv, block, block_len, counter, flags)
             },
             // Safe because detect() checked for platform support.
             #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-            Platform::SSE41 | Platform::AVX2 => unsafe {
+            PlatformKind::SSE41 | PlatformKind::AVX2 => unsafe {
                 crate::sse41::compress_xof(cv, block, block_len, counter, flags)
             },
             // Safe because detect() checked for platform support.
             #[cfg(blake3_avx512_ffi)]
             #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-            Platform::AVX512 => unsafe {
+            PlatformKind::AVX512 => unsafe {
                 crate::avx512::compress_xof(cv, block, block_len, counter, flags)
             },
             // No NEON compress_xof() implementation yet.
             #[cfg(blake3_neon)]
-            Platform::NEON => portable::compress_xof(cv, block, block_len, counter, flags),
+            PlatformKind::NEON => portable::compress_xof(cv, block, block_len, counter, flags),
             #[cfg(blake3_wasm32_simd)]
-            Platform::WASM32_SIMD => {
+            PlatformKind::WASM32_SIMD => {
                 crate::wasm32_simd::compress_xof(cv, block, block_len, counter, flags)
             }
         }
@@ -212,11 +220,22 @@ impl Platform {
         flags_end: u8,
         out: &mut [u8],
     ) {
-        // `out` may be larger than this group's output: the tree code passes the
-        // caller's buffer, which can hold more chaining values than one batch. The
-        // portable implementation already states the contract as `>=`; an `==` here
-        // failed every debug-mode test through `compress_subtree_wide`.
-        debug_assert!(out.len() >= inputs.len() * OUT_LEN);
+        // `N` is the number of bytes per input, and every kernel below reads and
+        // compresses whole 64-byte blocks. A non-multiple silently leaves a tail
+        // unhashed (or, in the assembly, reads past it), so reject it in every build.
+        assert_eq!(
+            N % BLOCK_LEN,
+            0,
+            "hash_many inputs must be whole 64-byte blocks"
+        );
+        // The assembly kernels write `inputs.len() * OUT_LEN` bytes unconditionally.
+        // This used to be a `debug_assert`, so a safe caller passing a short `out`
+        // triggered an out-of-bounds write in release. Keep a real check on this safe
+        // API; the tree code always passes at least this much.
+        assert!(
+            out.len() >= inputs.len() * OUT_LEN,
+            "hash_many output buffer is too short for the inputs"
+        );
         // The C/assembly kernels process a full SIMD group and then a 4/2/1-wide
         // tail. Their 2/4-wide loads read from `inputs[0]` at +16/+32/+48 bytes,
         // which is past the end of a 64-byte block at a page boundary. This was
@@ -293,7 +312,7 @@ impl Platform {
             // to SSE for the last 1..=7, which restores the 8..15-chunk batch
             // throughput without reintroducing the guard-page fault.
             #[cfg(blake3_avx512_ffi)]
-            if matches!(self, Platform::AVX512) && inputs.len() >= 8 {
+            if matches!(self.0, PlatformKind::AVX512) && inputs.len() >= 8 {
                 self.hash_many_simd(
                     &inputs[..8],
                     key,
@@ -322,8 +341,8 @@ impl Platform {
                     &mut out[8 * OUT_LEN..],
                 );
             }
-            match self {
-                Platform::SSE41 | Platform::AVX2 => unsafe {
+            match self.0 {
+                PlatformKind::SSE41 => unsafe {
                     crate::sse41::hash_many(
                         inputs,
                         key,
@@ -335,11 +354,42 @@ impl Platform {
                         out,
                     )
                 },
+                // AVX2 CPUs in practice all have SSE4.1, but the explicit `PlatformKind::AVX2`
+                // constructor does not require it. Falling back to the portable kernel
+                // when SSE4.1 is absent keeps the safe API from executing an unsupported
+                // instruction; on every AVX2 CPU the SSE4.1 path is still taken.
+                PlatformKind::AVX2 => {
+                    if sse41_detected() {
+                        unsafe {
+                            crate::sse41::hash_many(
+                                inputs,
+                                key,
+                                counter,
+                                increment_counter,
+                                flags,
+                                flags_start,
+                                flags_end,
+                                out,
+                            )
+                        }
+                    } else {
+                        portable::hash_many(
+                            inputs,
+                            key,
+                            counter,
+                            increment_counter,
+                            flags,
+                            flags_start,
+                            flags_end,
+                            out,
+                        )
+                    }
+                }
                 // The variant is absent when BLAKE3's Rust-only backends are selected
                 // (`pure`); AVX2 still exists there, and the SSE4.1 path is the safe
                 // 4-wide tail for it.
                 #[cfg(blake3_avx512_ffi)]
-                Platform::AVX512 => unsafe {
+                PlatformKind::AVX512 => unsafe {
                     crate::sse41::hash_many(
                         inputs,
                         key,
@@ -351,7 +401,7 @@ impl Platform {
                         out,
                     )
                 },
-                Platform::SSE2 => unsafe {
+                PlatformKind::SSE2 => unsafe {
                     crate::sse2::hash_many(
                         inputs,
                         key,
@@ -399,8 +449,8 @@ impl Platform {
         flags_end: u8,
         out: &mut [u8],
     ) {
-        match self {
-            Platform::Portable => portable::hash_many(
+        match self.0 {
+            PlatformKind::Portable => portable::hash_many(
                 inputs,
                 key,
                 counter,
@@ -412,7 +462,7 @@ impl Platform {
             ),
             // Safe because detect() checked for platform support.
             #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-            Platform::SSE2 => unsafe {
+            PlatformKind::SSE2 => unsafe {
                 crate::sse2::hash_many(
                     inputs,
                     key,
@@ -426,7 +476,7 @@ impl Platform {
             },
             // Safe because detect() checked for platform support.
             #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-            Platform::SSE41 => unsafe {
+            PlatformKind::SSE41 => unsafe {
                 crate::sse41::hash_many(
                     inputs,
                     key,
@@ -440,7 +490,7 @@ impl Platform {
             },
             // Safe because detect() checked for platform support.
             #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-            Platform::AVX2 => unsafe {
+            PlatformKind::AVX2 => unsafe {
                 crate::avx2::hash_many(
                     inputs,
                     key,
@@ -455,7 +505,7 @@ impl Platform {
             // Safe because detect() checked for platform support.
             #[cfg(blake3_avx512_ffi)]
             #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-            Platform::AVX512 => unsafe {
+            PlatformKind::AVX512 => unsafe {
                 crate::avx512::hash_many(
                     inputs,
                     key,
@@ -469,7 +519,7 @@ impl Platform {
             },
             // Assumed to be safe if the "neon" feature is on.
             #[cfg(blake3_neon)]
-            Platform::NEON => unsafe {
+            PlatformKind::NEON => unsafe {
                 crate::neon::hash_many(
                     inputs,
                     key,
@@ -483,7 +533,7 @@ impl Platform {
             },
             // Assumed to be safe if the "wasm32_simd" feature is on.
             #[cfg(blake3_wasm32_simd)]
-            Platform::WASM32_SIMD => unsafe {
+            PlatformKind::WASM32_SIMD => unsafe {
                 crate::wasm32_simd::hash_many(
                     inputs,
                     key,
@@ -550,12 +600,12 @@ impl Platform {
             }
             return;
         }
-        match self {
+        match self.0 {
             // Safe because detect() checked for platform support.
             #[cfg(blake3_avx512_ffi)]
             #[cfg(unix)]
             #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-            Platform::AVX512 => unsafe {
+            PlatformKind::AVX512 => unsafe {
                 crate::avx512::xof_many(cv, block, block_len, counter, flags, out)
             },
             _ => {
@@ -574,13 +624,13 @@ impl Platform {
     // Explicit platform constructors, for benchmarks.
 
     pub fn portable() -> Self {
-        Self::Portable
+        Self(PlatformKind::Portable)
     }
 
     #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
     pub fn sse2() -> Option<Self> {
         if sse2_detected() {
-            Some(Self::SSE2)
+            Some(Self(PlatformKind::SSE2))
         } else {
             None
         }
@@ -589,7 +639,7 @@ impl Platform {
     #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
     pub fn sse41() -> Option<Self> {
         if sse41_detected() {
-            Some(Self::SSE41)
+            Some(Self(PlatformKind::SSE41))
         } else {
             None
         }
@@ -598,7 +648,7 @@ impl Platform {
     #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
     pub fn avx2() -> Option<Self> {
         if avx2_detected() {
-            Some(Self::AVX2)
+            Some(Self(PlatformKind::AVX2))
         } else {
             None
         }
@@ -608,7 +658,7 @@ impl Platform {
     #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
     pub fn avx512() -> Option<Self> {
         if avx512_detected() {
-            Some(Self::AVX512)
+            Some(Self(PlatformKind::AVX512))
         } else {
             None
         }
@@ -617,13 +667,13 @@ impl Platform {
     #[cfg(blake3_neon)]
     pub fn neon() -> Option<Self> {
         // Assumed to be safe if the "neon" feature is on.
-        Some(Self::NEON)
+        Some(Self(PlatformKind::NEON))
     }
 
     #[cfg(blake3_wasm32_simd)]
     pub fn wasm32_simd() -> Option<Self> {
         // Assumed to be safe if the "wasm32_simd" feature is on.
-        Some(Self::WASM32_SIMD)
+        Some(Self(PlatformKind::WASM32_SIMD))
     }
 }
 

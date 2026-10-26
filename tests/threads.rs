@@ -1,18 +1,22 @@
 //! Concurrent use: the crate must be correct when many threads call it at once.
 //!
 //! The only other test that uses a thread (`tests/locked.rs` moves a key to one and
-//! joins it) never has two threads inside the crate at once, so the one piece of global
-//! state the crate *does* have is the interesting part: the cached AVX2 detection
-//! (`AVX2_CACHE` in `src/lib.rs`, an `AtomicU8`). A single-threaded test cannot reach
-//! the case where several threads populate that cache from cold, so this test compares
-//! the threads' results with each other rather than against a reference computed up
-//! front — computing one would warm the cache and remove the case under test.
+//! joins it) never has two threads inside the crate at once, so the most interesting
+//! global state on the default path is the cached AVX2 detection (`AVX2_CACHE` in
+//! `src/lib.rs`, an `AtomicU8`). A single-threaded test cannot reach the case where
+//! several threads populate that cache from cold, so this test compares the threads'
+//! results with each other rather than against a reference computed up front —
+//! computing one would warm the cache and remove the case under test. The `locked`
+//! feature has a second cached atomic (the page size); this TSAN run uses `pure`
+//! without `locked`, so that cache is not exercised here and `tests/locked.rs` covers
+//! its behaviour separately.
 //!
 //! `AVX2_CACHE` is an atomic, read and written with `Ordering::Relaxed`, so by the
 //! language's memory model it is *not* a data race and ThreadSanitizer does not
 //! report it. What the sanitizer run shows is that there is no *other*
-//! unsynchronised shared state in the crate: a clean pass over every path that
-//! touches shared memory. (An earlier version of this comment said "the race
+//! unsynchronised shared state on the paths it builds: a clean pass over every path
+//! that touches shared memory in that feature set. (An earlier version of this comment
+//! said "the race
 //! itself is what TSAN reports", which was wrong for an atomic cache; the
 //! deliberately racy negative control below is what proves the sanitizer is
 //! actually watching.)
@@ -21,8 +25,8 @@
 //! for — identical inputs, one cold cache:
 //!
 //! ```text
-//! RUSTFLAGS='-Zsanitizer=thread' cargo +nightly test --test threads \
-//!     --target x86_64-unknown-linux-gnu
+//! RUSTFLAGS='-Zsanitizer=thread' cargo +nightly test -Zbuild-std --release \
+//!     --features pure --test threads --target x86_64-unknown-linux-gnu
 //! ```
 //!
 //! **What a plain run does and does not establish.** Every thread gets identical

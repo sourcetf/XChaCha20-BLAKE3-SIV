@@ -842,7 +842,18 @@ def run():
         blob = capture.read(CAPTURE_BYTES)
         capture.seek(size - CAPTURE_BYTES)
         blob += capture.read(CAPTURE_BYTES)
-    if "forged tag accepted" in blob.decode("utf-8", "replace"):
+    text = blob.decode("utf-8", "replace")
+    # Every acceptance assertion in tests/decision.rs, not only the first. A fault
+    # that breaks message/ciphertext commitment makes `decrypt` return Ok for a
+    # different message, which is just as much an authentication failure as a forged
+    # tag; treating it as `crashed` hid it from the gate that counts accepting faults.
+    accepted_needles = (
+        "forged tag accepted",
+        "corrupted ciphertext accepted",
+        "a tag issued for one message authenticated another",
+        "a tag authenticated a ciphertext it was not issued for",
+    )
+    if any(needle in text for needle in accepted_needles):
         return "accepted"
     return "crashed"
 

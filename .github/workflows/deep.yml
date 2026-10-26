@@ -906,23 +906,25 @@ jobs:
           set -euo pipefail
           work="${RUNNER_TEMP:-${TMPDIR:-/tmp}}"
           rustup component add miri --toolchain nightly
-          MIRIFLAGS="-Zmiri-disable-isolation -Zmiri-strict-provenance -Zmiri-tree-borrows" \
-            cargo +nightly miri test --release --features pure --lib 2>&1 | tee "$work/miri-full-lib.log"
-          # The floor every filtered Miri step above carries, for the one run that has no
-          # filter: here the vacuum is not a filter matching nothing but the suite itself
-          # getting smaller -- a module (or a whole test block) that stops being compiled
-          # makes this run interpret less while staying green. The number is derived, not
-          # guessed: on this host `cargo test --release --features pure --lib`, the same
-          # target and feature set without Miri, reports 50 passed; that is the library's
-          # test count, and the floor. It moves only with the suite, and a shrink has to
-          # be paid for by updating this line in the same commit.
-          count="$(grep -E 'test result:' "$work/miri-full-lib.log" | tail -1 \
-            | sed -n 's/.* \([0-9][0-9]*\) passed.*/\1/p' || true)"
-          if [ -z "$count" ] || [ "$count" -lt 50 ]; then
-            echo "::error::the full Miri suite reported ${count:-0} passed test(s); expected at least 50 (the library's test count on this host), so this run interpreted less than the library's suite"
+          # Derive the expected count from the same target and feature set, rather than
+          # carrying a literal that silently becomes looser as the suite grows. A module
+          # (or a whole test block) that stops being compiled would make the Miri run
+          # interpret less while staying green.
+          expected="$(cargo test --locked --release --features pure --lib -- --list \
+            | grep -c ': test$' || true)"
+          if [ "${expected:-0}" -lt 1 ]; then
+            echo "::error::could not derive the library test count before Miri"
             exit 1
           fi
-          echo "Miri interpreted $count tests"
+          MIRIFLAGS="-Zmiri-disable-isolation -Zmiri-strict-provenance -Zmiri-tree-borrows" \
+            cargo +nightly miri test --release --features pure --lib 2>&1 | tee "$work/miri-full-lib.log"
+          count="$(grep -E 'test result:' "$work/miri-full-lib.log" | tail -1 \
+            | sed -n 's/.* \([0-9][0-9]*\) passed.*/\1/p' || true)"
+          if [ -z "$count" ] || [ "$count" -lt "$expected" ]; then
+            echo "::error::the full Miri suite reported ${count:-0} passed test(s); the same target lists $expected, so this run interpreted less than the library's suite"
+            exit 1
+          fi
+          echo "Miri interpreted $count tests (expected at least $expected)"
 
       # 15 minutes across every core the runner has, versus the two the push-time
       # job spends. The scheduled run is where coverage-of-time is affordable. Both

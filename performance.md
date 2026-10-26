@@ -292,8 +292,12 @@ re-measured — the decisions the bullets support do not turn on the exact perce
   `chacha20_apply` carries these numbers.
 * Wiping BLAKE3's internal state costs 15% of the instructions in a 64-byte round
   trip -- it wipes the whole CV stack, most of which a one-chunk input never
-  touched. It stays: that no copy of the keyed-BLAKE3 key material survives the call is the
-  guarantee, and only the dependency can say which of its state that covers.
+  touched. It stays: it clears the keyed-BLAKE3 state this crate can name, and only
+  the dependency can say which of its internal state that covers. It does **not**
+  clear by-value temporaries in BLAKE3's own frames: the default `hardened` build
+  leaves a whole `k_in` in dead stack space (measured and documented in
+  `README.md`), and only `dual-mac`/`ultra`'s best-effort `scrub_stack` covers that
+  region.
 * Above a few megabytes, intra-message parallelism is real, but it is a policy
   decision rather than an oversight. Hashing 16 MiB with a reused four-thread pool
   measured 3.7x against one thread (8 threads: 4.8x); at 1 MiB the same measurement
@@ -314,7 +318,8 @@ run against both):
 
 * **BLAKE3's native backends, not `pure`.** The `pure` feature selects BLAKE3's
   Rust-intrinsics backends; leaving it off lets BLAKE3 use its C/assembly SIMD
-  kernels, which is worth 24–32% from 4 KiB up. See the note in `Cargo.toml` for
+  kernels, measured about 19–21% faster at 4 KiB and 1 MiB (the native build is
+  24–26% faster in the other direction). See the note in `Cargo.toml` for
   the portability story (it falls back to the Rust backends when the target has
   no compiler) and for the two cases that still pass `--features pure`.
 * **One contiguous buffer for the tag, for mid-sized messages.** BLAKE3's

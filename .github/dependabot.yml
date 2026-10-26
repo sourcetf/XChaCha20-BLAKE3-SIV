@@ -108,3 +108,18 @@ updates:
       cargo-minor:
         patterns: ["*"]
         update-types: ["minor", "patch"]
+
+  # The vendored fork is excluded from the root workspace and has its own committed
+  # lock. `sync_blake3_upstream.sh` owns the BLAKE3 *source* version; this entry keeps
+  # the fork's dev/build dependencies (cc, arrayvec, constant_time_eq, reference_impl's
+  # test crates) visible to Dependabot rather than frozen.
+  - package-ecosystem: cargo
+    directory: "/blake3"
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    groups:
+      cargo-minor:
+        patterns: ["*"]
+        update-types: ["minor", "patch"]

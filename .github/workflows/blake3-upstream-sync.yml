@@ -30,17 +30,25 @@ permissions:
 
 concurrency:
   group: blake3-upstream-sync
-  cancel-in-progress: true
+  # Do not cancel a run that has pushed a branch but not created its PR: that is
+  # exactly the state the script now reports as an error instead of silently
+  # treating as "a PR already exists".
+  cancel-in-progress: false
 
 jobs:
   compare:
     name: open upstream comparison PR
+    # The candidate is based on main and the PR targets main explicitly. A dispatch
+    # from another branch would otherwise build a comparison against that branch and
+    # open it against main.
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           fetch-depth: 0
+          ref: refs/heads/main
 
       - name: compare and open draft PR
         env:

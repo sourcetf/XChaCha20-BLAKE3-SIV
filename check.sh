@@ -292,8 +292,8 @@ stage "building"
 # is empty and an offline build fails outright.  Cargo's own opt-in mechanism
 # (`CARGO_NET_OFFLINE`, or `--offline` in `.cargo/config.toml`) is the right
 # place to force offline behaviour, and it is honoured without any flag here.
-cargo build --release
-cargo build --release --features rng
+cargo build --locked --release
+cargo build --locked --release --features rng
 ok "host release (default + rng)"
 record "build: host release x2"
 
@@ -302,7 +302,7 @@ if [ "$FAST" -eq 0 ]; then
     # The musl target links with the toolchain's own rust-lld against a
     # self-contained libc.a, so no cross C toolchain is needed.
     # `--features pure`: BLAKE3's C kernels would need a cross C toolchain.
-    cargo build --target aarch64-unknown-linux-musl --release --features pure
+    cargo build --locked --target aarch64-unknown-linux-musl --release --features pure
     ok "aarch64-unknown-linux-musl release"
     record "build: aarch64-unknown-linux-musl"
   else

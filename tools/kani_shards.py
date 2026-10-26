@@ -409,6 +409,12 @@ def harnesses():
         )
     if not names:
         raise SystemExit("error: found no Kani harnesses in src/proofs.rs")
+    bad = [n for n in names if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", n)]
+    if bad:
+        raise SystemExit(
+            "error: harness name(s) contain characters unsafe for the shell matrix: "
+            + repr(bad)
+        )
     if len(set(names)) != len(names):
         dupes = sorted({n for n in names if names.count(n) > 1})
         raise SystemExit(f"error: duplicate harness names: {dupes}")

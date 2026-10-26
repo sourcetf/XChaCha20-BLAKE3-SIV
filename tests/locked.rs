@@ -1608,11 +1608,12 @@ fn the_dump_advice_is_issued_on_the_right_range() {
          a refused munlock leaves the page locked *and* dumpable, with the lock quota \
          never returned"
     );
-    // The mirror image in `lock_range`: a refused `MADV_DONTDUMP` must undo the mlock --
-    // and must undo the advice first, over the same range. `contains` on the whole function
-    // was not enough: the three statements could be reordered, or the `DODUMP` rollback
-    // deleted, while all three substrings stayed present (measured). Pin the failure block
-    // itself and the order inside it.
+    // The mirror image in `lock_range`: a refused `MADV_DONTDUMP` must undo the mlock.
+    // The order is munlock first, then `MADV_DODUMP`: if the unlock is refused, the range
+    // must stay non-dumpable rather than becoming locked *and* dumpable with a live key.
+    // `contains` on the whole function was not enough: the three statements could be
+    // reordered, or the `DODUMP` rollback deleted, while all three substrings stayed
+    // present (measured). Pin the failure block itself and the order inside it.
     let rollback = brace_blocks("if !ok(d) {");
     assert_eq!(
         rollback.len(),
@@ -1620,17 +1621,16 @@ fn the_dump_advice_is_issued_on_the_right_range() {
         "expected exactly one refused-`MADV_DONTDUMP` rollback block in `lock_range`"
     );
     let rollback = &rollback[0];
-    let dodump = rollback
-        .find("syscall3(NR_MADVISE, start, end - start, MADV_DODUMP)")
-        .expect("the rollback must restore MADV_DODUMP before releasing the lock");
     let munlock = rollback
         .find("syscall2(NR_MUNLOCK, ptr as usize, len)")
         .expect("the rollback must undo the mlock");
+    let dodump = rollback
+        .find("syscall3(NR_MADVISE, start, end - start, MADV_DODUMP)")
+        .expect("the rollback must restore MADV_DODUMP after releasing the lock");
     assert!(
-        dodump < munlock,
-        "the rollback must restore MADV_DODUMP before munlock: `madvise` applies as it \
-         walks, so a range it already excluded must be made dumpable before the lock is \
-         released\n{rollback}"
+        munlock < dodump,
+        "the rollback must munlock before restoring MADV_DODUMP: if the unlock is refused, \
+         the range must remain non-dumpable instead of becoming locked and dumpable\n{rollback}"
     );
     assert!(
         rollback.contains("return Err(d);"),

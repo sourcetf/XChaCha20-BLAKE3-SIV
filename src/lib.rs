@@ -326,21 +326,44 @@ pub(crate) mod test_counters {
         /// and passed in one configuration and failed in another depending on
         /// scheduling.
         pub static DERIVE_TAG_CALLS: core::cell::Cell<usize> = const { core::cell::Cell::new(0) };
+
+        /// Post-wipe key bytes captured from inside `Key::drop` on this thread.
+        ///
+        /// Reading a value's storage after `drop_in_place` is not legal in Rust's
+        /// abstract machine, even for `u8` storage. Capturing the live array *inside*
+        /// `Drop`, after `zeroize` has run, tests the same property without forming a
+        /// reference to uninitialized or deinitialized storage.
+        pub static KEY_DROP_LAST: core::cell::Cell<Option<[u8; crate::KEY_LEN]>> =
+            const { core::cell::Cell::new(None) };
+    }
+
+    pub(crate) fn record_key_drop(bytes: &[u8; crate::KEY_LEN]) {
+        KEY_DROP_LAST.with(|slot| slot.set(Some(*bytes)));
+    }
+
+    pub(crate) fn take_key_drop_witness() -> Option<[u8; crate::KEY_LEN]> {
+        KEY_DROP_LAST.with(|slot| slot.replace(None))
     }
 }
 
 // ── Constants ────────────────────────────────────────────────────────
 
 /// Maximum message size: 2^38 bytes (256 GiB), matching the c2sp.org A_MAX/P_MAX
-/// limit this crate inherited.  See `max_msg_size_fits_in_the_block_counter` for why
-/// it must not be raised: 2^38 is exactly 2^32 ChaCha20 blocks.
+/// limit this crate inherited.  It must not be raised: 2^38 is exactly 2^32
+/// ChaCha20 blocks, so the last block uses counter `u32::MAX` and one block more
+/// would wrap and reuse keystream. The compile-time assertion below enforces that,
+/// `tests/counter_range.rs` pins the call-site arithmetic, and
+/// `test_counter_range_covers_the_maximum_message_and_stops_there` exercises the
+/// accepted maximum and the first rejected length directly.
 ///
 /// Public so a caller can reject an input *before* reading or allocating it.  The
 /// AEAD cannot bound what it is handed: [`decrypt`] allocates a buffer as large as
 /// its ciphertext argument, so a service that trusts a length field off the wire
 /// is exposed to a memory-exhaustion request no matter what this crate does.
 /// Checking the length against this constant, before reading the body, is the
-/// cheap place to stop that.
+/// cheap place to stop that. Compare lengths as `u64` (`len as u64 >
+/// MAX_MSG_SIZE`): on a 32-bit target `MAX_MSG_SIZE as usize` truncates to zero,
+/// and the format ceiling is not representable as a `usize` there at all.
 pub const MAX_MSG_SIZE: u64 = 1u64 << 38;
 
 // The limit and the block counter are two halves of one fact, so they are bound by a
@@ -543,9 +566,11 @@ pub const fn stack_requirement_bytes() -> usize {
 /// material, and it carries no information beyond "the tag did not verify": the
 /// comparison covers all [`TAG_LEN`] bytes in constant time, the unverified
 /// plaintext is wiped rather than returned, and on **both decrypt entry points**
-/// every intermediate secret is wiped before the decision is taken. There is no
-/// distinction between "wrong key", "wrong nonce", "wrong AAD" and "corrupted
-/// ciphertext".
+/// the derived key, tag and witness material is wiped before the decision is
+/// taken. The recovered plaintext is necessarily the input to the tag
+/// recomputation, so it is wiped on the rejection path after that decision rather
+/// than before it; it is never returned. There is no distinction between "wrong
+/// key", "wrong nonce", "wrong AAD" and "corrupted ciphertext".
 ///
 /// That last clause is an ordering claim about the decrypt paths and is **not**
 /// claimed for [`encrypt`]'s `ultra` cross-check, where the decision call runs
@@ -828,9 +853,17 @@ impl core::fmt::Debug for Plaintext {
 /// A caller that already holds key bytes can wrap them with [`Key::from_bytes`];
 /// that *copies*, so the array passed in is still the caller's to wipe.
 ///
-/// `#[repr(transparent)]` over the array: the wrapper is an API convenience, and
-/// its layout is the array's (the test that reads the storage back after a drop
-/// relies on that, and it is worth being sure of rather than assuming).
+/// **Moving a `Key` copies its bytes.** `Drop` wipes the storage the value
+/// currently owns, but Rust moves `self`-contained values by copying: returning a
+/// `Key` from a function, passing it by value, or assigning it to another binding
+/// can leave a copy in a dead stack slot that is never dropped and never wiped.
+/// Use the generated key in place, or keep it in a stable allocation such as
+/// [`locked::LockedKey`] where moves copy only a pointer. This is a property of
+/// any inline zeroizing type; it is stated here because the convenience wrapper
+/// makes it easy to assume otherwise.
+///
+/// `#[repr(transparent)]` over the array: the wrapper is an API convenience and
+/// its layout is the array's.
 #[repr(transparent)]
 pub struct Key([u8; KEY_LEN]);
 
@@ -939,9 +972,13 @@ impl Drop for Key {
     fn drop(&mut self) {
         // Fully qualified: a future inherent `fn zeroize(&mut self)` on `Key` would
         // otherwise win name resolution over the trait method and silently turn this into
-        // a no-op. The test that reads the storage back after drop is the behavioural
-        // witness for the wipe; this spelling removes the namespace hazard.
+        // a no-op.
         <Key as zeroize::Zeroize>::zeroize(self);
+        // Capture the post-wipe bytes while the array is still live. Reading storage
+        // after `drop_in_place` would be undefined behaviour, so this in-`Drop` witness
+        // is what makes the wipe behaviourally testable.
+        #[cfg(test)]
+        crate::test_counters::record_key_drop(&self.0);
     }
 }
 
@@ -1051,15 +1088,18 @@ pub mod random {
     /// Fill `dest` with bytes from the operating system's CSPRNG.
     ///
     /// Returns an error if the OS entropy source is unavailable.  That can
-    /// genuinely happen — early boot, a sandbox that blocks `getrandom(2)` **and**
+    /// genuinely happen — a sandbox that blocks `getrandom(2)` **and**
     /// `/dev/urandom` (the `getrandom` crate falls back to the file when the
     /// syscall returns `EPERM`/`ENOSYS` — which errors it treats as "not available"
     /// is that crate's policy, and any other error it returns as it is — so blocking
     /// only the syscall is not enough on a glibc host), a failed `RDRAND` on
-    /// `no_std` — which is why this returns a `Result` instead of panicking. (An
-    /// audit demonstrated the fallback: a `getrandom`-denying preload still filled
-    /// the buffer from `/dev/urandom`, and only denying the file too produced the
-    /// error.)
+    /// `no_std`, or a platform with no usable backend. On Linux the `getrandom(2)`
+    /// path *blocks* until the CRNG is seeded, so early boot is normally a wait, not
+    /// an error; a caller that cannot wait should provide its own readiness policy.
+    /// This returns a `Result` because the failure case exists, not because it
+    /// cannot block. (An audit demonstrated the fallback: a `getrandom`-denying
+    /// preload still filled the buffer from `/dev/urandom`, and only denying the
+    /// file too produced the error.)
     ///
     /// Closing the fallback with a syscall filter takes more than one rule, and
     /// which one depends on the libc: opening `/dev/urandom` is `openat(2)` under
@@ -1074,8 +1114,11 @@ pub mod random {
     /// crate makes no promise about the buffer when it fails, so an error can leave a
     /// *prefix* of genuine entropy behind, and a caller that ignores the `Result` — which
     /// is `#[must_use]`, but a warning is not a guarantee — would use those bytes as a
-    /// key or a nonce. All zeros are not a usable key either, but they fail the same way
-    /// every time instead of working sometimes, which is what makes the failure visible.
+    /// key or a nonce. All zeros are a *valid* and publicly known key and nonce, so
+    /// ignoring the error after this wipe means using a totally compromised key, not a
+    /// failure that announces itself. The `Result` is the signal; the wipe only ensures
+    /// the fallback value is deterministic and obviously wrong to anyone who audits the
+    /// caller.
     ///
     /// There is deliberately **no userspace fallback PRNG**.  A predictable
     /// nonce is a real attack (see the module documentation), and a silent
@@ -1087,11 +1130,12 @@ pub mod random {
 
     /// Generate a fresh 256-bit key from the OS CSPRNG.
     ///
-    /// The key comes back in a [`Key`], which zeroizes it on drop.  A generated key
-    /// is the one secret in this API with no other copy anywhere, so it is the one
-    /// case where bytes left behind afterwards are purely this crate's doing.  On
-    /// failure nothing escapes: the intermediate buffer is wiped ([`fill`]'s
-    /// guarantee) and the `Key` is dropped.
+    /// The key comes back in a [`Key`], which zeroizes the copy it owns on drop. The
+    /// return value is moved, and a move copies the 32 inline bytes; a dead
+    /// moved-from stack slot can therefore retain a copy that no `Drop` reaches.
+    /// Keep the key in one place, or use [`locked::LockedKey`] for a stable
+    /// heap-located copy. On failure nothing escapes: the intermediate buffer is
+    /// wiped ([`fill`]'s guarantee) and the `Key` is dropped.
     ///
     /// A caller that needs a bare array can copy one out of it (`*key`), but then
     /// that copy is the caller's to wipe.
@@ -1380,17 +1424,14 @@ pub mod locked {
                 if !ok(d) {
                     // `madvise` applies as it walks: it can stop at a hole (`ENOMEM`) or a
                     // special VMA (`EINVAL`) *after* flagging the VMAs before it, and
-                    // `VM_DONTDUMP` is sticky -- so `munlock` alone would leave that
-                    // prefix out of every core dump written afterwards.  Undo the advice
-                    // over the same range first (the success path's
-                    // `mlock`-then-`DONTDUMP` in reverse), then the lock.  Both results
-                    // are ignored, as in `unlock_range`: this call is already failing and
-                    // there is nothing useful a caller could do with them.  The transient
-                    // locked-and-dumpable state that `DODUMP`-before-`munlock` opens is
-                    // the one the success path already has between its two syscalls, and
-                    // no caller keeps using a range this function just refused.
-                    let _ = syscall3(NR_MADVISE, start, end - start, MADV_DODUMP);
+                    // `VM_DONTDUMP` is sticky. Restore the lock first and only then undo
+                    // the advice, the same order as `unlock_range_with`: if `munlock` is
+                    // refused, the range stays non-dumpable instead of becoming a
+                    // locked-and-dumpable range with a live secret. Both results are
+                    // ignored because this call is already failing and the caller has
+                    // nothing to do with them; the original `madvise` error is returned.
                     let _ = syscall2(NR_MUNLOCK, ptr as usize, len);
+                    let _ = syscall3(NR_MADVISE, start, end - start, MADV_DODUMP);
                     return Err(d);
                 }
             }
@@ -1430,8 +1471,10 @@ pub mod locked {
         /// only thing that ever advised it — but a caller pairing `lock_range`/`unlock_range`
         /// on memory it does not own outright should treat this as "the range is now
         /// dumpable" rather than "restored to how I found it". The symmetric caveat applies
-        /// to `lock_range`'s failure path, which unconditionally restores dumpability over
-        /// the whole page range **and** `munlock`s.
+        /// to `lock_range`'s failure path: it attempts `munlock` and then restores
+        /// `MADV_DODUMP` over the whole page range, but if the unlock is refused it leaves
+        /// the range non-dumpable (a leaked exclusion is recoverable; a locked-and-dumpable
+        /// key is not).
         ///
         /// Idempotent for an unlocked range.
         ///
@@ -1768,30 +1811,36 @@ pub mod locked {
             const NEEDLE: &[u8] = b"VmLck:";
             let n = buf.len();
             let mut i = 0usize;
+            // The kernel writes `Name:` first and its value is unescaped, so a process
+            // that sets its comm to `x\nVmLck:\t999999` can put a fake line ahead of the
+            // real field. Take the *last* line-start match: the real `VmLck` is written
+            // after `Name`, and comm cannot append text below the real fields.
+            let mut found = None;
             while i + NEEDLE.len() <= n {
                 if (i == 0 || buf[i - 1] == b'\n') && &buf[i..i + NEEDLE.len()] == NEEDLE {
-                    let mut j = i + NEEDLE.len();
-                    while j < n && (buf[j] == b' ' || buf[j] == b'\t') {
-                        j += 1;
-                    }
-                    let start = j;
-                    while j < n && buf[j].is_ascii_digit() {
-                        j += 1;
-                    }
-                    if j == start {
-                        return None;
-                    }
-                    let mut kb = 0u64;
-                    let mut k = start;
-                    while k < j {
-                        kb = kb.checked_mul(10)?.checked_add((buf[k] - b'0') as u64)?;
-                        k += 1;
-                    }
-                    return Some(kb.saturating_mul(1024));
+                    found = Some(i);
                 }
                 i += 1;
             }
-            None
+            let i = found?;
+            let mut j = i + NEEDLE.len();
+            while j < n && (buf[j] == b' ' || buf[j] == b'\t') {
+                j += 1;
+            }
+            let start = j;
+            while j < n && buf[j].is_ascii_digit() {
+                j += 1;
+            }
+            if j == start {
+                return None;
+            }
+            let mut kb = 0u64;
+            let mut k = start;
+            while k < j {
+                kb = kb.checked_mul(10)?.checked_add((buf[k] - b'0') as u64)?;
+                k += 1;
+            }
+            Some(kb.saturating_mul(1024))
         }
 
         #[cfg(test)]
@@ -1804,6 +1853,15 @@ pub mod locked {
                 // the whole file fail, so a live, locked process reported `None` -- the
                 // same answer as "the kernel refused".
                 let status = b"Name:\t\xff\xfe\x80\nState:\tS (sleeping)\nVmLck:\t   16 kB\n";
+                assert_eq!(parse_vmlck(status), Some(16 * 1024));
+            }
+
+            #[test]
+            fn a_comm_injected_vmlck_line_does_not_win() {
+                // `comm` permits a newline; the kernel prints it unescaped in `Name:`
+                // before the real fields. The last line-start `VmLck:` is the kernel's.
+                let status =
+                    b"Name:\tfake\nVmLck:\t999999 kB\nState:\tS (sleeping)\nVmLck:\t   16 kB\n";
                 assert_eq!(parse_vmlck(status), Some(16 * 1024));
             }
 
@@ -1931,9 +1989,12 @@ pub mod locked {
 
     /// A `Key` that is locked into RAM (and excluded from core dumps) for its lifetime.
     ///
-    /// Dropping frees the page and drops the lock; `mem::forget` (or `Box::leak`) leaves
-    /// the page locked and charged against `RLIMIT_MEMLOCK` until the process exits, the
-    /// same caveat every RAII lock has. The `Deref` impl carries the same warning as
+    /// Dropping wipes the page, frees it, and asks the kernel to drop the lock and restore
+    /// dumpability. The release is **best effort**: if a syscall filter refuses `munlock`,
+    /// the freed page stays locked and dump-excluded (the `VmLck` quota is not returned).
+    /// `mem::forget` (or `Box::leak`) leaves the page locked and charged against
+    /// `RLIMIT_MEMLOCK` until the process exits, the same caveat every RAII lock has.
+    /// The `Deref` impl carries the same warning as
     /// `crate::Key`'s: `key.clone()` copies the plain array. (The other `Deref` hazard,
     /// `==`, is closed: this type has its own constant-time `PartialEq`, and without it
     /// `==` on two `LockedKey`s would not compile — the short-circuiting array comparison
@@ -2044,6 +2105,14 @@ pub mod locked {
         /// successful `mlock` covers it; the kernel can silently skip special VMAs
         /// (hugetlb, DAX, secretmem), and those are not the mappings used here.
         pub fn new(key: &[u8; crate::KEY_LEN]) -> Result<Self, isize> {
+            // Check the platform before allocating. The unsupported stub page size on
+            // this target is 16 KiB, so without this an unsupported caller would
+            // allocate, wipe and free a page-sized buffer on every attempt and could
+            // see ENOMEM/EINVAL before the documented ENOSYS -- a fail-closed error,
+            // but the wrong one, and paid for with an allocation that can never work.
+            if !SUPPORTED {
+                return Err(-38isize /* ENOSYS */);
+            }
             let mut page = Page::new()?;
             // Lock the whole page first; on failure `page` is freed by its own `Drop`.
             // SAFETY: `page` owns a live page-sized allocation for as long as `Self`,
@@ -2887,6 +2956,11 @@ pub fn encrypt(
         // MAC copy in this file rather than left to `scrub_stack` alone.
         let mut witness_tag = witness::encrypt_tag(key, nonce, aad, plaintext);
         let agree: subtle::Choice = witness_tag.ct_eq(&tag);
+        // The second gate uses the independently shaped fold, not the same `subtle`
+        // loop twice. Passing `agree` to both slots let a single skipped instruction
+        // in the witness comparison set both gates at once, which is the exact
+        // single-fault case the two gates exist to remove.
+        let agree2: subtle::Choice = ct_eq_independent(&witness_tag, &tag);
         crate::zeroize_array(&mut witness_tag);
         // Two rejections written before the call and checked in series, the same fail-closed
         // shape as both decrypt entry points: a fault that skips the call, or corrupts one
@@ -2901,7 +2975,7 @@ pub fn encrypt(
         // the call at every optimisation level.
         core::hint::black_box(&mut decision0);
         core::hint::black_box(&mut decision1);
-        accept_or_reject(agree, agree, &mut decision0, &mut decision1);
+        accept_or_reject(agree, agree2, &mut decision0, &mut decision1);
         if decision0.is_err() {
             crate::zeroize_array(&mut k_in);
             crate::zeroize_array(&mut k_out);
@@ -3033,7 +3107,9 @@ pub fn encrypt_in_place_detached(
 /// default) and everything above it — not only `dual-mac`.** It used to be
 /// gated on `dual-mac` — so the *default* build had one comparison shape and one shortened-loop
 /// fault was enough — until the costs were put side by side: this is one extra 65-byte fold,
-/// **measured at 1.4 ns** (0.1% of a 64-byte decryption, 1.32 us) against a measured change from
+/// the fold alone measured at **1.4 ns** before the optimizer barrier (the barrier adds a
+/// fixed handful of instructions; together well under 0.5% of a 64-byte decryption, 1.32 us)
+/// against a measured change from
 /// "forgery after 2,573 attempts" to "none in 2,000,000". A defence with that ratio belongs in
 /// the default. (The `--no-default-features` build is deliberately the single-gate, single-shape
 /// baseline — it compiles neither this function nor `ct_eq_independent` — which is why the
@@ -3057,7 +3133,7 @@ fn second_gate_comparison(a: &[u8; TAG_LEN], b: &[u8; TAG_LEN]) -> subtle::Choic
 /// gates defeats the purpose of having two.
 ///
 /// Unconditional *within the `hardened` family* since the cost was measured: one
-/// 65-byte fold, 1.4 ns, in exchange for turning a hand-modelled
+/// 65-byte fold (1.4 ns before the barrier), in exchange for turning a hand-modelled
 /// shortened-loop forgery from "accepted after 2,573 attempts" into "none in
 /// 2,000,000". It was `dual-mac`-only before that comparison, which left the
 /// *default* build on one comparison shape. It is not compiled at all under
@@ -3081,13 +3157,20 @@ fn ct_eq_independent(a: &[u8; TAG_LEN], b: &[u8; TAG_LEN]) -> subtle::Choice {
     while i + 8 <= TAG_LEN {
         let x = u64::from_le_bytes(a[i..i + 8].try_into().unwrap())
             ^ u64::from_le_bytes(b[i..i + 8].try_into().unwrap());
-        acc |= x;
+        // Hide the accumulator from the optimizer after every word. Without this,
+        // LLVM is entitled to recognize an OR-fold over independent loads as a
+        // short-circuiting comparison and emit an early exit, which would make this
+        // "independent" gate leak the first differing byte just as the `subtle` loop it
+        // is meant to survive is not allowed to. `constant_time_eq` uses the same
+        // construction for exactly this reason. The tag is public-sized (65 bytes), so
+        // the barrier cost is fixed and small.
+        acc = core::hint::black_box(acc | x);
         i += 8;
     }
     // TAG_LEN is 65, so one byte is left over; a general loop rather than a
     // hard-coded tail keeps this correct if TAG_LEN ever changes.
     while i < TAG_LEN {
-        acc |= (a[i] ^ b[i]) as u64;
+        acc = core::hint::black_box(acc | (a[i] ^ b[i]) as u64);
         i += 1;
     }
     acc.ct_eq(&0u64)
@@ -5216,7 +5299,7 @@ mod tests {
     }
 
     #[test]
-    fn test_decrypt_does_not_leak_plaintext_on_failure() {
+    fn test_decrypt_reports_authentication_failure_without_returning_plaintext() {
         let key = [0x42u8; 32];
         let nonce = [0u8; 24];
         let plaintext = b"Secret message";
@@ -5277,8 +5360,14 @@ mod tests {
         let nonce = [0u8; 24];
         let aad = b"same aad";
 
-        let (ct_a, tag_a) = encrypt(&key, &nonce, aad, b"first message").unwrap();
+        let (ct_a, tag_a) = encrypt(&key, &nonce, aad, b"first message!").unwrap();
         let (ct_b, tag_b) = encrypt(&key, &nonce, aad, b"second message").unwrap();
+        assert_eq!(
+            ct_a.len(),
+            ct_b.len(),
+            "the messages must have equal length so this test exercises content binding, \
+             not the length field"
+        );
         assert_ne!(tag_a, tag_b, "different messages must give different tags");
 
         // The transplant an attacker with a reused nonce would attempt: one
@@ -5298,7 +5387,7 @@ mod tests {
         // transplant and not a broken harness.
         assert_eq!(
             decrypt(&key, &nonce, aad, &ct_a, &tag_a).unwrap(),
-            b"first message"
+            b"first message!"
         );
         assert_eq!(
             decrypt(&key, &nonce, aad, &ct_b, &tag_b).unwrap(),
@@ -5467,19 +5556,21 @@ mod tests {
         let (ct, tag) = encrypt(&key, &nonce, b"", b"").unwrap();
         assert!(ct.is_empty());
         for pos in 0..TAG_LEN {
-            let mut bad = tag;
-            bad[pos] ^= 1;
-            assert_eq!(
-                decrypt(&key, &nonce, b"", &ct, &bad).unwrap_err(),
-                Error::AuthenticationFailed,
-                "decrypt accepted a tag differing at byte {pos} on an empty message"
-            );
-            let mut empty: [u8; 0] = [];
-            assert_eq!(
-                decrypt_in_place_detached(&key, &nonce, b"", &mut empty, &bad).unwrap_err(),
-                Error::AuthenticationFailed,
-                "in-place decrypt accepted a tag differing at byte {pos} on an empty message"
-            );
+            for bit in 0..8 {
+                let mut bad = tag;
+                bad[pos] ^= 1u8 << bit;
+                assert_eq!(
+                    decrypt(&key, &nonce, b"", &ct, &bad).unwrap_err(),
+                    Error::AuthenticationFailed,
+                    "decrypt accepted a tag differing at byte {pos} bit {bit} on an empty message"
+                );
+                let mut empty: [u8; 0] = [];
+                assert_eq!(
+                    decrypt_in_place_detached(&key, &nonce, b"", &mut empty, &bad).unwrap_err(),
+                    Error::AuthenticationFailed,
+                    "in-place decrypt accepted a tag differing at byte {pos} bit {bit} on an empty message"
+                );
+            }
         }
     }
 
@@ -5488,6 +5579,60 @@ mod tests {
         assert_eq!(NONCE_LEN, 24);
         assert_eq!(KEY_LEN, 32);
         assert_eq!(TAG_LEN, 65);
+    }
+
+    /// Both comparison shapes must detect every one of the 520 tag bits.
+    ///
+    /// The end-to-end tamper tests in this module exercise `second_gate_comparison` only
+    /// through a tag that the first `subtle` comparison already rejects, so a gate-2
+    /// implementation that returned a constant `true` — or ignored the high bit of each
+    /// byte — would stay green. These calls go to the helpers directly, one bit at a
+    /// time, so a constant fold or a shortened loop is observable.
+    #[cfg(feature = "hardened")]
+    #[test]
+    fn both_gate_shapes_detect_every_tag_bit() {
+        let a = [0x5Au8; TAG_LEN];
+        assert!(
+            bool::from(second_gate_comparison(&a, &a)),
+            "equal tags must pass both gates"
+        );
+        assert!(
+            bool::from(ct_eq_independent(&a, &a)),
+            "the independent fold must accept equal tags"
+        );
+        for pos in 0..TAG_LEN {
+            for bit in 0..8 {
+                let mut b = a;
+                b[pos] ^= 1u8 << bit;
+                assert!(
+                    !bool::from(second_gate_comparison(&a, &b)),
+                    "the combined gate accepted a tag differing at byte {pos} bit {bit}"
+                );
+                assert!(
+                    !bool::from(ct_eq_independent(&a, &b)),
+                    "the independent fold accepted a tag differing at byte {pos} bit {bit}"
+                );
+            }
+        }
+    }
+
+    /// On a target without the Linux/aarch64 lock primitives, `LockedKey::new` must
+    /// fail with the documented `ENOSYS` before it allocates a page.
+    #[cfg(all(
+        feature = "locked",
+        not(all(
+            target_os = "linux",
+            any(target_arch = "x86_64", target_arch = "aarch64"),
+            target_pointer_width = "64"
+        ))
+    ))]
+    #[test]
+    fn unsupported_locked_key_reports_enosys() {
+        assert_eq!(
+            crate::locked::LockedKey::new(&[0x5Au8; KEY_LEN]).unwrap_err(),
+            -38,
+            "an unsupported target must report ENOSYS, not an allocation failure"
+        );
     }
 
     // ── Detached API ──
@@ -5944,6 +6089,18 @@ mod tests {
     #[test]
     fn the_reported_stack_requirement_is_sufficient() {
         let need = stack_requirement_bytes();
+        // Pin the exported budget itself, not only a round trip that would pass with a
+        // smaller (or zero) value because of the margin below. The scrub frame is
+        // 16 KiB and the stack pointer moves through two sized frames in the worst
+        // call chain, hence 32 KiB under `dual-mac`; the default build scans no stack
+        // and reports zero.
+        #[cfg(feature = "dual-mac")]
+        assert_eq!(need, 32 * 1024, "the dual-mac stack budget changed");
+        #[cfg(not(feature = "dual-mac"))]
+        assert_eq!(
+            need, 0,
+            "the default build should report no fixed stack budget"
+        );
         // The margin covers the *ordinary* frames — the derivations, the SIMD kernels, the
         // allocator, this test's own closure — which are not what the constant describes, and
         // which are several times larger in a debug build. Sizing it as one number for both is
@@ -6191,12 +6348,10 @@ mod tests {
 
     /// A generated key wipes itself on drop, and `Debug` never prints it.
     ///
-    /// The wipe is read back out of the value's storage *after* dropping it in
-    /// place: wiping only when the allocation is reused, or only the bytes a
-    /// reference covers, is the failure mode this has to distinguish, and it cannot
-    /// be seen from the outside any other way.  `MaybeUninit` + `drop_in_place` is
-    /// what makes reading afterwards legal — the storage is ours, the value is gone,
-    /// and every byte is a `u8`.
+    /// The wipe is observed from inside `Key::drop`, after `zeroize` has run. Reading
+    /// the storage after `drop_in_place` would be undefined behaviour in Rust's
+    /// abstract machine even for `u8`, so the drop path records the still-live array
+    /// through test-only instrumentation instead.
     #[test]
     fn test_key_zeroizes_on_drop_and_hides_itself() {
         // The property is `Key`'s drop wipe and `Debug`, not randomness; using a fixed key
@@ -6208,26 +6363,15 @@ mod tests {
             "`Debug` must print nothing derived from the key -- not a prefix, not a hash"
         );
 
-        let mut slot = core::mem::MaybeUninit::<Key>::uninit();
-        slot.write(key);
-        // SAFETY: `slot` was just initialised, and `Key` is `#[repr(transparent)]`
-        // over `[u8; KEY_LEN]`, so its first `KEY_LEN` bytes are the key bytes and
-        // they are initialised.
-        let before = unsafe { core::ptr::read(slot.as_ptr() as *const [u8; KEY_LEN]) };
-        assert!(
-            before.iter().any(|&b| b != 0),
-            "the key was already zero before it was dropped"
+        // Clear any witness left by another test on this thread.
+        let _ = crate::test_counters::take_key_drop_witness();
+        drop(key);
+
+        assert_eq!(
+            crate::test_counters::take_key_drop_witness(),
+            Some([0u8; KEY_LEN]),
+            "Key::drop left key bytes behind"
         );
-
-        // SAFETY: `slot` is initialised, so this is the drop the scope would run.
-        unsafe { core::ptr::drop_in_place(slot.as_mut_ptr()) };
-
-        // SAFETY: the drop wrote `KEY_LEN` initialised bytes (`zeroize_array`), `u8`
-        // has no validity requirement beyond being initialised, and the storage is
-        // still `slot`'s, so reading them back is reading initialised memory. The
-        // value is never used as a `Key` again.
-        let after = unsafe { core::ptr::read(slot.as_ptr() as *const [u8; KEY_LEN]) };
-        assert_eq!(after, [0u8; KEY_LEN], "Key::drop left key bytes behind");
     }
 
     /// `random::fill` must overwrite the whole buffer, not a prefix.
@@ -6379,9 +6523,10 @@ mod tests {
         // Both must still round-trip under their own split.
         assert_eq!(decrypt(&key, &nonce, b"ab", &ct_a, &tag_a).unwrap(), b"c");
         assert_eq!(decrypt(&key, &nonce, b"a", &ct_b, &tag_b).unwrap(), b"bc");
-        // ...and neither may authenticate under the other's split. Round-tripping alone
-        // does not test the length fields: with one of them removed, each pair still
-        // decrypts correctly under its own context but a cross-split also succeeds.
+        // ...and neither may authenticate under the other's split. This pair changes
+        // both length fields together, so it detects dropping the whole length framing,
+        // not either field alone; the exact encoded-head test below and the KAT pin the
+        // individual fields.
         assert!(
             decrypt(&key, &nonce, b"ab", &ct_b, &tag_b).is_err(),
             "the (\"a\", \"bc\") ciphertext authenticated under the (\"ab\", \"c\") split"
@@ -6410,15 +6555,17 @@ mod tests {
         derive_enc(&enc_seed, &base, &mut key0, &mut nonce0);
 
         for pos in 0..TAG_LEN {
-            let mut t = base;
-            t[pos] ^= 0x01;
-            let mut k = [0u8; 32];
-            let mut n = [0u8; 12];
-            derive_enc(&enc_seed, &t, &mut k, &mut n);
-            assert!(
-                k != key0 || n != nonce0,
-                "tag byte {pos} does not reach the encryption key or nonce"
-            );
+            for bit in 0..8 {
+                let mut t = base;
+                t[pos] ^= 1u8 << bit;
+                let mut k = [0u8; 32];
+                let mut n = [0u8; 12];
+                derive_enc(&enc_seed, &t, &mut k, &mut n);
+                assert!(
+                    k != key0 || n != nonce0,
+                    "tag byte {pos} bit {bit} does not reach the encryption key or nonce"
+                );
+            }
         }
     }
 

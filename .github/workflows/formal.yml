@@ -127,7 +127,16 @@ jobs:
           fi
           # Fetches the matching Rust nightly and CBMC. Idempotent.
           cargo-kani setup
-          cargo kani --version
+          # A preinstalled/cached cargo-kani is not necessarily the pinned version.
+          # Harness semantics and counts are version-sensitive, so assert it.
+          version_line="$(cargo kani --version)"
+          echo "$version_line"
+          case "$version_line" in
+            *"$KANI_VERSION"*) ;;
+            *)
+              echo "::error::cargo kani reports '$version_line', expected version $KANI_VERSION"
+              exit 1 ;;
+          esac
 
       # -Z stubbing is REQUIRED: several harnesses use #[kani::stub] to replace
       # the ChaCha20 permutation, the zeroization helper and the BLAKE3

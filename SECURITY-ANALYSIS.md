@@ -954,11 +954,16 @@ on the key derivation being right.
 ### 4.3 Cross-protocol key reuse (XChaCha20 / XChaCha20-Poly1305)
 
 Standard XChaCha20 leaves the first four bytes of the 12-byte ChaCha20 nonce as zeros when
-it extends a 24-byte nonce. If this crate did the same, then for the same `(K, N)` it would
-derive identical per-message key material to XChaCha20-Poly1305 and the two schemes would
-share keystream in a mixed deployment. `SUBKEY_DOMAIN = "XSIV"` occupies those bytes
-instead. The placement matters as much as the value: putting the label in the *counter*
-would not separate this scheme from XChaCha20-Poly1305, which leaves the counter at 0.
+it extends a 24-byte nonce. If this crate did the same, then for the same `(K, N)` its
+subkey would equal XChaCha20's, its two derivation blocks would equal XChaCha20's first two
+keystream blocks, and `k_in`/`k_out`/`enc_seed` would coincide with values an XChaCha20
+implementation exposes as keystream. The message keystream is *not* automatically shared —
+this crate derives `enc_key`/`enc_nonce` from the tag, rather than encrypting under
+`subkey` — but the tag keys and derivation blocks would overlap, which is a cross-protocol
+hazard even before a tag collision. `SUBKEY_DOMAIN = "XSIV"` occupies those bytes
+instead, so the two schedules diverge at the first block. The placement matters as much as
+the value: putting the label in the *counter* would not separate this scheme from
+XChaCha20-Poly1305, which leaves the counter at 0.
 Pinned by `test_subkey_domain_occupies_nonce_not_counter` and
 `test_domain_separators_are_pinned`.
 
@@ -1745,7 +1750,7 @@ anywhere in this repository; that is the rule this section enforces.
 Two defences discussed elsewhere in this document are **not** in the table above, because each has
 a committed measurement already: the stack-residue claim is measured by `tools/stack_residue.sh`
 (with the residue it cannot reach stated on the row), and the second-comparison-shape defence has
-its cost measured (1.4 ns) and its effect hand-modelled in the README's fault table. (They are not
+the fold measured at 1.4 ns before the optimizer barrier, and its effect hand-modelled in the README's fault table. (They are not
 rows in §8.5 either — §8.5 lists the *unimplemented* algorithms; these two are implemented — which
 is why this sentence names them here rather than pointing back at a §8.5 row.) What those two have
 in common with the table above is the rule: the claim and the measurement are written next to each

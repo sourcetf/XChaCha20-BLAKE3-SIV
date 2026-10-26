@@ -50,8 +50,9 @@ those theorems is wrong is the most valuable kind this project can receive.
 
 ## What is explicitly not in scope
 
-Listed so that a report is not needed for them. Everything under "What is not
-defended against" in `README.md`:
+Listed so that a report is not needed for them. This covers both "What is not
+defended against" and "What this crate cannot fix for you" in `README.md`, plus the
+physical side channels named below:
 
 - **fault injection**, including the residual attacks that the `hardened`
   feature does not cover (two independent faults, a targeted fault inside the tag

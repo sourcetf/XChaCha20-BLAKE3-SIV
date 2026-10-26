@@ -826,7 +826,7 @@ fn test_zeroize() {
             buf_len: 42,
             blocks_compressed: 42,
             flags: 42,
-            platform: crate::Platform::Portable,
+            platform: crate::Platform::portable(),
         },
         initial_chunk_counter: 42,
         key: [42; 8],
@@ -841,7 +841,7 @@ fn test_zeroize() {
     assert_eq!(hasher.chunk_state.flags, 0);
     assert!(matches!(
         hasher.chunk_state.platform,
-        crate::Platform::Portable
+        crate::Platform::portable()
     ));
     assert_eq!(hasher.initial_chunk_counter, 0);
     assert_eq!(hasher.key, [0; 8]);
@@ -854,7 +854,7 @@ fn test_zeroize() {
             counter: 42,
             block_len: 42,
             flags: 42,
-            platform: crate::Platform::Portable,
+            platform: crate::Platform::portable(),
         },
         position_within_block: 42,
     };
@@ -867,7 +867,7 @@ fn test_zeroize() {
     assert_eq!(output_reader.inner.flags, 0);
     assert!(matches!(
         output_reader.inner.platform,
-        crate::Platform::Portable
+        crate::Platform::portable()
     ));
     assert_eq!(output_reader.position_within_block, 0);
 }

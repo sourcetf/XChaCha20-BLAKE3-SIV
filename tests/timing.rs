@@ -456,21 +456,35 @@ fn timing_screen_can_detect_a_real_difference() {
 #[test]
 fn timing_screens_are_present_and_not_ignored() {
     let source = include_str!("timing.rs");
-    assert!(
-        !source
-            .lines()
-            .any(|line| line.trim_start().starts_with("#[ignore")),
-        "a timing test is marked #[ignore]: `--list` still reports it, but the advisory \
-         job then passes without running the screen. Remove the attribute or teach the \
-         presence gate the difference."
-    );
+    for line in source.lines() {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with("//") {
+            continue;
+        }
+        // Collapse whitespace so `# [ cfg_attr ( all ( ) , ignore ) ]` cannot hide.
+        let compact: String = trimmed.chars().filter(|c| !c.is_whitespace()).collect();
+        assert!(
+            !(compact.starts_with("#[") && compact.contains("ignore")),
+            "a timing test carries an ignore attribute: `--list` still reports it, but the \
+             advisory job then passes without running the screen. Offending line: {line}"
+        );
+    }
     for name in [
         "fn timing_tag_position_screen_finds_no_gross_difference(",
         "fn timing_does_not_depend_on_key_contents(",
     ] {
-        assert!(
-            source.contains(name),
-            "the timing presence gate names `{name}`, but the function is gone"
-        );
+        let at = source.find(name).unwrap_or_else(|| {
+            panic!("the timing presence gate names `{name}`, but the function is gone")
+        });
+        let prefix_start = source[..at].rfind("\n\n").map_or(0, |i| i + 2);
+        let attributes = &source[prefix_start..at];
+        for line in attributes.lines() {
+            let compact: String = line.chars().filter(|c| !c.is_whitespace()).collect();
+            assert!(
+                !compact.starts_with("#[") || compact.starts_with("#[test]"),
+                "leak screen `{name}` is wrapped in an extra attribute ({line}); a cfg or \
+                 ignore can remove it while the source-text check still sees the name"
+            );
+        }
     }
 }

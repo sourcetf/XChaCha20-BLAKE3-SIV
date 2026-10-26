@@ -29,11 +29,12 @@ getrandom = { version = "0.4", optional = true, default-features = false }
 # BLAKE3 supplies the context-commitment half of the tag (see
 # `blake3_keyed_multi` in lib.rs).  `default-features = false` keeps it `no_std`.
 #
-# **No `pure` here, deliberately: it costs 24-32%.** BLAKE3's `pure` feature
-# selects its Rust-intrinsics backends; without it, BLAKE3 uses its C/assembly
-# SIMD kernels where the target has them. Measured on x86_64 (Ryzen 9 7945HX,
-# release+LTO) with `examples/bench_aead.rs`, whose size sweep includes the 1 MiB
-# point: 966 -> 766 MiB/s at 4 KiB, 2540 -> 2053 MiB/s at 1 MiB. The head-to-head
+# **No `pure` here, deliberately: it costs about 19-21% of throughput at the
+# measured points.** BLAKE3's `pure` feature selects its Rust-intrinsics backends;
+# without it, BLAKE3 uses its C/assembly SIMD kernels where the target has them.
+# Measured on x86_64 (Ryzen 9 7945HX, release+LTO) with `examples/bench_aead.rs`,
+# whose size sweep includes the 1 MiB point: 966 -> 766 MiB/s at 4 KiB, 2540 -> 2053
+# MiB/s at 1 MiB (native 24-26% faster in the other direction). The head-to-head
 # in `benches/compare.rs`, re-measured after the vendored fork's `hash_many` tail
 # fix, puts the hardened crate within ~10-25% of RustCrypto's
 # XChaCha20-Poly1305 at 4-5 KiB and at parity or ahead from 16 KiB up
@@ -110,9 +111,11 @@ criterion = "0.5"
 blake3 = { version = "1.8.7", path = "blake3", default-features = false, features = ["zeroize"] }
 # The head-to-head benchmark in `benches/compare.rs`: RustCrypto's
 # XChaCha20-Poly1305 is the natural reference point (same 24-byte nonce), and
-# `aead` supplies the trait both sides are driven through.
-chacha20poly1305 = "0.10"
-aead = { version = "0.5", features = ["alloc"] }
+# `aead` supplies the trait both sides are driven through. Disable their default
+# `rand_core`/`getrandom` features: these are test-only comparisons using fixed
+# keys, and the defaults pull a second legacy RNG stack into every test build.
+chacha20poly1305 = { version = "0.10", default-features = false, features = ["alloc"] }
+aead = { version = "0.5", default-features = false, features = ["alloc"] }
 # Property-based tests. The security tests in `tests/security.rs` are the main
 # reason for this: "no single-bit tamper is ever accepted" is a statement over
 # every possible input, which is exactly what a property test is for.
@@ -171,8 +174,9 @@ hardened = []
 # `ultra` cannot build cannot turn that layer on at all.
 #
 # `pure` is deliberately *not* here: it forces BLAKE3's portable Rust backends, which
-# costs 24-32% (see the `pure` comment below) and buys no security -- the C/assembly
-# kernels are constant-time by construction and covered by the same differential tests.
+# costs about 19-21% of throughput at the measured points (see the `pure` comment
+# below) and buys no security -- the C/assembly kernels are constant-time by
+# construction and covered by the same differential tests.
 # `ultra` is about defences, not about giving up speed for nothing.
 ultra = ["hardened", "rng", "dual-mac", "locked"]
 # A second derivation through the shared `derive_tag` path on the verify path (it catches

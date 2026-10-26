@@ -456,10 +456,14 @@ impl Output {
     }
 
     fn root_hash(&self) -> Hash {
-        debug_assert_eq!(self.counter, 0);
         let mut cv = self.input_chaining_value;
-        self.platform
-            .compress_in_place(&mut cv, &self.block, self.block_len, 0, self.flags | ROOT);
+        self.platform.compress_in_place(
+            &mut cv,
+            &self.block,
+            self.block_len,
+            self.counter,
+            self.flags | ROOT,
+        );
         Hash(platform::le_bytes_from_words_32(&cv))
     }
 
@@ -542,6 +546,14 @@ impl ChunkState {
     // Try to avoid buffering as much as possible, by compressing directly from
     // the input slice when full blocks are available.
     fn update(&mut self, mut input: &[u8]) -> &mut Self {
+        // One `ChunkState` is one 1024-byte chunk. The internal caller never exceeds
+        // that, but this is a safe (deprecated hazmat) API: without the check, more
+        // than a chunk silently produces a non-BLAKE3 value, and 16 KiB overflows
+        // `blocks_compressed: u8`.
+        assert!(
+            input.len() <= CHUNK_LEN - self.count(),
+            "a ChunkState cannot accept more than one 1024-byte chunk"
+        );
         if self.buf_len > 0 {
             self.fill_buf(&mut input);
             if !input.is_empty() {

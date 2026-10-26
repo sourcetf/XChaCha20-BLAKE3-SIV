@@ -8,7 +8,10 @@ use std::io;
 const MINIMUM_MMAP_SIZE: u64 = 16 * 1024; // 16 KiB
 
 pub(crate) fn copy_wide(mut reader: impl io::Read, hasher: &mut crate::Hasher) -> io::Result<u64> {
-    let mut buffer = [0; 65536];
+    // 16 KiB rather than 64 KiB: the larger buffer can exhaust a small thread stack
+    // from a safe `update_reader` call. This still amortizes the read syscall for
+    // ordinary readers without imposing a 64 KiB stack requirement.
+    let mut buffer = [0; 16 * 1024];
     let mut total = 0;
     loop {
         match reader.read(&mut buffer) {

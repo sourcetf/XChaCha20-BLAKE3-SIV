@@ -257,10 +257,10 @@ if [ "$KANI_ONLY" -eq 0 ]; then
 
   step "2. formatting and lints"
   cargo fmt --check
-  cargo clippy --all-targets -- -D warnings
+  cargo clippy --locked --all-targets -- -D warnings
   # The `rng` feature adds a public module and a dependency; lint it too, or a
   # warning there would only surface once someone enabled the feature.
-  cargo clippy --all-targets --features rng -- -D warnings
+  cargo clippy --locked --all-targets --features rng -- -D warnings
 
   # The tools' contract with this script: a gate that could not run answers exit 3,
   # and this script reports that as a skipped stage. Both halves are checked here
@@ -333,7 +333,10 @@ if [ "$KANI_ONLY" -eq 0 ]; then
   }
   cargo_test() {  # <description> <required targets, space-separated> <cargo args...>
     local what="$1" required="$2"; shift 2
-    if ! cargo "$@" 2>&1 | tee "$TEST_LOG"; then
+    # The gate selftest's cargo is a stub that does not implement lock resolution.
+    local lock=()
+    [ "${XSIV_IN_GATE_SELFTEST:-0}" = "1" ] || lock=(--locked)
+    if ! cargo "${lock[@]}" "$@" 2>&1 | tee "$TEST_LOG"; then
       echo "FAIL: cargo test for $what exited non-zero" >&2
       exit 1
     fi
@@ -434,7 +437,7 @@ plaintext_wipe security threads variable_latency"
 
   # `--no-default-features` is how a `no_std` user consumes this crate.
   step "3d. no-default-features build"
-  cargo check --no-default-features --all-targets
+  cargo check --locked --no-default-features --all-targets
 
   step "4. cross-compilation"
   # Type-check against the gnu target (no linker needed), then build the musl
@@ -444,13 +447,13 @@ plaintext_wipe security threads variable_latency"
   # these targets too; stage 5 below *executes* it on all four of its own targets.
   # (`pure` is what makes BLAKE3's C kernels unnecessary here; see stage 5.)
   if grep -qx 'aarch64-unknown-linux-gnu' <<< "$installed_targets"; then
-    cargo check --target aarch64-unknown-linux-gnu --all-targets --features ultra,pure
+    cargo check --locked --target aarch64-unknown-linux-gnu --all-targets --features ultra,pure
   else
     skip "aarch64-unknown-linux-gnu type-check" "target not installed"
     echo "         (rustup target add aarch64-unknown-linux-gnu)"
   fi
   if grep -qx 'aarch64-unknown-linux-musl' <<< "$installed_targets"; then
-    cargo check --target aarch64-unknown-linux-musl --all-targets --features ultra,pure
+    cargo check --locked --target aarch64-unknown-linux-musl --all-targets --features ultra,pure
   else
     skip "aarch64-unknown-linux-musl type-check" "target not installed"
     echo "         (rustup target add aarch64-unknown-linux-musl)"
@@ -459,7 +462,7 @@ plaintext_wipe security threads variable_latency"
   # scalar-only configuration.  Stage 5 (`--cross-exec`) also links and executes
   # it; this entry stays because it is cheap and runs without qemu.
   if grep -qx 'riscv64gc-unknown-linux-musl' <<< "$installed_targets"; then
-    cargo check --target riscv64gc-unknown-linux-musl --all-targets --features ultra,pure
+    cargo check --locked --target riscv64gc-unknown-linux-musl --all-targets --features ultra,pure
   else
     skip "riscv64gc-unknown-linux-musl type-check" "target not installed"
     echo "         (rustup target add riscv64gc-unknown-linux-musl)"
@@ -604,7 +607,7 @@ if [ "$RUN_CROSS_EXEC" -eq 1 ]; then
     # neither and reported "cargo reported no executables" on every cross target for two
     # commits, while this copy worked because the variable is unset locally and the redirect
     # was already here.
-    exes="$(CARGO_TERM_COLOR=never cargo test --target "$target" --release --no-run \
+    exes="$(CARGO_TERM_COLOR=never cargo test --locked --target "$target" --release --no-run \
             --features ultra,pure 2>&1 \
             | sed -n 's/^ *Executable .*(\(.*\))$/\1/p')"
     [ -n "$exes" ] || { echo "cargo reported no $target executables" >&2; exit 1; }
