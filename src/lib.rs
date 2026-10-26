@@ -1844,6 +1844,11 @@ pub mod locked {
 
     /// Unsupported on this target: reports `ENOSYS` rather than pretending, so a caller
     /// cannot mistake a no-op for protection.
+    ///
+    /// # Safety
+    ///
+    /// This stub never reads or writes through `_ptr`; the parameter exists only because
+    /// the supported implementation has the same unsafe signature.
     #[cfg(not(all(
         target_os = "linux",
         any(target_arch = "x86_64", target_arch = "aarch64"),
@@ -1853,6 +1858,10 @@ pub mod locked {
         Err(-38) // ENOSYS
     }
     /// Unsupported on this target: nothing was ever locked, so there is nothing to undo.
+    ///
+    /// # Safety
+    ///
+    /// This stub never reads or writes through `_ptr`.
     ///
     /// (This and the two below are `pub` in the module on every target, so they need doc
     /// comments everywhere — `missing_docs` is a hard lint here, and it caught these on

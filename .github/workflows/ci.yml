@@ -21,7 +21,7 @@
 # (Relaxing to `@v7` would put the fix path back but hand the decision of *what
 # runs here* to whoever can move that tag — which is the attack this pinning
 # exists to close: in the release job, where the token has `contents: write`,
-# that means the published `.crate` artifact. See the header of dependabot.yml.)
+# that means the published release artifacts. See the header of dependabot.yml.)
 #
 # One action needs care beyond the pin: `dtolnay/rust-toolchain` takes the
 # toolchain's *name from its ref*, so a bare SHA pin would leave the nightly and
@@ -44,8 +44,8 @@ on:
 
 # One run per ref: a new push supersedes an in-flight run rather than queueing
 # behind it -- but **only for pull requests**. On `main` a run carries the
-# `release` job, which tags the commit and uploads the `.crate`, the manifest and
-# the three bundles; `gh release create`/`upload` is not atomic, so superseding a
+# `release` job, which tags the commit and uploads the manifest and the three
+# bundles; `gh release create`/`upload` is not atomic, so superseding a
 # main run mid-publish can leave a partially-populated release -- the exact
 # outcome the publish step works to prevent. So pushes to `main` are not
 # cancelled; they queue, and each publishes its own `sha-<commit>` tag, which is
@@ -125,9 +125,6 @@ jobs:
       # users would hit it. Cheap to check, so check it.
       - name: build with no default features
         run: cargo check --no-default-features --all-targets
-
-      - name: cargo package
-        run: cargo package
 
   test:
     name: test (${{ matrix.profile }})
@@ -916,14 +913,6 @@ jobs:
         with:
           toolchain: stable
 
-      # Each job gets a fresh runner, so the lint job's `cargo package` output is
-      # not available here: this job must package the crate itself.
-      - name: package the crate
-        run: |
-          set -euo pipefail
-          cargo package
-          ls -l target/package/*.crate
-
       # Every release has three configurations, and this step is what makes that a
       # claim rather than a hope. Features are compile-time, so "three versions" for a
       # library means three *supported configurations*, each built here, each tested by
@@ -970,10 +959,10 @@ jobs:
           done
 
       # One artifact per configuration, not one artifact for the default and prose about the
-      # others. A `.crate` is feature-agnostic -- what a consumer gets depends on the features
-      # *they* enable -- so the three configurations are only "shipped" if each has something a
-      # user can take away and use, and if the release itself demonstrates what the three have
-      # in common.
+      # others. The library is feature-agnostic -- what a consumer gets depends on the
+      # features *they* enable -- so the three configurations are only "shipped" if each has
+      # something a user can take away and use, and if the release itself demonstrates what
+      # the three have in common.
       #
       # Each bundle carries the compiled library for that configuration, a runnable binary
       # (`xsiv_stdin`), the input vector it was run on, and a manifest with the exact build
@@ -1071,7 +1060,7 @@ jobs:
               echo "| File | What it is |"
               echo "| --- | --- |"
               echo "| \`xsiv_stdin\` | the crate's audit CLI, built for this configuration |"
-              echo "| \`libxchacha20_blake3_siv*.rlib\` | the compiled library for this configuration, **for inspection** — an \`rlib\` is not self-contained: linking it needs the same toolchain and the same dependency \`rlib\`s. The supported way to use this crate is the \`.crate\` attached to the release, with the features you want |"
+              echo "| \`libxchacha20_blake3_siv*.rlib\` | the compiled library for this configuration, **for inspection** — an \`rlib\` is not self-contained: linking it needs the same toolchain and the same dependency \`rlib\`s. The supported way to use this crate is the repository source tree (it carries the maintained \`blake3/\` fork), with the features you want |"
               echo "| \`kat.txt\` | the known-answer output for \`vector.txt\` in this configuration |"
               echo "| \`vector.txt\` | the input \`kat.txt\` is the answer for — one line, four space-separated hex fields (\`key nonce aad msg\`), the format \`xsiv_stdin\` reads on stdin |"
               echo
@@ -1116,7 +1105,7 @@ jobs:
           # The three configurations of this release
 
           Built and tested from commit \`${short}\`. Features are compile-time, so all three come
-          from the *same* \`.crate\` file; what differs is what the compiler includes.
+          from the *same source tree*; what differs is what the compiler includes.
 
           | Configuration | Cargo | What it adds |
           | --- | --- | --- |
@@ -1157,11 +1146,6 @@ jobs:
           # Defensive rather than a fix for a known failure: an unexpanded glob
           # is silent, and an unattached artifact is easy to miss at the time.
           shopt -s nullglob
-          crates=(target/package/*.crate)
-          if [ "${#crates[@]}" -eq 0 ]; then
-            echo "::error::no .crate artifact found to attach"
-            exit 1
-          fi
           # The configuration manifest is a *required* artifact: it is the statement that
           # this release is the three-configuration release, and a release that quietly
           # shipped without it would be the failure mode this whole step exists to stop.
@@ -1179,7 +1163,7 @@ jobs:
             echo "::error::expected three configuration bundles in dist/, found ${#bundles[@]}: ${bundles[*]}"
             exit 1
           fi
-          echo "artifacts to attach: ${crates[*]} ${manifest} ${bundles[*]}"
+          echo "artifacts to attach: ${manifest} ${bundles[*]}"
 
           # Idempotent in the strong sense: if the release already exists, attach
           # the artifact to it rather than reporting "nothing to do". This path is
@@ -1187,16 +1171,16 @@ jobs:
           # thing that would go unnoticed for a long time.
           if gh release view "$tag" >/dev/null 2>&1; then
             echo "release $tag already exists; uploading artifact"
-            gh release upload "$tag" "${crates[@]}" "$manifest" "${bundles[@]}" --clobber
+            gh release upload "$tag" "$manifest" "${bundles[@]}" --clobber
             exit 0
           fi
 
           cat > notes.md <<EOF
           Snapshot of \`main\` at commit [\`${short}\`](${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/commit/${GITHUB_SHA}).
 
-          **Three configurations, three artifacts.** Features are compile-time, so the
-          \`.crate\` is one source tree whose behaviour depends on the features a consumer
-          enables. Each configuration therefore also ships as its own bundle —
+          **Three configurations, three artifacts.** Features are compile-time, so
+          all three come from the same source tree; what differs is what the compiler
+          includes. Each configuration ships as its own bundle —
           \`xsiv-${short}-opt-out.tar.gz\`, \`-hardened.tar.gz\`, \`-ultra.tar.gz\` — containing the
           compiled library, a runnable binary, the known-answer output and the resolved
           feature set for that configuration, with digests in each bundle's \`README.md\`.

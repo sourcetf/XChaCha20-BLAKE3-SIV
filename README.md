@@ -154,20 +154,17 @@ Frozen does not mean finished, or standard: the format is this project's own, it
 so a consumer should pin an exact version rather than a range. A format change
 before 1.0 would be a revision bump, not a silent one.
 
-**It is not on crates.io yet, so the dependency lines in this file do not resolve
-today.** They are written the way they will read once there is a release; right now
-`version = "0.1"` points at nothing, and `CHANGELOG.md`'s top section is `Unreleased`
-for the same reason. Until then, depend on the repository:
+**This crate is source-only.** It is not on crates.io, and its BLAKE3 dependency is
+the maintained fork in `blake3/` (a direct path dependency), not a registry package.
+Use the repository at a `sha-<short>` tag:
 
 ```toml
-xchacha20-blake3-siv = { git = "https://github.com/sourcetf/XChaCha20-BLAKE3-SIV", features = ["ultra"] }
+xchacha20-blake3-siv = { git = "https://github.com/sourcetf/XChaCha20-BLAKE3-SIV", rev = "sha-<short>", features = ["ultra"] }
 ```
 
-and switch to the `version` form once the crate is published (a registry release is a
-deliberate step, not something CI does on a push — the `.crate` a build produces is
-attached to a GitHub Release instead). Pin a `rev` rather than letting a branch float:
-that same release job cuts a `sha-<short>` tag on every green push to `main`, so there
-is always a stable revision to name.
+The checkout carries `blake3/`, which Cargo resolves by path. Pin a `rev` rather than
+letting a branch float: the release job cuts a `sha-<short>` tag on every green push
+to `main`, so there is always a stable revision to name.
 
 ## Properties
 
@@ -581,11 +578,11 @@ magnitude worse than what the table above describes.
 features" should be one word rather than a checklist someone gets half-right.
 
 ```toml
-xchacha20-blake3-siv = { version = "0.1", features = ["ultra"] }
+xchacha20-blake3-siv = { git = "https://github.com/sourcetf/XChaCha20-BLAKE3-SIV", features = ["ultra"] }
 ```
 
-(Not on crates.io yet — "Wire format: frozen by revision, and the crate is 0.x" above
-carries the `git` line that works today.)
+(Source-only distribution: depend on the repository at a pinned `sha-<short>` tag;
+the checkout carries the maintained `blake3/` fork.)
 
 `ultra` includes `rng`, which pulls in `getrandom` and therefore needs an OS entropy
 source. It **does not build on bare-metal `no_std` targets** (e.g. `--features ultra
@@ -942,11 +939,10 @@ calls that out explicitly as unsuitable for commitment.
 With the opt-in `rng` feature the crate will draw from the OS CSPRNG for you:
 
 ```toml
-xchacha20-blake3-siv = { version = "0.1", features = ["rng"] }
+xchacha20-blake3-siv = { git = "https://github.com/sourcetf/XChaCha20-BLAKE3-SIV", features = ["rng"] }
 ```
 
-(Not on crates.io yet — see "Wire format: frozen by revision, and the crate is 0.x"
-above for the `git` line that works today.)
+(Source-only distribution: use the repository `git` line above, pinned to a tag.)
 
 ```rust
 use xchacha20_blake3_siv::{encrypt, random};
@@ -1184,13 +1180,13 @@ dependent crate:
   the addressable stream; and the Rust backends' counter increments wrap like the
   assembly at `u64::MAX` instead of panicking in debug builds.
 
-The patch is a **workspace-local** `[patch.crates-io]`, not a published dependency:
-`cargo package` still resolves `blake3 = "1.8"` from crates.io, so a published
-artifact would not contain these fixes. The same applies to **path and git consumers
-of this crate**: Cargo only applies `[patch]` in the workspace root, so their
-resolution also uses crates.io. The crate is not on crates.io; a release is blocked
-until the fork is published under its own package/version and the dependency is
-switched to it. That caveat is repeated in `Cargo.toml`.
+The parent depends on this directory **directly by path**: there is no
+`[patch.crates-io]` and no crates.io `blake3` dependency in either the library,
+the tests, or the fuzz workspace. The package is `publish = false` and distributed as
+source; a git checkout (or the repository tarball) carries `blake3/` with it. Consumers
+must not substitute a registry `blake3`; doing so removes the fixes above. A source
+archive is the supported distribution, and the CI release bundles are built from this
+same tree.
 
 ## Layout
 

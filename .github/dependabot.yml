@@ -2,8 +2,8 @@
 #
 # Pinning is a deliberate choice here (see the header of ci.yml): a `uses: foo@v7` is a
 # *mutable* reference, and a repointed tag runs arbitrary code in this repository's CI — with
-# `contents: write` in the release job, where it could tamper with the published `.crate`
-# artifact. Pinning to a commit SHA fixes the subject of the trust, and it creates the
+# `contents: write` in the release job, where it could tamper with the published release
+# artifacts. Pinning to a commit SHA fixes the subject of the trust, and it creates the
 # problem this file exists to solve: a security fix upstream does not arrive by itself.
 #
 # Dependabot closes that loop without giving up the pin. For `github-actions` it updates the

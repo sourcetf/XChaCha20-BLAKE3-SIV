@@ -3,7 +3,8 @@
 Source: the crates.io `blake3 1.8.7` package (published 2026-08-20), with the source
 changes below. Packaging metadata differs from the published archive (`Cargo.toml.orig`,
 `.cargo_vcs_info.json`, and the absent `.cargo-ok`/`Cargo.lock`), and this file is new.
-The parent `Cargo.toml` reaches this copy through `[patch.crates-io]`.
+The parent `Cargo.toml` depends on this directory **directly by path**; it does not use
+`[patch.crates-io]` or a crates.io `blake3` dependency.
 
 | Report ID | File(s) | Change |
 | --- | --- | --- |
@@ -30,10 +31,10 @@ within the registry build at 1 KiB/16 KiB/64 KiB/1 MiB; the 4 KiB cell is about
 about 10, inside its noise floor; see `performance.md`), and the restored AVX-512
 8-wide tail keeps 8..=15-chunk batches on `hash8`.
 
-**Publication caveat.** A crates.io package does not carry this `[patch]`; the parent
-`cargo package` resolves `blake3 = "1.8"` from crates.io. Publishing the fixed crate
-requires publishing this fork under its own package/version and switching the parent
-dependency to that package. The parent README and `Cargo.toml` state this.
+**Distribution policy.** The parent is source-only (`publish = false`) and depends on
+this directory directly by path. There is no crates.io `blake3` dependency to fall back
+to, and a git checkout carries the fork. Do not replace the path dependency with a
+registry version; that would remove every fix listed above.
 
 **Not patched.** D-03 (narrow `block_len`/`flags` ABI arguments in the unix
 SSE2/SSE4.1 assembly) remains: normal Rust/C callers zero-extend, and only a

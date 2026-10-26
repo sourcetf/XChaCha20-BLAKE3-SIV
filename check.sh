@@ -400,7 +400,7 @@ TARGET_DIR="${CARGO_TARGET_DIR:-target}"
 HOST_ARTIFACT="$TARGET_DIR/release/libxchacha20_blake3_siv.rlib"
 stale_input=""
 if [ -f "$HOST_ARTIFACT" ]; then
-  stale_input="$(find src Cargo.toml Cargo.lock -type f -newer "$HOST_ARTIFACT" -print -quit 2>/dev/null || true)"
+  stale_input="$(find src blake3 Cargo.toml Cargo.lock -type f -newer "$HOST_ARTIFACT" -print -quit 2>/dev/null || true)"
 fi
 # ...and it has to *be* an rlib: an existence check alone accepted any file, including the
 # 46-byte text file an audit planted at this path.

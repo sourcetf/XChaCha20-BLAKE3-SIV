@@ -81,14 +81,11 @@ edition = "2021"
 # hash of the key, and that is the residue this tool now looks for.
 xchacha20-blake3-siv = { path = "$ROOT", features = ["locked"] }
 # To compute the expected integrity tag (BLAKE3(key)[0..8]) independently, and to
-# run the blake3-only attribution control with the same wipe discipline.
-blake3 = { version = "1.8", default-features = false, features = ["zeroize"] }
+# run the blake3-only attribution control with the same wipe discipline. This tool's
+# standalone manifest must use the maintained fork directly: it does not inherit the
+# parent's path dependency, and there is no crates.io BLAKE3 in the graph.
+blake3 = { path = "$ROOT/blake3", default-features = false, features = ["zeroize"] }
 zeroize = "1"
-# The parent reaches the patched 1.8.7 through a path patch; a standalone manifest
-# does not inherit it, so without this the tool would measure the crates.io release
-# (and its integrity-tag control would come from a different BLAKE3 build).
-[patch.crates-io]
-blake3 = { path = "$ROOT/blake3" }
 [profile.release]
 opt-level = 3
 lto = true

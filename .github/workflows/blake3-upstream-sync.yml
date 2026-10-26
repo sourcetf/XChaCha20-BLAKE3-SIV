@@ -1,0 +1,49 @@
+name: BLAKE3 upstream sync
+
+# Weekly (and manually dispatchable) check for a newer BLAKE3 crate release.
+#
+# The job opens a **draft comparison PR**: blake3/ is replaced with pristine
+# upstream, and the branch carries three diffs under blake3/upstream-sync/
+# (local patches, upstream changes, combined). It is deliberately not a merge
+# candidate; a human decides which local fixes upstream has already made and
+# ports the rest. This is the "upstream moved" alarm, not an auto-merge.
+#
+# The GITHUB_TOKEN-created PR does not recursively trigger pull_request
+# workflows (GitHub suppresses workflow runs caused by the default token). That
+# is acceptable here: the unpatched tree is expected to fail the fork's
+# guard-page/equivalence tests until the patches are ported. Run CI manually on
+# the branch (or push a commit) when the comparison pass is ready.
+on:
+  schedule:
+    # Monday 06:00 UTC.
+    - cron: "0 6 * * 1"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Override the upstream version to compare (e.g. 1.8.8); empty = crates.io latest"
+        required: false
+        type: string
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: blake3-upstream-sync
+  cancel-in-progress: true
+
+jobs:
+  compare:
+    name: open upstream comparison PR
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+
+      - name: compare and open draft PR
+        env:
+          GH_TOKEN: ${{ github.token }}
+          INPUT_VERSION: ${{ inputs.version }}
+        run: bash tools/sync_blake3_upstream.sh

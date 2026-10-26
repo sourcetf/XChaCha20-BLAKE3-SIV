@@ -19,14 +19,10 @@ libfuzzer-sys = "0.4"
 [dependencies.xchacha20-blake3-siv]
 path = ".."
 
-# `fuzz` is deliberately outside the parent workspace, so the parent's
-# `[patch.crates-io]` does not reach this build. Without this duplicate patch, the
-# fuzz targets link crates.io BLAKE3 1.8.7 and exercise none of the vendored fork's
-# fixes (D-01 tail over-read, D-02 short `xof_many` write). Keep the two patches in
-# step; `cargo tree --manifest-path fuzz/Cargo.toml -i blake3` must show the path
-# package, not the registry source.
-[patch.crates-io]
-blake3 = { path = "../blake3" }
+# The parent uses the maintained BLAKE3 fork under `../blake3` as a direct path
+# dependency. No `[patch]` is needed here: that dependency resolves from the
+# parent's manifest, so the fuzz targets exercise the same fork the library does.
+# `cargo tree --manifest-path fuzz/Cargo.toml -i blake3` must show the path package.
 
 [[bin]]
 name = "roundtrip"

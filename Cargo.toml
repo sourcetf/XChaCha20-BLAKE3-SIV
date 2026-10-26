@@ -10,41 +10,12 @@ readme = "README.md"
 rust-version = "1.85"
 keywords = ["cryptography", "aead", "xchacha20", "blake3", "siv"]
 categories = ["cryptography", "no-std"]
-# What the published `.crate` contains. Without this, `cargo package` ships every
-# tracked, non-dotfile file: the CI workflows, `tools/`, `tests/`, the vendored
-# `blake3/` tree, and (worst) `mutants.out/`, whose logs carry developer host paths.
-# The allow list below is the crate plus the documents `README.md` links to; run
-# `cargo package --list` to verify it, rather than trusting a hand-maintained total
-# (which decayed as tests and the vendored tree were added). Cargo always includes
-# the manifest and the `readme` file.
-#
-# `Cargo.toml` and the `readme` file are not listed: cargo always includes them.
-# Naming `README.md` here would also sweep in `tests/README.md` -- include globs
-# match a bare file name at any depth (measured), so only the readme key keeps
-# that file's auto-inclusion limited to the package root.
-include = [
-    "src/**",
-    "benches/**",
-    "examples/**",
-    "CHANGELOG.md",
-    "SECURITY.md",
-    "SECURITY-ANALYSIS.md",
-    "performance.md",
-    "standard.txt",
-    "LICENSE-MIT",
-    "LICENSE-APACHE",
-]
-
-# docs.rs builds with the default features alone, and the default is `hardened`:
-# measured with `cargo doc --no-deps`, a default build renders neither `locked` nor
-# `random` (the `rng` feature's module), so half of this crate's public API -- the
-# opt-in layers, which are the point of the `ultra` section in README.md -- would be
-# invisible in the published docs. `all-features` rather than a list: a hand-picked set
-# (`ultra` was the first idea) documents exactly the features someone remembered to name,
-# and a feature added later would be invisible on docs.rs until someone noticed -- the
-# kind of gap that reads as a hidden API rather than a documentation setting.
-[package.metadata.docs.rs]
-all-features = true
+# Source-only distribution: BLAKE3 is the maintained fork under `blake3/`, reached
+# by a direct path dependency. This package does not resolve BLAKE3 from crates.io,
+# and it is not published as a `.crate`; consumers use the repository. The flag is
+# deliberate: `cargo publish` would otherwise have to strip the path dependency and
+# silently substitute the unpatched registry crate.
+publish = false
 
 [dependencies]
 # subtle provides constant-time comparison
@@ -104,15 +75,14 @@ getrandom = { version = "0.4", optional = true, default-features = false }
 # and `test_all_accelerated_paths_agree_on_a_boundary_corpus` pin the bytes, and
 # they run against both backends.
 #
-# **`blake3::platform` is hazmat; do not call it directly.** The vendored 1.8.7
-# fork (see `[patch.crates-io]` below) fixes the unsound `hash_many` tails, the
-# multi-block `xof_many` ABI, and the short-output `xof_many` write (a safe call
-# with `out.len()` in 1..=63 wrote a whole 64-byte block in release, up to 63 bytes
-# past the slice); the published 1.8.7 does not. This crate still does not call it:
-# it only uses `OutputReader::fill`, which passes `full_blocks * 64` and handles the
-# remainder through `fill_one_block` (confirmed with canaried slices of every length
-# 0..=130).
-blake3 = { version = "1.8", default-features = false, features = ["zeroize"] }
+# **`blake3::platform` is hazmat; do not call it directly.** The maintained fork
+# under `blake3/` fixes the unsound `hash_many` tails, the multi-block `xof_many`
+# ABI, and the short-output `xof_many` write (a safe call with `out.len()` in
+# 1..=63 wrote a whole 64-byte block in release, up to 63 bytes past the slice).
+# This crate still does not call it: it only uses `OutputReader::fill`, which
+# passes `full_blocks * 64` and handles the remainder through `fill_one_block`
+# (confirmed with canaried slices of every length 0..=130).
+blake3 = { path = "blake3", default-features = false, features = ["zeroize"] }
 
 # `zeroize` exists so BLAKE3's *internal* state can be wiped. The MAC key lives
 # inside `blake3::Hasher` (`key: CVWords`, plus the chunk state and CV stack), and
@@ -136,8 +106,8 @@ zeroize = { version = "1.5", default-features = false }
 [dev-dependencies]
 criterion = "0.5"
 # For the digest-based large-vector fixture: the test hashes `ciphertext || tag`
-# with plain BLAKE3 and compares it to what the reference implementation produced.
-blake3 = { version = "1.8", default-features = false, features = ["zeroize"] }
+# with the same vendored BLAKE3 fork the library uses.
+blake3 = { path = "blake3", default-features = false, features = ["zeroize"] }
 # The head-to-head benchmark in `benches/compare.rs`: RustCrypto's
 # XChaCha20-Poly1305 is the natural reference point (same 24-byte nonce), and
 # `aead` supplies the trait both sides are driven through.
@@ -235,21 +205,6 @@ rng = ["dep:getrandom"]
 # or when running under Miri.
 pure = ["blake3/pure"]
 
-# BLAKE3 1.8.7 has an out-of-bounds read in the AVX2/AVX-512 2/4-wide `hash_many`
-# tail (reproduced with a guard page: `Platform::detect()` = AVX512, two inputs at a
-# page boundary -> STATUS_ACCESS_VIOLATION). The vendored copy in `blake3/` contains
-# the fix; the patch is what makes this workspace's dependencies (normal and dev) use
-# it. `fuzz/` is a separate workspace and carries the same `[patch.crates-io]` entry
-# itself; without that duplicate, the fuzz targets silently link crates.io 1.8.7.
-#
-# A crates.io release cannot carry this path patch: `[patch]` applies only while
-# building this workspace, and a published crate would resolve `blake3 = "1.8"` from
-# crates.io again. Publishing this fork requires publishing a distinct patched
-# package/version and changing the dependency to it; until then the crate is a
-# working-tree/CI build, which the README's "not on crates.io" status already says.
-[patch.crates-io]
-blake3 = { path = "blake3" }
-
 [[bench]]
 name = "bench"
 harness = false
@@ -294,8 +249,7 @@ strip = true
 resolver = "3"
 # `cargo-fuzz` builds its target against the nightly sanitizer runtime, with its
 # own manifest; it must not be part of this workspace or the two disagree about
-# who owns the profile. `blake3` is the vendored patched dependency: it is a
-# workspace-external package reached by `[patch.crates-io]`, and keeping it out
-# of this workspace lets its own manifest/toolchain and guard-page example run
-# with `--manifest-path blake3/Cargo.toml`.
+# who owns the profile. `blake3` is a direct path dependency on the maintained fork;
+# keeping it out of this workspace lets its own manifest/toolchain and guard-page
+# example run with `--manifest-path blake3/Cargo.toml`.
 exclude = ["fuzz", "blake3"]

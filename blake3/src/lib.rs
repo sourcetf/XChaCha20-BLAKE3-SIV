@@ -1320,10 +1320,13 @@ impl Hasher {
                 self.push_cv(left_cv, self.chunk_state.chunk_counter);
                 self.push_cv(
                     right_cv,
-                    self.chunk_state.chunk_counter.wrapping_add(subtree_chunks / 2),
+                    self.chunk_state
+                        .chunk_counter
+                        .wrapping_add(subtree_chunks / 2),
                 );
             }
-            self.chunk_state.chunk_counter = self.chunk_state.chunk_counter.wrapping_add(subtree_chunks);
+            self.chunk_state.chunk_counter =
+                self.chunk_state.chunk_counter.wrapping_add(subtree_chunks);
             input = &input[subtree_len..];
         }
 

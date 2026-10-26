@@ -8,6 +8,15 @@ green push to `main` — which are build artefacts of that job, not construction
 
 ## Unreleased
 
+### BLAKE3 is a direct path dependency; crates.io is no longer in the graph
+
+The maintained fork in `blake3/` is now a direct `path` dependency of both the parent
+and the `fuzz/` workspace. There is no `[patch.crates-io]` and no crates.io `blake3`
+dependency to resolve. The package is `publish = false`; the release job ships the
+three source-built configuration bundles and no longer produces or attaches a `.crate`.
+`check.sh` includes `blake3/` in its stale-input scan, and README/`blake3/PATCHES.md`
+describe the source-only distribution instead of a registry fallback.
+
 ### Audit follow-up: backend, build, fuzz and verification-gate defects
 
 - The vendored `hash_many` tail now peels one safe 8-wide AVX-512 group before the
@@ -124,11 +133,10 @@ longer wraps; reproduced as `1` instead of `1 << 63`), and D-06 (`position` satu
 D-03's narrow-argument ABI issue and D-09's manually-constructed `Platform` variants
 remain documented upstream limitations; the parent path does not reach them.
 
-`[patch.crates-io]` is workspace-local. `cargo package` verifies against the crates.io
-`blake3` (the packaged manifest does not carry the patch), so a published artifact
-would not include these fixes until the fork is published under its own
-package/version and the dependency is switched. The crate is not on crates.io; the
-README and `Cargo.toml` say so explicitly. No wire-format bytes changed: the full
+The fork is a direct path dependency in both the parent and the fuzz workspace; there
+is no crates.io `blake3` fallback. The package is `publish = false`, and CI no longer
+packages a `.crate`; the repository source and the three configuration bundles are the
+distribution. No wire-format bytes changed: the full
 default-feature and `--all-features` suites pass.
 
 ### The sweep's children are contained, because an exploding fault was taking the runner with it
