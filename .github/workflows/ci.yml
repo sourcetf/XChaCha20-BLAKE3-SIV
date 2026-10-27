@@ -585,7 +585,7 @@ jobs:
           # missing/renamed/#[ignore]d guard would otherwise exit 0 with "0 passed".
           guard_log="$work/timing-guard.log"
           cargo test --locked --release --test timing -- --exact timing_screens_are_present_and_not_ignored 2>&1 | tee "$guard_log"
-          guard_passed="$(grep -E 'test result:' "$guard_log" | tail -1 | awk '{for (i=1;i<NF;i++) if ($(i+1)=="passed") print $i}' || true)"
+          guard_passed="$(grep -E 'test result:' "$guard_log" | tail -1 | awk '{for (i=1;i<NF;i++) if ($(i+1) ~ /^passed/) print $i}' || true)"
           if [ "${guard_passed:-0}" -ne 1 ]; then
             echo "::error::the timing presence guard executed ${guard_passed:-0} test(s), not 1; it was renamed, ignored or compiled out"
             exit 1
