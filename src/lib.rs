@@ -1318,9 +1318,8 @@ pub mod locked {
         /// Returns `Ok(())` only if **both** succeeded. `EFAULT` is impossible for a live
         /// slice, so a failure here is the environment's: `ENOMEM` means the
         /// `RLIMIT_MEMLOCK` allowance is exhausted (common, and not fatal), `EPERM` a
-        /// hardened container. `EINVAL` has one environment of its own — a kernel whose
-        /// pages are larger than the `page_size` fallback (see there), where the advice is
-        /// misaligned and this refuses rather than leaving the range unlocked; and
+        /// hardened container. `EINVAL` can mean a special VMA the kernel refuses to
+        /// advise (the page size itself is read from `AT_PAGESZ`, not guessed), and
         /// [`LockedKey::new`](crate::locked::LockedKey::new) fails closed on that error
         /// too. The caller decides; this
         /// crate's default build never calls it.
@@ -1343,10 +1342,10 @@ pub mod locked {
         /// direction: `madvise` applies its advice as it walks the range and can return
         /// `ENOMEM` at a hole (or `EINVAL` at a special VMA) *after* flagging the VMAs it
         /// already passed, and `VM_DONTDUMP` is sticky. The rollback therefore issues
-        /// `MADV_DODUMP` over the same page-aligned range before `munlock`, undoing any
-        /// partial advice rather than only the lock — mirroring the successful
-        /// `mlock`-then-`DONTDUMP` order in reverse, and clearing a dump exclusion it may
-        /// not have been the one to set, exactly as [`unlock_range`] does.
+        /// `munlock` first and restores `MADV_DODUMP` over the same page-aligned range only
+        /// if the unlock succeeded, undoing any partial advice rather than only the lock.
+        /// If the unlock is refused, the range stays non-dumpable; a leaked exclusion is
+        /// recoverable, a locked-and-dumpable page is not.
         ///
         /// A refused `mlock` is **not** rolled back, because this function cannot tell
         /// whether the kernel locked a prefix of the range before failing — and undoing a
@@ -1416,11 +1415,12 @@ pub mod locked {
                     // `VM_DONTDUMP` is sticky. Restore the lock first and only then undo
                     // the advice, the same order as `unlock_range_with`: if `munlock` is
                     // refused, the range stays non-dumpable instead of becoming a
-                    // locked-and-dumpable range with a live secret. Both results are
-                    // ignored because this call is already failing and the caller has
-                    // nothing to do with them; the original `madvise` error is returned.
-                    let _ = syscall2(NR_MUNLOCK, ptr as usize, len);
-                    let _ = syscall3(NR_MADVISE, start, end - start, MADV_DODUMP);
+                    // locked-and-dumpable range with a live secret. The `munlock`
+                    // result is checked; the original `madvise` error is returned.
+                    let u = syscall2(NR_MUNLOCK, ptr as usize, len);
+                    if ok(u) {
+                        let _ = syscall3(NR_MADVISE, start, end - start, MADV_DODUMP);
+                    }
                     return Err(d);
                 }
             }
@@ -1773,6 +1773,15 @@ pub mod locked {
                 // `/proc/self/status` is bounded in practice; refuse an unbounded stream
                 // rather than growing without limit.
                 if buf.len().saturating_add(n) > 1 << 20 {
+                    // SAFETY: closing a descriptor this function owns.
+                    unsafe {
+                        let _ = syscall2(NR_CLOSE, fd, 0);
+                    }
+                    return None;
+                }
+                // This is a diagnostic API returning `Option`, so an allocation failure
+                // should report "unavailable" rather than abort the process.
+                if buf.try_reserve(n).is_err() {
                     // SAFETY: closing a descriptor this function owns.
                     unsafe {
                         let _ = syscall2(NR_CLOSE, fd, 0);

@@ -8,6 +8,33 @@ green push to `main` — which are build artefacts of that job, not construction
 
 ## Unreleased
 
+### AUDIT-REPORT-2 follow-up (`ed89b05`)
+
+No wire-format bytes changed.
+
+- **Windows CI now exercises the native MSVC assembly.** `--all-features` implicitly
+  enabled the parent `pure` feature, which made BLAKE3 skip all C/asm backends; the
+  Windows job now uses `--features ultra`, so the Windows guard-page test and the native
+  kernels really run.
+- **The fork suite compiles under `zeroize`.** The `Platform` pattern use was invalid
+  after the opaque-struct change; it is now `PartialEq`. CI runs the fork suite with
+  `--features zeroize`, matching the parent's actual dependency feature set.
+- **`cargo package` is refused.** `publish = false` does not stop `cargo package`, which
+  rewrites the `blake3` path dependency to unpatched crates.io BLAKE3. A build-script
+  guard checks the manifest Cargo supplied and fails packaging; the sync candidate
+  branch (`blake3/upstream-sync/`) is also refused by the same guard.
+- **`lock_range` rollback now checks `munlock`.** It restores `MADV_DODUMP` only when
+  the unlock succeeded, matching the documented fail-closed order.
+- **Kani shard parser** counts every proof attribute, not one per line, and the
+  committed harness count is exact rather than a floor. The timing presence gate now
+  requires its one test to execute, and the runner-shutdown retry no longer classifies
+  a bare timeout cancellation as infrastructure.
+- **Plaintext failure witness** corrupts the ciphertext instead of the tag, so the
+  decrypted buffer still contains the 0xA7 sentinel and the wipe check is meaningful.
+- **Smaller fixes:** checked AVX-512 tail fallback and 32-bit output-length arithmetic
+  in the fork, fallible `locked_bytes` allocation, API-break/provenance notes, LF
+  normalization for `standard.txt`, and the audit-response title.
+
 ### Default stack scrub, C-library hardening, and release gates (2026-10-27)
 
 No wire-format byte changed.
@@ -63,7 +90,7 @@ direct/dev/build dependency, the tests, tooling, workflows and release path.
   rejects more than one chunk; `Output::root_hash` uses its counter; and `copy_wide`'s
   stack buffer is 16 KiB. The fork sets `publish = false` and `rust-version = "1.85"`,
   tracks its own lock, and vendors upstream's `reference_impl` and test vectors so its
-  43-test suite runs in CI. `.cargo-ok` and the misleading pristine
+  43 default-feature tests run in CI. `.cargo-ok` and the misleading pristine
   `.cargo_vcs_info.json` are removed. `PATCHES.md` now lists V-03 in `rust_avx2.rs`,
   the safe-API hardening, the remaining C/assembly limitations, and the provenance of
   the added test files.

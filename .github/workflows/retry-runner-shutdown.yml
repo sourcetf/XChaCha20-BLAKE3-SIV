@@ -7,6 +7,10 @@ name: Retry a run the runner shut down
 #   service is stopped, or a manually started runner is canceled.
 #   ##[error]The operation was canceled.
 #
+# The generic "operation was canceled" line is not sufficient on its own: a job that hits
+# its own `timeout-minutes` emits it too, and re-running that would turn a budget hit green
+# by repetition. The classifier below requires the explicit shutdown/lost/143 wording.
+#
 # Measured on 2026-10-21: `Deep checks` #213 (run 39628640338) lost 17 of its 42 sweep
 # jobs that way, and the re-run (run 39639772764) lost 6 of its first 10, at 15-51
 # minutes into the step, while every shorter job in the same runs (Miri, TSAN, fuzzing,
@@ -64,30 +68,24 @@ jobs:
         run: |
           set -euo pipefail
           jobs="$(mktemp)"
-          # Keep the name/conclusion plus timestamps. Workflow runs from forks are
-          # excluded by the job-level `if`: their annotations are controlled by the PR
-          # author, and a re-run with write permission must not let a fork turn a real
-          # failure green on attempt 2. The timestamps distinguish a runner shutdown
-          # from a job killed by its own timeout-minutes.
+          # Keep the name and conclusion as well as the id. Forks are excluded by the
+          # job-level `if`; only explicit runner-shutdown wording is infra.
           gh api --paginate "repos/$REPO/actions/runs/$RUN_ID/jobs?per_page=100" \
-            --jq '.jobs[] | select(.conclusion == "failure" or .conclusion == "cancelled") | "\(.id)\t\(.name)\t\(.conclusion)\t\(.started_at)\t\(.completed_at)"' > "$jobs"
+            --jq '.jobs[] | select(.conclusion == "failure" or .conclusion == "cancelled") | "\(.id)\t\(.name)\t\(.conclusion)"' > "$jobs"
           if [ ! -s "$jobs" ]; then
             echo "No failed jobs to consider."
             exit 0
           fi
 
           # A job id doubles as its check-run id, and the annotations are where the
-          # runner's own wording survives: "received a shutdown signal" and "lost
-          # communication with the server" are infrastructure; "The operation was
-          # canceled" is the generic wording the service pairs with them; and exit 143
-          # is SIGTERM, which is how the step process is ended when the runner service
-          # stops (measured: 5 lost-communication, 10 canceled and 1 exit 143 in run
-          # 39639772764). A verdict or a FAIL line matches none of these.
+          # runner's own wording survives. Only explicit shutdown/lost/143 wording is
+          # infrastructure. "The operation was canceled" alone is also what a job killed
+          # by its own timeout-minutes says, so it deliberately stays red.
           infra=0
           cancelled_infra=0
           other=0
           derived=0
-          while IFS=$'\t' read -r id name conclusion started completed; do
+          while IFS=$'\t' read -r id name conclusion; do
             # The verdict job aggregates the shards: when a shard was stopped by the
             # runner, the verdict necessarily fails on the missing report, and its
             # annotation says so in ordinary FAIL words. It is exempt from the
@@ -98,16 +96,11 @@ jobs:
               continue
             fi
             notes="$(gh api --paginate "repos/$REPO/check-runs/$id/annotations" --jq '.[].message')"
-            # A job killed by its own `timeout-minutes` also says "The operation was
-            # canceled". Do not retry that; a budget hit is a result, not lost work.
-            # The sweep jobs have 60-minute budgets and the wide jobs 300; the runner
-            # shutdowns that motivated this file were 15-51 minutes in, so 55 minutes
-            # separates them without hard-coding job names.
-            duration=0
-            if start_epoch="$(date -d "$started" +%s 2>/dev/null)" &&
-               end_epoch="$(date -d "$completed" +%s 2>/dev/null)"; then
-              duration=$((end_epoch - start_epoch))
-            fi
+            # Only the runner's explicit shutdown annotations are infra. A bare
+            # "The operation was canceled" is also what a job killed by its own
+            # `timeout-minutes` says, and retrying a budget hit would turn it green by
+            # repetition. A canceled job without an explicit shutdown/lost/143 marker
+            # stays red; that is the fail-closed direction.
             # `case`, not `printf ... | grep -q`: under `pipefail` grep exits at its
             # first match, a large annotation set gives printf SIGPIPE, and the
             # pipeline reports 141 -- so a real shutdown is read as "some other
@@ -119,20 +112,9 @@ jobs:
                   cancelled_infra=$((cancelled_infra + 1))
                 fi
                 ;;
-              *"The operation was canceled"*)
-                if [ "$duration" -ge 3300 ]; then
-                  other=$((other + 1))
-                  echo "job $id was cancelled after $duration s; that is a timeout, not a runner shutdown"
-                else
-                  infra=$((infra + 1))
-                  if [ "$conclusion" = "cancelled" ]; then
-                    cancelled_infra=$((cancelled_infra + 1))
-                  fi
-                fi
-                ;;
               *)
                 other=$((other + 1))
-                echo "job $id did not carry a runner-shutdown annotation:"
+                echo "job $id did not carry an explicit runner-shutdown annotation:"
                 sed -n '1,3s/^/    /p' <<<"$notes"
                 ;;
             esac

@@ -1,0 +1,5 @@
+# The vendored BLAKE3 fork and its sync path are security-critical. Require the
+# maintainer's review where the host supports code-owner enforcement.
+/blake3/ @sourcetf
+/tools/sync_blake3_upstream.sh @sourcetf
+/.github/workflows/blake3-upstream-sync.yml @sourcetf

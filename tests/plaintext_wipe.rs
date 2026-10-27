@@ -135,9 +135,11 @@ fn plaintext_vec_is_wiped_before_deallocation() {
 }
 
 /// The same witness for the *failure* path of the allocating entry point: a correct key
-/// with a tampered tag decrypts the known plaintext, then rejects and must wipe the
-/// internal buffer before freeing it. `decrypt`'s own test can only observe the error
-/// variant; this observes the bytes the allocator is about to hand out.
+/// and tag, but a corrupted ciphertext, decrypts under the correct keystream (leaving
+/// most of the known 0xA7 plaintext in the buffer), then rejects because the recomputed
+/// tag differs, and must wipe the internal buffer before freeing it. Tampering with the
+/// tag instead would change the KDF input and make the recovered buffer pseudorandom,
+/// so the 0xA7 residue check would be probabilistic; this is the meaningful sentinel.
 #[test]
 fn decrypt_failure_wipes_internal_plaintext() {
     let _serial = SERIAL
@@ -149,15 +151,15 @@ fn decrypt_failure_wipes_internal_plaintext() {
     let message = vec![0xA7u8; 4096];
 
     let (ciphertext, tag) = encrypt(&key, &nonce, aad, &message).unwrap();
-    let mut bad_tag = tag;
-    bad_tag[0] ^= 1;
+    let mut bad_ciphertext = ciphertext.clone();
+    bad_ciphertext[0] ^= 1;
 
     SAW_RESIDUE.store(false, Ordering::SeqCst);
     SAW_WATCHED_FREE.store(false, Ordering::SeqCst);
     WATCH_ALLOC_PTR.store(0, Ordering::SeqCst);
     WATCH_LEN.store(message.len(), Ordering::SeqCst);
     ARM_ALLOC.store(true, Ordering::SeqCst);
-    let error = decrypt(&key, &nonce, aad, &ciphertext, &bad_tag).unwrap_err();
+    let error = decrypt(&key, &nonce, aad, &bad_ciphertext, &tag).unwrap_err();
     ARM_ALLOC.store(false, Ordering::SeqCst);
 
     assert_eq!(error, Error::AuthenticationFailed);

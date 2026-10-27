@@ -1,4 +1,4 @@
-# Audit response — the five third-party reviews of revision `8ae80ce` (and, in §5, the line-by-line report against `92c85ad`)
+# Audit response — four third-party reviews of revision `8ae80ce`, plus the §5 line-by-line report against `92c85ad`
 
 Four reports were produced against revision `8ae80ce` (construction `v0.3`), and this document
 records what was done with each finding: what was **fixed** (with the commit and the evidence),

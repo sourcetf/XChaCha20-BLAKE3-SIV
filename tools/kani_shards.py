@@ -396,15 +396,17 @@ def harnesses():
     # again -- the failure mode this parser exists to prevent, and the one a `>= 17` count
     # floor in `tools/check_kani_cfg.sh` cannot see when the harness that vanishes is a new
     # one. A `// #[kani::proof]` line is a comment, and is not counted.
-    attribute_lines = sum(
-        1
+    # Count every attribute occurrence, not one per line: two `#[kani::proof]` tokens
+    # on one line used to produce one name and pass a line-based cross-check, leaving
+    # the second harness permanently outside every shard.
+    proof_attrs = sum(
+        len(PROOF_ATTR.findall(line))
         for line in lines
         if not line.strip().startswith("//")
-        and ("#[kani::proof]" in line or PROOF_ATTR.search(line) is not None)
     )
-    if attribute_lines != len(names):
+    if proof_attrs != len(names):
         raise SystemExit(
-            f"error: {attribute_lines} line(s) start with #[kani::proof] but {len(names)} "
+            f"error: {proof_attrs} #[kani::proof] attribute(s) but {len(names)} "
             f"harness name(s) were parsed -- a harness is being dropped silently"
         )
     if not names:

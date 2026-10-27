@@ -657,7 +657,7 @@ jobs:
       - name: dependency inventory
         run: |
           set -euo pipefail
-          cargo metadata --format-version 1 > dependencies.json
+          cargo metadata --locked --format-version 1 > dependencies.json
           cargo tree --edges normal > dependencies.txt
           cargo tree --edges normal | sort -u | wc -l
 

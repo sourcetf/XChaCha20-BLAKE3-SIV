@@ -213,8 +213,12 @@ const DIVISION_METHODS: &[&str] = &[
 ///
 /// `if` 47 -> 48 when `LockedKey::new` began rejecting unsupported targets before
 /// allocating its page: that branch tests a compile-time constant, not secret content.
+/// `if` 48 -> 49 when `lock_range`'s failure rollback began checking the `munlock`
+/// result before restoring `MADV_DODUMP`: a syscall-result branch, not secret content.
+/// `if` 49 -> 50 when `locked_bytes` switched to fallible `Vec::try_reserve`, a branch
+/// on allocation success, not secret content.
 const CONTROL_FLOW: &[(&str, usize)] = &[
-    ("if", 48),
+    ("if", 50),
     ("while", 14),
     ("for", 25),
     ("loop", 2),

@@ -40,13 +40,13 @@ cfg_if::cfg_if! {
     }
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Platform(PlatformKind);
 
 /// The implementation chosen by [`Platform::detect`] or one of its checked
 /// constructors. Private on purpose: a caller cannot name an ISA its CPU does not
 /// implement and hand it to a safe hashing method.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum PlatformKind {
     Portable,
     #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
@@ -232,8 +232,12 @@ impl Platform {
         // This used to be a `debug_assert`, so a safe caller passing a short `out`
         // triggered an out-of-bounds write in release. Keep a real check on this safe
         // API; the tree code always passes at least this much.
+        let out_needed = inputs
+            .len()
+            .checked_mul(OUT_LEN)
+            .expect("hash_many input count overflows usize");
         assert!(
-            out.len() >= inputs.len() * OUT_LEN,
+            out.len() >= out_needed,
             "hash_many output buffer is too short for the inputs"
         );
         // The C/assembly kernels process a full SIMD group and then a 4/2/1-wide
@@ -389,18 +393,33 @@ impl Platform {
                 // (`pure`); AVX2 still exists there, and the SSE4.1 path is the safe
                 // 4-wide tail for it.
                 #[cfg(blake3_avx512_ffi)]
-                PlatformKind::AVX512 => unsafe {
-                    crate::sse41::hash_many(
-                        inputs,
-                        key,
-                        counter,
-                        increment_counter,
-                        flags,
-                        flags_start,
-                        flags_end,
-                        out,
-                    )
-                },
+                PlatformKind::AVX512 => {
+                    if sse41_detected() {
+                        unsafe {
+                            crate::sse41::hash_many(
+                                inputs,
+                                key,
+                                counter,
+                                increment_counter,
+                                flags,
+                                flags_start,
+                                flags_end,
+                                out,
+                            )
+                        }
+                    } else {
+                        portable::hash_many(
+                            inputs,
+                            key,
+                            counter,
+                            increment_counter,
+                            flags,
+                            flags_start,
+                            flags_end,
+                            out,
+                        )
+                    }
+                }
                 PlatformKind::SSE2 => unsafe {
                     crate::sse2::hash_many(
                         inputs,

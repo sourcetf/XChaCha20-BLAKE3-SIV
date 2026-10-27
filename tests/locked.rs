@@ -1627,6 +1627,14 @@ fn the_dump_advice_is_issued_on_the_right_range() {
     let dodump = rollback
         .find("syscall3(NR_MADVISE, start, end - start, MADV_DODUMP)")
         .expect("the rollback must restore MADV_DODUMP after releasing the lock");
+    let guard = rollback
+        .find("if ok(u) {")
+        .expect("the rollback must restore MADV_DODUMP only when munlock succeeded");
+    assert!(
+        dodump > guard,
+        "MADV_DODUMP must be inside the `if ok(u)` guard, not after it: a refused munlock \
+         must leave the range non-dumpable\n{rollback}"
+    );
     assert!(
         munlock < dodump,
         "the rollback must munlock before restoring MADV_DODUMP: if the unlock is refused, \

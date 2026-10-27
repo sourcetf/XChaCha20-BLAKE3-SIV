@@ -145,6 +145,7 @@ jobs:
         run: |
           set -euo pipefail
           cargo test --locked --manifest-path blake3/Cargo.toml
+          cargo test --locked --manifest-path blake3/Cargo.toml --features zeroize
           cargo test --locked --release --manifest-path blake3/Cargo.toml --features pure
 
       # The tools' contract: "could not run" is exit 3, never 0, and the caller that
@@ -451,11 +452,13 @@ jobs:
           rm -f "$vacuous"
 
   windows:
-    name: windows (MSVC, all features)
+    name: windows (MSVC, ultra; native asm)
     # The Windows assembly is selected by build.rs and was the platform on which
-    # D-01's guard-page fault was first reproduced; no other job compiles it. The
-    # `locked` tests skip on this platform by design, and `ultra` exercises the
-    # witness and the non-Linux stubs.
+    # D-01's guard-page fault was first reproduced; no other job compiles it.
+    # Do NOT use --all-features here: the parent's `pure` feature is included by
+    # --all-features, and BLAKE3's build.rs then skips every C/asm backend. `ultra`
+    # includes the witness, rng and locked layers without `pure`. The `locked`
+    # tests skip on this platform by design.
     runs-on: windows-latest
     timeout-minutes: 45
     steps:
@@ -467,7 +470,7 @@ jobs:
         with:
           shared-key: windows
       - name: cargo test (all features, release)
-        run: cargo test --locked --release --all-features -- --skip timing
+        run: cargo test --locked --release --features ultra -- --skip timing
       - name: cargo check (no default features)
         run: cargo check --locked --no-default-features --all-targets
 
@@ -578,10 +581,15 @@ jobs:
         run: |
           set -euo pipefail
           work="${RUNNER_TEMP:-${TMPDIR:-/tmp}}"
-          # Run the source-level guard itself. `--list` still names ignored tests, so the
-          # list check below is necessary but not sufficient; the guard rejects an ignore
-          # or cfg attribute on either screen (including cfg_attr spellings).
-          cargo test --locked --release --test timing -- --exact timing_screens_are_present_and_not_ignored
+          # Run the source-level guard itself and require its one test to execute. A
+          # missing/renamed/#[ignore]d guard would otherwise exit 0 with "0 passed".
+          guard_log="$work/timing-guard.log"
+          cargo test --locked --release --test timing -- --exact timing_screens_are_present_and_not_ignored 2>&1 | tee "$guard_log"
+          guard_passed="$(grep -E 'test result:' "$guard_log" | tail -1 | awk '{for (i=1;i<NF;i++) if ($(i+1)=="passed") print $i}' || true)"
+          if [ "${guard_passed:-0}" -ne 1 ]; then
+            echo "::error::the timing presence guard executed ${guard_passed:-0} test(s), not 1; it was renamed, ignored or compiled out"
+            exit 1
+          fi
           cargo test --locked --release --test timing -- --list | tee "$work/timing-list.log"
           for name in \
             timing_tag_position_screen_finds_no_gross_difference \

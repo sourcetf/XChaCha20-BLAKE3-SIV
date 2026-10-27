@@ -131,14 +131,14 @@ case "$harness_count" in
     sed 's/^/      /' "$WORK/kani-count.err" >&2
     exit 1 ;;
 esac
-if [ "$harness_count" -lt "$COMMITTED_HARNESSES" ]; then
-  echo "FAIL: src/proofs.rs contains $harness_count #[kani::proof] harness(es), fewer" >&2
-  echo "      than the $COMMITTED_HARNESSES this gate is written against. The crate" >&2
+if [ "$harness_count" -ne "$COMMITTED_HARNESSES" ]; then
+  echo "FAIL: src/proofs.rs contains $harness_count #[kani::proof] harness(es), not" >&2
+  echo "      the $COMMITTED_HARNESSES this gate is written against. The crate" >&2
   echo "      still type-checks, and the Formal job's matrix would silently shrink, so" >&2
-  echo "      a removed harness is judged here rather than nowhere." >&2
+  echo "      a removed or added harness is judged here rather than nowhere." >&2
   exit 1
 fi
-echo "harness count: $harness_count (>= the $COMMITTED_HARNESSES committed)"
+echo "harness count: $harness_count (== the $COMMITTED_HARNESSES committed)"
 # The count is only as trustworthy as the parser that produces it, so the parser's
 # rejection rules get a control of their own. Each shape below once inflated the count
 # while leaving the harness uncompiled: a cfg above or below the marker (including one
@@ -154,6 +154,7 @@ parser = sys.argv[1]
 base = "#[kani::proof]\nfn real_one() {}\n"
 cases = [
     ("an ordinary harness", base, True, "1"),
+    ("two proofs on one line", "#[kani::proof] #[kani::proof]\nfn dup() {}\n", False, None),
     ("a cfg above the marker", "#[cfg(any())]\n#[kani::proof]\nfn g() {}\n", False, None),
     ("a cfg above the marker past a comment",
      "#[cfg(any())]\n// why\n#[kani::proof]\nfn g() {}\n", False, None),

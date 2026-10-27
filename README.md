@@ -202,7 +202,7 @@ to `main`, so there is always a stable revision to name.
   not cover a page that was already swapped out, a core dump, or a cold boot — see
   "What this crate cannot fix for you" below. Debug builds spill additional secret
   copies; do not run them with real keys.
-- **`no_std`** — with `alloc`.
+- **`no_std`** — with `alloc`. Every AEAD call uses the 16 KiB `scrub_stack` frame: reserve at least `stack_requirement_bytes()` (32 KiB) of thread stack, including on bare-metal targets.
 - **SIMD** — SSE2 / AVX2 on x86-64, NEON on aarch64, with a scalar reference
   fallback on every other target. All backends are held byte-identical to the
   scalar path by differential tests, and to *each other* by
@@ -601,6 +601,11 @@ x86_64/aarch64; its stubs fail closed elsewhere). The `witness` module hangs off
 the `ultra` feature *name* rather than off the features it implies, and there is no
 `witness` feature, so on a target where `ultra` cannot build there is no way to turn the
 second implementation on ("What the witness is" prices that loss).
+
+Every one of those features still runs the unconditional `scrub_stack`: reserve at
+least `stack_requirement_bytes()` (32 KiB) for each AEAD call, including on
+`thumbv7em-none-eabihf`. The bare-metal CI job is a compile check, not a stack-fit
+guarantee; a caller on a small-stack RTOS must size the thread explicitly.
 
 | Layer | What it defends | Cost (measured, this host) |
 | --- | --- | --- |
@@ -1168,7 +1173,7 @@ dependent crate:
   short `out` and a non-block input length in release; `guts::ChunkState::update`
   rejects more than one chunk; `Output::root_hash` uses its counter; and `copy_wide`'s
   stack buffer is 16 KiB instead of 64 KiB. The fork also vendors upstream's
-  `reference_impl` and test vectors, so its own 43-test suite runs in CI.
+  `reference_impl` and test vectors, so its own 43 default-feature tests run in CI (the source also has feature-gated tests).
 
 The C library is patched too: `blake3/c/blake3_dispatch.c` keeps only complete SIMD
 groups on the AVX2/AVX-512 kernels and sends tails to SSE/portable, the unix compress

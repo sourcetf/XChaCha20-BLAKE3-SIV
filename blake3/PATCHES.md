@@ -32,7 +32,7 @@ Packaging differences from the published archive:
 | D-05 (Low) | `src/hazmat.rs` | `left_subtree_len` uses `div_ceil(2)`, so `u64::MAX + 1` no longer wraps. Reproduced as `1` instead of `1 << 63`. |
 | D-06 (Low) | `src/lib.rs` | `OutputReader::position` uses saturating arithmetic at the end of the addressable stream. |
 | V-03 (Low, debug) | `src/portable.rs`, `src/rust_sse2.rs`, `src/rust_sse41.rs`, `src/rust_avx2.rs`, `src/wasm32_simd.rs`, `src/platform.rs`, `src/lib.rs` | `hash_many`/`xof_many` and `OutputReader::fill`/`fill_one_block` use wrapping counter increments. `counter += 1` panicked in debug at `u64::MAX` while the assembly kernels wrapped silently. |
-| D-09 (Medium, safety) | `src/platform.rs` | `Platform` is now an opaque struct over a private implementation enum. Upstream exposes the enum variants publicly, so safe code could pass `Platform::AVX512` to a safe method on a CPU without AVX-512 and execute an unsupported instruction. The checked constructors (`detect`, `portable`, `sse2`, `sse41`, `avx2`, `avx512`, `neon`, `wasm32_simd`) are unchanged in name, and the parent's use of `detect()` is unaffected. |
+| D-09 (Medium, safety) | `src/platform.rs` | `Platform` is now an opaque struct over a private implementation enum. Upstream exposes the enum variants publicly, so safe code could pass `Platform::AVX512` to a safe method on a CPU without AVX-512 and execute an unsupported instruction. The checked constructors (`detect`, `portable`, `sse2`, `sse41`, `avx2`, `avx512`, `neon`, `wasm32_simd`) are unchanged in name, and the parent's use of `detect()` is unaffected. The enum-to-struct change is a deliberate API break for the doc-hidden benchmark interface; code that matched on `Platform::AVX512` must use the checked constructors instead. |
 | Safe-API length checks | `src/platform.rs`, `src/lib.rs` | `Platform::hash_many` now asserts that `N` is a whole number of 64-byte blocks and that `out.len() >= inputs.len() * 32`. Both were `debug_assert!`/documentation-only, so a safe caller with a short `out` could trigger an out-of-bounds write in release. The deprecated `guts::ChunkState::update` rejects input longer than its remaining 1024-byte chunk, and `Output::root_hash` uses `self.counter` like `root_output_block` instead of hard-coding zero. |
 | Small-stack DoS | `src/io.rs` | `copy_wide`'s stack buffer is 16 KiB instead of 64 KiB, so a safe `update_reader` call cannot require 64 KiB of thread stack. |
 
@@ -67,10 +67,16 @@ on host load (the audit measured 17-20% at load about 10, inside its noise floor
 **Distribution policy.** The parent is source-only (`publish = false`) and depends on
 this directory directly by path. A git checkout carries the fork. Do not replace the
 path dependency with a registry version; that would remove every fix listed above.
+The upstream-sync workflow's comparison branch contains `blake3/upstream-sync/`; the
+parent's `build.rs` refuses that directory, so the candidate cannot be built or mistaken
+for a merge candidate. `cargo package` is likewise refused by `build.rs` because Cargo
+would rewrite this path dependency to unpatched crates.io BLAKE3.
 
-**No known C-API memory-safety or ABI defect remains in this tree.** The C dispatch
-splits groups, the unix compress/xof assembly zero-extends its narrow arguments, and
-the C library's own tests run in CI (`make test` and `make test_asm`). D-08
+**The reviewed public C API paths have no known memory-safety or ABI defect in this
+tree.** The C dispatch splits groups, the unix compress/xof assembly zero-extends its
+narrow arguments, and the C library's own tests run in CI (`make test` and
+`make test_asm`). The backend symbols (`blake3_hash_many_avx512`, etc.) are internal;
+a caller invoking them directly bypasses the safe dispatch and its grouping contract. D-08
 (riscv64-musl getrandom) is outside this fork's use. The Rust build still uses only
 the assembly kernels through the patched Rust dispatcher; the C library is now a
 patched copy too, not merely an unreachable upstream copy.

@@ -2,6 +2,7 @@
 name = "xchacha20-blake3-siv"
 version = "0.1.0"
 edition = "2021"
+build = "build.rs"
 authors = ["Security Team"]
 description = "XChaCha20-BLAKE3-SIV: misuse-resistant, key- and context-committing AEAD with a 24-byte nonce and a 520-bit tag"
 license = "MIT OR Apache-2.0"

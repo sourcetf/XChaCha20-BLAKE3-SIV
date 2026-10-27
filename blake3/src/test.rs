@@ -839,10 +839,7 @@ fn test_zeroize() {
     assert_eq!(hasher.chunk_state.buf_len, 0);
     assert_eq!(hasher.chunk_state.blocks_compressed, 0);
     assert_eq!(hasher.chunk_state.flags, 0);
-    assert!(matches!(
-        hasher.chunk_state.platform,
-        crate::Platform::portable()
-    ));
+    assert_eq!(hasher.chunk_state.platform, crate::Platform::portable());
     assert_eq!(hasher.initial_chunk_counter, 0);
     assert_eq!(hasher.key, [0; 8]);
     assert_eq!(&*hasher.cv_stack, &[[0u8; 32]; 0]);
@@ -865,10 +862,7 @@ fn test_zeroize() {
     assert_eq!(output_reader.inner.counter, 0);
     assert_eq!(output_reader.inner.block_len, 0);
     assert_eq!(output_reader.inner.flags, 0);
-    assert!(matches!(
-        output_reader.inner.platform,
-        crate::Platform::portable()
-    ));
+    assert_eq!(output_reader.inner.platform, crate::Platform::portable());
     assert_eq!(output_reader.position_within_block, 0);
 }
 
