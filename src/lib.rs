@@ -2476,9 +2476,11 @@ unsafe fn zeroize_raw(ptr: *mut u8, len: usize) {
 /// return and the `ChunkState` built from the key — the copies the comment on
 /// `blake3_keyed_multi` names), and the `blake3` dependency's XOF output block, whose frames
 /// hold a run of `enc_key ‖ enc_nonce` (16 of the 44 bytes, and 4 of `k_out`'s 32, on the
-/// 4,096-byte derived-value scan an audit ran — *not* a committed one: `tools/stack_residue.sh`
-/// searches 1 MiB for the master key and `locked`'s tag only, because the derived values are
-/// unreachable from the public API; `k_out` runs to ~16 bytes under `pure`).  This crate cannot name those
+/// 4,096-byte derived-value scan an audit ran; `k_out` runs to ~16 bytes under `pure`).
+/// The committed `tools/stack_residue.sh` reconstructs `k_in`, `k_out`, `enc_seed`,
+/// `enc_key` and `enc_nonce` independently from the public construction, checks that
+/// reconstruction against the public tag and ciphertext, and searches 1 MiB for all of
+/// them (plus `locked`'s tag where the platform supports it).  This crate cannot name those
 /// frames, let alone zeroize them — `k_in` it does name and wipe, and the wipe does
 /// not reach the copy the compiler left behind.
 ///

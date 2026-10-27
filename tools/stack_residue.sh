@@ -1,18 +1,21 @@
 #!/usr/bin/env bash
 # Measure what key material survives in the stack frames of an AEAD call.
 #
-# This is a *measurement*, not a gate, and it is wired in as an advisory: CI has a
-# `stack residue` job that runs it in both configurations under `continue-on-error`, and
-# `verify.sh`'s tool stage runs it and reports a change as ADVISORY rather than as a
-# failure in a narrow run -- under `--deep`/`--all` (`STRICT=1`) a finding fails the run,
-# because a strict run is the one place a measurement this noisy is worth gating on.
-# (The header used to say it was not wired into CI at all, which stopped being
-# true when that job was added.)
+# CI's `stack residue` job runs this in the default and `ultra` configurations as a
+# **blocking** check and a release gate: a finding, a missing measurement, or a positive
+# control that did not fire fails the job. `verify.sh`'s tool stage is narrower: a narrow
+# local run reports a change as ADVISORY, while `--deep`/`--all` (`STRICT=1`) fails the
+# run. (The header used to say the tool was advisory in CI, which stopped being true when
+# the job became blocking.)
 # What it finds today is dominated by the `blake3` dependency: its XOF output
 # buffer sits in frames this crate cannot name, let alone wipe (the key itself is
-# not left -- measured). A gate that fails for a reason upstream of this crate
-# would be a gate someone eventually deletes, so it is a tool instead, and the
-# finding is written down in README's "cannot fix for you" list.
+# not left -- measured). The derived per-message values are reconstructed from the
+# public construction and that reconstruction is checked against the public tag and
+# ciphertext before it is scanned; a wrong domain string or field order therefore
+# fails this tool instead of making every derived pattern miss. A gate that fails
+# for a reason upstream of this crate would be a gate someone eventually deletes,
+# so it is a tool instead, and the finding is written down in README's "cannot fix
+# for you" list.
 #
 # Method, and why it has to be this way:
 #   * a stack region is painted with a sentinel by a function that then returns,
@@ -273,9 +276,10 @@ fn run() {
     let nonce: [u8; 24] = hx("404142434445464748494a4b4c4d4e4f5051525354555657")
         .try_into().unwrap();
 
-    // The caller knows these two; the derived values (k_in, k_out, enc_seed, enc_key,
-    // enc_nonce) are not reachable from the public API, which is why the in-tree
-    // version of this measurement needed crate internals.
+    // The caller knows these two. The derived values (k_in, k_out, enc_seed, enc_key,
+    // enc_nonce) are reconstructed below from the documented construction and checked
+    // against the public tag/ciphertext; the in-tree version of this measurement used
+    // crate internals, while this one needs the construction to be correct and says so.
     //
     // The third pattern *is* reachable: the `locked` integrity tag is `BLAKE3(key)[0..8]`,
     // an unkeyed hash of the master key, so it is computable here and (per the crate's
@@ -322,6 +326,33 @@ fn run() {
     h.update(&tag);
     h.finalize_xof().fill(&mut enc_material);
 
+    // Positive control for the derivation itself, not just for the scan: the values
+    // above are computed from the documented construction, and a typo in a domain
+    // string, field order or length would make every derived pattern miss without
+    // ever failing. Feed the independently derived tag and per-message key back
+    // through the public API and require the same bytes. This is also what proves
+    // the scan's `tag`/`enc_material` are the crate's values, not merely some
+    // self-consistent construction.
+    let plaintext = [b'A'; 64];
+    let (public_ciphertext, public_tag) = encrypt(&key, &nonce, b"", &plaintext).unwrap();
+    assert_eq!(
+        tag, public_tag,
+        "the independently derived tag does not match the public encrypt output; the scan's derived patterns are not the crate's values"
+    );
+    let mut independent_plaintext = plaintext;
+    let mut independent_ciphertext = [0u8; 64];
+    let mut cipher = chacha20::ChaCha20::new(
+        GenericArray::from_slice(&enc_material[..32]),
+        GenericArray::from_slice(&enc_material[32..44]),
+    );
+    cipher.apply_keystream(&mut independent_plaintext);
+    independent_ciphertext.copy_from_slice(&independent_plaintext);
+    assert_eq!(
+        &independent_ciphertext[..],
+        &public_ciphertext[..],
+        "the independently derived per-message key/nonce do not reproduce the public ciphertext"
+    );
+
     let known: Vec<(&str, Vec<u8>)> = vec![
         ("master KEY (must never appear)", key.to_vec()),
         (
@@ -336,7 +367,7 @@ fn run() {
         ("enc_nonce (derived, must never appear)", enc_material[32..].to_vec()),
     ];
 
-    let cases: [(&str, fn(&[u8; 32], &[u8; 24])); 9] = [
+    let mut cases: Vec<(&str, fn(&[u8; 32], &[u8; 24]))> = vec![
         // First, so the scan's own positive controls are known before any verdict and the
         // blake3-only attribution below runs on a scan that is known to see this region.
         // All three controls (whole key, 4+4 split, 7-byte run) come first, and the
@@ -350,12 +381,21 @@ fn run() {
         ("encrypt+decrypt", do_decrypt),
         ("encrypt_in_place_detached", do_enc_ip),
         ("decrypt_in_place_detached", do_dec_ip),
-        ("locked new+as_bytes", do_locked),
     ];
+    // `locked` is Linux-only; printing a `0 B` line for a case that returned
+    // immediately made an unmeasured entry point read as a clean one. Omit the
+    // case and say so, rather than claiming its tag was scanned here.
+    let locked_supported = xchacha20_blake3_siv::locked::SUPPORTED;
+    if locked_supported {
+        cases.push(("locked new+as_bytes", do_locked));
+    } else {
+        println!("locked new+as_bytes: SKIPPED (the locked module is unsupported on this platform)");
+    }
 
     // The detection thresholds, and the arithmetic they were chosen with. The region
-    // is PAINT = 1 MiB, so there are 2^20 windows per case, the nine cases are the
-    // `cases` array below, and the three patterns are 32, 32 and 8 bytes ("master
+    // is PAINT = 1 MiB, so there are 2^20 windows per case, the eight or nine cases
+    // are the `cases` vector below (the `locked` case is omitted where the platform
+    // does not support it), and the three patterns are 32, 32 and 8 bytes ("master
     // key", "control", "tag" -- the control is `deadbeef...`, 64 hex digits = 32
     // bytes, not the 64 the earlier revision of this comment claimed).
     //
@@ -634,9 +674,13 @@ fn run() {
             println!("PASS: no master key in the call-chain stack region, and no residue of");
             println!("      this crate's own code -- the 8-byte locked integrity tag above IS");
             println!("      left, by the blake3 dependency's XOF buffer, as the note below says.");
-        } else {
+        } else if locked_supported {
             println!("PASS: this crate leaves neither the master key, the locked integrity");
             println!("      tag, nor any derived key in the call-chain stack region.");
+        } else {
+            println!("PASS: this crate leaves neither the master key nor any derived key in");
+            println!("      the call-chain stack region; the locked integrity tag was not");
+            println!("      measurable because the locked module is unsupported on this platform.");
         }
         println!("      The three planted controls (whole key, 4+4 split, 7-byte run) show the");
         println!("      scan reads this region and sees both of the shapes an 8-byte single-run");
@@ -651,8 +695,14 @@ fn run() {
             println!("crate's own copies are wiped; this is the residual that is not its code.");
         } else if dependency_leaks_tag {
             println!();
-            println!("The blake3-only control leaves the dependency's 8-byte XOF tag; the");
-            println!("crate's `locked` entry point now scrubs that region, so its case is clean.");
+            if locked_supported {
+                println!("The blake3-only control leaves the dependency's 8-byte XOF tag; the");
+                println!("crate's `locked` entry point now scrubs that region, so its case is clean.");
+            } else {
+                println!("The blake3-only control leaves the dependency's 8-byte XOF tag. The");
+                println!("`locked` entry point was not run on this platform, so this note makes no");
+                println!("claim about it.");
+            }
         }
     } else {
         println!();
@@ -661,7 +711,8 @@ fn run() {
     }
     println!();
     println!("Covered here: the derived k_in/k_out/enc_seed/enc_key/enc_nonce values,");
-    println!("computed independently from the public construction. A register or a");
+    println!("computed independently from the public construction and checked against the");
+    println!("public tag and ciphertext before scanning. A register or a");
     println!("value outside the 1 MiB painted window is still outside the scan; the");
     println!("entry-point scrub is the mitigation and is measured by these patterns.");
 }

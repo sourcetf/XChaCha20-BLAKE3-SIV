@@ -964,7 +964,8 @@ jobs:
             *) # 3 is "could not run" -- the repository's convention, and a *skipped stage* in
                # verify.sh. It is still an error here, because this step exists to produce the
                # measurement and an absent measurement reported as a passed step is how a check
-               # stops being a check. The job stays advisory, so this blocks nothing.
+               # stops being a check. The job and this step are blocking, so the release gate
+               # sees this as a failure.
                echo "::error::stack_residue.sh exited $rc in the default build: no measurement was produced (3 = could not run)"; exit "$rc" ;;
           esac
 
