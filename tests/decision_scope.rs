@@ -1048,6 +1048,20 @@ fn the_second_gate_uses_two_comparison_shapes_wherever_the_gates_are_built() {
         "the fold comparison must be unconditional -- a `#[cfg]` here is how the default build \
          lost this defence before:\n{body}"
     );
+    assert_eq!(
+        body.matches("let also =").count(),
+        1,
+        "the second comparison must be bound exactly once; a second placeholder binding can \
+         shadow it while the exact line above stays present:\n{body}"
+    );
+    assert!(
+        !body.contains("Choice::from("),
+        "the second gate must not contain a constant `Choice::from(...)` placeholder:\n{body}"
+    );
+    assert!(
+        !body.contains("#[cfg"),
+        "the second gate's comparison must not be gated by a cfg attribute:\n{body}"
+    );
     // The AND must be the function's *return expression*, not a discarded computation:
     // an earlier version of this assertion only searched for the substring `plain & also`,
     // so `let _ = plain & also; plain` — the fold computed and thrown away — passed it.
@@ -1088,6 +1102,11 @@ fn the_second_gate_uses_two_comparison_shapes_wherever_the_gates_are_built() {
     assert_eq!(fold.len(), 1, "one `ct_eq_independent` expected");
     let fold_code = strip_comments(&fold[0]);
     let flat = fold_code.split_whitespace().collect::<Vec<_>>().join(" ");
+    assert!(
+        !fold_code.contains("#[cfg"),
+        "`ct_eq_independent` must not be gated by a cfg attribute:\n{}",
+        fold[0]
+    );
     assert!(
         flat.contains(
             "let x = u64::from_le_bytes(a[i..i + 8].try_into().unwrap()) \

@@ -519,41 +519,30 @@ pub const DOM_ENC: [u8; 8] = *b"XSIV-ENC";
 
 /// Extra stack, in bytes, that one call into this crate may touch below its entry point.
 ///
-/// Non-zero only under `dual-mac` (and therefore `ultra`), where the entry points call
-/// `scrub_stack` to overwrite the call-chain region the key derivations used. That overwrite is
-/// a single **16 KiB frame** — 16,408 bytes in a release x86_64 build, the buffer plus the saved
-/// registers — and the ordinary frames around it (the derivations, the tag buffers, the SIMD
-/// kernels, the allocator) were another ~10 KiB in the same measurement: an audit measured a
-/// 4 KiB round trip overflowing a 24,576-byte thread and fitting 26,624. This function reports
-/// **32 KiB** — that measured need with margin — because "size your threads for the scrub frame"
-/// was advice in a table row, and `stack_size(stack_requirement_bytes() + margin)` is a build
-/// step. The README's layer table carries the measurement's other half (a 32 KiB thread survives
-/// ~16 KiB of prior consumption without this feature and fails at 8 KiB with it).
+/// Every entry point calls `scrub_stack` after its last derivation, in every feature
+/// configuration, to overwrite the call-chain region the key derivations used. That
+/// overwrite is a single **16 KiB frame** — 16,408 bytes in a release x86_64 build, the
+/// buffer plus the saved registers — and the ordinary frames around it (the derivations,
+/// the tag buffers, the SIMD kernels, the allocator) were another ~10 KiB in the same
+/// measurement: an audit measured a 4 KiB round trip overflowing a 24,576-byte thread and
+/// fitting 26,624. This function reports **32 KiB** — that measured need with margin —
+/// because "size your threads for the scrub frame" is a build requirement, and
+/// `stack_size(stack_requirement_bytes() + margin)` is how a caller meets it.
 ///
-/// Zero means "no large fixed frame" — not a promise that the crate uses no stack at all:
-/// outside `dual-mac` the derivations, the tag buffers and the SIMD kernels are ordinary frames,
-/// in the hundreds of bytes to a few kilobytes, and none of them is large enough to be worth a
-/// named budget. A caller that gives a thread less stack than those need has a problem no
-/// constant can describe either. The measurement above is a release one; unoptimized frames are
-/// several times larger, which is why the in-crate test of this value adds a 1 MiB margin under
-/// `debug_assertions` (64 KiB in release) rather than treating the constant as the whole budget.
+/// Unlike ordinary frames, this is a large fixed frame even in the default/opt-out
+/// builds, because the residue it removes (`k_in` left by BLAKE3's by-value temporaries)
+/// is present in every build. A caller that gives a thread less stack than this can
+/// fault the thread with a stack overflow; the measurement above is release, and
+/// unoptimized frames are several times larger, which is why the in-crate test adds a
+/// 1 MiB margin under `debug_assertions` (64 KiB in release).
 ///
 /// ```no_run
-/// # #[cfg(feature = "dual-mac")]
 /// let stack = xchacha20_blake3_siv::stack_requirement_bytes() + 16 * 1024;
-/// # #[cfg(feature = "dual-mac")]
 /// let h = std::thread::Builder::new().stack_size(stack).spawn(|| { /* AEAD here */ }).unwrap();
 /// ```
 #[must_use]
 pub const fn stack_requirement_bytes() -> usize {
-    #[cfg(feature = "dual-mac")]
-    {
-        32 * 1024
-    }
-    #[cfg(not(feature = "dual-mac"))]
-    {
-        0
-    }
+    32 * 1024
 }
 
 // ── Error type ────────────────────────────────────────────────────────
@@ -2126,6 +2115,10 @@ pub mod locked {
             // classification, and the copy in the page is covered by the page's own wipe on
             // drop. This local is the copy that is *not*: wipe it before returning.
             crate::zeroize_array(&mut tag);
+            // `integrity_tag` runs a keyed-BLAKE3 finalize; its by-value temporaries are
+            // the same dependency residue every AEAD entry point scrubs. This constructor
+            // is a public entry point too.
+            crate::scrub_stack();
             Ok(LockedKey(page))
         }
 
@@ -2187,6 +2180,8 @@ pub mod locked {
             // i.e. on every encryption and decryption through this key. `ok` is a `Choice`
             // and does not alias the buffer, so clearing it first is sound.
             crate::zeroize_array(&mut expected);
+            // Same BLAKE3 XOF by-value temporaries as every other entry point.
+            crate::scrub_stack();
             if !bool::from(ok) {
                 panic!(
                     "LockedKey: the locked page no longer holds the key that was stored in it \
@@ -2444,8 +2439,12 @@ unsafe fn zeroize_raw(ptr: *mut u8, len: usize) {
     core::sync::atomic::compiler_fence(core::sync::atomic::Ordering::SeqCst);
 }
 
-/// Overwrite the stack region the key derivations just used (the `dual-mac` layer;
-/// `ultra` includes it).
+/// Overwrite the stack region the key derivations just used.
+///
+/// Every entry point calls this in every feature configuration, after its last
+/// derivation. The residue it targets is present even in the opt-out build: BLAKE3's
+/// by-value temporaries leave `k_in` (and fragments of the other derived values) in
+/// frames no named wipe can reach.
 ///
 /// Every named **byte buffer** this crate owns at function scope is wiped, and
 /// `tools/stack_residue.sh` confirms that the master key never survives in the
@@ -2483,16 +2482,15 @@ unsafe fn zeroize_raw(ptr: *mut u8, len: usize) {
 ///   rechecked instead of believed.
 /// * It reaches only this thread's stack.  A value already written to swap, a core
 ///   dump, or another process is what `locked` is for, not this.
-#[cfg(feature = "dual-mac")]
 #[inline(never)]
 fn scrub_stack() {
     /// The derivation frames measured ~3.4 KiB deep; this leaves ample margin.
     ///
     /// The margin is stack *usage* as well as coverage: this buffer is a 16 KiB frame, so a
     /// thread whose remaining stack is smaller than that faults here -- measured on a 32 KiB
-    /// thread stack, which survives ~16 KiB of prior consumption in the default build and
-    /// fails at 8 KiB with this enabled. A caller that runs AEAD on small-stack threads must
-    /// size them for it.
+    /// thread stack, which survives ~16 KiB of prior consumption in a build without the
+    /// scrub and fails at 8 KiB with it. A caller that runs AEAD on small-stack threads
+    /// must size them for it.
     const SCRUB_LEN: usize = 16 * 1024;
     let mut buf = [0u8; SCRUB_LEN];
     // The buffer is already zero, so a plain store would be a dead store the
@@ -2630,7 +2628,7 @@ fn blake3_keyed_multi(key: &[u8; 32], parts: &[&[u8]], out: &mut [u8]) {
     // `ChunkState` built from the key on the multi-chunk path), and audits measured
     // exactly that: a copy of `k_in` left in dead stack frames on the `hardened` build
     // for inputs above ~950 bytes, readable across threads, thread-stack reuse and
-    // `fork` until `scrub_stack` (which `ultra` runs) covers it. The same region holds
+    // `fork` until `scrub_stack` (which every build now runs) covers it. The same region holds
     // shorter fragments of the other two secrets -- a 4-byte prefix of `k_out` (at
     // `k_in + 0x40`) and of `enc_seed` in one probe -- so "the residue is `k_in` only"
     // would be too narrow, even though a 4-byte prefix is not a key. The shape depends on
@@ -2996,7 +2994,6 @@ pub fn encrypt(
             // that just ran (it held the key and the tag it derived) is left in the region
             // the scrub exists to overwrite. Cheap (0.5-1 us) and only on a path that
             // should never be taken, so it is paid here too.
-            #[cfg(feature = "dual-mac")]
             crate::scrub_stack();
             return Err(Error::AuthenticationFailed);
         }
@@ -3008,7 +3005,6 @@ pub fn encrypt(
             // No `ciphertext` wipe: see the `decision0` arm above -- the buffer is still
             // all zeros here, so the wipe was `O(plaintext.len())` work that protected
             // nothing.
-            #[cfg(feature = "dual-mac")]
             crate::scrub_stack();
             return Err(Error::AuthenticationFailed);
         }
@@ -3028,7 +3024,6 @@ pub fn encrypt(
     // than left on the stack.
     crate::zeroize_array(&mut enc_nonce);
 
-    #[cfg(feature = "dual-mac")]
     crate::scrub_stack();
 
     Ok((ciphertext, tag))
@@ -3083,7 +3078,6 @@ pub fn encrypt_in_place_detached(
     // than left on the stack.
     crate::zeroize_array(&mut enc_nonce);
 
-    #[cfg(feature = "dual-mac")]
     crate::scrub_stack();
 
     Ok(tag)
@@ -3443,7 +3437,6 @@ pub fn decrypt(
     // a fault that skips the call leaves both standing, and a fault that corrupts one
     // outcome leaves the other -- so accepting would take two faults. See the comment
     // on `accept_or_reject`.
-    #[cfg(feature = "dual-mac")]
     crate::scrub_stack();
 
     let mut decision0: Result<(), Error> = Err(Error::AuthenticationFailed);
@@ -3713,7 +3706,6 @@ pub fn decrypt_in_place_detached(
     // serial checks, so a fault that skips the call or corrupts one outcome cannot
     // accept. The opt-out build has one gate, and `accept_or_reject` deliberately writes
     // both slots from it; there the two checks are one check written twice.
-    #[cfg(feature = "dual-mac")]
     crate::scrub_stack();
 
     let mut decision0: Result<(), Error> = Err(Error::AuthenticationFailed);
@@ -6086,20 +6078,16 @@ mod tests {
     /// `scrub_stack` — stays the hand measurement in the README's layer table, because a stack
     /// overflow is not something a test can catch: the process dies, which is the point of the
     /// constant rather than something to assert around.
+    /// **This now pins the number itself** as well as sufficiency: every build calls
+    /// `scrub_stack`, so `stack_requirement_bytes` is always 32768. The margin below
+    /// still covers the ordinary frames and the debug-build growth.
     #[test]
     fn the_reported_stack_requirement_is_sufficient() {
         let need = stack_requirement_bytes();
-        // Pin the exported budget itself, not only a round trip that would pass with a
-        // smaller (or zero) value because of the margin below. The scrub frame is
-        // 16 KiB and the stack pointer moves through two sized frames in the worst
-        // call chain, hence 32 KiB under `dual-mac`; the default build scans no stack
-        // and reports zero.
-        #[cfg(feature = "dual-mac")]
-        assert_eq!(need, 32 * 1024, "the dual-mac stack budget changed");
-        #[cfg(not(feature = "dual-mac"))]
         assert_eq!(
-            need, 0,
-            "the default build should report no fixed stack budget"
+            need,
+            32 * 1024,
+            "every build reserves the 16 KiB scrub frame plus ordinary frames"
         );
         // The margin covers the *ordinary* frames — the derivations, the SIMD kernels, the
         // allocator, this test's own closure — which are not what the constant describes, and

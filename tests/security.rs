@@ -1740,6 +1740,14 @@ fn no_constant_cfg_attribute_can_deaden_the_crypto_source() {
         // after either file's test module is scanned here too (a constant `#[cfg(…)]`
         // appended below `mod tests` in `src/lib.rs` left this test green).
         let body = non_test_source_of(src);
+        // The known leading-statement bypass used a `pure` cfg on a block. There is no
+        // legitimate `pure` cfg in the crate source: the feature is forwarded to the
+        // BLAKE3 dependency in Cargo.toml, never tested in Rust cfg.
+        assert!(
+            !body.contains("cfg(feature = \"pure\")"),
+            "`{name}` contains a `pure` cfg attribute; the known deadening bypass uses one, \
+             and no production code needs it"
+        );
         let found = constant_cfg_attributes(&body);
         assert!(
             found.is_empty(),

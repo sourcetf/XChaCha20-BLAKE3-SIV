@@ -23,6 +23,9 @@ Packaging differences from the published archive:
 | Report ID | File(s) | Change |
 | --- | --- | --- |
 | D-01 (Medium) | `src/platform.rs` | `Platform::hash_many` sends complete SIMD groups to the widest kernel; on AVX-512 an 8..=15-input tail peels one safe 8-wide `hash8` group, and the final 1..=7 inputs use the 4-wide SSE2/SSE4.1 kernels (portable elsewhere). The AVX2/AVX-512 2/4-wide tail loads at +16/+32/+48 cross the end of the **last 64-byte block of any input** (the guard-page reproducer used `n=2` on AVX512; the 16-byte SSE and AVX-512 8-wide loads end exactly at +64). Empty input is a no-op. The first fix sent every tail to `portable::hash_many`; that was safe but made 4 KiB keyed BLAKE3 ~3.3x slower (an audit measured it), so the tail now uses the safe SIMD kernels. The AVX2 tail falls back to portable if SSE4.1 is absent, so an explicit `Platform::avx2()` cannot execute an unsupported SSE4.1 instruction. |
+| C library D-01 (Medium) | `c/blake3_dispatch.c` | The C API used to pass arbitrary `num_inputs` to the AVX2/AVX-512 kernels, selecting their over-reading 2/4-wide tails. It now keeps only complete SIMD groups (16 AVX-512, 8 AVX2) on those kernels, routes 4-wide remainders to SSE, and sends 1..3 to SSE/portable. Checked against Python BLAKE3 for every CPU-feature mask, 0..2048 bytes. |
+| C library D-03 (Low) | `c/blake3_sse2_x86-64_unix.S`, `c/blake3_sse41_x86-64_unix.S`, `c/blake3_avx512_x86-64_unix.S` | Zero-extend the narrow `block_len`/`flags` arguments (`movzx`) before packing or broadcasting them. Normal C/Rust callers already zero-extend; this removes the hand-written-FFI ABI hazard too. |
+| C library hygiene | `c/CMakeLists.txt`, `c/blake3_avx2.c` | Reject NEON on big-endian targets (`TestBigEndian`), use `list(APPEND ...)` for the C++20 flags, and type the AVX2 `storeu` destination as 32 bytes. |
 | D-02 (Low) | `src/platform.rs` | Multi-block `xof_many` uses the documented `compress_xof` loop instead of unix AVX-512 assembly that does not zero-extend `block_len`/`flags`. Single-block output is unchanged. |
 | Parent audit D1 (Medium) | `src/platform.rs` | A non-multiple-of-64 `xof_many` output (1..=63 bytes) is computed with `compress_xof` and copied as a prefix. The single-block AVX-512 path wrote a full 64-byte block in release (up to 63 bytes past the caller's slice), where the `debug_assert` was compiled out. The same prefix calculation also fixes the under-write the audit found for 65..=127-byte outputs (134 of 137 non-multiples). |
 | D-04 (Low) | `src/lib.rs` | `Hasher::reset` clears `initial_chunk_counter` (set by the hazmat `set_input_offset`). Reproduced as a `finalize` assertion failure before the fix. |
@@ -65,11 +68,9 @@ on host load (the audit measured 17-20% at load about 10, inside its noise floor
 this directory directly by path. A git checkout carries the fork. Do not replace the
 path dependency with a registry version; that would remove every fix listed above.
 
-**Not patched.** D-03 (narrow `block_len`/`flags` ABI arguments in the unix
-SSE2/SSE4.1 `compress_in_place` assembly) remains: normal Rust/C callers zero-extend,
-and only a hand-written FFI caller with dirty high bits can observe it. The assembly
-also still contains the upstream 2/4-wide over-read; the Rust dispatcher above never
-selects those widths, so it is unreachable from the parent, but the C library is kept
-byte-identical to upstream and is not a patched copy. Builds that use the C library
-through CMake (not this Cargo package) should apply upstream's future fix themselves.
-D-08 (riscv64-musl getrandom) is outside this fork's use.
+**No known C-API memory-safety or ABI defect remains in this tree.** The C dispatch
+splits groups, the unix compress/xof assembly zero-extends its narrow arguments, and
+the C library's own tests run in CI (`make test` and `make test_asm`). D-08
+(riscv64-musl getrandom) is outside this fork's use. The Rust build still uses only
+the assembly kernels through the patched Rust dispatcher; the C library is now a
+patched copy too, not merely an unreachable upstream copy.

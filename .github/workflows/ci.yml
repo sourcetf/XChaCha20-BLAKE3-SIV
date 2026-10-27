@@ -471,6 +471,30 @@ jobs:
       - name: cargo check (no default features)
         run: cargo check --locked --no-default-features --all-targets
 
+  blake3-c:
+    name: vendored BLAKE3 C library
+    # The C/assembly tree is shipped for C consumers and is no longer byte-identical
+    # to upstream: the dispatch now splits SIMD groups and the unix compress
+    # prologues zero-extend their narrow arguments. Run both the intrinsics and the
+    # assembly test suites against the official vectors.
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7
+        with:
+          python-version: "3.x"
+      - name: C intrinsics tests (ASan/UBSan)
+        working-directory: blake3/c
+        run: |
+          make -f Makefile.testing clean
+          make -f Makefile.testing test
+      - name: C assembly tests (ASan/UBSan)
+        working-directory: blake3/c
+        run: |
+          make -f Makefile.testing clean
+          make -f Makefile.testing test_asm
+
   no-std:
     name: no_std target (thumbv7em)
     # `--no-default-features --all-targets` on a host with std only proves the source
@@ -899,31 +923,20 @@ jobs:
         run: python3 tools/gen_test_vectors.py --check
 
   stack-residue:
-    name: stack residue (advisory, ultra)
+    name: stack residue (blocking, every build)
     runs-on: ubuntu-latest
-    # `continue-on-error` on purpose, and the reason is written here rather than
-    # left implicit: what this measures is *layout dependent* -- the residue that
-    # `ultra`'s `scrub_stack` erases lives in the `blake3` dependency's frames,
-    # and which frames a compiler picks is not something a test can pin.  The
-    # assertion it does make (the master key never appears in the call-chain
-    # stack region) has held in every run so far, so this job is expected to
-    # pass; it is advisory so that a toolchain change that moves the residue
-    # *reports* instead of blocking, which is the honest disposition for a
-    # measurement whose target is a compiler's choice.
-    continue-on-error: true
+    # Every build now calls `scrub_stack`; the tool scans for the master key,
+    # the locked integrity tag, and the derived k_in/k_out/enc_seed/enc_key/enc_nonce
+    # values independently. A residue report is a release blocker. The scan has
+    # positive controls for the shapes its thresholds cover, so a layout change that
+    # moves a value is reported as a finding rather than silently passing.
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
-      # Default build: a report fails this step. It is *not* turned into a warning, and that
-      # is deliberate -- the tool's assertion is that the master key never appears in the
-      # call-chain stack region in *any* configuration, so a report means either a real
-      # finding or a layout change nobody has looked at yet, and both are things a human
-      # should look at. The job stays advisory (`continue-on-error` above) because which
-      # frames a compiler leaves is not a property this repository controls; the step, and
-      # so the job, goes red and carries the numbers. The only thing this step adds to the
-      # tool's own exit is a message that says *which* of the two exit-1 causes happened:
-      # a positive control that did not take (a tool problem, measurement void) versus
-      # residue reported.
+      # Default build: a report fails this step and the job. The tool checks the master
+      # key, the locked integrity tag, and the derived k_in/k_out/enc_seed/enc_key/
+      # enc_nonce patterns; its own positive controls must fire first. A layout change
+      # that moves a value is therefore a release blocker rather than a warning.
       - name: default build
         run: |
           set +e
@@ -931,11 +944,11 @@ jobs:
           rc=${PIPESTATUS[0]}
           set -e
           case "$rc" in
-            0) echo "default build: no run of the master key at or above the tool's thresholds" ;;
+            0) echo "default build: no key or derived-value run at or above the tool's thresholds" ;;
             1) if grep -qE '^FAIL: the .*positive control' "$RUNNER_TEMP/residue-default.log"; then
                  echo "::error::stack_residue.sh's own positive control did not take, so the default build's measurement is void: $(grep -E '^FAIL' "$RUNNER_TEMP/residue-default.log" | head -2 | tr '\n' ' ')"
                else
-                 echo "::error::stack_residue.sh reported residue in the default build: $(grep -E ' \| KEY RESIDUE: ' "$RUNNER_TEMP/residue-default.log" | head -3 | tr '\n' ' ')"
+                 echo "::error::stack_residue.sh reported residue in the default build: $(grep -E ' \| (KEY|DERIVED) RESIDUE: ' "$RUNNER_TEMP/residue-default.log" | head -3 | tr '\n' ' ')"
                fi
                exit "$rc" ;;
             *) # 3 is "could not run" -- the repository's convention, and a *skipped stage* in
@@ -945,9 +958,8 @@ jobs:
                echo "::error::stack_residue.sh exited $rc in the default build: no measurement was produced (3 = could not run)"; exit "$rc" ;;
           esac
 
-      # `ultra`: `scrub_stack` overwrites the region, so this is the run that shows the
-      # defence working -- and for that reason a report here is the *strongest* signal the
-      # tool produces. It fails the step, exactly like the default build's.
+      # `ultra`: the same scrub plus the witness. A report here fails the step exactly
+      # like the default build's.
       - name: ultra build
         run: |
           set +e
@@ -955,7 +967,7 @@ jobs:
           rc=${PIPESTATUS[0]}
           set -e
           case "$rc" in
-            0) echo "ultra build: no run of the master key at or above the tool's thresholds" ;;
+            0) echo "ultra build: no key or derived-value run at or above the tool's thresholds" ;;
             1) if grep -qE '^FAIL: the .*positive control' "$RUNNER_TEMP/residue-ultra.log"; then
                  echo "::error::stack_residue.sh's own positive control did not take, so the ultra build's measurement is void: $(grep -E '^FAIL' "$RUNNER_TEMP/residue-ultra.log" | head -2 | tr '\n' ' ')"
                else
@@ -996,13 +1008,15 @@ jobs:
     # `timing-instrument` is in the list because it is *blocking* (no
     # `continue-on-error`) and was previously omitted, so a commit whose timing
     # instrument had rotted could still cut a release -- contradicting this comment.
-    # The two advisory jobs (`timing`, `stack-residue`) are `continue-on-error: true`
-    # and are deliberately not gates.
-    needs: [lint, test, windows, no-std, msrv, cross, cross-exec, differential, timing-instrument, supply-chain]
+    # `stack-residue` is blocking and is a gate. The statistical `timing` job remains
+    # advisory (host noise), while its instrument is a separate blocking job.
+    needs: [lint, test, windows, blake3-c, no-std, msrv, cross, cross-exec, differential, timing-instrument, stack-residue, supply-chain]
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     permissions:
       contents: write
+      actions: read
+    timeout-minutes: 300
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -1018,6 +1032,39 @@ jobs:
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
         with:
           toolchain: stable
+
+      # Same-commit Deep and Formal success is part of the release gate. They are
+      # separate workflows (their runtimes are long), so `needs` cannot express this;
+      # poll the workflow-run API for this exact SHA and refuse to publish until both
+      # have completed successfully. A failure or a timeout blocks the release.
+      - name: require same-commit Deep and Formal success
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          deadline=$(( $(date +%s) + 240*60 ))
+          while :; do
+            deep="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs?head_sha=$GITHUB_SHA&per_page=100" --jq '[.workflow_runs[] | select(.name == "Deep checks")][0] | "\(.status) \(.conclusion // "")"' || true)"
+            formal="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs?head_sha=$GITHUB_SHA&per_page=100" --jq '[.workflow_runs[] | select(.name == "Formal verification")][0] | "\(.status) \(.conclusion // "")"' || true)"
+            echo "Deep: ${deep:-missing}; Formal: ${formal:-missing}"
+            case "$deep" in
+              "completed success") ;;
+              completed\ *)
+                echo "::error::Deep checks did not succeed on $GITHUB_SHA ($deep)"; exit 1 ;;
+            esac
+            case "$formal" in
+              "completed success") ;;
+              completed\ *)
+                echo "::error::Formal verification did not succeed on $GITHUB_SHA ($formal)"; exit 1 ;;
+            esac
+            if [ "$deep" = "completed success" ] && [ "$formal" = "completed success" ]; then
+              break
+            fi
+            if [ "$(date +%s)" -ge "$deadline" ]; then
+              echo "::error::timed out waiting for Deep/Formal on $GITHUB_SHA"; exit 1
+            fi
+            sleep 30
+          done
 
       # Every release has three configurations, and this step is what makes that a
       # claim rather than a hope. Features are compile-time, so "three versions" for a
@@ -1241,9 +1288,10 @@ jobs:
           Each row is gated on a named leg of the \`test\` matrix at this commit
           (\`release, default features\`, \`release, no default features\`, \`release, ultra\`), plus the
           cross-target and qemu executions, the differential fixture against the independent
-          reference, and the formal proofs in \`formal.yml\` and the scheduled Deep
-          checks (Miri, ctgrind, TSAN, fuzzing, wide sweeps) run separately and are
-          **not** release gates.
+          reference, and the same-commit Formal verification and Deep checks are
+          polled by the release job and must succeed before publication. The
+          scheduled wide sweeps are a separate scheduled audit, not part of the
+          push-time Deep run; they are not release gates.
 
           The wire format is **identical across the three**: the KATs, the differential fixture and
           the accelerated-path corpus pin the same bytes in every configuration, and this release
@@ -1340,9 +1388,10 @@ jobs:
           differential fixture
           re-checked against the independent reference implementation.
 
-          The formal proofs in \`.github/workflows/formal.yml\` and the scheduled Deep
-          checks (Miri, ctgrind, TSAN, fuzzing, wide sweeps) run separately and are
-          **not** gates for this release. The gate is the ci.yml job set named above.
+          The same-commit Formal verification and Deep checks are gates for this
+          release: the release job polls their workflow runs for this SHA and
+          refuses to publish unless both completed successfully. The scheduled
+          wide sweeps are a separate scheduled audit and are not release gates.
 
           > **Wire format.** This construction is bespoke and not byte-compatible
           > with anything else: a two-level keyed-BLAKE3 65-byte tag over the

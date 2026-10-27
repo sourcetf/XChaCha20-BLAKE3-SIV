@@ -1793,6 +1793,8 @@ _blake3_compress_in_place_sse41:
         movups  xmm0, xmmword ptr [rdi]
         movups  xmm1, xmmword ptr [rdi+0x10]
         movaps  xmm2, xmmword ptr [BLAKE3_IV+rip]
+        movzx   edx, dl
+        movzx   r8d, r8b
         shl     r8, 32
         add     rdx, r8
         movq    xmm3, rcx

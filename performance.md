@@ -32,6 +32,13 @@ per-message cost**, so the change shows at the small sizes and is inside the noi
 
 ## Post-vendored-BLAKE3 re-measurement (2026-10-24)
 
+**Measurement note (2026-10-27):** `scrub_stack` is now in every build, not only
+`dual-mac`/`ultra`. The tables in this file were measured before that change, so
+the current default pays an additional fixed ~0.5–1 µs per operation (plus the
+16 KiB stack frame documented in `README.md`). The small-message ratios below are
+therefore conservative for the current default; the large-message conclusions do
+not move. A fresh campaign should be run before quoting new small-message ratios.
+
 The tables below were measured for `v0.3`, **before** BLAKE3's 1.8.7 fork was
 vendored. The fork's first `hash_many` fix sent every sub-SIMD-group tail to
 `portable::hash_many`; the audit measured 4 KiB keyed BLAKE3 ~3.3x slower as a result.
@@ -294,10 +301,10 @@ re-measured — the decisions the bullets support do not turn on the exact perce
   trip -- it wipes the whole CV stack, most of which a one-chunk input never
   touched. It stays: it clears the keyed-BLAKE3 state this crate can name, and only
   the dependency can say which of its internal state that covers. It does **not**
-  clear by-value temporaries in BLAKE3's own frames: the default `hardened` build
-  leaves a whole `k_in` in dead stack space (measured and documented in
-  `README.md`), and only `dual-mac`/`ultra`'s best-effort `scrub_stack` covers that
-  region.
+  clear by-value temporaries in BLAKE3's own frames. Every build now runs the
+  best-effort `scrub_stack` after the last derivation to cover that region; the
+  stack-residue tool scans for `k_in`/`k_out`/`enc_seed`/`enc_key`/`enc_nonce`
+  independently and reports clean on the reference host.
 * Above a few megabytes, intra-message parallelism is real, but it is a policy
   decision rather than an oversight. Hashing 16 MiB with a reused four-thread pool
   measured 3.7x against one thread (8 threads: 4.8x); at 1 MiB the same measurement

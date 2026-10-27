@@ -8,6 +8,32 @@ green push to `main` — which are build artefacts of that job, not construction
 
 ## Unreleased
 
+### Default stack scrub, C-library hardening, and release gates (2026-10-27)
+
+No wire-format byte changed.
+
+- **`scrub_stack` is now in every build**, not only `dual-mac`/`ultra`. The default
+  and opt-out builds pay the fixed ~16 KiB wipe and the 32 KiB stack budget, and the
+  BLAKE3 by-value `k_in` residue is scrubbed after every AEAD entry point. The two
+  `LockedKey` entry points that hash the key now scrub too. `stack_requirement_bytes`
+  is always 32768.
+- **The C library is patched, not just the Rust dispatcher.** `blake3_dispatch.c`
+  keeps complete AVX-512/AVX2 groups and sends tails to SSE/portable; the unix
+  compress/xof assembly zero-extends its narrow arguments; CMake refuses NEON on
+  big-endian targets, `list(APPEND ...)` is used for the C++20 flags, and the AVX2
+  `storeu` destination is typed as 32 bytes. CI now runs `make test` and
+  `make test_asm` against the official vectors.
+- **The stack-residue tool scans derived values.** It computes
+  `k_in`/`k_out`/`enc_seed`/`enc_key`/`enc_nonce` independently from the public
+  construction and treats a hit as a failure; the `stack residue` CI job is now
+  blocking and part of the release gate.
+- **Release is gated on same-commit Deep and Formal success.** The release job polls
+  the workflow-run API for this SHA and refuses to publish unless both completed
+  successfully; the stack-residue job is also in `needs`.
+- `wasip2` is pinned to 1.0.0 (the newest release compatible with the declared Rust
+  1.85 MSRV) and ignored in Dependabot; the direct `cc` update to 1.10.0 was audited
+  and the fork's own suite passes with it.
+
 ### Full-tree re-audit after the vendored-BLAKE3 migration
 
 No wire-format byte changed. The changes below close defects and verification gaps

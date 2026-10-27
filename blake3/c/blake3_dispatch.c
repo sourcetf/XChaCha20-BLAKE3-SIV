@@ -251,52 +251,62 @@ void blake3_hash_many(const uint8_t *const *inputs, size_t num_inputs,
                       size_t blocks, const uint32_t key[8], uint64_t counter,
                       bool increment_counter, uint8_t flags,
                       uint8_t flags_start, uint8_t flags_end, uint8_t *out) {
+  // The AVX2/AVX-512 kernels' 2/4-wide tails read past the end of the last
+  // 64-byte block (the Rust dispatcher has the same guard in platform.rs). Keep
+  // only full SIMD groups on those kernels and send the remainder to kernels
+  // whose loads stay within the block, or to portable. This is the C library's
+  // equivalent of the fork's D-01 fix.
+  size_t done = 0;
+  uint64_t ctr = counter;
+#define HASH_GROUP(fn, n)                                                    \
+  do {                                                                       \
+    fn(inputs + done, (n), blocks, key, ctr, increment_counter, flags,       \
+       flags_start, flags_end, out + done * BLAKE3_OUT_LEN);                 \
+    if (increment_counter) ctr += (n);                                       \
+    done += (n);                                                             \
+  } while (0)
+
 #if defined(IS_X86)
   const enum cpu_feature features = get_cpu_features();
   MAYBE_UNUSED(features);
 #if !defined(BLAKE3_NO_AVX512)
   if ((features & (AVX512F|AVX512VL)) == (AVX512F|AVX512VL)) {
-    blake3_hash_many_avx512(inputs, num_inputs, blocks, key, counter,
-                            increment_counter, flags, flags_start, flags_end,
-                            out);
-    return;
+    while (num_inputs - done >= 16) HASH_GROUP(blake3_hash_many_avx512, 16);
   }
 #endif
 #if !defined(BLAKE3_NO_AVX2)
   if (features & AVX2) {
-    blake3_hash_many_avx2(inputs, num_inputs, blocks, key, counter,
-                          increment_counter, flags, flags_start, flags_end,
-                          out);
-    return;
+    while (num_inputs - done >= 8) HASH_GROUP(blake3_hash_many_avx2, 8);
   }
 #endif
 #if !defined(BLAKE3_NO_SSE41)
   if (features & SSE41) {
-    blake3_hash_many_sse41(inputs, num_inputs, blocks, key, counter,
-                           increment_counter, flags, flags_start, flags_end,
-                           out);
+    // The 4-wide SSE kernels use 16-byte loads at +0/+16/+32/+48, so both
+    // the 4-wide body and the 1..3 tail are in-bounds.
+    while (num_inputs - done >= 4) HASH_GROUP(blake3_hash_many_sse41, 4);
+    if (num_inputs - done) HASH_GROUP(blake3_hash_many_sse41, num_inputs - done);
     return;
   }
 #endif
 #if !defined(BLAKE3_NO_SSE2)
   if (features & SSE2) {
-    blake3_hash_many_sse2(inputs, num_inputs, blocks, key, counter,
-                          increment_counter, flags, flags_start, flags_end,
-                          out);
+    while (num_inputs - done >= 4) HASH_GROUP(blake3_hash_many_sse2, 4);
+    if (num_inputs - done) HASH_GROUP(blake3_hash_many_sse2, num_inputs - done);
     return;
   }
 #endif
-#endif
-
-#if BLAKE3_USE_NEON == 1
-  blake3_hash_many_neon(inputs, num_inputs, blocks, key, counter,
-                        increment_counter, flags, flags_start, flags_end, out);
+  if (num_inputs - done) HASH_GROUP(blake3_hash_many_portable, num_inputs - done);
   return;
 #endif
 
-  blake3_hash_many_portable(inputs, num_inputs, blocks, key, counter,
-                            increment_counter, flags, flags_start, flags_end,
-                            out);
+#if BLAKE3_USE_NEON == 1
+  while (num_inputs - done >= 4) HASH_GROUP(blake3_hash_many_neon, 4);
+  if (num_inputs - done) HASH_GROUP(blake3_hash_many_portable, num_inputs - done);
+  return;
+#endif
+
+  if (num_inputs - done) HASH_GROUP(blake3_hash_many_portable, num_inputs - done);
+#undef HASH_GROUP
 }
 
 // The dynamically detected SIMD degree of the current platform.

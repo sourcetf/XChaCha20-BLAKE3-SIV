@@ -53,6 +53,9 @@ set -euo pipefail
 export PATH="$HOME/.cargo/bin:$PATH"
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+# Cargo reads manifest paths with the host's path syntax. On Windows Git Bash,
+# `$ROOT` is /c/... and would be resolved as C:\c\...; convert for the temp project.
+ROOT_MANIFEST="$(cygpath -m "$ROOT" 2>/dev/null || printf %s "$ROOT")"
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 
@@ -79,13 +82,14 @@ edition = "2021"
 [dependencies]
 # The locked feature so the scan can exercise LockedKey: its integrity tag is a
 # hash of the key, and that is the residue this tool now looks for.
-xchacha20-blake3-siv = { path = "$ROOT", features = ["locked"] }
+xchacha20-blake3-siv = { path = "$ROOT_MANIFEST", features = ["locked"] }
 # To compute the expected integrity tag (BLAKE3(key)[0..8]) independently, and to
 # run the blake3-only attribution control with the same wipe discipline. This tool's
 # standalone manifest must use the maintained fork directly: it does not inherit the
 # parent's path dependency, and there is no crates.io BLAKE3 in the graph.
-blake3 = { path = "$ROOT/blake3", default-features = false, features = ["zeroize"] }
+blake3 = { path = "$ROOT_MANIFEST/blake3", default-features = false, features = ["zeroize"] }
 zeroize = "1"
+chacha20 = { version = "0.9", default-features = false }
 [profile.release]
 opt-level = 3
 lto = true
@@ -96,6 +100,8 @@ cat > "$WORK/src/main.rs" <<'RS'
 use xchacha20_blake3_siv::{
     decrypt, decrypt_in_place_detached, encrypt, encrypt_in_place_detached,
 };
+use chacha20::cipher::{KeyIvInit, StreamCipher};
+use chacha20::cipher::generic_array::GenericArray;
 
 const PAINT: usize = 1 << 20;
 const SENTINEL: u8 = 0x5A;
@@ -194,7 +200,10 @@ fn do_dec_ip(k: &[u8; 32], n: &[u8; 24]) {
 /// wiped by their caller — this case is what measures that.
 #[inline(never)]
 fn do_locked(k: &[u8; 32], _n: &[u8; 24]) {
-    use xchacha20_blake3_siv::locked::LockedKey;
+    use xchacha20_blake3_siv::locked::{LockedKey, SUPPORTED};
+    if !SUPPORTED {
+        return;
+    }
     let key = LockedKey::new(k).expect("mlock failed");
     std::hint::black_box(key.as_bytes());
 }
@@ -248,6 +257,17 @@ fn do_blake3_only(k: &[u8; 32], _n: &[u8; 24]) {
 }
 
 fn main() {
+    // `paint` needs a 1 MiB frame; the platform main-thread stack is often 1 MiB
+    // (Windows), so run the measurement on a thread with room for it and the scrub.
+    std::thread::Builder::new()
+        .stack_size(16 << 20)
+        .spawn(run)
+        .expect("spawn")
+        .join()
+        .expect("scan thread panicked");
+}
+
+fn run() {
     let key: [u8; 32] = hx("000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f")
         .try_into().unwrap();
     let nonce: [u8; 24] = hx("404142434445464748494a4b4c4d4e4f5051525354555657")
@@ -262,13 +282,58 @@ fn main() {
     // classification) is key material. It is 8 bytes, so it is judged by the same
     // 7-byte single-run and split rules as the two longer patterns.
     let tag8 = blake3::hash(&key).as_bytes()[..8].to_vec();
-    let known: [(&str, Vec<u8>); 3] = [
+
+    // Derive the per-message values independently, using the public construction:
+    // HChaCha20 subkey, the two "XSIV"||N[16..24] ChaCha20 blocks, then the two
+    // keyed-BLAKE3 hashes. Scanning for these is what turns "scrub_stack should
+    // cover the dependency's by-value temporaries" into a measurement.
+    let subkey = chacha20::hchacha::<chacha20::cipher::consts::U10>(
+        GenericArray::from_slice(&key),
+        GenericArray::from_slice(&nonce[..16]),
+    );
+    let mut derive_nonce = [0u8; 12];
+    derive_nonce[..4].copy_from_slice(b"XSIV");
+    derive_nonce[4..].copy_from_slice(&nonce[16..]);
+    let mut derive = chacha20::ChaCha20::new(
+        GenericArray::from_slice(&subkey),
+        GenericArray::from_slice(&derive_nonce),
+    );
+    let mut material = [0u8; 96];
+    derive.apply_keystream(&mut material);
+    let k_in: [u8; 32] = material[0..32].try_into().unwrap();
+    let k_out: [u8; 32] = material[32..64].try_into().unwrap();
+    let enc_seed: [u8; 32] = material[64..96].try_into().unwrap();
+    let mut inner = [0u8; 32];
+    let mut h = blake3::Hasher::new_keyed(&k_in);
+    h.update(b"XSIV-PRE");
+    h.update(&nonce);
+    h.update(&0u64.to_le_bytes());
+    h.update(&64u64.to_le_bytes());
+    h.update(&[b'A'; 64]);
+    h.finalize_xof().fill(&mut inner);
+    let mut tag = [0u8; 65];
+    let mut h = blake3::Hasher::new_keyed(&k_out);
+    h.update(b"XSIV-TAG");
+    h.update(&inner);
+    h.finalize_xof().fill(&mut tag);
+    let mut enc_material = [0u8; 44];
+    let mut h = blake3::Hasher::new_keyed(&enc_seed);
+    h.update(b"XSIV-ENC");
+    h.update(&tag);
+    h.finalize_xof().fill(&mut enc_material);
+
+    let known: Vec<(&str, Vec<u8>)> = vec![
         ("master KEY (must never appear)", key.to_vec()),
         (
             "control (never used, must not appear)",
             hx("deadbeefcafebabe00112233445566778899aabbccddeeff0011223344556677"),
         ),
         ("locked integrity tag BLAKE3(key)[0..8]", tag8),
+        ("k_in (derived, must never appear)", k_in.to_vec()),
+        ("k_out (derived, must never appear)", k_out.to_vec()),
+        ("enc_seed (derived, must never appear)", enc_seed.to_vec()),
+        ("enc_key (derived, must never appear)", enc_material[..32].to_vec()),
+        ("enc_nonce (derived, must never appear)", enc_material[32..].to_vec()),
     ];
 
     let cases: [(&str, fn(&[u8; 32], &[u8; 24])); 9] = [
@@ -336,6 +401,7 @@ fn main() {
 
     let mut failures = 0usize;
     let mut dependency_leaks_tag = false;
+    let mut locked_tag_hit = false;
     let mut planted_found = false;
     let mut split_found = false;
     let mut seven_found = false;
@@ -368,10 +434,10 @@ fn main() {
         // cannot overwrite what it is about to read. Results are collected first and
         // formatted afterwards for the same reason: building `line` allocates.
         let region: &[u8] = unsafe { core::slice::from_raw_parts(ptr, PAINT) };
-        let mut best = [0usize; 3];
-        let mut at = [0usize; 3];
-        let mut split_runs = [0usize; 3];
-        let mut split_bytes = [0usize; 3];
+        let mut best = vec![0usize; known.len()];
+        let mut at = vec![0usize; known.len()];
+        let mut split_runs = vec![0usize; known.len()];
+        let mut split_bytes = vec![0usize; known.len()];
         // Every maximal run of >= MIN_RUN shared bytes is collected, not only the
         // longest, because the split rule below needs the *runs*: a 4+4 split is
         // two runs and no contiguous threshold sees eight bytes in it. `r += l`
@@ -455,6 +521,11 @@ fn main() {
                 String::new()
             };
             let tag_case = label.starts_with("locked integrity tag");
+            let derived_case = *label == "k_in (derived, must never appear)"
+                || *label == "k_out (derived, must never appear)"
+                || *label == "enc_seed (derived, must never appear)"
+                || *label == "enc_key (derived, must never appear)"
+                || *label == "enc_nonce (derived, must never appear)";
             if label.starts_with("master KEY") && hit {
                 if is_split_plant || is_seven_plant {
                     // The two controls that pin the shapes the old threshold
@@ -500,6 +571,7 @@ fn main() {
                         best, at, split_note
                     ));
                 } else if dependency_leaks_tag {
+                    locked_tag_hit = true;
                     line.push_str(&format!(
                         " | TAG RESIDUE ({}-byte run @{}) attributable to blake3",
                         best, at
@@ -511,6 +583,12 @@ fn main() {
                         best, at, split_note
                     ));
                 }
+            } else if derived_case && hit {
+                failures += 1;
+                line.push_str(&format!(
+                    " | DERIVED RESIDUE: {}-byte run @{}{}",
+                    best, at, split_note
+                ));
             } else {
                 line.push_str(&format!(" | {}: {} B", label.split(' ').next().unwrap(), best));
             }
@@ -552,25 +630,29 @@ fn main() {
 
     if failures == 0 {
         println!();
-        if dependency_leaks_tag {
+        if locked_tag_hit {
             println!("PASS: no master key in the call-chain stack region, and no residue of");
             println!("      this crate's own code -- the 8-byte locked integrity tag above IS");
             println!("      left, by the blake3 dependency's XOF buffer, as the note below says.");
         } else {
-            println!("PASS: this crate leaves neither the master key nor the locked integrity");
-            println!("      tag in the call-chain stack region.");
+            println!("PASS: this crate leaves neither the master key, the locked integrity");
+            println!("      tag, nor any derived key in the call-chain stack region.");
         }
         println!("      The three planted controls (whole key, 4+4 split, 7-byte run) show the");
         println!("      scan reads this region and sees both of the shapes an 8-byte single-run");
         println!("      threshold used to miss, and the never-used pattern shows it produces no");
         println!("      false positives.");
-        if dependency_leaks_tag {
+        if locked_tag_hit {
             println!();
             println!("Note: the blake3-only control DOES leave the 8-byte tag, with the same");
             println!("wipe discipline and no crate code -- so the tag residue in the `locked`");
             println!("case is the dependency's XOF output buffer, in a frame this crate cannot");
             println!("wipe (the same finding as the derived values, README 'cannot fix'). The");
             println!("crate's own copies are wiped; this is the residual that is not its code.");
+        } else if dependency_leaks_tag {
+            println!();
+            println!("The blake3-only control leaves the dependency's 8-byte XOF tag; the");
+            println!("crate's `locked` entry point now scrubs that region, so its case is clean.");
         }
     } else {
         println!();
@@ -578,10 +660,10 @@ fn main() {
         std::process::exit(1);
     }
     println!();
-    println!("Not covered here: the derived per-message values, which are unreachable");
-    println!("from the public API. The dominant residue for those is inside the blake3");
-    println!("dependency (its XOF output buffer), in frames this crate cannot wipe --");
-    println!("see README, 'What this crate cannot fix for you'.");
+    println!("Covered here: the derived k_in/k_out/enc_seed/enc_key/enc_nonce values,");
+    println!("computed independently from the public construction. A register or a");
+    println!("value outside the 1 MiB painted window is still outside the scan; the");
+    println!("entry-point scrub is the mitigation and is measured by these patterns.");
 }
 RS
 

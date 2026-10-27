@@ -10,10 +10,9 @@
 //!
 //! The test is deliberately about the *returned* plaintext, the allocation an attacker
 //! with a use-after-free or an allocator bug would read. Stack residue is a different
-//! witness: `tools/stack_residue.sh` checks the master key and the `locked` integrity
-//! tag (not the derived per-message values), and `ultra`'s `scrub_stack` is a
-//! best-effort overwrite. This test covers the heap copy the public API hands to the
-//! caller.
+//! witness: every build now runs `scrub_stack` for the derivation region, and
+//! `tools/stack_residue.sh` checks the master key and the `locked` integrity tag. This
+//! test covers the heap copy the public API hands to the caller.
 
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};

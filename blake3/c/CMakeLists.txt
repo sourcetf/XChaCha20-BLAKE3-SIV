@@ -23,6 +23,8 @@ option(BLAKE3_FETCH_TBB "Allow fetching oneTBB from GitHub if not found on syste
 include(CTest)
 include(FeatureSummary)
 include(GNUInstallDirs)
+include(TestBigEndian)
+test_big_endian(BLAKE3_BIG_ENDIAN)
 include(BLAKE3/Utils)
 
 add_subdirectory(dependencies)
@@ -116,6 +118,7 @@ elseif(CMAKE_SYSTEM_PROCESSOR IN_LIST BLAKE3_X86_NAMES
 elseif((CMAKE_SYSTEM_PROCESSOR IN_LIST BLAKE3_ARMv8_NAMES
           OR ANDROID_ABI STREQUAL "armeabi-v7a"
           OR BLAKE3_USE_NEON_INTRINSICS)
+        AND NOT BLAKE3_BIG_ENDIAN
         AND (DEFINED BLAKE3_CFLAGS_NEON
           OR CMAKE_SIZEOF_VOID_P EQUAL 8))
   set(BLAKE3_SIMD_TYPE "neon-intrinsics" CACHE STRING "the SIMD acceleration type to use")
@@ -268,8 +271,8 @@ endif()
 if(BLAKE3_USE_TBB)
   # Define some scratch variables for building appropriate flags per compiler
   if(CMAKE_VERSION VERSION_LESS 3.12)
-    set(APPEND BLAKE3_CXX_STANDARD_FLAGS_GNU -std=c++20)
-    set(APPEND BLAKE3_CXX_STANDARD_FLAGS_MSVC /std:c++20)
+    list(APPEND BLAKE3_CXX_STANDARD_FLAGS_GNU -std=c++20)
+    list(APPEND BLAKE3_CXX_STANDARD_FLAGS_MSVC /std:c++20)
   endif()
 
   set(BLAKE3_CXXFLAGS_GNU "-fno-exceptions;-fno-rtti;${BLAKE3_CXX_STANDARD_FLAGS_GNU}" CACHE STRING "C++ flags used for compiling private BLAKE3 library components with GNU-like compiler frontends.")

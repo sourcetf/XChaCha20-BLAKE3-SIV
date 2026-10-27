@@ -2691,7 +2691,9 @@ _blake3_xof_many_avx512:
         vpbroadcastd zmm11,DWORD PTR [BLAKE3_IV_3+rip]
         vmovdqa32 zmm12,ZMMWORD PTR [rsp]
         vmovdqa32 zmm13,ZMMWORD PTR [rsp+0x40]
+        movzx edx,dl
         vpbroadcastd zmm14,edx
+        movzx r8d,r8b
         vpbroadcastd zmm15,r8d
         vpaddd zmm0,zmm0,zmm16
         vpaddd zmm1,zmm1,zmm18
@@ -3624,7 +3626,9 @@ _blake3_xof_many_avx512:
         vpbroadcastd ymm11,DWORD PTR [BLAKE3_IV_3+rip]
         vmovdqa ymm12,YMMWORD PTR [rsp]
         vmovdqa ymm13,YMMWORD PTR [rsp+0x40]
+        movzx edx,dl
         vpbroadcastd ymm14,edx
+        movzx r8d,r8b
         vpbroadcastd ymm15,r8d
         vpaddd ymm0,ymm0,ymm16
         vpaddd ymm1,ymm1,ymm18
@@ -4508,11 +4512,13 @@ _blake3_xof_many_avx512:
         vpunpckhdq xmm15,xmm12,xmm13
         vpermq ymm14,ymm14,0xdc
         vpermq ymm15,ymm15,0xdc
+        movzx edx,dl
         vpbroadcastd zmm12,edx
         vinserti64x4 zmm13,zmm14,ymm15,0x1
         mov    eax,0x4444
         kmovw  k2,eax
         vpblendmd zmm13{k2},zmm13,zmm12
+        movzx r8d,r8b
         vpbroadcastd zmm15,r8d
         mov    eax,0x8888
         kmovw  k4,eax
@@ -4623,6 +4629,7 @@ _blake3_xof_many_avx512:
         vpinsrd xmm14,xmm14,edx,0x2
         vinserti128 ymm13,ymm13,xmm14,0x1
         vbroadcasti128 ymm2,XMMWORD PTR [BLAKE3_IV+rip]
+        movzx r8d,r8b
         vpbroadcastd ymm8,r8d
         vpblendd ymm3,ymm13,ymm8,0x88
         vbroadcasti128 ymm8,XMMWORD PTR [rsi]

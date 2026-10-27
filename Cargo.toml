@@ -39,6 +39,9 @@ getrandom = { version = "0.4", optional = true, default-features = false }
 # fix, puts the hardened crate within ~10-25% of RustCrypto's
 # XChaCha20-Poly1305 at 4-5 KiB and at parity or ahead from 16 KiB up
 # (`performance.md` has the current table).
+# Those measurements predate making `scrub_stack` part of every build; the current
+# default pays its fixed ~0.5-1 us/op, so the small-message ratios are conservative.
+# See the measurement note at the top of `performance.md`.
 #
 # Portability is not lost, because BLAKE3's build script *falls back* to the Rust
 # backends when no compiler is available for the target (`support == NoCompiler`).

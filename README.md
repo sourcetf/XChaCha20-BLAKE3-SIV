@@ -604,10 +604,10 @@ second implementation on ("What the witness is" prices that loss).
 
 | Layer | What it defends | Cost (measured, this host) |
 | --- | --- | --- |
-| `hardened` (already default) | a single corrupted decision value or instruction | +25% at 64 B, +24% at 256 B, +23% at 1 KiB, +11% at 4 KiB, and within the noise floor from 16 KiB up (`performance.md`'s `hardened`-cost bullet carries the campaign medians) |
+| `hardened` (already default) | a single corrupted decision value or instruction | +25% at 64 B, +24% at 256 B, +23% at 1 KiB, +11% at 4 KiB, and within the noise floor from 16 KiB up (`performance.md`'s `hardened`-cost bullet carries the campaign medians). These figures predate making the scrub below default; the current default also pays that row's fixed cost |
 | `hardened` (moved here from `dual-mac`) | a fault inside the shared constant-time comparison (a shortened loop, a corrupted bound): the second gate `AND`s a differently *written* comparison (an 8-byte fold into a `u64`, rather than `subtle`'s per-byte loop), so one fault reaches only one of the two shapes and a forgery needs two faults | **about 1.4 ns** per decryption for the fold, plus a fixed handful of barrier instructions (well under 0.5% at 64 B). It was `dual-mac`-only until the two numbers were put side by side: this cost against a hand-modelled change from "forgery accepted after 2,573 attempts" to "no forgery in 2,000,000" |
-| `dual-mac` | the tag being pinned to a constant or to the received tag — the one model the two gates fail *together* on | +30% at 64 B, +40% at 1 KiB, +24% at 1 MiB on decryption (a +21–40% range); +6–25% on a round trip (the two ranges `Cargo.toml` and the changelog state). An independent build measured the same layer higher on its own harness (1.69–1.81x at 1 KiB, and +43–44% on the *encrypt* side at 64 B, where the fixed `scrub_stack` cost dominates); `performance.md` says how far these ratios move between builds |
-| `dual-mac` | key residue surviving in stack frames a wipe does not reach — the inner key `k_in`, left by the dependency's by-value temporaries rather than a frame this crate can name, plus the `blake3` dependency's XOF output (a run of `enc_key ‖ enc_nonce`) and, under `pure`, the outer key `k_out` (4,096-byte scan; the list, with the measured lengths, is in "What this crate cannot fix for you"): `scrub_stack()` overwrites the 16 KiB below the entry point after the last derivation | ~16 KiB of volatile stores, ~0.5–1 µs per operation, **and a 16,408-byte frame — 32 KiB of thread stack in all**, the published budget. Measured on a thread with a 32 KiB stack: the default build still runs after 16 KiB of the stack is already consumed, this one does not survive 8 KiB. A caller that spawns threads with small stacks must size them for it — the scrub is a 16 KiB frame, so it can fault the thread it is protecting. The budget is public as `stack_requirement_bytes()`: **32 KiB** under `dual-mac` (zero elsewhere), which is that frame plus the ordinary frames around it (~10 KiB in the same measurement, which overflowed a 24,576-byte thread and fitted in 26,624) with margin, and `the_reported_stack_requirement_is_sufficient` measures that a thread given that budget plus the test's documented margin (64 KiB in release, 1 MiB in debug) survives a round trip — so what it pins is that the constant does not understate by more than the margin, not that it is exact |
+| `dual-mac` | the tag being pinned to a constant or to the received tag — the one model the two gates fail *together* on | +30% at 64 B, +40% at 1 KiB, +24% at 1 MiB on decryption (a +21–40% range); +6–25% on a round trip (the two ranges `Cargo.toml` and the changelog state). An independent build measured the same layer higher on its own harness (1.69–1.81x at 1 KiB, and +43–44% on the *encrypt* side at 64 B where the fixed per-call costs dominate); `performance.md` says how far these ratios move between builds. `scrub_stack` is no longer part of this row: it is now in every build |
+| **all builds** (including the default) | key residue surviving in stack frames a wipe does not reach — the inner key `k_in`, left by the dependency's by-value temporaries rather than a frame this crate can name, plus the `blake3` dependency's XOF output (a run of `enc_key ‖ enc_nonce`) and, under `pure`, the outer key `k_out` (4,096-byte scan; the list, with the measured lengths, is in "What this crate cannot fix for you"): `scrub_stack()` overwrites the 16 KiB below the entry point after the last derivation | ~16 KiB of volatile stores, ~0.5–1 µs per operation, **and a 16,408-byte frame — 32 KiB of thread stack in all**, the published budget. Measured on a thread with a 32 KiB stack: a build without the scrub still runs after 16 KiB of the stack is already consumed; with it, the call does not survive 8 KiB. A caller that spawns threads with small stacks must size them for it — the scrub is a 16 KiB frame, so it can fault the thread it is protecting. The budget is public as `stack_requirement_bytes()`: **32 KiB**, that frame plus the ordinary frames around it (~10 KiB in the same measurement, which overflowed a 24,576-byte thread and fitted 26,624) with margin. `the_reported_stack_requirement_is_sufficient` pins the exact value and measures that a thread given it plus the test's margin (64 KiB in release, 1 MiB in debug) survives a round trip |
 | `witness` (in `ultra` only) | a fault aimed at the **derivation arithmetic both tag computations share** — `derive_tag`, the keyed BLAKE3 under it, and the SIMD kernels: the one model `dual-mac` alone cannot close, and where every accepting fault the sweep finds in the `hardened` build sits | the **`ultra` mode it is part of**, re-measured after the vendored-BLAKE3 tail fix, costs **2.4x at 64 B, 2.4x at 1 KiB, 4.3x at 64 KiB and 4.8x at 1 MiB** against the default configuration on allocating encryption (the only encrypt path that carries the witness), and **2.8x/4.1x/9.8x/14.3x** on decryption. Those are the whole bundle, not this row alone; [`performance.md`](performance.md)'s post-fork table is the current source, and its older ultra-minus-witness measurement put the **witness layer itself** at 1.45x at 64 B, 2.14x at 1 KiB, 6.3x at 64 KiB and 9.2x at 1 MiB on decryption. The witness is a complete scalar second implementation, so this is a design cost rather than a main-path regression. It is a *scalar* implementation, so its cost is per byte, and on the encrypt side it is present **only on the allocating `encrypt`** — see "What the witness is" for why the in-place path does not carry it. It does not make the *totals* in the fault table zero — it removes accepting faults from the decision and from the shared derivation, and the `ultra` build has a handful elsewhere (§§) |
 | `locked` | key pages readable out of **swap** or a **core dump** | ~7 µs once per key (`mlock`+`munlock`), not per message. The key is heap-allocated so its address is stable: `mlock` is address-based, and a key returned by value moves after being locked, which left this layer protecting a dead stack slot |
 | `locked` | a **hardware fault or bit flip in the key page** turning into a silent wrong key | `+42 ns` per use, measured: an 8-byte BLAKE3 tag of the key is stored beside it and checked (constant time) on every `as_bytes()`, so a corrupted page panics at the first use instead of decrypting with a key that is not the caller's. It does not detect a fault that rewrites the tag too, nor one outside the key-and-tag region (the rest of the page is never read) |
@@ -776,50 +776,21 @@ deployment.
   the practical ceiling is the address space; but a 32-bit deployment that wants a
   bound must impose it itself, e.g. through `decrypt_bounded` and its own check.
 - **A stack scan finds the `blake3` dependency's own frame residue, and this crate
-  cannot reach it.** Measured by stack scans of the kind `tools/stack_residue.sh`
-  implements — the committed tool reaches only the master key and `locked`'s tag from the
-  public API, as its own closing note says, so the derived-value scans used crate
-  internals or an audit probe: after a full round trip the **master** key never appears
-  in the call-chain stack region, but three kinds of *derived* material do — measured on
-  one 4,096-byte scan of the default (`hardened`) build: the whole 32-byte **`k_in`**,
-  the inner tag key, left by `blake3`'s by-value temporaries (the `Hasher::new_keyed`
-  return and the `ChunkState` built from the key on the multi-chunk path — the copies
-  the code comment above `blake3_keyed_multi` names); a
-  run of the *XOF output* of the keyed hash, 16 of the 44 bytes of
-  `enc_key ‖ enc_nonce`, because `blake3` keeps its output block in frames of its own;
-  and, under the `pure` (Rust-backend) build, the outer key `k_out` (~16 of 32 bytes; 4
-  of 32 on the default build). So the residue is not only the dependency's XOF buffer —
-  it includes a derived *key*, in full, in frames this crate cannot reach. `ultra`'s
-  `scrub_stack` overwrites the derivation region and clears all three, which is why the
-  `ultra` scan reports clean. The **master** key itself
-  is not left *whole* and its fragments are short rather than absent: the committed tool's
-  own reading, on the reference host, was a longest run of 4 bytes — and its thresholds are
-  lower than that measurement (it reports a 7-byte run, or two runs totalling 8 bytes across
-  the key's 32), so the honest form of the claim is that no whole key and no long run
-  survives, not that every fragment is gone. Which fragments a compiler leaves is its
-  choice, and the tool reports them (the `stack residue (advisory, ultra)` job fails its
-  step on a report — the job itself is `continue-on-error`, so it is advisory; `verify.sh
-  --deep` is where a report fails the whole run). The derived
-  material is the part that survives in full. `blake3`'s `zeroize` feature is already on and
-  the crate already calls `reader.zeroize(); hasher.zeroize();`, which is the entire
-  reach a caller has apart from `scrub_stack`. What this means in practice: an attacker who can read this
-  process's stack gets per-message encryption keys, not the master key — and such an
-  attacker can usually read the caller's own key copy anyway. It is written down here
-  because the crate's own claim — that the keyed-BLAKE3 state it can *name*
-  (`k_in`/`k_out`/`enc_seed` in BLAKE3's hasher state, and every local it can wipe) is
-  zeroized — is about those copies, not about dead frames: the three survivors above are
-  exactly why `scrub_stack` exists, and the claim must not be read as "nothing derived
-  survives the call" (this paragraph quoted it that way until the scan said otherwise).
-  The same scan
-  covers `locked`'s integrity tag — a hash of the master key — and reaches the same
-  conclusion: the crate's own copies are wiped, the residue is the frames described
-  above (the whole `k_in`, a run of the dependency's XOF buffer, plus `k_out` under `pure`), and the tool attributes it with a blake3-only control. Four source changes
-  in this crate reduce the residue that *is* reachable — `derive_enc`, `derive_material`
-  and `integrity_tag` all write through caller slices instead of returning an aggregate
-  (the last one's return value was a copy of `BLAKE3(key)` in a frame no wipe could
-  reach), and `chacha20_rounds` mutates in place instead of taking the key state by
-  value — and all but `derive_material`'s were found by exactly this scan (that one was
-  changed to match the shape, with no residue confirmed; `CHANGELOG.md`).
+  overwrites that region in every build.** `tools/stack_residue.sh` now computes
+  `k_in`, `k_out`, `enc_seed`, `enc_key` and `enc_nonce` independently from the public
+  construction, in addition to the master key and `locked`'s integrity tag, and scans
+  the call-chain stack for all of them. Before the every-build scrub, the derived
+  values were measurable; the default (`hardened`) build left the whole 32-byte `k_in`
+  from `blake3`'s by-value temporaries, and the tool's control case still demonstrates
+  the dependency's 8-byte XOF tag when the crate's scrub is not in the call path.
+  Every public entry point now calls `scrub_stack` after its last derivation, and the
+  measured entry-point cases report no key or derived-value run at or above the tool's
+  thresholds. What remains outside that measurement is a value the compiler kept in a
+  register or spilled outside the tool's 1 MiB window: the scrub is a frame-layout
+  heuristic, not a proof. This is documented rather than hidden; it is not a known
+  surviving derived value. `blake3`'s `zeroize` feature is already on and the crate
+  already calls `reader.zeroize(); hasher.zeroize();`, which covers the state the
+  dependency can name; `scrub_stack` covers the dependency's unnamed temporaries.
 - **Zeroization is a volatile-store wipe.** It clears the bytes this crate owns, when
   it drops them. It does not reach a page that had already been swapped out, a core
   dump or a hibernation image the OS writes, a debugger attached to the process, or
@@ -1132,11 +1103,14 @@ configurations, the measured noise floor, and the cost of each defence — are i
 [`performance.md`](performance.md), split out so this file stays about the construction and
 the security argument. The short version, so a reader need not open it: this crate pays
 **more per message** (three derived keys, a 65-byte tag, and wiping all of it) and **less
-per byte** (BLAKE3 beats Poly1305 once there is data to batch), so in the default
-configuration it is ahead of `XChaCha20Poly1305` on encryption at 64–256 B, behind at
+per byte** (BLAKE3 beats Poly1305 once there is data to batch). These figures predate
+the every-build stack scrub; the current default adds a fixed ~0.5–1 µs per operation
+(see `performance.md`'s measurement note). Before that change, in the default
+configuration it was ahead of `XChaCha20Poly1305` on encryption at 64–256 B, behind at
 1 KiB (0.90x), level at 4 KiB (0.89x) and ahead from 16 KiB up, and on decryption it
 is behind at 1 KiB (0.76x) and 4 KiB (0.90x, within the measured noise floor) and ahead
-from 16 KiB up. The current table is `performance.md`'s post-fork one.
+from 16 KiB up. The current table is `performance.md`'s post-fork one; expect the
+small-message cells to be lower now that the scrub is default.
 The two costs it prices are a fixed per-message cost on
 `hardened` decryption (the gates' four 65-byte constant-time comparison passes — three more
 than the opt-out build's single pass, since each gate runs `subtle`'s loop both ways round —
@@ -1196,10 +1170,12 @@ dependent crate:
   stack buffer is 16 KiB instead of 64 KiB. The fork also vendors upstream's
   `reference_impl` and test vectors, so its own 43-test suite runs in CI.
 
-The C and assembly sources under `blake3/c/` remain byte-identical to upstream. The
-Rust dispatcher above never selects the over-reading 2/4-wide tails, so the parent is
-not affected; a consumer building the C library directly with CMake should apply
-upstream's fix when it appears. `blake3/PATCHES.md` lists that under **Not patched**.
+The C library is patched too: `blake3/c/blake3_dispatch.c` keeps only complete SIMD
+groups on the AVX2/AVX-512 kernels and sends tails to SSE/portable, the unix compress
+and xof assembly zero-extends its narrow arguments, and CMake rejects NEON on
+big-endian targets. `make test` and `make test_asm` run the official vectors against
+the C intrinsics and assembly in CI. The C API therefore has neither the 2/4-wide
+over-read nor the D-03 ABI hazard; see `blake3/PATCHES.md`.
 
 The parent depends on this directory **directly by path**: there is no
 `[patch.crates-io]` and no crates.io `blake3` dependency in either the library,

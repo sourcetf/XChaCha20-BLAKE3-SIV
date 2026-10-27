@@ -8,7 +8,7 @@ INLINE __m256i loadu(const uint8_t src[32]) {
   return _mm256_loadu_si256((const __m256i *)src);
 }
 
-INLINE void storeu(__m256i src, uint8_t dest[16]) {
+INLINE void storeu(__m256i src, uint8_t dest[32]) {
   _mm256_storeu_si256((__m256i *)dest, src);
 }
 

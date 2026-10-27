@@ -93,6 +93,10 @@ updates:
       # because Dependabot's own cargo is not ours to pin. Remove it when `rust-version`
       # moves to 1.88 or beyond — the same commit that moves the MSRV job's pin.
       - dependency-name: proptest
+      # Dev-only WASI target dependency pulled by proptest -> rand -> getrandom 0.3.
+      # 1.0.1 and later declare rust-version 1.87, above this crate's 1.85; 1.0.0 is
+      # the newest MSRV-compatible release and is pinned in Cargo.lock.
+      - dependency-name: wasip2
 
   # `Cargo.toml` excludes `fuzz` from the workspace, so `fuzz/Cargo.toml` (and its own
   # committed `fuzz/Cargo.lock`) are a second dependency set that the `directory: "/"`

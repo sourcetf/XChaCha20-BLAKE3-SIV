@@ -1473,8 +1473,8 @@ missing later (L3.6, §2.1).
   and the ciphertext length equals the message length. Both are properties of the mode, not
   defects, and both are documented in `README.md`.
 * **Stack residue, and the limit of what `scrub_stack` proves.** The crate wipes every
-  key-bearing local it can *name*, but four things it cannot reach are measured to survive in the
-  call-chain stack: the **whole 32-byte `k_in`** — a derived *key*, left by the
+  key-bearing local it can *name*. Before the every-build scrub, four things it cannot
+  reach were measured to survive in the call-chain stack: the **whole 32-byte `k_in`** — a derived *key*, left by the
   dependency's by-value temporaries rather than in a frame this crate can name, and the
   largest survivor — the `blake3` dependency's XOF
   output buffer (16 of the 44 bytes of `enc_key ‖ enc_nonce`; a frame this crate does not own),
@@ -1482,17 +1482,18 @@ missing later (L3.6, §2.1).
   default build), and the
   *return temporaries* of functions
   that return an aggregate by value (which is why `derive_material`/`derive_enc` write through
-  caller slices). Under `ultra`, `dual-mac`'s `scrub_stack` overwrites the derivation region
-  afterwards, which is why the `ultra` stack scan reports clean — but that is a **frame-layout
-  heuristic, not a proof**: it is best-effort, compiler-dependent, and covers the region the
-  scrubber's own 16 KiB frame happens to reach, not the caller's frames above it. `README.md`
+  caller slices). Every build now calls `scrub_stack` after the last derivation, which
+  overwrites the derivation region; that is why the stack scans report clean — but it is a
+  **frame-layout heuristic, not a proof**: it is best-effort, compiler-dependent, and covers
+  the region the scrubber's own 16 KiB frame happens to reach, not the caller's frames above
+  it or values the compiler kept in registers. `README.md`
   ("What this crate cannot fix for you") carries the measurements, and `tools/stack_residue.sh`
-  re-runs the half of them reachable from the public API — the master key and `locked`'s tag;
-  the derived-value scans need crate internals, as the tool's own closing note says. This is in
-  the residual list because it is the one hygiene claim that rests on
-  something other than a wipe the code names, and because the largest survivor is a whole derived
-  key rather than a buffer tail: a reader must not read "the crate wipes what it names" as
-  "nothing derived survives the call".
+  re-runs them from the public construction and now scans the master key, `locked`'s tag,
+  and `k_in`/`k_out`/`enc_seed`/`enc_key`/`enc_nonce`; the reference host reports clean.
+  A register or a value outside the tool's 1 MiB window remains outside that measurement,
+  so the scrub is still a frame-layout heuristic rather than a proof. This is in the
+  residual list because it is best-effort and compiler-dependent, not because a known
+  derived value survives.
 * **Beyond the model.** Side channels, fault injection, a debugger, cold boot, a hostile
   hypervisor: out of scope here and covered where they belong.
 * **What "no unknown problem" can and cannot mean.** A break of this construction must be a
