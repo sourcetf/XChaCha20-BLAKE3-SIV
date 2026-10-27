@@ -15,6 +15,9 @@ Packaging differences from the published archive:
   describe this patched tree as unmodified) are removed.
 - `Cargo.lock` is tracked so the fork's own test suite is reproducible; it includes the
   path dev-dependency below and is not part of the parent's build graph.
+- `repository` and `documentation` name the parent repository and this patch file, not
+  upstream's docs.rs page: `cargo metadata`/SBOM output otherwise attributes this patched
+  tree to pristine `blake3 1.8.7`.
 - `reference_impl/` and `test_vectors/` are from the upstream git repository at
   `f3149ec5bb5449af877ba20377a11008ff499fa2` (the commit named by the published
   `.crate`). They restore the published crate's missing test dev-dependency
@@ -70,7 +73,9 @@ path dependency with a registry version; that would remove every fix listed abov
 The upstream-sync workflow's comparison branch contains `blake3/upstream-sync/`; the
 parent's `build.rs` refuses that directory, so the candidate cannot be built or mistaken
 for a merge candidate. `cargo package` is likewise refused by `build.rs` because Cargo
-would rewrite this path dependency to unpatched crates.io BLAKE3.
+would rewrite this path dependency to unpatched crates.io BLAKE3. `cargo package
+--no-verify` writes an archive without running that guard; no such archive is ever
+published or attached, and it is untrusted if produced locally.
 
 **The reviewed public C API paths have no known memory-safety or ABI defect in this
 tree.** The C dispatch splits groups, the unix compress/xof assembly zero-extends its

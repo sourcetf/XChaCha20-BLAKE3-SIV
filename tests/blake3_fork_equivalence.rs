@@ -30,6 +30,16 @@ fn platforms_to_test() -> Vec<Platform> {
                 .flatten(),
         );
     }
+    // `detect()` includes AVX-512 only on a CPU that supports it, and a hosted runner
+    // may not; naming the checked constructor explicitly means the 8-wide peel is
+    // exercised whenever the host can execute it, rather than silently skipped.
+    #[cfg(all(
+        any(target_arch = "x86", target_arch = "x86_64"),
+        not(feature = "pure")
+    ))]
+    {
+        platforms.extend(Platform::avx512());
+    }
     platforms
 }
 

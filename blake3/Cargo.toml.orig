@@ -3,9 +3,9 @@ name = "blake3"
 version = "1.8.7"
 authors = ["Jack O'Connor <oconnor663@gmail.com>", "Samuel Neves"]
 description = "the BLAKE3 hash function"
-repository = "https://github.com/BLAKE3-team/BLAKE3"
+repository = "https://github.com/sourcetf/XChaCha20-BLAKE3-SIV"
 license = "CC0-1.0 OR Apache-2.0 OR Apache-2.0 WITH LLVM-exception"
-documentation = "https://docs.rs/blake3"
+documentation = "https://github.com/sourcetf/XChaCha20-BLAKE3-SIV/blob/main/blake3/PATCHES.md"
 readme = "README.md"
 edition = "2024"
 # Patched fork, source-only with the parent repository.

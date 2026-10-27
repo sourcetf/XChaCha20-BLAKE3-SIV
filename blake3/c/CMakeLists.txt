@@ -129,6 +129,17 @@ endif()
 
 mark_as_advanced(BLAKE3_SIMD_TYPE)
 
+# The NEON implementation is little-endian only. The auto-selection above already
+# refuses it on a big-endian target, but an explicit -DBLAKE3_SIMD_TYPE=neon-intrinsics
+# would otherwise reach it; fail here rather than emit code that reads every block
+# byte-swapped. (test_big_endian is a compile-time check, so this also holds when
+# cross-compiling.)
+if(BLAKE3_SIMD_TYPE STREQUAL "neon-intrinsics" AND BLAKE3_BIG_ENDIAN)
+  message(FATAL_ERROR
+    "BLAKE3's NEON implementation is little-endian only; "
+    "BLAKE3_SIMD_TYPE=neon-intrinsics is not supported on a big-endian target.")
+endif()
+
 # library target
 add_library(blake3
   blake3.c

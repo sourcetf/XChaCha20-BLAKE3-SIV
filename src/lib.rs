@@ -517,7 +517,8 @@ pub const DOM_TAG: [u8; 8] = *b"XSIV-TAG";
 /// three BLAKE3 invocations cannot be confused for one another.
 pub const DOM_ENC: [u8; 8] = *b"XSIV-ENC";
 
-/// Extra stack, in bytes, that one call into this crate may touch below its entry point.
+/// Extra stack, in bytes, that one **optimized** call into this crate may touch below
+/// its entry point.
 ///
 /// Every entry point calls `scrub_stack` after its last derivation, in every feature
 /// configuration, to overwrite the call-chain region the key derivations used. That
@@ -532,9 +533,13 @@ pub const DOM_ENC: [u8; 8] = *b"XSIV-ENC";
 /// Unlike ordinary frames, this is a large fixed frame even in the default/opt-out
 /// builds, because the residue it removes (`k_in` left by BLAKE3's by-value temporaries)
 /// is present in every build. A caller that gives a thread less stack than this can
-/// fault the thread with a stack overflow; the measurement above is release, and
-/// unoptimized frames are several times larger, which is why the in-crate test adds a
-/// 1 MiB margin under `debug_assertions` (64 KiB in release).
+/// fault the thread with a stack overflow.
+///
+/// **The 32 KiB figure is for an optimized build.** Unoptimized frames are several times
+/// larger, and the number does not vary with the profile, so a debug caller must add its
+/// own margin: the in-crate test uses 1 MiB under `debug_assertions` and 64 KiB in
+/// release. The value is 32 KiB in every feature configuration; it is the release
+/// requirement, not a promise that a debug build fits in the same budget.
 ///
 /// ```no_run
 /// let stack = xchacha20_blake3_siv::stack_requirement_bytes() + 16 * 1024;
@@ -6075,21 +6080,13 @@ mod tests {
     /// needing 24,576 < stack ≤ 26,624, so the surrounding ordinary frames are part of the
     /// budget (see the function's own docs).
     ///
-    /// **Not a regression lock on the number itself**, and an earlier revision of this
-    /// doc read as though it were: with the default feature set `stack_requirement_bytes`
-    /// is 0 (`dual-mac` is what makes it 32768), so the assertion is that the *reported*
-    /// value is sufficient — and the margin (64 KiB in release, 1 MiB in debug) is 2x to
-    /// 32x the constant, so a constant under-reported within that margin still passes.
-    /// What it does pin is that the reported value does not *understate by more than the
-    /// margin*, which is the direction that would fault a caller's thread.
-    ///
-    /// The "too small" half — that a thread with less than the requirement faults inside
-    /// `scrub_stack` — stays the hand measurement in the README's layer table, because a stack
-    /// overflow is not something a test can catch: the process dies, which is the point of the
-    /// constant rather than something to assert around.
-    /// **This now pins the number itself** as well as sufficiency: every build calls
-    /// `scrub_stack`, so `stack_requirement_bytes` is always 32768. The margin below
-    /// still covers the ordinary frames and the debug-build growth.
+    /// The margin is not a regression lock on the exact runtime need: a stack overflow
+    /// kills the process, so a test cannot catch "too small" by asserting around it. What
+    /// the test pins is (a) the published value itself, which is 32 KiB in every feature
+    /// configuration, and (b) that this published release-style value plus a generous
+    /// margin survives a debug or release round trip. The margin is larger in debug
+    /// because unoptimized frames are larger; it is not part of the published constant.
+    /// The "too small" half stays the hand measurement in the README's layer table.
     #[test]
     fn the_reported_stack_requirement_is_sufficient() {
         let need = stack_requirement_bytes();

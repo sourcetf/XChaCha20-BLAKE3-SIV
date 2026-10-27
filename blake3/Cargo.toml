@@ -24,10 +24,10 @@ autoexamples = false
 autotests = false
 autobenches = false
 description = "the BLAKE3 hash function"
-documentation = "https://docs.rs/blake3"
+documentation = "https://github.com/sourcetf/XChaCha20-BLAKE3-SIV/blob/main/blake3/PATCHES.md"
 readme = "README.md"
 license = "CC0-1.0 OR Apache-2.0 OR Apache-2.0 WITH LLVM-exception"
-repository = "https://github.com/BLAKE3-team/BLAKE3"
+repository = "https://github.com/sourcetf/XChaCha20-BLAKE3-SIV"
 # This directory is a patched fork distributed only as source with the parent
 # repository. Publishing it under upstream's name and version would ship the
 # local modifications as pristine `blake3 1.8.7`.

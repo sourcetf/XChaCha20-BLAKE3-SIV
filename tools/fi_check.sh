@@ -58,8 +58,8 @@ trap 'rc=$?; if [ "$rc" -eq 0 ]; then rm -rf "$WORK"; else echo "fault-campaign 
 # has to come along or the manifest does not resolve at all.
 copy_tree() {
   mkdir -p "$1"
-  cp -r src tests benches blake3 Cargo.toml Cargo.lock "$1/" 2>/dev/null || true
-  cp -r src tests benches blake3 Cargo.toml Cargo.lock "$1/"
+  cp -r src tests benches blake3 Cargo.toml Cargo.lock build.rs "$1/" 2>/dev/null || true
+  cp -r src tests benches blake3 Cargo.toml Cargo.lock build.rs "$1/"
 }
 
 # Require the run's log to show that tests actually ran.

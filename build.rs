@@ -5,6 +5,10 @@
 //! requirement. The resulting package would silently build against unpatched
 //! crates.io BLAKE3, so this build script checks the manifest cargo actually
 //! supplied to the build and fails if the path dependency is gone.
+//!
+//! `cargo package --no-verify` writes the archive without running this script.
+//! Nothing can prevent that locally; such an archive is untrusted, is never
+//! published or attached by CI, and does not contain the vendored fix set.
 
 use std::env;
 use std::fs;
@@ -14,7 +18,9 @@ fn main() {
     let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
     if manifest_dir.join("blake3/upstream-sync").exists() {
         panic!(
-            "this is the unpatched upstream-sync comparison branch; it is not a merge              candidate and the build intentionally refuses it. Apply the documented local              patches before using this tree."
+            "this is the unpatched upstream-sync comparison branch; it is not a merge \
+             candidate and the build intentionally refuses it. Apply the documented local \
+             patches before using this tree."
         );
     }
     let manifest = fs::read_to_string(manifest_dir.join("Cargo.toml")).unwrap_or_default();

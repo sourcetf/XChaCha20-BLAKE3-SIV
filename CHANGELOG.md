@@ -23,6 +23,23 @@ No wire-format bytes changed.
   rewrites the `blake3` path dependency to unpatched crates.io BLAKE3. A build-script
   guard checks the manifest Cargo supplied and fails packaging; the sync candidate
   branch (`blake3/upstream-sync/`) is also refused by the same guard.
+- **Fault-injection, ctgrind, mutation and cache-profile scripts copy `build.rs`.** The
+  new build-script guard is now part of every throwaway source tree those tools compile;
+  without it their baselines and planted copies failed before the detector ran. Both
+  `verify the verifier` and `ctgrind` went red on the first push for exactly this reason.
+- **The timing presence guard counts libtest's `passed;` field.** The previous parser
+  looked for the bare word `passed`, so a healthy `1 passed;` summary was read as zero
+  tests and the blocking step failed even though its guard test ran.
+- **CMake rejects an explicit big-endian NEON request**, not only the auto-selection path;
+  the fork's equivalence tests also name `Platform::avx512()` so the 8-wide peel runs
+  whenever the host can execute it.
+- **The stack budget and package provenance documentation are consistent again:** the
+  stale claim that `stack_requirement_bytes()` was zero outside `dual-mac` is gone, the
+  32 KiB figure is explicitly the optimized-build requirement, the MRAE auth display
+  includes the `q·2^-520` term its surrounding text already described, and the fork
+  manifest points `repository`/`documentation` at this repository and `PATCHES.md`
+  rather than upstream's docs.rs page. `cargo package --no-verify` is documented as
+  bypassing the guard; such an archive is untrusted and never distributed.
 - **`lock_range` rollback now checks `munlock`.** It restores `MADV_DODUMP` only when
   the unlock succeeded, matching the documented fail-closed order.
 - **Kani shard parser** counts every proof attribute, not one per line, and the

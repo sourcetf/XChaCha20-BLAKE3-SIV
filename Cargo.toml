@@ -173,7 +173,10 @@ hardened = []
 # fails inside `getrandom`); a `no_std` caller should use the list
 # `--features hardened,dual-mac` instead. That is `ultra` minus the witness, minus
 # `rng`, and minus `locked` (functional only on Linux x86_64/aarch64; its stubs fail
-# closed elsewhere). The `witness` module is gated on the `ultra` feature *name*, not
+# closed elsewhere). Every AEAD call reserves the 16 KiB `scrub_stack` frame, so a
+# `no_std` task must budget `stack_requirement_bytes()` (32 KiB in an optimized build)
+# of stack; see the function's docs for the larger unoptimized-build margin. The
+# `witness` module is gated on the `ultra` feature *name*, not
 # on the features it implies, and there is no `witness` feature, so a target where
 # `ultra` cannot build cannot turn that layer on at all.
 #

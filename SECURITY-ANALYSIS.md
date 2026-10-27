@@ -675,7 +675,7 @@ answer) with the same length profile. Then
 
 ```
 Adv^{priv} ≤ 2·Adv^{A1} + Adv^{A2} + 3·Adv^{A3} + q²/2^257
-Adv^{auth} ≤ 2·Adv^{A1} + Adv^{A2} + 3·Adv^{A3} + q·2^-256 + q²/2^257
+Adv^{auth} ≤ 2·Adv^{A1} + Adv^{A2} + 3·Adv^{A3} + q·2^-256 + q·2^-520 + q²/2^257
 ```
 
 where `q` bounds the adversary's oracle queries and each `Adv` is the *multi-query* PRF

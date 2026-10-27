@@ -34,7 +34,7 @@ trap 'rm -rf "$WORK"' EXIT
 copy_tree() {
   local dest="$1"
   mkdir -p "$dest"
-  cp -r src tests tools blake3 Cargo.toml Cargo.lock benches "$dest/"
+  cp -r src tests tools blake3 Cargo.toml Cargo.lock build.rs benches "$dest/"
 }
 
 # 1. Secret-dependent comparison in both decrypt paths. `ctgrind` must report it.

@@ -287,7 +287,7 @@ if [ "${1:-}" = "--selftest" ]; then
   # listed fewer trees); GNU `cp -r` nests into directories that already exist, so the
   # second copied everything again as `$work/src/src`, `$work/tools/tools`, ... and, being
   # the unguarded one, aborted the script on a full disk.
-  cp -r src tests examples benches tools blake3 Cargo.toml Cargo.lock "$work/"
+  cp -r src tests examples benches tools blake3 Cargo.toml Cargo.lock build.rs "$work/"
   python3 - "$work/src/lib.rs" <<'PY'
 import sys
 p = sys.argv[1]
