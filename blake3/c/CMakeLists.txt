@@ -24,7 +24,11 @@ include(CTest)
 include(FeatureSummary)
 include(GNUInstallDirs)
 include(TestBigEndian)
-test_big_endian(BLAKE3_BIG_ENDIAN)
+# A caller may pin the byte order (the guard below is then testable on a
+# little-endian host); otherwise detect it from the compiler.
+if(NOT DEFINED BLAKE3_BIG_ENDIAN)
+  test_big_endian(BLAKE3_BIG_ENDIAN)
+endif()
 include(BLAKE3/Utils)
 
 add_subdirectory(dependencies)

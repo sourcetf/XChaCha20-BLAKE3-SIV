@@ -31,8 +31,9 @@ No wire-format bytes changed.
   looked for the bare word `passed`, so a healthy `1 passed;` summary was read as zero
   tests and the blocking step failed even though its guard test ran.
 - **CMake rejects an explicit big-endian NEON request**, not only the auto-selection path;
-  the fork's equivalence tests also name `Platform::avx512()` so the 8-wide peel runs
-  whenever the host can execute it.
+  `BLAKE3_BIG_ENDIAN` can now be pinned in the cache so CI can require that rejection on a
+  little-endian host. The fork's equivalence tests also name `Platform::avx512()` so the
+  8-wide peel runs whenever the host can execute it.
 - **The stack budget and package provenance documentation are consistent again:** the
   stale claim that `stack_requirement_bytes()` was zero outside `dual-mac` is gone, the
   32 KiB figure is explicitly the optimized-build requirement, the MRAE auth display

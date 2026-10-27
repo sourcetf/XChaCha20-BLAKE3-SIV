@@ -499,6 +499,28 @@ jobs:
           chmod +x test.py
           make -f Makefile.testing clean
           make -f Makefile.testing test_asm
+      - name: CMake refuses explicit big-endian NEON
+        # The auto-selection path already refuses NEON on a big-endian target; this
+        # pins the explicit `-DBLAKE3_SIMD_TYPE=neon-intrinsics` path too. Setting
+        # BLAKE3_BIG_ENDIAN in the cache is what makes the guard testable on an LE
+        # host; a successful configure here would silently enable the LE-only kernels.
+        run: |
+          set +e
+          cmake -S blake3/c -B "$RUNNER_TEMP/cmake-be" \
+            -DBLAKE3_BIG_ENDIAN=ON -DBLAKE3_SIMD_TYPE=neon-intrinsics \
+            >"$RUNNER_TEMP/cmake-be.log" 2>&1
+          rc=$?
+          set -e
+          if [ "$rc" -eq 0 ]; then
+            echo "::error::CMake accepted NEON on a big-endian target"
+            exit 1
+          fi
+          if ! grep -q "little-endian only" "$RUNNER_TEMP/cmake-be.log"; then
+            echo "::error::CMake failed for a different reason than the big-endian NEON guard:"
+            tail -20 "$RUNNER_TEMP/cmake-be.log"
+            exit 1
+          fi
+          echo "CMake rejected explicit big-endian NEON as intended"
 
   no-std:
     name: no_std target (thumbv7em)
