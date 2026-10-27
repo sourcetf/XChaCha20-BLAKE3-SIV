@@ -487,11 +487,13 @@ jobs:
       - name: C intrinsics tests (ASan/UBSan)
         working-directory: blake3/c
         run: |
+          chmod +x test.py
           make -f Makefile.testing clean
           make -f Makefile.testing test
       - name: C assembly tests (ASan/UBSan)
         working-directory: blake3/c
         run: |
+          chmod +x test.py
           make -f Makefile.testing clean
           make -f Makefile.testing test_asm
 
