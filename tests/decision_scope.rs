@@ -1399,13 +1399,15 @@ fn the_decision_outcome_is_fail_closed() {
         );
     }
 
-    // The default build passes the same `Choice` twice (the second gate is compiled
-    // out there), which is also what keeps the signature -- and the symbol the
-    // suppression names -- identical in both builds.
+    // Only the `--no-default-features` build passes the same `Choice` twice (the second
+    // gate is compiled out there), which is also what keeps the signature -- and the
+    // symbol the suppression names -- identical in both builds. The default build's two
+    // decrypt entry points pass `gates.0`/`gates.1`, and `encrypt`'s `ultra` branch passes
+    // `agree`/`agree2`, which are two different comparisons of the same values.
     assert_eq!(
         code.matches("accept_or_reject(auth_ok, auth_ok, ").count(),
         2,
-        "the default build must not compute a second comparison it does not use"
+        "only the gate-less build may reuse one comparison for both slots"
     );
 
     // The helper must write through that pointer rather than return a value: a
@@ -1668,6 +1670,19 @@ fn the_decision_outcome_is_fail_closed() {
         non_test.matches("accept_or_reject(agree, agree2,").count(),
         1,
         "`ultra`'s encrypt-side cross-check must go through the one suppressed decision"
+    );
+    // The call above names two *different* `Choice`s, but a name is not a comparison: the
+    // injection `let agree2: subtle::Choice = agree;` leaves every assertion above true --
+    // the call still reads `accept_or_reject(agree, agree2,` -- and made the whole
+    // `--features ultra` suite green (measured on a copy). If the second slot carries the
+    // first comparison's answer, one skipped instruction reaches both gates and `ultra`'s
+    // whole second-gate story is gone while the README still claims it. Pin where `agree2`
+    // comes from, not only that it exists.
+    assert!(
+        non_test.contains("let agree2: subtle::Choice = ct_eq_independent(&witness_tag, &tag);"),
+        "`encrypt`'s second gate must be the independently shaped fold over the witness tag \
+         and the computed tag; binding `agree2` to `agree` (or any other spelling of the \
+         first comparison) makes one fault reach both gates"
     );
     assert!(
         !non_test.contains("bool::from(witness::"),

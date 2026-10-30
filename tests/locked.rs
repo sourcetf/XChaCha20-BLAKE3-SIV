@@ -1243,9 +1243,21 @@ fn raw_string_prefix(b: &[u8]) -> Option<(usize, u8)> {
 /// It reads [`non_test_source`], so a block ending in a comment that contains `{` or a `}`
 /// cannot unbalance the brace walk, and a needle mentioned in prose is not a definition.
 fn brace_blocks(needle: &str) -> Vec<String> {
-    let text = non_test_source();
+    brace_blocks_in(&non_test_source(), needle)
+}
+
+/// [`brace_blocks`] over a source slice the caller already holds: every brace-matched
+/// block that starts at `needle`, `needle` included.
+///
+/// The split exists because the assertions below need to ask a question about a block
+/// *inside* another block — is `MADV_DODUMP` in the body of `if ok(u) { … }`, or merely
+/// somewhere after it? A whole-file needle returns both guards (one in `lock_range`'s
+/// rollback, one in `unlock_range_with`) with no way to say which function they are in,
+/// and comparing string offsets (`dodump > guard`) accepts an unconditional restore that
+/// merely comes later — the exact injection an audit used to keep this suite green.
+fn brace_blocks_in(text: &str, needle: &str) -> Vec<String> {
     let mut out = Vec::new();
-    let mut rest = text.as_str();
+    let mut rest = text;
     while let Some(i) = rest.find(needle) {
         let after = &rest[i..];
         let open = after.find('{').expect("block without a body");
@@ -1520,6 +1532,71 @@ fn the_integrity_check_fails_stop_on_a_corrupted_page() {
     );
 }
 
+/// The two `LockedKey` paths that derive key material still scrub the stack.
+///
+/// `tests/ultra.rs` counts the same two sites, but it is compiled only under `ultra`;
+/// `locked` is a feature a caller can enable alone, so the guarantee needs a witness in
+/// this file too. The sites are `LockedKey::new` (the integrity tag's keyed-BLAKE3
+/// finalize) and `check_integrity` (the same finalize, on every `as_bytes()`, i.e. every
+/// use of the key). An audit deleted both calls and the whole `--all-features` suite
+/// stayed green, because the previous count covered only the four AEAD entry points.
+#[test]
+fn the_locked_key_paths_scrub_the_stack() {
+    let new = brace_blocks("pub fn new(key: &[u8; crate::KEY_LEN])");
+    assert_eq!(new.len(), 1, "one `LockedKey::new` expected");
+    let new = &new[0];
+    assert_eq!(
+        new.matches("scrub_stack();").count(),
+        1,
+        "LockedKey::new must scrub the stack after `integrity_tag`, or the tag's keyed-\
+         BLAKE3 finalize leaves key-dependent temporaries in its frame"
+    );
+    let tag_wipe = new
+        .find("zeroize_array(&mut tag)")
+        .expect("LockedKey::new must wipe its tag local");
+    let scrub = new.find("scrub_stack();").expect("checked above");
+    let ok = new
+        .find("Ok(LockedKey(page))")
+        .expect("LockedKey::new must return the page");
+    assert!(
+        tag_wipe < scrub && scrub < ok,
+        "the scrub must come after the tag wipe and before the success return: a scrub on \
+         an early-return path would protect nothing and one after `Ok(..)` would never run"
+    );
+
+    let check = brace_blocks("fn check_integrity(&self, bytes: &[u8; crate::KEY_LEN])");
+    assert_eq!(check.len(), 1, "one `LockedKey::check_integrity` expected");
+    let check = &check[0];
+    assert_eq!(
+        check.matches("scrub_stack();").count(),
+        1,
+        "check_integrity must scrub the stack: it runs on every `as_bytes()`, and its \
+         keyed-BLAKE3 finalize is the same dependency residue every AEAD entry point clears"
+    );
+    let wipe = check
+        .find("zeroize_array(&mut expected)")
+        .expect("check_integrity must wipe the recomputed tag before branching");
+    let scrub = check.find("scrub_stack();").expect("checked above");
+    let branch = check
+        .find("if !bool::from(ok)")
+        .expect("check_integrity must branch on the comparison");
+    assert!(
+        wipe < scrub && scrub < branch,
+        "check_integrity must wipe and scrub before the fail-stop branch: the panic unwinds \
+         without running later statements, so a scrub after it would cover only the success \
+         path"
+    );
+
+    // `as_bytes` must actually call the checked path: a scrub in a helper nobody calls is
+    // the shape a whole-file count cannot distinguish from the real one.
+    let as_bytes = brace_blocks("pub fn as_bytes(&self) -> &[u8; crate::KEY_LEN]");
+    assert_eq!(as_bytes.len(), 1, "one `LockedKey::as_bytes` expected");
+    assert!(
+        as_bytes[0].contains("self.check_integrity(bytes);"),
+        "as_bytes must run the integrity check (and its scrub) on every use"
+    );
+}
+
 /// The advice constants are the ABI's, and both are actually passed to `madvise`.
 ///
 /// This exists because the effect of `MADV_DODUMP` is only *observable* on a host whose
@@ -1602,11 +1679,18 @@ fn the_dump_advice_is_issued_on_the_right_range() {
         "unlock_range must munlock before restoring MADV_DODUMP: the page stays \
          non-dumpable until the lock is released"
     );
+    let guard_blocks = brace_blocks_in(&unlock[0], "if ok(u) {");
+    assert_eq!(
+        guard_blocks.len(),
+        1,
+        "unlock_range_with must have exactly one `if ok(u)` guard around the advice restore"
+    );
     assert!(
-        unlock[0].contains("if ok(u) {"),
-        "MADV_DODUMP must be restored only when the munlock succeeded: restoring it after \
-         a refused munlock leaves the page locked *and* dumpable, with the lock quota \
-         never returned"
+        guard_blocks[0].contains("syscall3(NR_MADVISE, start, end - start, MADV_DODUMP)"),
+        "MADV_DODUMP must be *inside* the `if ok(u)` block, not merely after it: restoring \
+         it after a refused munlock leaves the page locked *and* dumpable, with the lock \
+         quota never returned\n{}",
+        guard_blocks[0]
     );
     // The mirror image in `lock_range`: a refused `MADV_DONTDUMP` must undo the mlock.
     // The order is munlock first, then `MADV_DODUMP`: if the unlock is refused, the range
@@ -1630,15 +1714,25 @@ fn the_dump_advice_is_issued_on_the_right_range() {
     let guard = rollback
         .find("if ok(u) {")
         .expect("the rollback must restore MADV_DODUMP only when munlock succeeded");
-    assert!(
-        dodump > guard,
-        "MADV_DODUMP must be inside the `if ok(u)` guard, not after it: a refused munlock \
-         must leave the range non-dumpable\n{rollback}"
+    // `dodump > guard` compared string offsets, so it accepted an *empty* guard followed
+    // by an unconditional restore -- exactly the injection an audit measured green. The
+    // block itself must contain the call.
+    let rollback_guard = brace_blocks_in(rollback, "if ok(u) {");
+    assert_eq!(
+        rollback_guard.len(),
+        1,
+        "the rollback must have exactly one `if ok(u)` guard around the advice restore"
     );
     assert!(
-        munlock < dodump,
-        "the rollback must munlock before restoring MADV_DODUMP: if the unlock is refused, \
-         the range must remain non-dumpable instead of becoming locked and dumpable\n{rollback}"
+        rollback_guard[0].contains("syscall3(NR_MADVISE, start, end - start, MADV_DODUMP)"),
+        "MADV_DODUMP must be *inside* the `if ok(u)` block, not merely after it: a refused \
+         munlock must leave the range non-dumpable\n{rollback}"
+    );
+    assert!(
+        munlock < guard && guard < dodump,
+        "the rollback must munlock, then enter the `if ok(u)` guard that restores \
+         MADV_DODUMP: if the unlock is refused, the range must remain non-dumpable instead \
+         of becoming locked and dumpable\n{rollback}"
     );
     assert!(
         rollback.contains("return Err(d);"),

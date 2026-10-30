@@ -1815,10 +1815,15 @@ pub mod locked {
             const NEEDLE: &[u8] = b"VmLck:";
             let n = buf.len();
             let mut i = 0usize;
-            // The kernel writes `Name:` first and its value is unescaped, so a process
-            // that sets its comm to `x\nVmLck:\t999999` can put a fake line ahead of the
-            // real field. Take the *last* line-start match: the real `VmLck` is written
-            // after `Name`, and comm cannot append text below the real fields.
+            // `Name:` comes first, and an unescaped producer of this format could let a
+            // process whose comm is `x\nVmLck:\t999999` put a fake line ahead of the real
+            // field. Linux 6.6 does not: `proc_pid_status` calls `proc_task_name(..., true)`,
+            // which runs `seq_escape_str(..., "\n\\")`, so the newline appears as the two
+            // characters `\` and `n` and no fake line-start exists (measured; see
+            // `vmlck_tests`). Taking the *last* line-start match keeps the parser correct on
+            // an unescaped producer too -- older kernels, or another writer of this layout --
+            // because the real `VmLck` is written after `Name` and comm cannot append text
+            // below the real fields.
             let mut found = None;
             while i + NEEDLE.len() <= n {
                 if (i == 0 || buf[i - 1] == b'\n') && &buf[i..i + NEEDLE.len()] == NEEDLE {
@@ -1861,12 +1866,80 @@ pub mod locked {
             }
 
             #[test]
-            fn a_comm_injected_vmlck_line_does_not_win() {
-                // `comm` permits a newline; the kernel prints it unescaped in `Name:`
-                // before the real fields. The last line-start `VmLck:` is the kernel's.
+            fn an_unescaped_name_line_does_not_win() {
+                // Synthetic input: Linux 6.6 escapes a newline in `comm` to the two
+                // characters `\n` (measured), so this is *not* what `/proc/self/status`
+                // produces today. It models an unescaped producer -- an older kernel, or
+                // another writer of this layout -- and pins that the parser still takes
+                // the last line-start `VmLck:`, which is the real field and comes after
+                // `Name`.
                 let status =
                     b"Name:\tfake\nVmLck:\t999999 kB\nState:\tS (sleeping)\nVmLck:\t   16 kB\n";
                 assert_eq!(parse_vmlck(status), Some(16 * 1024));
+            }
+
+            #[test]
+            fn a_live_hostile_comm_does_not_forge_a_vmlck_line() {
+                // `comm` may contain a newline: `PR_SET_NAME` accepts it and
+                // `/proc/self/comm` shows it raw. What matters is `/proc/self/status`.
+                // On Linux 6.6 its `Name:` line escapes the newline to the two
+                // characters `\` + `n`, so this comm cannot start a fake `VmLck:` line.
+                // The assertions are also written so they hold if a producer stops
+                // escaping: the parser's last-match rule must return the real field,
+                // never the comm's number.
+                const PR_SET_NAME: usize = 15;
+                let name = b"x\nVmLck:\t999999\0";
+                // SAFETY: `name` is a NUL-terminated byte string in static memory, and
+                // `PR_SET_NAME` reads at most 16 bytes from it. The remaining
+                // arguments are unused for this option.
+                let ret = unsafe {
+                    super::syscall3(super::NR_PRCTL, PR_SET_NAME, name.as_ptr() as usize, 0)
+                };
+                if ret < 0 {
+                    // A syscall filter (or an emulator) can refuse PR_SET_NAME. Nothing
+                    // was measured, so this is a visible skip, not a pass; the synthetic
+                    // `an_unescaped_name_line_does_not_win` still pins the parser.
+                    std::eprintln!(
+                        "SKIPPED [a_live_hostile_comm_does_not_forge_a_vmlck_line]: \
+                         prctl(PR_SET_NAME) was refused ({ret}); the synthetic unescaped-\
+                         input test still pins the parser."
+                    );
+                    return;
+                }
+
+                let Ok(status) = std::fs::read("/proc/self/status") else {
+                    std::eprintln!(
+                        "SKIPPED [a_live_hostile_comm_does_not_forge_a_vmlck_line]: \
+                         /proc/self/status is not readable here; the synthetic unescaped-\
+                         input test still pins the parser."
+                    );
+                    return;
+                };
+                let real = parse_vmlck(&status).expect("the real VmLck field must parse");
+                assert_ne!(
+                    real,
+                    999_999 * 1024,
+                    "the comm's fake VmLck value won; the parser must take the last \
+                     line-start match"
+                );
+                // Read back through the production path too, so the live reader is checked
+                // against the same hostile comm. The two parsed *values* are deliberately
+                // not compared: `VmLck` is process-wide, and other test threads in this
+                // binary may lock or unlock pages between the two reads. The fake number
+                // (1 GiB) cannot be a legitimate transient total here.
+                let Some(via_production) = super::locked_bytes() else {
+                    std::eprintln!(
+                        "SKIPPED [a_live_hostile_comm_does_not_forge_a_vmlck_line]: the \
+                         production reader cannot report VmLck here; the synthetic \
+                         unescaped-input test still pins the parser."
+                    );
+                    return;
+                };
+                assert_ne!(
+                    via_production,
+                    999_999 * 1024,
+                    "the production reader adopted the comm's fake VmLck value"
+                );
             }
 
             #[test]
@@ -2160,10 +2233,16 @@ pub mod locked {
         /// sense §4.2 is about either — nothing is derived from this value and no adversary
         /// controls its input.
         ///
-        /// Cost, measured on this host: one BLAKE3 hash of a 32-byte input, **42 ns**, paid per
-        /// `as_bytes()` call — so once per encryption and once per decryption, since both go
-        /// through it. That is ~4% of a 64-byte encrypt (0.94 us, `v0.3`) and ~0.01% of a 1 MiB one,
-        /// and it is confined to `locked`: callers that pass a `&[u8; 32]` directly pay nothing.
+        /// Cost, measured on this host: **≈1 µs per `as_bytes()` call** (0.84–1.38 µs across
+        /// runs on a shared host, 0.84 µs on a quiet core), paid once per encryption and once
+        /// per decryption, since both go through it. It is not the ~42 ns a bare
+        /// `blake3::hash` of a 32-byte input costs: the integrity tag is **0.18–0.22 µs**
+        /// (an XOF fill plus a wipe of the hasher state), and `scrub_stack` issues its
+        /// 16 KiB frame of volatile stores at **0.65–1.1 µs**, the dominant term. That is
+        /// 20–33x the bare-hash figure, and a locked-key 64-byte encrypt carries **two**
+        /// scrubs (this one and the AEAD entry point's): measured +0.4–1.0 µs, +16–41%
+        /// depending on API and core contention, negligible at 1 MiB. It also reserves the
+        /// 16 KiB scrub frame on the caller's stack; see `stack_requirement_bytes`.
         pub fn as_bytes(&self) -> &[u8; crate::KEY_LEN] {
             // SAFETY: `new` wrote `KEY_LEN` initialised bytes at the start of the page; the
             // page is page-aligned, so the cast is aligned for `[u8; KEY_LEN]` (alignment
@@ -3231,11 +3310,12 @@ fn ct_eq_independent(a: &[u8; TAG_LEN], b: &[u8; TAG_LEN]) -> subtle::Choice {
 //
 // The default is `hardened`, so in the default build both gates are live and the two
 // decrypt entry points pass two *different* recomputations (`gates.0`, `gates.1`) — the
-// second gate branch below is compiled in. Two call sites pass the same `Choice` twice
-// instead: `encrypt`'s `ultra` branch, which has one comparison to make (the witness tag
-// against the computed one) so both gates carry its answer even though `ultra` implies
-// `hardened`; and every `--no-default-features` build, where the second gate is compiled
-// out — one comparison is the whole decision and nothing is wasted computing a second one.
+// second gate branch below is compiled in. The `ultra` encrypt path also passes two
+// different `Choice`s: `agree` is `subtle`'s loop over the witness tag and the derived
+// tag, and `agree2` is the independently shaped fold (`ct_eq_independent`) over the same
+// two values. Only the `--no-default-features` build passes the same `Choice` twice,
+// because its second gate is compiled out — one comparison is the whole decision and
+// nothing is wasted computing a second one.
 #[inline(never)]
 fn accept_or_reject(
     gate0: subtle::Choice,

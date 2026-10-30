@@ -8,6 +8,47 @@ green push to `main` — which are build artefacts of that job, not construction
 
 ## Unreleased
 
+### AUDIT-REPORT-3 follow-up (`2cf40cc`)
+
+No code or wire-format bytes changed; the production behaviour is identical.
+
+- **Three test-face gaps closed, each verified by the injection that used to stay green.** The
+  `ultra` encrypt path's second gate is pinned to
+  `let agree2 = ct_eq_independent(&witness_tag, &tag);` (binding it to `agree` now fails
+  `tests/decision_scope.rs`); the two `LockedKey` `scrub_stack()` sites (`new` and
+  `check_integrity`, the latter on every `as_bytes()`) are counted by both `tests/locked.rs` and
+  `tests/ultra.rs` (deleting either now fails); and `MADV_DODUMP` is asserted to be *inside* the
+  `if ok(u)` block by brace-block extraction, not by string offsets (an empty guard plus an
+  unconditional restore now fails).
+- **The cross-nonce KDF-collision figure is corrected.** With the received tag held fixed,
+  `DOM_ENC ‖ T` and its 72-bit tail block are fixed too, so the KDF's state collision is over the
+  256-bit chaining value (`2^-256` per pair, `2^128` by birthday), not the 328-bit `2^164` of the
+  distinct-tag case. The cross-nonce completion still needs the tag match (`k_out` plus `X`,
+  `2^-512` per pair, `2^256` by birthday for the attacker-chosen game), so the nonce-only target
+  bound (`2^-320` over the `2^192` nonce space) is unchanged.
+  `SECURITY-ANALYSIS.md` now states the `T₁ ≠ T₂` qualifier explicitly.
+- **`LockedKey`'s per-use cost is corrected to ≈1 µs.** The old `+42 ns` counted only a bare
+  32-byte BLAKE3 hash. Measured end to end: 0.84–1.38 µs, of which 0.18–0.22 µs is the tag's
+  XOF-plus-wipe and 0.65–1.1 µs is the 16 KiB `scrub_stack`; a locked-key 64-byte encrypt carries
+  two scrubs (+16–41% on the measuring host). The 16 KiB frame is now stated on the row as a
+  stack requirement, not only as a time cost.
+- **`tools/stack_residue.sh --pure` no longer fails a clean tree.** The `blake3-only` control
+  itself leaves a 16-byte by-value copy of the master key in the pure backend's frame; that hit
+  is now attributed to the dependency (`KEY RESIDUE in blake3 itself`) instead of counted as a
+  crate entry point's residue. The same exemption is applied to derived values in that control.
+  A planted leak in a real entry point still fails the run (measured in both default and
+  `--pure`).
+- **The `VmLck` parser's comment matches the kernel.** Linux 6.6 escapes a newline in `comm` to
+  the two characters `\` and `n` in `Name:`, so the claimed comm injection does not work there;
+  the last-line-start rule stays as defence for unescaped producers, and a live test now sets
+  `PR_SET_NAME` and checks the parser against the real `/proc/self/status`. The synthetic
+  unescaped-input test is renamed accordingly.
+- **The BLAKE3 fork's test count is 44, not 43** (plus 13 doctests; 45 unit tests with
+  `zeroize`), in both the README and this changelog.
+- **Comments describing `accept_or_reject`'s call sites are corrected:** only the
+  `--no-default-features` build passes one `Choice` twice; the default decrypt paths pass
+  `gates.0`/`gates.1` and `ultra` encryption passes `agree`/`agree2`.
+
 ### MATH-AUDIT follow-up (`453c442`)
 
 No code or wire-format bytes changed.
@@ -142,7 +183,8 @@ direct/dev/build dependency, the tests, tooling, workflows and release path.
   rejects more than one chunk; `Output::root_hash` uses its counter; and `copy_wide`'s
   stack buffer is 16 KiB. The fork sets `publish = false` and `rust-version = "1.85"`,
   tracks its own lock, and vendors upstream's `reference_impl` and test vectors so its
-  43 default-feature tests run in CI. `.cargo-ok` and the misleading pristine
+  44 default-feature tests and 13 doctests run in CI (45 unit tests with `zeroize`).
+  `.cargo-ok` and the misleading pristine
   `.cargo_vcs_info.json` are removed. `PATCHES.md` now lists V-03 in `rust_avx2.rs`,
   the safe-API hardening, the remaining C/assembly limitations, and the provenance of
   the added test files.
@@ -3222,8 +3264,12 @@ down why the others are not:
   hardware fault or bit flip turns into a fail-stop panic at the first use instead of a silent
   wrong key — which otherwise shows up as "authentication failed", a message about the ciphertext
   for a fault in the key, and on the encrypt side as ciphertexts the peer rejects. Cost measured
-  on this host: **42 ns per use** (one BLAKE3 hash of a 32-byte input), ~5% of a 64-byte encrypt
-  and invisible at 1 MiB; confined to `locked`, and therefore to `ultra` (a caller passing a
+  on this host: **≈1 µs per use**, measured 0.84–1.38 µs end to end — 0.18–0.22 µs for the
+  BLAKE3 tag plus 0.65–1.1 µs for the 16 KiB `scrub_stack`, which dominates. That is 20–33x the
+  bare-hash figure quoted when this entry was written (an earlier revision counted only the
+  hash), and a locked-key 64-byte encrypt carries two scrubs: +0.4–1.0 µs, +16–41% depending on
+  API and core contention, negligible at 1 MiB. It also reserves the 16 KiB scrub frame on the
+  caller's stack. Confined to `locked`, and therefore to `ultra` (a caller passing a
   `&[u8; 32]` directly pays nothing). What it does *not* cover, stated on the row: a fault that
   rewrites the tag as well, and anything outside the key-and-tag region — the rest of the page is
   never read, so a flip there is harmless by construction and the check deliberately ignores it.
@@ -3252,7 +3298,7 @@ Asked which items are expensive and which are cheap, and whether anything cheap 
 | Second gate (two recomputed comparisons, fail-closed) | +10.8% at 64 B, +0.4% at 1 MiB (**superseded**: re-measured for `v0.3` as +25% at 64 B, +24% at 256 B, +23% at 1 KiB, +11% at 4 KiB, within the noise floor from 16 KiB up — the second comparison was added to every build and the small sizes were re-measured) | `hardened` |
 | **Second comparison *shape* (8-byte fold vs `subtle`'s loop)** | **+1.4 ns per decryption (0.1% at 64 B)** | **was `dual-mac`-only; now every gate-building configuration (`hardened` and above — not the opt-out build, which compiles neither gate nor fold)** |
 | `deny_debugging` (`prctl`) | one syscall, once, opt-in | `locked` (ultra) |
-| Key integrity tag | +42 ns per use | `locked` (ultra) |
+| Key integrity tag | ≈+1 µs per use (0.18–0.22 µs tag + 0.65–1.1 µs 16 KiB scrub; 0.84–1.38 µs measured) | `locked` (ultra) |
 | `mlock` + dump exclusion | ~7 µs once per key | `locked` (ultra) |
 | `dual-mac` (second independent tag recomputation) | +24–40% on decryption, per byte | `dual-mac` (ultra) |
 | `scrub_stack` | ~0.5–1 µs **and 16 KiB of stack** | `dual-mac` (ultra) |

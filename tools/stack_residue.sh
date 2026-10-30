@@ -8,8 +8,10 @@
 # run. (The header used to say the tool was advisory in CI, which stopped being true when
 # the job became blocking.)
 # What it finds today is dominated by the `blake3` dependency: its XOF output
-# buffer sits in frames this crate cannot name, let alone wipe (the key itself is
-# not left -- measured). The derived per-message values are reconstructed from the
+# buffer sits in frames this crate cannot name, let alone wipe (no crate entry
+# point leaves the key itself -- measured; the blake3-only control *does* leave a
+# by-value key copy under `--pure`, reported as the dependency's, not the crate's).
+# The derived per-message values are reconstructed from the
 # public construction and that reconstruction is checked against the public tag and
 # ciphertext before it is scanned; a wrong domain string or field order therefore
 # fails this tool instead of making every derived pattern miss. A gate that fails
@@ -441,6 +443,14 @@ fn run() {
 
     let mut failures = 0usize;
     let mut dependency_leaks_tag = false;
+    // The blake3-only control runs the dependency with no crate code around it. Its
+    // `Hasher::update(key)` leaves a by-value copy of the master key in that backend's
+    // frame under `--pure` (measured: a 16-byte run, and the clean-tree run failed on
+    // that line), and a derived value found in the same case is attributable to the
+    // dependency for the same reason. Neither is this crate's residue, so they are
+    // recorded separately instead of counted as entry-point failures.
+    let mut dependency_leaks_key = false;
+    let mut dependency_leaks_derived = false;
     let mut locked_tag_hit = false;
     let mut planted_found = false;
     let mut split_found = false;
@@ -588,6 +598,18 @@ fn run() {
                         " | KEY RESIDUE (planted, expected): {}-byte run @{}{}",
                         best, at, split_note
                     ));
+                } else if is_control {
+                    // The blake3-only control feeds the master key to the dependency's
+                    // `Hasher::update` with no crate code around it. The pure backend
+                    // copies it into its own frame (measured: a 16-byte run, which made
+                    // a clean `--pure` tree report a failure), so this is the
+                    // dependency's by-value input copy, not this crate's residue. Record
+                    // it; a crate entry point that leaks the key still fails below.
+                    dependency_leaks_key = true;
+                    line.push_str(&format!(
+                        " | KEY RESIDUE in blake3 itself: {}-byte run @{}{}",
+                        best, at, split_note
+                    ));
                 } else {
                     failures += 1;
                     line.push_str(&format!(
@@ -624,11 +646,24 @@ fn run() {
                     ));
                 }
             } else if derived_case && hit {
-                failures += 1;
-                line.push_str(&format!(
-                    " | DERIVED RESIDUE: {}-byte run @{}{}",
-                    best, at, split_note
-                ));
+                if is_control {
+                    // Same attribution as the tag above: this case runs the blake3 XOF
+                    // path with no crate code, so a derived value found here is the
+                    // dependency's by-value temporary, not the crate's. Record it and
+                    // keep the crate entry points on the hook: any of them that leaks a
+                    // derived value still increments `failures` below.
+                    dependency_leaks_derived = true;
+                    line.push_str(&format!(
+                        " | DERIVED RESIDUE in blake3 itself: {}-byte run @{}{}",
+                        best, at, split_note
+                    ));
+                } else {
+                    failures += 1;
+                    line.push_str(&format!(
+                        " | DERIVED RESIDUE: {}-byte run @{}{}",
+                        best, at, split_note
+                    ));
+                }
             } else {
                 line.push_str(&format!(" | {}: {} B", label.split(' ').next().unwrap(), best));
             }
@@ -670,7 +705,23 @@ fn run() {
 
     if failures == 0 {
         println!();
-        if locked_tag_hit {
+        if dependency_leaks_key || dependency_leaks_derived {
+            // Every crate entry point above was clean; the only hits came from the
+            // control that runs the dependency with no crate code. Say exactly that
+            // instead of either swallowing the finding or blaming the crate for it.
+            println!("PASS: every crate entry point is clean -- no master key and no derived");
+            println!("      key in the call-chain stack region. The blake3-only control itself");
+            println!("      does leave key material (see the note below): it runs the dependency's");
+            println!("      own XOF path with no crate code, so that residue is blake3's by-value");
+            println!("      copy, not this crate's.");
+            if locked_tag_hit {
+                println!("      The 8-byte locked integrity tag above is likewise left by blake3's");
+                println!("      XOF buffer, as the note below says.");
+            } else if !locked_supported {
+                println!("      The locked integrity tag was not measurable because the locked");
+                println!("      module is unsupported on this platform.");
+            }
+        } else if locked_tag_hit {
             println!("PASS: no master key in the call-chain stack region, and no residue of");
             println!("      this crate's own code -- the 8-byte locked integrity tag above IS");
             println!("      left, by the blake3 dependency's XOF buffer, as the note below says.");
@@ -702,6 +753,24 @@ fn run() {
                 println!("The blake3-only control leaves the dependency's 8-byte XOF tag. The");
                 println!("`locked` entry point was not run on this platform, so this note makes no");
                 println!("claim about it.");
+            }
+        }
+        if dependency_leaks_key || dependency_leaks_derived {
+            let what = if dependency_leaks_key && dependency_leaks_derived {
+                "the master key and derived key material"
+            } else if dependency_leaks_key {
+                "a copy of the master key"
+            } else {
+                "derived key material"
+            };
+            println!();
+            println!("Note: the blake3-only control's own frames contain {what}. That case");
+            println!("runs the dependency's XOF with the same wipe discipline and no crate");
+            println!("code, so its hits are recorded against blake3, not counted as residue");
+            println!("of the entry points above -- every one of them measured clean.");
+            if dependency_leaks_key {
+                println!("The `--pure` BLAKE3 backends copy the key through their own frame;");
+                println!("with the default backends this case left only the 8-byte tag.");
             }
         }
     } else {

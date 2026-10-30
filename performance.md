@@ -4,8 +4,9 @@ Provenance and method for every performance number this repository quotes, split
 out of [`README.md`](README.md) so the README stays about the construction and the
 security argument. The figures, the noise floor and the methodology are unchanged;
 the configuration and throughput figures that the README's tables cite resolve to a
-table here. (Some per-layer *costs* — the fold's 1.4 ns, the integrity tag's 42 ns,
-`mlock`'s ~7 µs, `scrub_stack`'s 16 KiB frame — are stated on the README's layer
+table here. (Some per-layer *costs* — the fold's 1.4 ns, the integrity tag's ≈0.2 µs hash
+(≈1 µs end to end with its 16 KiB scrub), `mlock`'s ~7 µs, `scrub_stack`'s 16 KiB frame —
+are stated on the README's layer
 rows themselves, because each is a property of one layer rather than a configuration
 measurement; those are not repeated here.)
 

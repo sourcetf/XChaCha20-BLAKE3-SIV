@@ -642,8 +642,11 @@ fn dual_mac_is_wired_into_both_decrypt_paths() {
 /// `scrub_stack` overwrites the derivation frames that the wipes cannot name. It is
 /// best-effort and has no behavioural signature, so nothing else notices if a call is
 /// dropped — and dropping one leaves key material in the region it exists to clear.
-/// Six sites: the two `ultra` encrypt-side rejection returns, the two success returns
-/// (`encrypt`, `encrypt_in_place_detached`), and the two decrypt entry points.
+/// Eight sites: three in `encrypt` (two witness-refusal returns and the success return),
+/// one in `encrypt_in_place_detached`, one in each decrypt entry point, and — the two
+/// this test used to omit, which is how an audit deleted both and kept the suite green —
+/// `LockedKey::new`'s success return and `LockedKey::check_integrity`, the latter on
+/// every `as_bytes()` and therefore on every use of a locked key.
 #[test]
 fn scrub_stack_is_called_at_every_entry_point() {
     // Comments stripped, so the injection that kept this test green — replacing a real call
@@ -677,16 +680,20 @@ fn scrub_stack_is_called_at_every_entry_point() {
     }
 
     // Per function, not a whole-file count: a total is unbound to position, so a call
-    // moved into a helper nobody calls would keep it at six. The expected sites are
+    // moved into a helper nobody calls would keep it at eight. The expected sites are
     // three in `encrypt` (the two witness-refusal returns and the success return), one
     // in `encrypt_in_place_detached` (its only encrypt-side call -- the in-place path
-    // deliberately has no witness cross-check), and one in each decrypt entry point.
+    // deliberately has no witness cross-check), one in each decrypt entry point, and one
+    // in each `LockedKey` entry point that derives key material (`new`, and
+    // `check_integrity`, which `as_bytes()` runs on every use).
     let mut total = 0;
     for (name, expected) in [
         ("pub fn encrypt(", 3),
         ("pub fn encrypt_in_place_detached(", 1),
         ("pub fn decrypt(", 1),
         ("pub fn decrypt_in_place_detached(", 1),
+        ("pub fn new(key: &[u8; crate::KEY_LEN])", 1),
+        ("fn check_integrity(&self, bytes: &[u8; crate::KEY_LEN])", 1),
     ] {
         let found = body_of(&body, name).matches("scrub_stack();").count();
         assert_eq!(
@@ -696,7 +703,7 @@ fn scrub_stack_is_called_at_every_entry_point() {
         );
         total += found;
     }
-    assert_eq!(total, 6, "all six scrub_stack call sites must remain");
+    assert_eq!(total, 8, "all eight scrub_stack call sites must remain");
 }
 
 /// Which entry points the witness is actually called from — all of them except one.

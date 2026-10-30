@@ -321,14 +321,23 @@ target row, applied that number to a game whose object is a 256-bit `subkey` rat
     AAD — whose inner digests collide at `2^128` give the same tag, and the KDF's input is the
     tag rather than the context, so the keystream is the same too — one `(C, T)`, two contexts,
     one plaintext, no fixed point to solve. (The nonce has to be held fixed, but not because a
-    cross-nonce collision is unreachable — two digests under *different* tag keys are still a
-    `2^128` birthday. What fails is the completion: a nonce change also moves `enc_seed`, so the
-    derived keystream differs for the same received tag unless the KDF itself collides;
-    that KDF sees a 328-bit state (256-bit chaining value plus the 72-bit tail block), so its
-    birthday is `≈2^164` (`2^-328` per pair), not `2^-352`; the one `(C, T)` then no longer
-    decrypts to the same `M`. This is CMT-3's
-    context half; earlier revisions here and in §4.5 priced only the key route and called *all*
-    of the remainder a fixed point, which is true of the different-message case alone.)
+    cross-nonce collision is unreachable — an inner-digest collision under *different* tag keys
+    is still a `2^128` birthday. Completion is what fails, and it needs two matches: a nonce
+    change moves `k_out`, so equal inner digests give equal tags only if `k_out` collides too
+    (`2^-256`; the direct 520-bit outer hit is `2^-520` and dominated) — a `2^-512`-per-pair tag
+    match with birthday `2^256`; and it moves `enc_seed`, so the derived keystream for the same
+    received tag differs unless the KDF collides as well. With the tag held fixed the KDF's
+    input `DOM_ENC ‖ T` is fixed, so its 72-bit tail block is fixed and the state collision is
+    over the 256-bit chaining value alone — `2^-256` per pair, birthday `2^128`, not the
+    `2^-328`/`2^164` of the *distinct*-tag case and not `2^-352` (the output collision, which
+    the state collision dominates). That makes the KDF collision cheaper than the tag match,
+    not the obstruction; the tag match is. The cheapest known joint route is a `subkey`
+    collision with the 64-bit `N₂` held equal (`2^-256`, which fixes `k_out` and `enc_seed`
+    together) plus the `X` collision the `N₁` change still requires (`2^-256`): `2^-512` per
+    pair, `2^256` by birthday. The one `(C, T)` therefore does not decrypt to the same `M` at the
+    price of the tag collision alone. This is CMT-3's context half; earlier revisions here and
+    in §4.5 priced only the key route and called *all* of the remainder a fixed point, which is
+    true of the different-message case alone.)
   * the **salamander** route — two *different* messages — is priced at the key-search level by a
     construction, not by a bound: it needs `KS₁ ≠ KS₂`, hence two keys with different material,
     and the cheapest construction `SECURITY-ANALYSIS.md` can find never searches the 520-bit tag
@@ -621,7 +630,7 @@ guarantee; a caller on a small-stack RTOS must size the thread explicitly.
 | **all builds** (including the default) | key residue surviving in stack frames a wipe does not reach — the inner key `k_in`, left by the dependency's by-value temporaries rather than a frame this crate can name, plus the `blake3` dependency's XOF output (a run of `enc_key ‖ enc_nonce`) and, under `pure`, the outer key `k_out` (4,096-byte scan; the list, with the measured lengths, is in "What this crate cannot fix for you"): `scrub_stack()` overwrites the 16 KiB below the entry point after the last derivation | ~16 KiB of volatile stores, ~0.5–1 µs per operation, **and a 16,408-byte frame — 32 KiB of thread stack in all**, the published budget. Measured on a thread with a 32 KiB stack: a build without the scrub still runs after 16 KiB of the stack is already consumed; with it, the call does not survive 8 KiB. A caller that spawns threads with small stacks must size them for it — the scrub is a 16 KiB frame, so it can fault the thread it is protecting. The budget is public as `stack_requirement_bytes()`: **32 KiB**, that frame plus the ordinary frames around it (~10 KiB in the same measurement, which overflowed a 24,576-byte thread and fitted 26,624) with margin. `the_reported_stack_requirement_is_sufficient` pins the exact value and measures that a thread given it plus the test's margin (64 KiB in release, 1 MiB in debug) survives a round trip |
 | `witness` (in `ultra` only) | a fault aimed at the **derivation arithmetic both tag computations share** — `derive_tag`, the keyed BLAKE3 under it, and the SIMD kernels: the one model `dual-mac` alone cannot close, and where every accepting fault the sweep finds in the `hardened` build sits | the **`ultra` mode it is part of**, re-measured after the vendored-BLAKE3 tail fix, costs **2.4x at 64 B, 2.4x at 1 KiB, 4.3x at 64 KiB and 4.8x at 1 MiB** against the default configuration on allocating encryption (the only encrypt path that carries the witness), and **2.8x/4.1x/9.8x/14.3x** on decryption. Those are the whole bundle, not this row alone; [`performance.md`](performance.md)'s post-fork table is the current source, and its older ultra-minus-witness measurement put the **witness layer itself** at 1.45x at 64 B, 2.14x at 1 KiB, 6.3x at 64 KiB and 9.2x at 1 MiB on decryption. The witness is a complete scalar second implementation, so this is a design cost rather than a main-path regression. It is a *scalar* implementation, so its cost is per byte, and on the encrypt side it is present **only on the allocating `encrypt`** — see "What the witness is" for why the in-place path does not carry it. It does not make the *totals* in the fault table zero — it removes accepting faults from the decision and from the shared derivation, and the `ultra` build has a handful elsewhere (§§) |
 | `locked` | key pages readable out of **swap** or a **core dump** | ~7 µs once per key (`mlock`+`munlock`), not per message. The key is heap-allocated so its address is stable: `mlock` is address-based, and a key returned by value moves after being locked, which left this layer protecting a dead stack slot |
-| `locked` | a **hardware fault or bit flip in the key page** turning into a silent wrong key | `+42 ns` per use, measured: an 8-byte BLAKE3 tag of the key is stored beside it and checked (constant time) on every `as_bytes()`, so a corrupted page panics at the first use instead of decrypting with a key that is not the caller's. It does not detect a fault that rewrites the tag too, nor one outside the key-and-tag region (the rest of the page is never read) |
+| `locked` | a **hardware fault or bit flip in the key page** turning into a silent wrong key | `≈+1 µs` per use, measured (0.84–1.38 µs across runs): an 8-byte BLAKE3 tag of the key is stored beside it and checked (constant time) on every `as_bytes()`, so a corrupted page panics at the first use instead of decrypting with a key that is not the caller's. The tag itself is 0.18–0.22 µs; the 16 KiB `scrub_stack` in `check_integrity` dominates at 0.65–1.1 µs, and a locked-key 64-byte encrypt carries two scrubs (+16–41% on this host, negligible at 1 MiB). It also reserves the 16 KiB scrub frame on the caller's stack. It does not detect a fault that rewrites the tag too, nor one outside the key-and-tag region (the rest of the page is never read) |
 | `locked` | a **debugger** attaching to the process, or another process reading its memory | two `prctl` calls in one opt-in function — `PR_GET_DUMPABLE` to read the previous state it returns, then `PR_SET_DUMPABLE` to clear it — via `locked::deny_debugging()`, after which the kernel refuses `PTRACE_MODE_ATTACH` (and `/proc/<pid>/mem`) even to the same user without `CAP_SYS_PTRACE`. Not automatic, not even under `ultra`, because it is *process* policy — it also disables core dumps and breaks crash reporters, which is the application's call rather than a library's |
 | `rng` | nothing about the cipher; it is how a caller gets a key at all | — |
 
@@ -1179,7 +1188,8 @@ dependent crate:
   short `out` and a non-block input length in release; `guts::ChunkState::update`
   rejects more than one chunk; `Output::root_hash` uses its counter; and `copy_wide`'s
   stack buffer is 16 KiB instead of 64 KiB. The fork also vendors upstream's
-  `reference_impl` and test vectors, so its own 43 default-feature tests run in CI (the source also has feature-gated tests).
+  `reference_impl` and test vectors, so its own 44 default-feature tests and 13 doctests
+  run in CI (45 unit tests with `zeroize`; the source also has feature-gated tests).
 
 The C library is patched too: `blake3/c/blake3_dispatch.c` keeps only complete SIMD
 groups on the AVX2/AVX-512 kernels and sends tails to SSE/portable, the unix compress
