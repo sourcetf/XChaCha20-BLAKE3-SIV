@@ -8,6 +8,40 @@ green push to `main` — which are build artefacts of that job, not construction
 
 ## Unreleased
 
+### MATH-AUDIT follow-up (`453c442`)
+
+No code or wire-format bytes changed.
+
+- **Thm 1 now states the collision level.** The key material is 768 bits of output, but the
+  triple is a function of `(subkey, sn)` with the 256-bit `subkey` as the bottleneck; the theorem
+  now carries `q(q-1)/2^257` and says
+  explicitly that it has a 128-bit collision level (the 256-bit subkey bottleneck), not a
+  768-bit one. The proof no longer claims distinct nonces give distinct subkeys or independent
+  keys.
+- **Thm 2 now states 520-bit output and 128-bit worst-case collision security.** The tag is not
+  a strict 520-bit PRF: repeating a nonce fixes `k_out` and leaves the 256-bit inner digest, so
+  the `q(q-1)/2^257` term is the repeated-nonce worst case; distinct nonces improve it. Thm 3's
+  missing `enc_seed`-uniformity hybrid and Thm 4's "two keys" (there are three derived values)
+  were corrected.
+- **A2′ is now an explicit assumption.** HChaCha20's key-direction random-function/dual-PRF
+  behaviour is not implied by the nonce-direction PRF assumption A2; the target key-commitment
+  bound, the attacker-chosen key route and Thm 4's key-guess term are stated as conditional on
+  it.
+- **Multi-target work is corrected.** §8.1 no longer says total work stays at `2^256`; with
+  `Q` targets it is `2^256/Q`, while the single-target cost remains `2^256`.
+- **Quantum commitment is corrected.** Grover on the 256-bit `subkey` preimage gives `≈2^128`;
+  "the target bound is unaffected" was wrong. A5's scope now points at §8.1's quantum rows.
+- **Context commitment is split into AAD and nonce.** The `2^256` target and the `2^128`
+  attacker-chosen completion are AAD-only. A nonce change also re-derives the keys and is
+  hashed into `X`; a second nonce is bounded by the `k_out`+`X` route at ≤`2^-320` over all
+  nonces for a given `(C,T)` (the direct tag match is `2^-328`; same-plaintext needs the
+  subkey+`X` route, ≤`2^-384` with `N₂` fixed), and a subkey collision alone does not complete.
+  The audit's proposed `2^-128` nonce bound and `2^128` subkey completion were rejected for
+  this reason.
+- Thm 4's text now says the displayed `q·2^-520` term is present and dominated, rather than
+  claiming it was omitted; the §6 "strongest true sentence" carries A2′ and the nonce
+  qualification.
+
 ### AUDIT-REPORT-2 follow-up (`ed89b05`)
 
 No wire-format bytes changed.

@@ -48,8 +48,8 @@
 //!   correlation: neither hash call has a secret in its *message* — the inner one
 //!   absorbs the public context, and the outer one's message is the inner digest,
 //!   which the cascade step (L1.3) covers.  It does **not**, however, widen the
-//!   equal-material route: all three derived values are functions of the
-//!   single 256-bit `subkey = HChaCha20(K, N₁)`, so two keys agreeing on the triple
+//!   equal-material route: for a fixed nonce, all three derived values are functions
+//!   of the single 256-bit `subkey = HChaCha20(K, N₁)`, so two keys agreeing on the triple
 //!   need a `subkey` collision — a `2^128` birthday, the same order as the tag's own
 //!   collision bound, not a 768-bit one.  (In revision `v0.2` the `K`-in-input step
 //!   neutralised that route; the two-level tag does not, so a subkey collision now
@@ -59,8 +59,8 @@
 //!   (salamander) half needs `KS₁ ≠ KS₂` and so is the fixed point
 //!   `T = tag(K₂, N, A, C ⊕ KS₂(T))` that `SECURITY-ANALYSIS.md` §4.5 prices *by
 //!   construction* at the key-search level, `≈ 2^256` — a route, not a proven bound.  The *target* bound — a given
-//!   ciphertext, `≈ 2^-256` per candidate key, the 256-bit `subkey` preimage — is
-//!   unchanged either way.)
+//!   ciphertext, `≈ 2^-256` per candidate key, the 256-bit `subkey` preimage — has
+//!   the same value in both revisions; only its object moved from the tag to the subkey.)
 //! * **Both lengths are encoded and every field is fixed width.**  BLAKE3 is not
 //!   vulnerable to length extension (its finalisation is flagged, unlike
 //!   Merkle–Damgård constructions), but `A || M` alone would be ambiguous:
@@ -100,7 +100,7 @@
 //!   and context routes are priced at `2^128` in the table below and whose different-message
 //!   route is priced at the key-search level by construction (`≈ 2^256`, §4.5; no bound is
 //!   proven)): an attacker must reproduce a *fixed* value, but
-//!   that value is the 256-bit `subkey = HC(K′, N₁)`, not the 520-bit tag — an event of
+//!   that value is the 256-bit `subkey = HC(K′, N₁)` under A2′, not the 520-bit tag — an event of
 //!   probability `≈ 2^-256` per candidate key, so a full sweep of the key space expects
 //!   `≈ 1` second key (success `≈ 0.63`), i.e. key-search level.  The width does **not**
 //!   set this bound.  Read the "Security level" section
@@ -135,9 +135,9 @@
 //! | --- | --- | --- |
 //! | Confidentiality | 256-bit | the ChaCha20 key |
 //! | Forgery resistance | **256-bit** | BLAKE3 keyed mode as a PRF over a 256-bit key |
-//! | Key commitment against a given ciphertext | **`≈ 2^-256` per candidate key** — `≈ 1` second key over the whole key space (the *target* game) | the 256-bit `subkey` the tag and the keystream are both derived from, **not** the tag's width |
-//! | Context commitment (the AAD; the nonce also enters `k_in`/`k_out`/`enc_seed`, so a context route holds it fixed) | **`≈ 2^256`** target / **`2^128`** attacker-chosen | the 256-bit inner digest the context feeds, not the tag's width |
-//! | Attacker-chosen commitment (the literature's CMT-1/CMT-3) | **key route `2^128`, context route `2^128`** — both with identical plaintexts; the different-message salamander is priced at the key-search level (`≈ 2^256`, §4.5) by construction, not by a bound | the `subkey` collision and the inner-digest collision, each a birthday |
+//! | Key commitment against a given ciphertext | **`≈ 2^-256` per candidate key under A2′** — `≈ 1` second key over the whole key space (the *target* game) | the 256-bit `subkey` the tag and the keystream are both derived from, **not** the tag's width |
+//! | Context commitment (AAD, nonce fixed) | **`≈ 2^256`** target / **`2^128`** attacker-chosen | the 256-bit inner digest the AAD feeds, not the tag's width; a nonce change is a different game (it re-derives the keys and is hashed into `X`), so it needs a 520-bit tag match, not this `X`-preimage route |
+//! | Attacker-chosen commitment (the literature's CMT-1/CMT-3) | **key route `2^128`, AAD-context route `2^128`** — both with identical plaintexts; the different-message salamander is priced at the key-search level (`≈ 2^256`, §4.5) by construction, not by a bound | the `subkey` collision and the inner-digest collision, each a birthday; a nonce-only `subkey` collision alone does not complete because `N₁` is in `X` |
 //! | Collision resistance of the tag | **2^128** | the 256-bit chaining value the tag is a function of, not the tag's width |
 //!
 //! **Forgery: 256 bits is the ceiling, not a choice.**  Forgery resistance is
@@ -435,7 +435,8 @@ pub const KEY_LEN: usize = 32;
 /// refutation would look like):
 ///
 /// * **the width is not what makes it committing — the 256-bit `subkey` is.** A candidate key
-///   that is not the real one opens a given ciphertext by reproducing `subkey = HC(K′, N₁)`,
+///   that is not the real one opens a given ciphertext by reproducing `subkey = HC(K′, N₁)`
+///   under A2′,
 ///   at `≈ 2^-256` per candidate, so enumerating the whole `2^256` key space expects `≈ 1`
 ///   second key (success `≈ 0.63`): key-search level. An earlier revision of this list said
 ///   `2^-520` per candidate and `≈ 2^-264` over the space and attributed that to the width; it
@@ -2546,8 +2547,8 @@ fn zeroize_array<T>(value: &mut T) {
 ///
 /// Three 256-bit values rather than one 64-byte block.  This does **not** widen the
 /// equal-material route, and an earlier revision of this comment claimed it did: all
-/// three are deterministic functions of the single 256-bit `subkey`, so two keys that
-/// agree on the whole triple need a collision in `subkey` — a `2^128` birthday, the
+/// three are, for a fixed nonce, deterministic functions of the single 256-bit `subkey`,
+/// so two keys that agree on the whole triple need a collision in `subkey` — a `2^128` birthday, the
 /// same order as the tag's own collision bound, **not** a 768-bit one.  What the
 /// three values buy is that no master key need enter any hash message (Thm 2's
 /// cascade carries no key-dependent input); what they do not buy is commitment
@@ -2694,7 +2695,7 @@ const TAG_CONCAT_MIN: usize = 2_048;
 /// * **No hash message contains the master key.**  The inner hash absorbs the
 ///   public context under `k_in`; the outer turns that 32-byte digest into the tag
 ///   under the independent key `k_out`.  This is the NMAC shape, and it is what
-///   makes the tag's PRF claim rest on "keyed BLAKE3 is a PRF" alone: in both calls
+///   makes the tag's PRF/collision claim rest on "keyed BLAKE3 is a PRF" alone: in both calls
 ///   the message is a value the reduction can construct, so the standard
 ///   PRF/cascade reductions apply.
 ///
@@ -2706,7 +2707,8 @@ const TAG_CONCAT_MIN: usize = 2_048;
 ///   (`SECURITY-ANALYSIS.md` §2.1, node L3.6, with a separation showing the gap is
 ///   real).  Two levels remove the correlation outright.  They do **not**, however,
 ///   restore the equal-material closure the single level's `K` provided: all three
-///   derived values are functions of the single 256-bit `subkey`, so giving two keys
+///   derived values are, for a fixed nonce, functions of the single 256-bit `subkey`,
+///   so giving two keys
 ///   the same triple costs a `subkey` collision — a `2^128` birthday, not the
 ///   768-bit one an earlier revision of this comment claimed.  In `v0.2` the
 ///   `K`-in-input step made a subkey collision harmless (the tags still differed);
@@ -2714,7 +2716,7 @@ const TAG_CONCAT_MIN: usize = 2_048;
 ///   game, which `SECURITY-ANALYSIS.md` §4.5 prices at `2^128` (the key route:
 ///   both openings recover the *same* plaintext); the *target* bound this crate
 ///   does claim — a given ciphertext, `≈ 2^-256` per candidate key, the `subkey`
-///   preimage — is untouched.
+///   preimage — has the same value, although its object moved from the tag to the subkey.
 /// * **Lengths are encoded and every field is fixed width.** BLAKE3 is not
 ///   vulnerable to length extension (its finalisation is flagged, unlike
 ///   Merkle–Damgård constructions), but `A || M` alone would be ambiguous:

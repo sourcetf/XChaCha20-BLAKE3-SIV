@@ -1,8 +1,9 @@
 # XChaCha20-BLAKE3-SIV
 
 Misuse-resistant AEAD with a 24-byte (192-bit) nonce, committing to the key and the
-context: a *given* ciphertext cannot be re-opened under another key or context below
-key-search work. Each candidate key succeeds with probability `≈2^-256`; the key space
+context: a *given* ciphertext cannot be re-opened under another key or AAD below
+key-search work; a nonce-only second opening is stronger (it must match the tag, not just the
+AAD digest). Each candidate key succeeds with probability `≈2^-256`; the key space
 is `2^256` candidates (see "Security level" for why the attacker-chosen games the
 literature names are a different question).
 
@@ -107,8 +108,8 @@ Three details are load-bearing rather than incidental:
    key-dependent-input shape is genuinely stronger than the PRF assumption). Two
    levels remove the
    correlation outright. They do **not** widen the equal-material route, though an
-   earlier revision of this file said they did: all three derived values are
-   functions of the single 256-bit `subkey`, so two keys agreeing on the triple need
+   earlier revision of this file said they did: for a fixed nonce, all three derived
+   values are functions of the single 256-bit `subkey`, so two keys agreeing on the triple need
    a `subkey` collision — a `2^128` birthday, the same order as the tag's own
    collision bound, not a 768-bit one. In `v0.2` the `K`-in-input step made such a
    collision harmless; here it is not, so a subkey collision yields one ciphertext
@@ -177,7 +178,8 @@ to `main`, so there is always a stable revision to name.
   message, so a ciphertext cannot be re-opened under another key or context **in the target
   setting, where the attacker is given the ciphertext**: a second key
   succeeds by reproducing the 256-bit derivation that the tag *and* the keystream both come
-  from — `subkey = HC(K′, N₁)` — which is a `≈ 2^-256` event per candidate key, i.e. `≈ 1`
+  from — `subkey = HC(K′, N₁)`, under A2′ (HChaCha20's key-direction collision/preimage
+  resistance; §2) — which is a `≈ 2^-256` event per candidate key, i.e. `≈ 1`
   second key over the entire key space: key-search level, and **not** a bound the 520-bit
   width sets. A tag short enough for the *pure tag-collision* route to fall below 256 bits would
   be the weakest link instead, which is why the width is at least that; 65 bytes is the frozen
@@ -221,10 +223,10 @@ to `main`, so there is always a stable revision to name.
 | --- | --- | --- |
 | Confidentiality (plaintext recovery) | 256-bit | the ChaCha20 key |
 | Forgery resistance | **256-bit** | BLAKE3 keyed mode as a PRF over a 256-bit key; a *target* problem, so no birthday search applies |
-| Context commitment (AAD; the nonce re-derives the whole key schedule) | **key-holder target: `≈ 2^256`; attacker-chosen: `2^128`, completion immediate** | The AAD enters the tag's *hash input* (`X`), not the tag's *key*, so the 65-byte width does **not** set this bound: a second AAD that reproduces a given `X` is a preimage of BLAKE3's 256-bit chaining value (`≈ 2^256`), and two *chosen* AADs whose `X` values collide are a `2^128` birthday — after which the tag, and therefore the derived keystream, are equal, so both openings share one plaintext and no fixed point is needed. The nonce is not merely a context input: it selects `subkey` through HChaCha20 and also enters the derived ChaCha20 nonce, so changing it changes all derived material; its `≈2^256` target bound comes from that 256-bit derivation, not from the `X`-preimage argument above. An earlier revision of this row wrote `2^-520` per candidate key and "the width is what sets it", which is the *key*-search game, not this one — see below |
-| Key commitment **against a given ciphertext** (the target game) | `≈ 2^-256` per candidate key — `≈ 1` second key over the whole key space, key-search level | reproducing the 256-bit `subkey = HC(K′, N₁)`: that one value determines `k_in`, `k_out` and `enc_seed`, hence the derived key pair, the recovered message, the inner digest and the tag alike — so the object is 256-bit and **the tag width does not set this bound**, exactly as in the context row above. The pure `2^-520` tag-collision route is dominated by it. The key enters the tag through `k_in` (the inner digest) and `k_out` (the tag's own derivation); `enc_seed` does **not** enter the tag at all — it keys the KDF *whose input is the tag*, which is how the tag binds the keystream material too. The literature's CMT-3 is *attacker-chosen*, not this — see below |
-| Commitment in the **attacker-chosen** games (invisible salamanders, CMT-1/CMT-3) | **two priced routes at `2^128`, both with identical plaintexts (key half and context half), and the different-message salamander priced by construction at the key-search level (`≈ 2^256`) — no bound derived** | the adversary outputs both keys (or contexts), both messages and `(C,T)`, so `2^520` does not describe it. A `subkey` collision at `2^128` gives two keys whose derived material, tag and keystream all coincide — one `(C,T)` valid under both, decrypting to the **same** plaintext (the key half). A collision of the inner digest `X` between two *chosen contexts* under one key does the same for the context half: equal tag, equal KDF output, equal keystream, one plaintext, completion immediate. The salamander — two *different* messages — needs `KS₁ ≠ KS₂`, hence two keys; the cheapest construction this file can find never searches the tag space: equal `k_out` first (a birthday over ≈`2^128.5` sampled keys), then a chosen-message search for the 256-bit inner-digest equality `X(k_in₂, C ⊕ KS₂(T)) = X(k_in₁, M₁)` — ≈`2^256` candidates, key-search level — a construction, not a bound. `SECURITY-ANALYSIS.md` §4.5, Thm 2 and §8.1 |
-| Tag collision resistance (the DAE bound's collision term) | **2^128** | the *chaining value*, not the tag: keyed BLAKE3's output is a function of its 256-bit state, so a state collision gives byte-identical tags of any length |
+| Context commitment (AAD, nonce fixed) | **key-holder target: `≈ 2^256`; attacker-chosen: `2^128`, completion immediate** | The AAD enters the tag's *hash input* (`X`), not the tag's *key*, so the 65-byte width does **not** set this bound: a second AAD that reproduces a given `X` is a preimage of BLAKE3's 256-bit chaining value (`≈ 2^256`), and two *chosen* AADs whose `X` values collide are a `2^128` birthday — after which the tag, and therefore the derived keystream, are equal, so both openings share one plaintext and no fixed point is needed. **This row is AAD-only.** A nonce change also re-derives `k_in`/`k_out`/`enc_seed` *and* is itself hashed into `X`. For a given `(C,T)`, a second nonce is bounded by the `k_out`-collision + `X`-collision route (`2^-512` per nonce), hence ≤`2^-320` over the 2^192 nonce space; the direct 520-bit tag match is `2^-328`. If the game also requires the same plaintext, the simple `subkey`+`X` route is ≤`2^-384` with `N₂` fixed. A `subkey` collision alone does not complete because the nonce bytes in `X` still differ. The 2^256 figure is not a nonce-only bound. An earlier revision of this row wrote `2^-520` per candidate key and "the width is what sets it", which is the *key*-search game, not this one — see below |
+| Key commitment **against a given ciphertext** (the target game) | `≈ 2^-256` per candidate key under A2′ — `≈ 1` second key over the whole key space, key-search level | reproducing the 256-bit `subkey = HC(K′, N₁)`: that one value determines `k_in`, `k_out` and `enc_seed`, hence the derived key pair, the recovered message, the inner digest and the tag alike — so the object is 256-bit and **the tag width does not set this bound**, exactly as in the context row above. The pure `2^-520` tag-collision route is dominated by it. The key enters the tag through `k_in` (the inner digest) and `k_out` (the tag's own derivation); `enc_seed` does **not** enter the tag at all — it keys the KDF *whose input is the tag*, which is how the tag binds the keystream material too. The literature's CMT-3 is *attacker-chosen*, not this — see below |
+| Commitment in the **attacker-chosen** games (invisible salamanders, CMT-1/CMT-3) | **two priced routes at `2^128`, both with identical plaintexts (key half and context half), and the different-message salamander priced by construction at the key-search level (`≈ 2^256`) — no bound derived** | the adversary outputs both keys (or contexts), both messages and `(C,T)`, so `2^520` does not describe it. A `subkey` collision at `2^128` gives two keys whose derived material, tag and keystream all coincide — one `(C,T)` valid under both, decrypting to the **same** plaintext (the key half). A collision of the inner digest `X` between two *chosen AADs* under one key and one nonce does the same for the context half: equal tag, equal KDF output, equal keystream, one plaintext, completion immediate. The salamander — two *different* messages — needs `KS₁ ≠ KS₂`, hence two keys; the cheapest construction this file can find never searches the tag space: equal `k_out` first (a birthday over ≈`2^128.5` sampled keys), then a chosen-message search for the 256-bit inner-digest equality `X(k_in₂, C ⊕ KS₂(T)) = X(k_in₁, M₁)` — ≈`2^256` candidates, key-search level — a construction, not a bound. `SECURITY-ANALYSIS.md` §4.5, Thm 2 and §8.1 |
+| Tag collision resistance (the DAE bound's collision term) | **2^128 worst case** | the *chaining value*, not the tag: keyed BLAKE3's output is a function of its 256-bit state, so a state collision gives byte-identical tags of any length. The worst case is a repeated nonce; distinct nonces make `k_out` differ and improve the bound to `2^-512`-class per pair |
 
 **On forgery: 256 bits is the ceiling, not a choice.** Forgery resistance is
 bounded by the key's entropy, so with a 256-bit key it cannot exceed 256 bits.
@@ -321,8 +323,10 @@ target row, applied that number to a game whose object is a 256-bit `subkey` rat
     one plaintext, no fixed point to solve. (The nonce has to be held fixed, but not because a
     cross-nonce collision is unreachable — two digests under *different* tag keys are still a
     `2^128` birthday. What fails is the completion: a nonce change also moves `enc_seed`, so the
-    derived keystream differs for the same received tag unless the KDF itself collides
-    (`≈ 2^-352`), and the one `(C, T)` then no longer decrypts to the same `M`. This is CMT-3's
+    derived keystream differs for the same received tag unless the KDF itself collides;
+    that KDF sees a 328-bit state (256-bit chaining value plus the 72-bit tail block), so its
+    birthday is `≈2^164` (`2^-328` per pair), not `2^-352`; the one `(C, T)` then no longer
+    decrypts to the same `M`. This is CMT-3's
     context half; earlier revisions here and in §4.5 priced only the key route and called *all*
     of the remainder a fixed point, which is true of the different-message case alone.)
   * the **salamander** route — two *different* messages — is priced at the key-search level by a
@@ -367,10 +371,12 @@ earlier revision of this crate added on top of those — binding the key into th
 tag's *input* as well as into its key derivation, which put a derived key and the
 value it is derived from in one hash call — is **gone** as of revision `v0.3`: the
 tag is now two levels and no hash message contains the master key, so the assumption
-list is the primitives' own: three irreducible conjectures — ChaCha20, HChaCha20 and keyed
-BLAKE3 are PRFs — with the two BLAKE3 *mode* statements (the tree preserves PRF-ness, the XOF
-keeps it past the first block) reduced to the keyed-BLAKE3 conjecture in §2.1 rather than counted
-as assumptions of their own. `SECURITY-ANALYSIS.md` §2.1 keeps the node `L3.6` and
+list is the primitives' own: three irreducible PRF conjectures — ChaCha20, HChaCha20 and keyed
+BLAKE3 — plus **A2′**, HChaCha20's key-direction collision/preimage resistance, which the PRF
+statement in the nonce direction does not imply and which the target key-commitment claim uses.
+The two BLAKE3 *mode* statements (the tree preserves PRF-ness, the XOF keeps it past the first
+block) reduce to the keyed-BLAKE3 conjecture in §2.1 rather than being counted as assumptions of
+their own. `SECURITY-ANALYSIS.md` §2.1 keeps the node `L3.6` and
 its separation as the record of *why* the single-level form was replaced; §2.2 there
 is a ledger mapping an auditor's own lettered list of assumptions onto the document,
 so "which of these do you actually assume, and which are proved or falsified?" has a
