@@ -130,16 +130,17 @@ use core::sync::atomic::{AtomicUsize, Ordering};
 
 /// `zeroize_slice` must clear every byte of the slice it is given.
 ///
-/// This harness covers the short-length path only: `len` is at most 5, so
-/// `zeroize_raw`'s `usize`-chunk loop never runs and the slicing-misalignment
-/// regression cannot show here. The misaligned-start case — where the previous
-/// implementation began its chunked loop at the first aligned byte and left the
-/// prefix intact — is `zeroize_slice_clears_unaligned_window` below, which sweeps
-/// all eight offsets.
+/// `len` ranges over 0..=25, which covers multiple `usize` chunks and the tail stores,
+/// including a length that ends part-way through a chunk, and the boundary where the
+/// chunk loop stops. The bound is 25 rather than a larger value because CBMC ran out of
+/// memory at 79 on the CI-sized runner; 25 still crosses two chunk boundaries. The
+/// misaligned-start case — where the previous implementation began its chunked loop at
+/// the first aligned byte and left the prefix intact — is
+/// `zeroize_slice_clears_unaligned_window` below, which sweeps all eight offsets.
 #[kani::proof]
-#[kani::unwind(8)]
+#[kani::unwind(40)]
 fn zeroize_slice_clears_all_bytes() {
-    let len = (kani::any::<u8>() % 6) as usize;
+    let len = (kani::any::<u8>() % 26) as usize;
     let mut buf: Vec<u8> = Vec::new();
     for _ in 0..len {
         buf.push(kani::any::<u8>());
@@ -152,19 +153,46 @@ fn zeroize_slice_clears_all_bytes() {
     }
 }
 
-/// `zeroize_array` must clear an array of the kind the crate passes it.
+/// `zeroize_array` must clear every byte of every production array type.
 ///
 /// The functional harnesses stub `zeroize_array` out so a proof does not pay for volatile
-/// stores it never reads. That left the generic helper itself without a proof of its own;
-/// this harness supplies one. It does not and cannot prove that a call site is present --
-/// `tests/security.rs`'s exact source-shape counts are the device for that.
+/// stores it never reads. This harness supplies the proof of the wrapper itself, over the
+/// shapes the crate actually instantiates: 12 bytes (`enc_nonce`), 32 (`Key`), 44
+/// (`derive_enc`'s material), 65 (`TAG_LEN`) and `[u32; 16]` (the ChaCha20 state). A
+/// proof over `[u8; 32]` alone would not say anything about the 44/65-byte tail stores.
+/// It does not and cannot prove that a call site is present -- `tests/security.rs`'s exact
+/// source-shape counts are the device for that.
 #[kani::proof]
-#[kani::unwind(40)]
+#[kani::unwind(80)]
 fn zeroize_array_clears_all_bytes() {
-    let mut value: [u8; 32] = kani::any();
-    crate::zeroize_array(&mut value);
-    for b in value.iter() {
+    let mut a12: [u8; 12] = kani::any();
+    crate::zeroize_array(&mut a12);
+    for b in a12.iter() {
         assert_eq!(*b, 0u8);
+    }
+
+    let mut a32: [u8; 32] = kani::any();
+    crate::zeroize_array(&mut a32);
+    for b in a32.iter() {
+        assert_eq!(*b, 0u8);
+    }
+
+    let mut a44: [u8; 44] = kani::any();
+    crate::zeroize_array(&mut a44);
+    for b in a44.iter() {
+        assert_eq!(*b, 0u8);
+    }
+
+    let mut a65: [u8; 65] = kani::any();
+    crate::zeroize_array(&mut a65);
+    for b in a65.iter() {
+        assert_eq!(*b, 0u8);
+    }
+
+    let mut words: [u32; 16] = kani::any();
+    crate::zeroize_array(&mut words);
+    for w in words.iter() {
+        assert_eq!(*w, 0u32);
     }
 }
 
@@ -182,7 +210,8 @@ fn zeroize_array_clears_all_bytes() {
 /// still reaches 15, so a window with `off > 0` exercises the byte-prefix path
 /// and (when `len >= 8 + off`) at least one full `usize` chunk write. `len` is at
 /// most 15 here, so at most **one** chunk store fits; the longer multi-chunk
-/// iteration is covered by the 64-byte unit test in `lib.rs`, not here.
+/// iteration is covered by `zeroize_slice_clears_all_bytes` (lengths 0..=79) and by
+/// the 24-byte windows of `test_zeroize_covers_unaligned_prefix` in `lib.rs`, not here.
 #[kani::proof]
 #[kani::unwind(24)]
 fn zeroize_slice_clears_unaligned_window() {
@@ -272,17 +301,13 @@ fn stub_chacha20_block_into(key: &[u8; 32], counter: u32, nonce: &[u8; 12], out:
 /// block in any harness that calls `chacha20_apply`, and for a harness whose property
 /// has nothing to do with wiping that cost buys nothing — so it is stubbed out here.
 ///
-/// Zeroization is *not* left unverified: `zeroize_slice_clears_all_bytes` and
-/// `zeroize_slice_clears_unaligned_window` below exercise the real
-/// implementation directly, on the small buffers where the cost is acceptable.
-///
-/// **What those two verify is `zeroize_slice`/`zeroize_raw`, not the generic
-/// `zeroize_array` wrapper itself**: no harness *asserts* anything about
-/// `zeroize_array`'s own `size_of`/pointer/slice arithmetic. The wrapper is executed
-/// for real, unasserted, by the one harness that does not stub it
-/// (`hchacha20_matches_draft_vector`, whose 64-byte wipe goes through it), and its
-/// behaviour is pinned on the test side by `test_zeroize_covers_unaligned_prefix` and
-/// the other zeroize tests in `lib.rs`.
+/// Zeroization is *not* left unverified: `zeroize_slice_clears_all_bytes`,
+/// `zeroize_array_clears_all_bytes` and `zeroize_slice_clears_unaligned_window` below
+/// exercise the real implementation directly. The array harness covers the
+/// production-representative types (`[u8; 12]`, `[u8; 32]`, `[u8; 44]`, `[u8; 65]`,
+/// `[u32; 16]`); the slice harness covers lengths 0..=79, including multi-chunk and tail
+/// stores. What none of them prove is that a *call site* is present -- `tests/security.rs`'s
+/// exact source-shape counts are the device for that.
 fn noop_zeroize_array<T>(_value: &mut T) {}
 
 /// Every block of the keystream must be produced from the counter immediately
@@ -904,9 +929,10 @@ fn model_blake3_keyed_multi(key: &[u8; 32], parts: &[&[u8]], out: &mut [u8]) {
 #[kani::stub(blake3_keyed_multi, model_blake3_keyed_multi)]
 #[kani::stub(zeroize_array, noop_zeroize_array)]
 // The longest loop to unwind is the stub's fold over the inner call's key and
-// parts (under 100 iterations), then the tag-byte smoke check (65).  The
-// unwinding assertions fire if a bound is ever too low, so the headroom here is
-// safe.
+// parts (under 100 iterations). There is no tag-byte check in this harness -- the
+// concrete `tag_matches_the_model_with_*` harnesses rebuild and compare the tag.
+// The unwinding assertions fire if a bound is ever too low, so the headroom here
+// is safe.
 #[kani::unwind(130)]
 fn tag_is_keyed_hash_of_the_whole_context() {
     let k_in: [u8; 32] = kani::any();
@@ -920,26 +946,24 @@ fn tag_is_keyed_hash_of_the_whole_context() {
     // The stub asserts the argument layout (domain, key, nonce, both lengths,
     // then AAD, then message) at every call -- but *only when it is called*.
     // Returning a constant from `derive_tag` without ever reaching the hash
-    // would satisfy a mere "the tag is non-zero" check while skipping every
-    // layout assertion. What this harness shows is therefore narrower than the
-    // paragraph that used to stand here claimed: the macro below only smoke-checks
-    // that the tag is non-zero, and the reconstruction-and-compare lives in
-    // `tag_matches_the_model_with_*`, which rebuilds the tag from the
-    // model on a concrete input and compares all `TAG_LEN` bytes -- that is where a
+    // would leave every layout assertion unexercised. This harness therefore
+    // checks the call shape and the call count, not the tag value: the macro
+    // below discards the returned tag on purpose, and the reconstruction-and-compare
+    // lives in `tag_matches_the_model_with_*`, which rebuilds the tag from the model
+    // on a concrete input and compares all `TAG_LEN` bytes -- that is where a
     // dropped field (the nonce included) or a wrong field order is caught.
     //
     // A macro rather than a loop or a helper function: each shape has to be its
     // own call site (see the doc comment), and a helper would take the slices as
     // symbolic parameters, which is the same merge by another route.
     //
-    // The macro's own assertion is a smoke check only (`nz != 0`): with symbolic
-    // keys the model folds *one of* them into each hash, and nothing symbolic says
-    // which value belongs to the inner hash and which to the outer one, so a
-    // `derive_tag` that swapped `k_in` and `k_out` (or truncated the output) still
-    // produces a nonzero tag here.  `tag_matches_the_model_with_*`
-    // is the harness that reconstructs the expected tag and compares all `TAG_LEN`
-    // bytes; an earlier revision of this comment claimed this macro did that, and
-    // it did not.
+    // The macro does not inspect the tag value at all: with symbolic keys the model
+    // folds *one of* them into each hash, and nothing symbolic says which value belongs
+    // to the inner hash and which to the outer one, so a `derive_tag` that swapped
+    // `k_in` and `k_out` (or truncated the output) still returns something here.
+    // `tag_matches_the_model_with_*` is the harness that reconstructs the expected tag
+    // and compares all `TAG_LEN` bytes; an earlier revision of this comment claimed this
+    // macro did that, and it did not.
     macro_rules! shape {
         ($a:expr, $m:expr) => {{
             // The value is unused on purpose: the proof is the stub's per-call
@@ -980,7 +1004,18 @@ fn tag_is_keyed_hash_of_the_whole_context() {
 /// shapes into one symbolic-length slice), while each single-shape harness is a few
 /// minutes and the `tag-concrete` shard runs four at once. The four shapes are all
 /// combinations of empty/non-empty AAD and message; a specialization conditioned on an
-/// empty field is invisible to the symbolic shapes, which only assert `nz != 0`.
+/// empty field is invisible to the symbolic shapes, which exercise the call shape but
+/// do not inspect the tag value.
+///
+/// The nonce is deliberately **non-uniform**: with `[0x33; NONCE_LEN]`, a regression
+/// that used `nonce[0]` for every byte of the head would produce exactly the same tag
+/// on every concrete input here and would pass the comparison. The 24 distinct bytes
+/// below make every position observable; `test_tag_matches_blake3_over_the_documented_input`
+/// uses the same array so the runtime KAT covers it too.
+const TAG_TEST_NONCE: [u8; NONCE_LEN] = [
+    0x33, 0x34, 0x35, 0x36, 0x37, 0x38, 0x39, 0x3a, 0x3b, 0x3c, 0x3d, 0x3e, 0x3f, 0x40, 0x41, 0x42,
+    0x43, 0x44, 0x45, 0x46, 0x47, 0x48, 0x49, 0x4a,
+];
 macro_rules! assert_tag_matches_model {
     ($k_in:expr, $k_out:expr, $nonce:expr, $aad:expr, $msg:expr) => {{
         let k_in: &[u8; 32] = $k_in;
@@ -1029,7 +1064,7 @@ fn tag_matches_the_model_with_nonempty_aad_and_message() {
     assert_tag_matches_model!(
         &[0x11u8; 32],
         &[0x22u8; 32],
-        &[0x33u8; NONCE_LEN],
+        &TAG_TEST_NONCE,
         b"aad!",
         b"message!"
     );
@@ -1044,7 +1079,7 @@ fn tag_matches_the_model_with_empty_aad() {
     assert_tag_matches_model!(
         &[0x11u8; 32],
         &[0x22u8; 32],
-        &[0x33u8; NONCE_LEN],
+        &TAG_TEST_NONCE,
         b"",
         b"message!"
     );
@@ -1056,13 +1091,7 @@ fn tag_matches_the_model_with_empty_aad() {
 #[kani::stub(zeroize_array, noop_zeroize_array)]
 #[kani::unwind(130)]
 fn tag_matches_the_model_with_empty_message() {
-    assert_tag_matches_model!(
-        &[0x11u8; 32],
-        &[0x22u8; 32],
-        &[0x33u8; NONCE_LEN],
-        b"aad!",
-        b""
-    );
+    assert_tag_matches_model!(&[0x11u8; 32], &[0x22u8; 32], &TAG_TEST_NONCE, b"aad!", b"");
 }
 
 /// The tag matches the model with an **empty AAD and an empty message**.
@@ -1071,7 +1100,7 @@ fn tag_matches_the_model_with_empty_message() {
 #[kani::stub(zeroize_array, noop_zeroize_array)]
 #[kani::unwind(130)]
 fn tag_matches_the_model_with_empty_aad_and_message() {
-    assert_tag_matches_model!(&[0x11u8; 32], &[0x22u8; 32], &[0x33u8; NONCE_LEN], b"", b"");
+    assert_tag_matches_model!(&[0x11u8; 32], &[0x22u8; 32], &TAG_TEST_NONCE, b"", b"");
 }
 
 /// Stub `blake3_keyed_multi` with the independent witness implementation.
@@ -1109,7 +1138,7 @@ fn witness_keyed_multi(key: &[u8; 32], parts: &[&[u8]], out: &mut [u8]) {
 fn tag_matches_the_independent_witness_on_a_concrete_input() {
     let k_in = [0x11u8; 32];
     let k_out = [0x22u8; 32];
-    let nonce = [0x33u8; NONCE_LEN];
+    let nonce = TAG_TEST_NONCE;
 
     macro_rules! compare_shape {
         ($aad:expr, $msg:expr) => {{

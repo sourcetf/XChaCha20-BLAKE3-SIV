@@ -50,7 +50,6 @@ cd "$(dirname "$0")/.."
 export PATH="$HOME/.cargo/bin:$PATH"
 REAL_CARGO_HOME="${CARGO_HOME:-$HOME/.cargo}"
 REAL_RUSTUP_HOME="${RUSTUP_HOME:-$HOME/.rustup}"
-REAL_HOME="$HOME"
 CARGO_BIN_DIR="$(dirname "$(command -v cargo)")"
 # The restricted PATHs below deliberately drop the job's Python prefix to control
 # which `cargo` runs. Python's reference dependency is not part of that experiment:

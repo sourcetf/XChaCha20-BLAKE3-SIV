@@ -852,6 +852,32 @@ fn the_suppressed_function_contains_only_the_decision() {
         2,
         "both branches must convert a `Choice`, not compare bytes directly:\n{def}"
     );
+    // The count above says a conversion happens twice, not *which* value is converted.
+    // A shadow binding -- `let _ = gate1; let gate1 = gate0;` -- keeps both `if` lines,
+    // both `bool::from` spellings and every other count intact while the second gate
+    // reads the first one's answer. Pin the two branch expressions and forbid a second
+    // binding of either parameter; the parameters themselves are not `let` bindings.
+    assert_eq!(
+        code.matches("if bool::from(gate0) {").count(),
+        1,
+        "the first branch must test `gate0` itself:\n{def}"
+    );
+    assert_eq!(
+        code.matches("if bool::from(gate1) {").count(),
+        1,
+        "the second branch must test `gate1` itself:\n{def}"
+    );
+    // `let _ = gate1;` is legitimate in the opt-out arm (it consumes the unused
+    // parameter); the dangerous shape is a *rebinding* of either parameter.
+    for shadow in ["let gate0 =", "let gate1 ="] {
+        assert_eq!(
+            code.matches(shadow).count(),
+            0,
+            "`{shadow}` is a local binding that can shadow a parameter: making gate 1 a \
+             copy of gate 0 turns the second branch into the first one's answer while \
+             every textual count above stays true:\n{def}"
+        );
+    }
     assert!(
         !code.contains("#[cfg(not(feature = \"hardened\"))]\n    if "),
         "the default build must not have a branch of its own: it shares this body, \
@@ -911,26 +937,26 @@ fn the_hardened_second_gate_is_recomputed() {
         ] {
             assert_eq!(block.matches(site).count(), 1, "{what}:\n{block}");
         }
-        // The read *lines* being present is not enough: assigning to either binding
-        // between the reads and the comparison leaves every snippet above in place while
-        // making the second gate compare a value with itself. That is the `gates-shared`
-        // shape the whole block exists to reject, and it stayed green when it was
-        // measured. Pin the segment between the last read and the comparison.
+        // The read *lines* being present is not enough: any statement between the reads
+        // and the comparison that can rewrite one of the copies leaves every snippet
+        // above in place while making the second gate compare a value with itself. The
+        // earlier version only rejected `operand =`, which `copy_from_slice`, `fill`, a
+        // raw-pointer store or a helper call all evade. There is no legitimate statement
+        // in this segment -- the real block goes from the last read straight to
+        // `gate_pair` -- so require it to be empty after comments/strings are stripped.
         let last_read = "let mut tag_copy = unsafe { core::ptr::read_volatile(tag) };";
         let read_end = block.find(last_read).expect("asserted present above") + last_read.len();
         let compare =
             "let gate_pair = second_gate_comparison(&computed_tag_copy, &tag_copy) & witness_ok";
         let compare_at = block.find(compare).expect("asserted present below");
         let between = &block[read_end..compare_at];
-        for operand in ["computed_tag_copy", "tag_copy"] {
-            assert!(
-                !between.contains(&format!("{operand} =")),
-                "`{operand}` must not be reassigned between the volatile read and the \
-                 comparison: the second gate would then read a different value than the \
-                 one it is documented to re-read, and a single assignment is enough to \
-                 make it compare a value with itself:\n{between}"
-            );
-        }
+        assert!(
+            between.trim().is_empty(),
+            "no statement may run between the volatile re-reads and their comparison: a \
+             method write (`copy_from_slice`, `fill`), a raw store or a helper call naming \
+             either operand can make the second gate compare a value with itself while \
+             every substring above stays present. The segment is:\n{between}"
+        );
         assert!(
             block.contains("zeroize_array(&mut computed_tag_copy)"),
             "the re-read copy of the computed tag is secret-derived and must be \
@@ -1039,6 +1065,26 @@ fn the_second_gate_uses_two_comparison_shapes_wherever_the_gates_are_built() {
     assert_eq!(body.len(), 1, "one `second_gate_comparison` expected");
     let body = &body[0];
 
+    // Count the bindings before pinning lines: `let b = a;` inserted at the top keeps
+    // every `contains` below true while making `ct_eq_independent(a, b)` a fold of `a`
+    // with itself -- the two "shapes" are then one shape again. The same count catches a
+    // closure shadowing `ct_eq_independent` and any other extra local assignment.
+    let body_code = strip_comments(body);
+    let flat_body = body_code.split_whitespace().collect::<Vec<_>>().join(" ");
+    assert_eq!(
+        flat_body.matches("let ").count(),
+        2,
+        "the comparison must have exactly two local bindings (`plain`, `also`); a shadow \
+         such as `let b = a;` keeps every line pinned below intact while making the fold \
+         compare `a` with itself:\n{body}"
+    );
+    assert_eq!(
+        flat_body.matches(" = ").count(),
+        2,
+        "the comparison must contain exactly those two assignments; any additional \
+         assignment can rewrite an operand before the fold:\n{body}"
+    );
+
     assert!(
         body.contains("a.ct_eq(b) & b.ct_eq(a)"),
         "the `subtle` comparison must stay: it is the shape the fold is independent of:\n{body}"
@@ -1102,6 +1148,28 @@ fn the_second_gate_uses_two_comparison_shapes_wherever_the_gates_are_built() {
     assert_eq!(fold.len(), 1, "one `ct_eq_independent` expected");
     let fold_code = strip_comments(&fold[0]);
     let flat = fold_code.split_whitespace().collect::<Vec<_>>().join(" ");
+    // The line pins below do not forbid an early exit: inserting
+    // `if x != 0 { return subtle::Choice::from(0u8); }` after the XOR keeps every
+    // required line present, still answers every test correctly, and leaks the position
+    // of the first differing word. The function is a fixed shape -- two loops and one
+    // comparison -- so reject every construct that can branch or return early.
+    for construct in ["if", "match", "return", "break", "continue", "else"] {
+        assert_eq!(
+            keyword_occurrences(&fold_code, construct),
+            0,
+            "`{construct}` inside `ct_eq_independent` is a secret-dependent branch or an \
+             early exit: it leaves every required XOR/accumulator line in place while \
+             leaking the position of the first differing byte or word:\n{}",
+            fold[0]
+        );
+    }
+    assert!(
+        non_test_source()
+            .contains("#[cfg(feature = \"hardened\")]\n#[inline(never)]\nfn ct_eq_independent("),
+        "`ct_eq_independent` must keep both attributes: the cfg keeps it out of the \
+         single-gate baseline, and `#[inline(never)]` is what stops the compiler from \
+         merging the fold back into `subtle`'s loop -- the two shapes are the defence"
+    );
     assert!(
         !fold_code.contains("#[cfg"),
         "`ct_eq_independent` must not be gated by a cfg attribute:\n{}",
@@ -1514,6 +1582,27 @@ fn the_decision_outcome_is_fail_closed() {
             "the accept must be the fall-through of both reject checks:\n{tail}"
         );
     }
+    // The loop above pins the *second* reject block's return. The first block has the
+    // same shape and needs the same pin: a `return Ok(...)` in the `decision0` arm would
+    // hand back unverified plaintext while the header-wipe counts above stayed intact.
+    for place in [
+        "crate::zeroize_slice(&mut plaintext);",
+        "crate::zeroize_slice(buffer);",
+    ] {
+        let head = [
+            "    if decision0.is_err() {",
+            &format!("        {place}"),
+            "        return Err(Error::AuthenticationFailed);",
+            "    }",
+        ]
+        .join("\n");
+        assert_eq!(
+            code.matches(head.as_str()).count(),
+            1,
+            "the first reject check must wipe and then return `AuthenticationFailed`, not \
+             fall through to an accept:\n{head}"
+        );
+    }
 
     // The witness is a `Choice` folded into the gate, and the `encrypt` cross-check is a
     // rejection path of its own — both are asserted, because the whole point of the feature is
@@ -1677,12 +1766,50 @@ fn the_decision_outcome_is_fail_closed() {
     // `--features ultra` suite green (measured on a copy). If the second slot carries the
     // first comparison's answer, one skipped instruction reaches both gates and `ultra`'s
     // whole second-gate story is gone while the README still claims it. Pin where `agree2`
-    // comes from, not only that it exists.
+    // comes from, not only that it exists -- and pin it *inside `encrypt`*, because a
+    // whole-file `contains` is satisfied by the same text in a dead helper.
+    let enc = &encrypt_body[0];
+    let agree_decl = "let agree: subtle::Choice = witness_tag.ct_eq(&tag);";
+    let agree2_decl = "let agree2: subtle::Choice = ct_eq_independent(&witness_tag, &tag);";
+    assert_eq!(
+        enc.matches(agree_decl).count(),
+        1,
+        "`encrypt` must bind `agree` from the witness tag and its own tag exactly once"
+    );
+    assert_eq!(
+        enc.matches(agree2_decl).count(),
+        1,
+        "`encrypt`'s second gate must be the independently shaped fold over the witness \
+         tag and the computed tag"
+    );
+    assert_eq!(
+        enc.matches("let agree2").count(),
+        1,
+        "`encrypt` must bind `agree2` exactly once: a second binding shadows the fold \
+         while the declaration line above stays present"
+    );
+    let agree_at = enc.find(agree_decl).expect("asserted above") + agree_decl.len();
+    let agree2_at = enc.find(agree2_decl).expect("asserted above");
+    let between = &enc[agree_at..agree2_at];
     assert!(
-        non_test.contains("let agree2: subtle::Choice = ct_eq_independent(&witness_tag, &tag);"),
-        "`encrypt`'s second gate must be the independently shaped fold over the witness tag \
-         and the computed tag; binding `agree2` to `agree` (or any other spelling of the \
-         first comparison) makes one fault reach both gates"
+        between.trim().is_empty(),
+        "no statement may run between `let agree` and the independent fold's declaration: \
+         `witness_tag.copy_from_slice(&tag);` there makes `agree2` compare `tag` with \
+         itself while every count above stays true. The segment is:\n{between}"
+    );
+    let call = "accept_or_reject(agree, agree2, &mut decision0, &mut decision1);";
+    let call_at = enc.find(call).expect("asserted present above");
+    assert_eq!(
+        enc.matches(call).count(),
+        1,
+        "the decision call must be unique"
+    );
+    let after = &enc[agree2_at + agree2_decl.len()..call_at];
+    assert_eq!(
+        after.matches("agree2").count(),
+        0,
+        "`agree2` must not be rebound or reassigned before the decision call; the \
+         declaration above is the only mention that may exist:\n{after}"
     );
     assert!(
         !non_test.contains("bool::from(witness::"),

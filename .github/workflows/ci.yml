@@ -983,6 +983,8 @@ jobs:
                  echo "::error::stack_residue.sh reported residue in the default build: $(grep -E ' \| (KEY|DERIVED) RESIDUE: ' "$RUNNER_TEMP/residue-default.log" | head -3 | tr '\n' ' ')"
                fi
                exit "$rc" ;;
+            4) echo "::error::stack_residue.sh's own positive control did not take (exit 4), so the default build's measurement is void: $(grep -E '^FAIL' "$RUNNER_TEMP/residue-default.log" | head -2 | tr '\n' ' ')"
+               exit 4 ;;
             *) # 3 is "could not run" -- the repository's convention, and a *skipped stage* in
                # verify.sh. It is still an error here, because this step exists to produce the
                # measurement and an absent measurement reported as a passed step is how a check
@@ -1007,6 +1009,8 @@ jobs:
                  echo "::error::stack_residue.sh reported residue in the ultra build, where scrub_stack is supposed to erase it: $(grep -E ' \| KEY RESIDUE: ' "$RUNNER_TEMP/residue-ultra.log" | head -3 | tr '\n' ' ')"
                fi
                exit "$rc" ;;
+            4) echo "::error::stack_residue.sh's own positive control did not take (exit 4), so the ultra build's measurement is void: $(grep -E '^FAIL' "$RUNNER_TEMP/residue-ultra.log" | head -2 | tr '\n' ' ')"
+               exit 4 ;;
             *) echo "::error::stack_residue.sh exited $rc in the ultra build: no measurement was produced (3 = could not run)"; exit "$rc" ;;
           esac
 
@@ -1027,6 +1031,10 @@ jobs:
           tool: cargo-audit@0.22.2
       - name: audit the dependency tree
         run: cargo audit --deny warnings
+      - name: audit the fuzz workspace
+        # The root workspace excludes `fuzz/`, so the fuzz-only lock (libfuzzer-sys,
+        # arbitrary, jobserver, cc) is not in the graph the step above scans.
+        run: cargo audit --deny warnings --file fuzz/Cargo.lock
       - uses: taiki-e/install-action@1e29709c0ec63babbe8f266397a465f29a825f91 # v2
         with:
           tool: cargo-deny@0.20.2

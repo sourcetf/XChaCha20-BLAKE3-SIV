@@ -109,7 +109,10 @@ blake3 = { version = "1.8.7", path = "blake3", default-features = false, feature
 zeroize = { version = "1.5", default-features = false }
 
 [dev-dependencies]
-criterion = "0.5"
+# No default features: the defaults pull `rayon` and `plotters` (54 packages) into every
+# test build, and neither benchmark plots or uses rayon. `cargo_bench_support` is the one
+# piece the `harness = false` benchmarks need.
+criterion = { version = "0.5", default-features = false, features = ["cargo_bench_support"] }
 # For the digest-based large-vector fixture: the test hashes `ciphertext || tag`
 # with the same vendored BLAKE3 fork the library uses.
 blake3 = { version = "1.8.7", path = "blake3", default-features = false, features = ["zeroize"] }
@@ -122,8 +125,9 @@ chacha20poly1305 = { version = "0.10", default-features = false, features = ["al
 aead = { version = "0.5", default-features = false, features = ["alloc"] }
 # Property-based tests. The security tests in `tests/security.rs` are the main
 # reason for this: "no single-bit tamper is ever accepted" is a statement over
-# every possible input, which is exactly what a property test is for.
-proptest = { version = "1", default-features = false, features = ["std", "bit-set"] }
+# every possible input, which is exactly what a property test is for. `bit-set` is
+# not used (no `bits()` generator in the tests), so it is not enabled.
+proptest = { version = "1", default-features = false, features = ["std"] }
 # Integration tests cannot see the crate's own dependencies, and `tests/ctgrind.rs`
 # compares operands through `subtle::ConstantTimeEq` directly to check the
 # primitive the tag comparison rests on.

@@ -1542,19 +1542,36 @@ fn the_integrity_check_fails_stop_on_a_corrupted_page() {
 /// stayed green, because the previous count covered only the four AEAD entry points.
 #[test]
 fn the_locked_key_paths_scrub_the_stack() {
+    /// Count occurrences of `call` that are direct statements of `body`'s outer block
+    /// (brace depth 1), not nested in an `if`, a closure, or a local `fn`. `body` comes
+    /// from `non_test_source`, so comments/strings cannot fake a nesting token.
+    fn top_level_calls(body: &str, call: &str) -> usize {
+        let mut count = 0usize;
+        let mut from = 0usize;
+        while let Some(i) = body[from..].find(call) {
+            let at = from + i;
+            if brace_depth_at(body, at) == 1 {
+                count += 1;
+            }
+            from = at + call.len();
+        }
+        count
+    }
+
     let new = brace_blocks("pub fn new(key: &[u8; crate::KEY_LEN])");
     assert_eq!(new.len(), 1, "one `LockedKey::new` expected");
     let new = &new[0];
     assert_eq!(
-        new.matches("scrub_stack();").count(),
+        top_level_calls(new, "crate::scrub_stack();"),
         1,
-        "LockedKey::new must scrub the stack after `integrity_tag`, or the tag's keyed-\
-         BLAKE3 finalize leaves key-dependent temporaries in its frame"
+        "LockedKey::new must scrub the stack as a direct statement after `integrity_tag`, \
+         or the tag's keyed-BLAKE3 finalize leaves key-dependent temporaries in its frame; \
+         a nested dead block keeps the text but never runs it:\n{new}"
     );
     let tag_wipe = new
         .find("zeroize_array(&mut tag)")
         .expect("LockedKey::new must wipe its tag local");
-    let scrub = new.find("scrub_stack();").expect("checked above");
+    let scrub = new.find("crate::scrub_stack();").expect("checked above");
     let ok = new
         .find("Ok(LockedKey(page))")
         .expect("LockedKey::new must return the page");
@@ -1563,20 +1580,25 @@ fn the_locked_key_paths_scrub_the_stack() {
         "the scrub must come after the tag wipe and before the success return: a scrub on \
          an early-return path would protect nothing and one after `Ok(..)` would never run"
     );
+    assert!(
+        !new.contains("black_box(false)") && !new.contains("if false"),
+        "the scrub must not be inside a constant-false block:\n{new}"
+    );
 
     let check = brace_blocks("fn check_integrity(&self, bytes: &[u8; crate::KEY_LEN])");
     assert_eq!(check.len(), 1, "one `LockedKey::check_integrity` expected");
     let check = &check[0];
     assert_eq!(
-        check.matches("scrub_stack();").count(),
+        top_level_calls(check, "crate::scrub_stack();"),
         1,
-        "check_integrity must scrub the stack: it runs on every `as_bytes()`, and its \
-         keyed-BLAKE3 finalize is the same dependency residue every AEAD entry point clears"
+        "check_integrity must scrub the stack as a direct statement: it runs on every \
+         `as_bytes()`, and its keyed-BLAKE3 finalize is the same dependency residue every \
+         AEAD entry point clears; a nested dead block keeps the text but never runs it:\n{check}"
     );
     let wipe = check
         .find("zeroize_array(&mut expected)")
         .expect("check_integrity must wipe the recomputed tag before branching");
-    let scrub = check.find("scrub_stack();").expect("checked above");
+    let scrub = check.find("crate::scrub_stack();").expect("checked above");
     let branch = check
         .find("if !bool::from(ok)")
         .expect("check_integrity must branch on the comparison");
@@ -1586,6 +1608,10 @@ fn the_locked_key_paths_scrub_the_stack() {
          without running later statements, so a scrub after it would cover only the success \
          path"
     );
+    assert!(
+        !check.contains("black_box(false)") && !check.contains("if false"),
+        "the scrub must not be inside a constant-false block:\n{check}"
+    );
 
     // `as_bytes` must actually call the checked path: a scrub in a helper nobody calls is
     // the shape a whole-file count cannot distinguish from the real one.
@@ -1594,6 +1620,45 @@ fn the_locked_key_paths_scrub_the_stack() {
     assert!(
         as_bytes[0].contains("self.check_integrity(bytes);"),
         "as_bytes must run the integrity check (and its scrub) on every use"
+    );
+}
+
+/// `LockedKey::drop` must wipe the page **before** it unlocks and restores dumpability.
+///
+/// The order is the point: `munlock` makes the page swappable again, so unlocking first
+/// reopens the window in which a live key can be written to swap. A drop that calls
+/// `unlock_range_with` first, or that replaces it with a bare `munlock`, leaves every
+/// behavioural test green (the `VmLck` total still falls), so pin the two statements and
+/// their order in the shipped source.
+#[test]
+fn the_locked_key_drop_wipes_before_unlocking() {
+    let drop = brace_blocks("impl Drop for LockedKey {");
+    assert_eq!(drop.len(), 1, "one `impl Drop for LockedKey` expected");
+    let body = &drop[0];
+    let wipe = "crate::zeroize_slice(self.0.bytes_mut());";
+    let unlock = "unlock_range_with(self.0.page_size(), self.0.as_ptr(), self.0.len());";
+    assert_eq!(
+        body.matches(wipe).count(),
+        1,
+        "Drop must wipe the whole page exactly once:\n{body}"
+    );
+    assert_eq!(
+        body.matches(unlock).count(),
+        1,
+        "Drop must release the lock through `unlock_range_with`, which restores \
+         `MADV_DODUMP`, exactly once:\n{body}"
+    );
+    let wipe_at = body.find(wipe).expect("asserted above");
+    let unlock_at = body.find(unlock).expect("asserted above");
+    assert!(
+        wipe_at < unlock_at,
+        "Drop must wipe before unlocking: unlocking first makes the page swappable with the \
+         key still in it:\n{body}"
+    );
+    assert!(
+        !body.contains("NR_MUNLOCK") && !body.contains("syscall2("),
+        "Drop must not bypass `unlock_range_with` with a bare `munlock` (that would leave \
+         `VM_DONTDUMP` set on the freed page):\n{body}"
     );
 }
 
@@ -1692,6 +1757,14 @@ fn the_dump_advice_is_issued_on_the_right_range() {
          quota never returned\n{}",
         guard_blocks[0]
     );
+    let inner = &guard_blocks[0]
+        [guard_blocks[0].find('{').unwrap() + 1..guard_blocks[0].rfind('}').unwrap()];
+    assert_eq!(
+        inner.trim(),
+        "let _ = syscall3(NR_MADVISE, start, end - start, MADV_DODUMP);",
+        "the guard body must be the single top-level DODUMP statement: a nested \
+         `black_box(false)` block keeps the substring but never executes the restore:\n{inner}"
+    );
     // The mirror image in `lock_range`: a refused `MADV_DONTDUMP` must undo the mlock.
     // The order is munlock first, then `MADV_DODUMP`: if the unlock is refused, the range
     // must stay non-dumpable rather than becoming locked *and* dumpable with a live key.
@@ -1727,6 +1800,14 @@ fn the_dump_advice_is_issued_on_the_right_range() {
         rollback_guard[0].contains("syscall3(NR_MADVISE, start, end - start, MADV_DODUMP)"),
         "MADV_DODUMP must be *inside* the `if ok(u)` block, not merely after it: a refused \
          munlock must leave the range non-dumpable\n{rollback}"
+    );
+    let inner = &rollback_guard[0]
+        [rollback_guard[0].find('{').unwrap() + 1..rollback_guard[0].rfind('}').unwrap()];
+    assert_eq!(
+        inner.trim(),
+        "let _ = syscall3(NR_MADVISE, start, end - start, MADV_DODUMP);",
+        "the guard body must be the single top-level DODUMP statement: a nested \
+         `black_box(false)` block keeps the substring but never executes the restore:\n{inner}"
     );
     assert!(
         munlock < guard && guard < dodump,

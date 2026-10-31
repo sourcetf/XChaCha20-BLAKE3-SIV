@@ -680,7 +680,7 @@ fn run() {
         println!("      region -- was NOT found, so this scan is not reading the frames it");
         println!("      claims to read and every 'no residue' line above is vacuous. Fix the");
         println!("      probe before trusting a PASS.");
-        std::process::exit(1);
+        std::process::exit(4);
     }
     // The two controls for the shapes the old single-run threshold could not see.
     // Each must be found by its own rule: a regression of the split rule or of the
@@ -693,14 +693,14 @@ fn run() {
         println!("      two separate 4-byte stack copies -- was NOT found by the split rule");
         println!("      (>= 2 runs of >= {MIN_RUN} bytes totalling >= {SPLIT_TOTAL}), so a 4+4 split of");
         println!("      key material would read as clean. Fix the rule before trusting a PASS.");
-        std::process::exit(1);
+        std::process::exit(4);
     }
     if !seven_found {
         println!();
         println!("FAIL: the 7-byte positive control -- the key's first seven bytes as one run --");
         println!("      was NOT found by the {SINGLE_RUN}-byte single-run threshold, so a 7-byte");
         println!("      residual would read as clean. Fix the threshold before trusting a PASS.");
-        std::process::exit(1);
+        std::process::exit(4);
     }
 
     if failures == 0 {
@@ -789,12 +789,13 @@ RS
 
 cd "$WORK"
 # Exit codes are the repository's convention: 0 = measured, nothing found; 1 = measured,
-# residue found -- or the scan's own positive control was not found, which means the
-# measurement was vacuous (the probe exits 1 for both); 3 = could not run. The distinction
-# matters to verify.sh, which reports 1 as ADVISORY (a change in compiler-chosen layout
-# must not fail a `--deep` run) but a *skipped stage* for 3. Nothing produced a 3 here
-# before -- so a build failure (cargo exits 101) was reported as "residue changed", which
-# is a measurement claim about a run that never happened.
+# residue found; 3 = could not run; 4 = the measurement is void because one of the scan's
+# own positive controls did not fire (the probe cannot see a key copy it planted, so a PASS
+# would be vacuous). The distinction matters to verify.sh: 1 is an ADVISORY in a narrow run
+# (a change in compiler-chosen layout must not fail a `--deep` run), 3 is a skipped stage,
+# and 4 is always a hard failure. Nothing produced a 3 here before -- so a build failure
+# (cargo exits 101) was reported as "residue changed", which is a measurement claim about a
+# run that never happened.
 rc=0
 # Prefer `--offline` when this standalone project can resolve from the local cargo
 # cache: verify.sh --tools runs after the crate has been built, and an offline host

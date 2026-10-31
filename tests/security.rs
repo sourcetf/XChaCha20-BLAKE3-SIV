@@ -108,7 +108,7 @@ fn nonempty_bytes_strategy(max: usize) -> impl Strategy<Value = Vec<u8>> {
 /// Lengths chosen to straddle every internal boundary: ChaCha20 blocks, the
 /// SIMD widths, and BLAKE3's chunk boundary.
 const BOUNDARY_LENS: &[usize] = &[
-    0, 1, 63, 64, 65, 127, 128, 255, 256, 511, 512, 1023, 1024, 2048,
+    0, 1, 63, 64, 65, 127, 128, 255, 256, 257, 511, 512, 513, 1023, 1024, 1025, 2048,
 ];
 
 // ── Property: round-trip ──────────────────────────────────────────────
@@ -237,20 +237,26 @@ proptest! {
 
         let mut k2 = key;
         k2[kpos.index(k2.len())] ^= delta;
-        prop_assert!(decrypt(&k2, &nonce, b"", &ct, &tag).is_err());
+        prop_assert_eq!(
+            decrypt(&k2, &nonce, b"", &ct, &tag),
+            Err(Error::AuthenticationFailed)
+        );
 
         let mut n2 = nonce;
         n2[npos.index(n2.len())] ^= delta;
-        prop_assert!(decrypt(&key, &n2, b"", &ct, &tag).is_err());
+        prop_assert_eq!(
+            decrypt(&key, &n2, b"", &ct, &tag),
+            Err(Error::AuthenticationFailed)
+        );
     }
 
     /// **Nonce reuse semantics.** With `(key, nonce)` fixed:
     ///
     ///   * identical `(aad, msg)` gives byte-identical output (the scheme is
     ///     deterministic — that is what makes the KATs meaningful);
-    ///   * different `(aad, msg)` gives a different tag, which is what SIV
-    ///     promises on nonce reuse (the *ciphertexts* are not promised to differ —
-    ///     see the note in the body);
+    ///   * a different message under the same key, nonce and AAD gives a different tag,
+    ///     which is what SIV promises on nonce reuse (the *ciphertexts* are not promised
+    ///     to differ — see the note in the body);
     ///   * and both still decrypt.
     ///
     /// The second point is the reason this construction is usable with a random
@@ -288,8 +294,14 @@ proptest! {
         prop_assert_eq!(back2.as_slice(), other.as_slice());
 
         // And the tags are not interchangeable.
-        prop_assert!(decrypt(&key, &nonce, &aad, &ct1, &tag2).is_err());
-        prop_assert!(decrypt(&key, &nonce, &aad, &ct2, &tag1).is_err());
+        prop_assert_eq!(
+            decrypt(&key, &nonce, &aad, &ct1, &tag2),
+            Err(Error::AuthenticationFailed)
+        );
+        prop_assert_eq!(
+            decrypt(&key, &nonce, &aad, &ct2, &tag1),
+            Err(Error::AuthenticationFailed)
+        );
     }
 
     /// The AAD/message split must be unambiguous: `(aad, msg)` and a different
@@ -323,8 +335,14 @@ proptest! {
 
         // Concretely: a ciphertext authenticated under (a2, b2) must not verify
         // when presented with aad = a.
-        prop_assert!(decrypt(&key, &nonce, &a, &ct2, &tag2).is_err());
-        prop_assert!(decrypt(&key, &nonce, &a2, &ct1, &tag1).is_err());
+        prop_assert_eq!(
+            decrypt(&key, &nonce, &a, &ct2, &tag2),
+            Err(Error::AuthenticationFailed)
+        );
+        prop_assert_eq!(
+            decrypt(&key, &nonce, &a2, &ct1, &tag1),
+            Err(Error::AuthenticationFailed)
+        );
     }
 
     /// Empty inputs at every length boundary must round-trip, so an
@@ -353,7 +371,10 @@ proptest! {
         pt in bytes_strategy(64),
     ) {
         let (ct, _) = encrypt(&key, &nonce, b"", &pt).unwrap();
-        prop_assert!(decrypt(&key, &nonce, b"", &ct, &[0u8; TAG_LEN]).is_err());
+        prop_assert_eq!(
+            decrypt(&key, &nonce, b"", &ct, &[0u8; TAG_LEN]),
+            Err(Error::AuthenticationFailed)
+        );
     }
 }
 
@@ -876,9 +897,18 @@ fn find_cfg_test_attribute(source: &str, from: usize) -> Option<(usize, usize, b
     while i < b.len() {
         if b[i] == b'#' {
             let mut j = i + 1;
+            // `# [cfg(test)]` is the same attribute as `#[cfg(test)]`; rustc accepts
+            // whitespace between every token, and a scanner that requires adjacency is
+            // one space away from being evaded.
+            while j < b.len() && b[j].is_ascii_whitespace() {
+                j += 1;
+            }
             let inner = b.get(j) == Some(&b'!');
             if inner {
                 j += 1;
+                while j < b.len() && b[j].is_ascii_whitespace() {
+                    j += 1;
+                }
             }
             if b.get(j) == Some(&b'[') {
                 j += 1;
@@ -895,10 +925,27 @@ fn find_cfg_test_attribute(source: &str, from: usize) -> Option<(usize, usize, b
                         while j < b.len() && b[j].is_ascii_whitespace() {
                             j += 1;
                         }
-                        if b[j..].starts_with(b"test") {
-                            let mut k = j + 4;
+                        // `r#test` is the same atom as `test` (raw identifiers are
+                        // accepted in cfg predicates), and `#[cfg(test,)]` is the same
+                        // predicate with a trailing comma. Both were measured to evade
+                        // the earlier scanner.
+                        let atom = if b[j..].starts_with(b"r#test") {
+                            6
+                        } else if b[j..].starts_with(b"test") {
+                            4
+                        } else {
+                            0
+                        };
+                        if atom != 0 {
+                            let mut k = j + atom;
                             while k < b.len() && b[k].is_ascii_whitespace() {
                                 k += 1;
+                            }
+                            if b.get(k) == Some(&b',') {
+                                k += 1;
+                                while k < b.len() && b[k].is_ascii_whitespace() {
+                                    k += 1;
+                                }
                             }
                             if b.get(k) == Some(&b')') {
                                 k += 1;
@@ -963,7 +1010,7 @@ fn cfg_test_item_end(source: &str, close: usize) -> usize {
         let rest = &source[at..];
         let trimmed = rest.trim_start();
         at += rest.len() - trimmed.len();
-        if trimmed.starts_with("#[") || trimmed.starts_with("#![") {
+        if is_attribute_line(trimmed) {
             let open = source[at..].find('[').map_or(at, |n| at + n + 1);
             at = source[open..].find(']').map_or(open, |n| open + n + 1);
         } else {
@@ -1220,7 +1267,10 @@ fn raw_string_prefix(b: &[u8]) -> Option<(usize, u8)> {
 /// because `#[ cfg ( any ( ) ) ]` is the same attribute written to evade a byte scan.
 fn constant_cfg_value(pred: &str) -> Option<bool> {
     let normalized: String = pred.chars().filter(|c| !c.is_whitespace()).collect();
-    let p = normalized.as_str();
+    // `#[cfg(any(),)]` / `#[cfg(test,)]`: a trailing comma is the same predicate. Strip
+    // it at every recursion level before matching, or the recursive calls below receive
+    // `any(),` and fall through to the unknown-atom branch.
+    let p = normalized.trim_end_matches(',');
     if let Some(inner) = p.strip_prefix("any(").and_then(|s| s.strip_suffix(')')) {
         let args = split_cfg_args(inner);
         if args.is_empty() {
@@ -1255,7 +1305,7 @@ fn constant_cfg_value(pred: &str) -> Option<bool> {
         return constant_cfg_value(inner).map(|b| !b);
     }
     match p {
-        "test" => Some(false), // set only by the crate's own test harness
+        "test" | "r#test" => Some(false), // set only by the crate's own test harness
         "true" => Some(true),
         "false" => Some(false),
         _ => None,
@@ -1263,6 +1313,11 @@ fn constant_cfg_value(pred: &str) -> Option<bool> {
 }
 
 /// `inner` split at its **top-level** commas (`all(a, any(b, c))` -> `["a", "any(b, c)"]`).
+///
+/// Empty arguments are dropped: `any(test,)` and `any(any(),)` are legal Rust and evaluate
+/// exactly like `any(test)` / `any(any())`. Keeping the empty slice made
+/// [`constant_cfg_value`] see an unknown atom and return `None`, which was a measured
+/// bypass of the constant-gate check.
 fn split_cfg_args(inner: &str) -> Vec<&str> {
     let mut out = Vec::new();
     let mut depth = 0usize;
@@ -1272,14 +1327,17 @@ fn split_cfg_args(inner: &str) -> Vec<&str> {
             '(' => depth += 1,
             ')' => depth = depth.saturating_sub(1),
             ',' if depth == 0 => {
-                out.push(&inner[start..i]);
+                let arg = &inner[start..i];
+                if !arg.trim().is_empty() {
+                    out.push(arg);
+                }
                 start = i + 1;
             }
             _ => {}
         }
     }
     let last = &inner[start..];
-    if !out.is_empty() || !last.trim().is_empty() {
+    if !last.trim().is_empty() {
         out.push(last);
     }
     out
@@ -1316,8 +1374,16 @@ fn find_cfg_attribute(source: &str, from: usize) -> Option<(usize, usize, CfgAtt
     while i < b.len() {
         if b[i] == b'#' {
             let mut j = i + 1;
+            // Whitespace is legal between every token: `# [cfg(any())]` and
+            // `# ! [cfg(any())]` are the same attributes, and rustc accepts them.
+            while j < b.len() && b[j].is_ascii_whitespace() {
+                j += 1;
+            }
             if b.get(j) == Some(&b'!') {
                 j += 1; // the inner form `#![…]`
+                while j < b.len() && b[j].is_ascii_whitespace() {
+                    j += 1;
+                }
             }
             if b.get(j) == Some(&b'[') {
                 j += 1;
@@ -1440,7 +1506,7 @@ fn preceding_attributes(body: &str, at: usize) -> Vec<(usize, &str)> {
         // attribute branches come first: a line can be both an attribute and an opener
         // (`#[cfg(feature = "pure")] {`), and skipping it as an opener would lose the
         // attribute this scan exists to see.
-        if line.starts_with("#[") || line.starts_with("#![") {
+        if is_attribute_line(line) {
             out.push((line_no, line));
             if start == 0 {
                 break;
@@ -1481,20 +1547,84 @@ fn attribute_suffix(line: &str) -> Option<&str> {
             b'[' => {
                 depth -= 1;
                 if depth == 0 {
-                    let hash = if i >= 1 && bytes[i - 1] == b'#' {
-                        i - 1
-                    } else if i >= 2 && bytes[i - 2] == b'#' && bytes[i - 1] == b'!' {
-                        i - 2
-                    } else {
-                        return None; // the `[` is not part of an attribute
-                    };
-                    return Some(&line[hash..]);
+                    // `# [ … ]` / `# ! [ … ]` are the same attributes with whitespace;
+                    // skip it backwards before looking for the `#`/`!`.
+                    let mut k = i;
+                    while k > 0 && bytes[k - 1].is_ascii_whitespace() {
+                        k -= 1;
+                    }
+                    if k > 0 && bytes[k - 1] == b'!' {
+                        k -= 1;
+                        while k > 0 && bytes[k - 1].is_ascii_whitespace() {
+                            k -= 1;
+                        }
+                    }
+                    if k > 0 && bytes[k - 1] == b'#' {
+                        return Some(&line[k - 1..]);
+                    }
+                    return None; // the `[` is not part of an attribute
                 }
             }
             _ => {}
         }
     }
     None
+}
+
+/// Whether `line`, after leading whitespace, begins an outer or inner attribute.
+///
+/// Unlike `starts_with("#[")`, this accepts whitespace between `#`, `!` and `[`:
+/// `# [cfg(any())]` is a legal, always-false attribute that the earlier scanners missed.
+fn is_attribute_line(line: &str) -> bool {
+    let Some(rest) = line.trim_start().strip_prefix('#') else {
+        return false;
+    };
+    let rest = rest.trim_start();
+    let rest = match rest.strip_prefix('!') {
+        Some(rest) => rest.trim_start(),
+        None => rest,
+    };
+    rest.starts_with('[')
+}
+
+/// The cfg scanners must recognise the spellings rustc accepts but a literal `#[cfg(`
+/// byte scan does not: whitespace between `#`/`!`/`[`, a trailing comma, empty arguments,
+/// and the raw identifier `r#test`. Each was a measured bypass of an earlier scanner.
+#[test]
+fn cfg_scanners_recognise_whitespace_and_trailing_comma_spellings() {
+    for predicate in ["any(),", "test,", "any(any(),)", "any(test,)", "r#test"] {
+        assert_eq!(
+            constant_cfg_value(predicate),
+            Some(false),
+            "`{predicate}` is an always-false cfg predicate and must be recognised"
+        );
+    }
+    for attribute in [
+        "#[cfg(test,)] fn t() {}",
+        "# [cfg(test)] fn t() {}",
+        "# ! [cfg(r#test)] fn t() {}",
+    ] {
+        assert!(
+            find_cfg_test_attribute(attribute, 0).is_some(),
+            "the test-item blanker must see {attribute}"
+        );
+    }
+    for attribute in [
+        "#[cfg(any())] wipe();",
+        "# [cfg(any())] wipe();",
+        "# ! [cfg(any(),)] wipe();",
+    ] {
+        assert!(
+            find_cfg_attribute(attribute, 0).is_some(),
+            "the constant-gate scan must see {attribute}"
+        );
+    }
+    let line = "{ # [cfg(any())]";
+    assert_eq!(
+        attribute_suffix(line).map(str::trim_start),
+        Some("# [cfg(any())]"),
+        "the suffix scan must see a whitespace-separated attribute ending a line"
+    );
 }
 
 /// The reason the attribute of `kind` with argument list `args` is constant-gated, if it
@@ -1637,6 +1767,103 @@ fn raw_lib_line(line: usize) -> &'static str {
 ///
 /// `body_line` is the 1-based line of `src/lib.rs` that `body`'s first line is, so the
 /// raw read can find the attribute the stripped line describes.
+/// The brace-nesting depth at byte `at` in `body`: the number of `{` opened and not yet
+/// closed before it. A statement at a function's top level is depth 1. `body` comes from
+/// [`non_test_source`], whose literal contents are blanked and comments removed, so no
+/// brace inside a string or comment can move the count.
+fn brace_depth_at(body: &str, at: usize) -> usize {
+    let mut depth = 0usize;
+    for (i, c) in body.char_indices() {
+        if i >= at {
+            break;
+        }
+        match c {
+            '{' => depth += 1,
+            '}' => depth = depth.saturating_sub(1),
+            _ => {}
+        }
+    }
+    depth
+}
+
+/// Occurrences of `needle` in `body` that are direct statements of the outer block
+/// (depth 1), not nested in an `if`/`match`/loop or a local function.
+fn top_level_count(body: &str, needle: &str) -> usize {
+    let mut count = 0usize;
+    let mut from = 0usize;
+    while let Some(i) = body[from..].find(needle) {
+        let at = from + i;
+        if brace_depth_at(body, at) == 1 {
+            count += 1;
+        }
+        from = at + needle.len();
+    }
+    count
+}
+
+/// Attributes that gate a block *enclosing* byte `at`, not only those directly above it.
+///
+/// `preceding_attributes` stops at the first non-attribute line in the same statement
+/// position, so a `#[cfg(feature = "rng")] { let _ = 0; wipe }` hides the gate behind the
+/// leading `let`. Walking the enclosing brace stack and asking the same question at each
+/// opener recovers it.
+fn enclosing_block_attributes(body: &str, at: usize) -> Vec<(usize, &str)> {
+    let mut opens = Vec::new();
+    for (i, c) in body.char_indices() {
+        if i >= at {
+            break;
+        }
+        match c {
+            '{' => opens.push(i),
+            '}' => {
+                opens.pop();
+            }
+            _ => {}
+        }
+    }
+    let mut out = Vec::new();
+    for open in opens {
+        out.extend(preceding_attributes(body, open));
+    }
+    out
+}
+
+/// The head (text between the previous delimiter and the `{`) of any enclosing block that
+/// is a constant-false wrapper. A wipe moved inside `if black_box(false) { … }` keeps
+/// every text count while never executing; the table cannot afford to reject `match`,
+/// `if decision.is_err()` or a `while` loop, which are legitimate enclosing shapes in this
+/// crate, so only the constant-false forms are rejected.
+fn constant_false_enclosing_block(body: &str, at: usize) -> Option<String> {
+    let mut opens = Vec::new();
+    for (i, c) in body.char_indices() {
+        if i >= at {
+            break;
+        }
+        match c {
+            '{' => opens.push(i),
+            '}' => {
+                opens.pop();
+            }
+            _ => {}
+        }
+    }
+    for open in opens {
+        let head_start = body[..open]
+            .rfind(['\n', ';', '{', '}'])
+            .map_or(0, |i| i + 1);
+        let head = body[head_start..open].trim();
+        if head.contains("black_box(false)")
+            || head == "if false"
+            || head.starts_with("if false ")
+            || head == "while false"
+            || head.starts_with("while false ")
+        {
+            return Some(head.to_string());
+        }
+    }
+    None
+}
+
 fn assert_wipes_are_not_deadened(
     name: &str,
     body: &str,
@@ -1674,7 +1901,23 @@ fn assert_wipes_are_not_deadened(
                 break;
             }
         }
-        for (line_no, attr) in preceding_attributes(body, stmt_at) {
+        if let Some(head) = constant_false_enclosing_block(body, stmt_at) {
+            panic!(
+                "`{name}`'s wipe `{wipe}` is nested in a constant-false block (`{head}`): the \
+                 text this file counts is unchanged while the wipe never runs. Delete the \
+                 wrapper."
+            );
+        }
+        let mut attrs = preceding_attributes(body, stmt_at);
+        for candidate in enclosing_block_attributes(body, stmt_at) {
+            if !attrs
+                .iter()
+                .any(|(line, attr)| *line == candidate.0 && *attr == candidate.1)
+            {
+                attrs.push(candidate);
+            }
+        }
+        for (line_no, attr) in attrs {
             if let Some(finding) = attribute_finding(attr) {
                 panic!(
                     "`{name}`'s wipe `{wipe}` is directly preceded by `{attr}`: {finding}. An \
@@ -1742,9 +1985,12 @@ fn no_constant_cfg_attribute_can_deaden_the_crypto_source() {
         let body = non_test_source_of(src);
         // The known leading-statement bypass used a `pure` cfg on a block. There is no
         // legitimate `pure` cfg in the crate source: the feature is forwarded to the
-        // BLAKE3 dependency in Cargo.toml, never tested in Rust cfg.
+        // BLAKE3 dependency in Cargo.toml, never tested in Rust cfg. The check reads the
+        // *raw* source, not `body`: `strip_comments` blanks string-literal contents, so
+        // `cfg(feature = "pure")` becomes `cfg(feature = "")` there and the assertion
+        // could never fire.
         assert!(
-            !body.contains("cfg(feature = \"pure\")"),
+            !src.contains("cfg(feature = \"pure\")"),
             "`{name}` contains a `pure` cfg attribute; the known deadening bypass uses one, \
              and no production code needs it"
         );
@@ -1880,9 +2126,11 @@ fn every_allocation_happens_before_any_derivation() {
         let body = body(name);
         for spelling in [
             "vec![",
+            "vec! [",
             // The bare path form, so the turbofish spelling `Vec::<u8>::with_capacity` is
             // caught too: an injected `Vec::<u8>::with_capacity(1)` after `derive_enc`
-            // walked straight past a `Vec::with_capacity` match.
+            // walked straight past a `Vec::with_capacity` match. `Box::` and `vec!` catch
+            // the turbofish and the space-before-bracket spellings.
             "Vec::",
             "Vec::from",
             "with_capacity",
@@ -1890,10 +2138,11 @@ fn every_allocation_happens_before_any_derivation() {
             ".to_vec()",
             ".to_owned(",
             ".collect(",
-            "Box::new",
+            "Box::",
             "String::",
             "Rc::",
             "Arc::",
+            "alloc::alloc::alloc",
         ] {
             assert!(
                 !body.contains(spelling),
@@ -1901,6 +2150,16 @@ fn every_allocation_happens_before_any_derivation() {
                  place relative to the first derivation; route it through the fallible \
                  `alloc_zeroed` helper before the derivation, or add this spelling to the \
                  list deliberately and order it too"
+            );
+        }
+        // A function item alias (`let f = alloc_zeroed;`) puts an unbanned call spelling
+        // after the derivation while the early allocation goes through the alias; reject
+        // the binding shape rather than trying to follow it.
+        for alias in ["= alloc_zeroed;", "= derive_material;"] {
+            assert!(
+                !body.contains(alias),
+                "{name} binds `{alias}` as a function item; a call through the alias escapes \
+                 both this spelling list and the ordering check above"
             );
         }
     }
@@ -1934,6 +2193,24 @@ fn every_allocation_happens_before_any_derivation() {
         2,
         "both `ultra` allocation failures must zeroize the caller's buffer before returning"
     );
+    // The third failure arm with the same promise is the length refusal. It returns
+    // before anything is written, and its input (more than `MAX_MSG_SIZE` bytes) cannot
+    // be built in a test, so a *source* shape is the only witness: deleting this wipe
+    // leaves every behavioural test green while the documented "on failure the buffer is
+    // zeroized" contract becomes false for this arm.
+    let length_arm = [
+        "    if let Err(e) = check_lengths(buffer.len(), aad.len()) {",
+        "        crate::zeroize_slice(buffer);",
+        "        return Err(e);",
+        "    }",
+    ]
+    .join("\n");
+    assert_eq!(
+        in_place.matches(length_arm.as_str()).count(),
+        1,
+        "the length-refusal arm must zeroize the caller's buffer before returning; the \
+         contract is unconditional and this arm has no behavioural route:\n{length_arm}"
+    );
 
     // Every named secret buffer must actually be wiped, per entry point. The ordering
     // assertions above only compare *positions*: an audit deleted `encrypt`'s
@@ -1948,7 +2225,7 @@ fn every_allocation_happens_before_any_derivation() {
     // runs in every configuration), which is the point -- deleting either one leaves the
     // secret-derived KDF input in the frame, and no behavioural test can reach the
     // rejection path because reaching it needs a witness disagreement.
-    for (name, buffers) in [
+    let buffer_table = [
         (
             "encrypt",
             &[
@@ -1992,7 +2269,29 @@ fn every_allocation_happens_before_any_derivation() {
                 ("computed_tag", 1),
             ][..],
         ),
-    ] {
+    ];
+    // The table's own size is pinned: deleting a whole entry-point row (and its wipes)
+    // would otherwise leave the per-row counts above true for the rows that remain.
+    assert_eq!(
+        buffer_table.len(),
+        4,
+        "the entry-point wipe table must keep all four rows"
+    );
+    for (name, buffers) in buffer_table {
+        let expected_buffers = match name {
+            "encrypt" => 6,
+            "encrypt_in_place_detached" => 5,
+            "decrypt" => 6,
+            "decrypt_in_place_detached" => 6,
+            other => panic!("unexpected entry-point table row `{other}`"),
+        };
+        assert_eq!(
+            buffers.len(),
+            expected_buffers,
+            "`{name}`'s buffer list has {} entries, expected {expected_buffers}: a deleted \
+             row must be a deliberate change to this count",
+            buffers.len()
+        );
         let (body, body_line) = body_of(&format!("pub fn {name}("));
         for (buffer, expected) in buffers {
             let wipe = format!("zeroize_array(&mut {buffer});");
@@ -2007,10 +2306,28 @@ fn every_allocation_happens_before_any_derivation() {
             // The count is text, and text survives being compiled out: the same wipe
             // wrapped in `#[cfg(any())] { … }` (or prefixed with `#[cfg(any())]`, or with
             // `#[cfg(feature = "…")]`) is counted exactly as before while never running.
-            // Pin the live shape at each site the count just found. `&[]` is the
-            // allow-list: every wipe in this table exists in every configuration, so no
-            // `cfg`-family attribute directly on one is acceptable.
-            assert_wipes_are_not_deadened(name, &body, body_line, &wipe, &[]);
+            // Pin the live shape at each site the count just found. `encrypt`'s rejection
+            // arms live inside its `#[cfg(feature = "ultra")]` block, so that predicate is
+            // the one legitimate enclosing gate; every other site must have none.
+            let allowed: &[&str] = if name == "encrypt" {
+                &["feature=\"ultra\""]
+            } else {
+                &[]
+            };
+            assert_wipes_are_not_deadened(name, &body, body_line, &wipe, allowed);
+            // The count alone cannot see a wipe moved into an existing rejection branch:
+            // every entry point's success-path wipe is a direct statement of the function
+            // body (depth 1). `encrypt`'s `tag` is the one exception -- the tag is
+            // returned, not wiped on success -- so it has no depth-1 site by design.
+            if !(name == "encrypt" && *buffer == "tag") {
+                let top = top_level_count(&body, &wipe);
+                assert!(
+                    top >= 1,
+                    "`{name}` has no top-level `{wipe}`: a copy of the wipe inside an \
+                     `if`/`match`/loop keeps the count while the success path stops wiping; \
+                     `top_level_count` found {top}"
+                );
+            }
         }
     }
 }
@@ -2113,9 +2430,10 @@ fn every_documented_wipe_has_a_witness() {
         Site {
             label: "Page::drop (locked)",
             marker: "impl Drop for Page {",
-            // The failure path of `LockedKey::new` drops the page directly, with the key
-            // and its integrity tag already written, so this wipe and not
-            // `LockedKey::drop` is the one that covers it.
+            // `LockedKey::new`'s early returns and any unwind drop the page directly; the
+            // key is written after the fallible `lock_range`, so the current refusal path
+            // drops an all-zero page. This wipe is the unwinding-path and future-early-return
+            // cover, not the `lock_range` refusal (which has nothing to wipe yet).
             wipes: &[("crate::zeroize_slice(self.bytes_mut());", 1, &[])],
         },
         Site {
@@ -2206,6 +2524,38 @@ fn every_documented_wipe_has_a_witness() {
             ],
         },
     ];
+
+    // The table must not be able to shrink silently: deleting a `Site` or one of its wipe
+    // entries (together with the source line it names) would otherwise leave every label
+    // check true while the wipe it witnessed is gone. These two counts are the literal
+    // size of the table, so a deletion has to edit them too and the diff says why.
+    assert_eq!(
+        sites.len(),
+        13,
+        "the wipe table has {} sites, expected 13: a deleted Site must be a deliberate \
+         change to this count",
+        sites.len()
+    );
+    let wipe_entries: usize = sites.iter().map(|s| s.wipes.len()).sum();
+    assert_eq!(
+        wipe_entries, 26,
+        "the wipe table has {wipe_entries} entries, expected 26: a deleted entry must be a \
+         deliberate change to this count"
+    );
+    // And every marker must still be a single definition, driven from the table rather
+    // than a hand-kept list that can drift: `body_of` takes the *first* match, so a decoy
+    // with the same marker would otherwise satisfy the counts for a deleted real wipe.
+    let full = non_test_source();
+    for site in &sites {
+        assert_eq!(
+            full.matches(site.marker).count(),
+            1,
+            "`{}`'s marker `{}` has more than one definition in the non-test source; \
+             `body_of` takes the first, so a decoy can stand in for the real item",
+            site.label,
+            site.marker
+        );
+    }
 
     for site in &sites {
         let (body, body_line) = body_of(site.marker);
@@ -2521,11 +2871,23 @@ fn block_attributes_are_seen_through_their_opener() {
 fn macro_bodies(source: &str) -> Vec<String> {
     let mut out = Vec::new();
     let mut rest = source;
-    while let Some(start) = rest.find("macro_rules!") {
+    while let Some(start) = rest.find("macro_rules") {
         let after = &rest[start..];
-        let Some(open) = after.find('{') else {
+        // `macro_rules ! m { … }` is the same definition with whitespace between the
+        // tokens (rustc accepts it); a literal `macro_rules!` search missed it.
+        let name_at = "macro_rules".len();
+        let Some(tail) = after.get(name_at..) else {
             break;
         };
+        let trimmed = tail.trim_start();
+        if !trimmed.starts_with('!') {
+            rest = &after[name_at..];
+            continue;
+        }
+        let Some(open) = trimmed.find('{') else {
+            break;
+        };
+        let open = after.len() - trimmed.len() + open;
         let mut depth = 0usize;
         let mut end = None;
         for (offset, ch) in after[open..].char_indices() {
@@ -2608,6 +2970,95 @@ fn counted_definitions_are_unique() {
             "`{marker}` has more than one definition in the non-test source; a decoy \
              earlier in the file can satisfy the wipe counts while the real definition's \
              wipe is removed. Keep one definition, or teach the scanner to select it."
+        );
+    }
+}
+
+/// The primitive-level wipes the entry-point table does not count: `scrub_stack`'s own
+/// buffer, the scalar ChaCha20/HChaCha20 state, and the per-block keystream scratch.
+///
+/// These functions are documented as wiping key-derived state, but no behavioural test
+/// sees a volatile store, and `tools/stack_residue.sh` scans entry points rather than
+/// these frames. Source-shape counts are the guard. `chacha20_apply` has five `ks` wipes
+/// (one per dispatch arm and the scalar tail); a deleted one leaves a keystream block in
+/// the frame.
+#[test]
+fn primitive_wipe_sites_have_a_witness() {
+    for (marker, call, expected) in [
+        ("fn scrub_stack(", "crate::zeroize_array(&mut buf);", 1usize),
+        (
+            "fn chacha20_block_into(",
+            "crate::zeroize_array(&mut s);",
+            1,
+        ),
+        (
+            "fn chacha20_block_into(",
+            "crate::zeroize_array(&mut orig);",
+            1,
+        ),
+        ("fn hchacha20_into(", "crate::zeroize_array(&mut s);", 1),
+        ("fn chacha20_apply(", "crate::zeroize_array(&mut ks);", 5),
+    ] {
+        let (body, _) = body_of(marker);
+        assert_eq!(
+            body.matches(call).count(),
+            expected,
+            "`{marker}` must contain `{call}` {expected} time(s): the state holds key words \
+             or key-derived keystream, and no behavioural test can see a volatile store:\n{body}"
+        );
+        assert!(
+            !body.contains("black_box(false)") && !body.contains("if false"),
+            "`{marker}`'s wipes must not be nested in a constant-false block:\n{body}"
+        );
+    }
+}
+
+/// Every SIMD kernel that keeps the key words in vector registers must wipe its named
+/// state arrays before returning.
+///
+/// `zeroize_xmm`/`zeroize_ymm`/`zeroize_neon` are residue measures, not behaviour: deleting
+/// a call leaves every ciphertext identical, and the committed stack-residue tool only
+/// exercises 64-byte messages, below the 256/512-byte SIMD threshold. These source-shape
+/// counts are the only guard against a dropped wipe. They are scoped to the kernel bodies,
+/// not the whole file, and reject a `black_box(false)` wrapper that would keep the text but
+/// never execute it.
+#[test]
+fn simd_kernels_wipe_their_key_state() {
+    // Markers must not contain a string literal: `non_test_source` blanks literal
+    // contents, so a marker like `#[target_feature(enable = "sse2")]` is not findable.
+    for (module, calls) in [
+        (
+            "mod x86_simd {",
+            &[
+                ("zeroize_xmm(&mut x);", 1usize),
+                ("zeroize_xmm(&mut orig);", 1),
+                ("zeroize_ymm(&mut x);", 1),
+                ("crate::zeroize_array(&mut s);", 2),
+            ][..],
+        ),
+        (
+            "mod aarch64_simd {",
+            &[
+                ("zeroize_neon(&mut x);", 1usize),
+                ("zeroize_neon(&mut orig);", 1),
+                ("crate::zeroize_array(&mut w);", 1),
+                ("crate::zeroize_array(&mut s);", 1),
+            ][..],
+        ),
+    ] {
+        let (body, _) = body_of(module);
+        for (call, expected) in calls {
+            assert_eq!(
+                body.matches(call).count(),
+                *expected,
+                "`{module}` must contain `{call}` {expected} time(s): the SIMD state holds \
+                 the per-message key words, and no behavioural test or stack-residue case \
+                 reaches this path:\n{body}"
+            );
+        }
+        assert!(
+            !body.contains("black_box(false)") && !body.contains("if false"),
+            "the SIMD wipe calls must be reachable, not nested in a constant-false block:\n{body}"
         );
     }
 }

@@ -184,10 +184,11 @@ registries = [
 # nothing to fire on -- there is no duplicate in it. The duplicates Cargo.lock does
 # carry are all outside that graph, so this deny cannot see them: cpufeatures
 # 0.2.17/0.3.1 (0.2 comes via the dev-only chacha20poly1305 -> chacha20), getrandom
-# 0.2.17/0.3.4/0.4.3 (0.4 is the optional `rng` dependency; the others are dev),
-# r-efi 5/6, rand_core 0.6/0.9 (dev-only) and syn 2/3 (criterion/proptest build
-# graphs). Adding a duplicate to the shipped graph is what makes this fire; the
-# wording here used to imply it policed the whole lockfile, which it never did.
+# 0.3.4/0.4.3 (0.4 is the optional `rng` dependency; 0.3 is dev/transitive), r-efi
+# 5.3.0/6.0.0 (via the two getrandom versions) and syn 2/3 (criterion/proptest build
+# graphs). rand_core is single-version here (0.9.5). Adding a duplicate to the shipped
+# graph is what makes this fire; the wording here used to imply it policed the whole
+# lockfile, which it never did.
 multiple-versions = "deny"
 # Lint level for when a crate version requirement is `*`
 wildcards = "deny"

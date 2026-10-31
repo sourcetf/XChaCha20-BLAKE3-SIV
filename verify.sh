@@ -14,7 +14,7 @@
 #   6b. Miri (slow: minutes; --miri)
 #   7. ctgrind constant-time check (--ctgrind)
 #   7b. ThreadSanitizer (--tsan)
-#   8. cargo-deny (--deny)
+#   8. cargo-deny and cargo-audit (--deny)
 #   9. fuzzing (--fuzz)
 #   10. the tool-level gates (--tools)
 #
@@ -834,12 +834,33 @@ fi
 
 if [ "$RUN_DENY" -eq 1 ]; then
   STAGE_KEY=deny
-  step "8. cargo-deny (advisories, licences, bans, sources)"
+  step "8. cargo-deny and cargo-audit (advisories, licences, bans, sources)"
   if cargo deny --version >/dev/null 2>&1; then
     cargo deny check
   else
     skip "cargo-deny" "not installed (cargo install cargo-deny)"
     echo "         (cargo install cargo-deny --locked)"
+  fi
+  # `cargo deny`'s advisory check and `cargo audit` read different databases and different
+  # graphs: the lock workspace excludes `fuzz/`, so the fuzz-only dependencies are audited
+  # by the second command only (CI runs both). The `--no-fetch` retry keeps an offline host
+  # with a cached advisory database usable; if the cache is cold too, the retry fails and
+  # the stage is a failure rather than a silent pass.
+  audit_with_fallback() {  # <file>
+    local file="$1"
+    if [ -n "$file" ]; then
+      cargo audit --deny warnings --file "$file" \
+        || cargo audit --no-fetch --deny warnings --file "$file"
+    else
+      cargo audit --deny warnings || cargo audit --no-fetch --deny warnings
+    fi
+  }
+  if cargo audit --version >/dev/null 2>&1; then
+    audit_with_fallback ""
+    audit_with_fallback fuzz/Cargo.lock
+  else
+    skip "cargo-audit" "not installed (cargo install cargo-audit)"
+    echo "         (cargo install cargo-audit --locked)"
   fi
 fi
 
@@ -903,7 +924,7 @@ if [ "$RUN_FUZZ" -eq 1 ]; then
       FUZZ_TARGET_DIR="$PWD/fuzz/target"
     fi
     cargo +nightly fuzz run roundtrip --target-dir "$FUZZ_TARGET_DIR" \
-      -- -max_total_time="$FUZZ_SECONDS"
+      -- -max_total_time="$FUZZ_SECONDS" -max_len=8192
     # The same target with `ultra`, which is the only configuration that runs the second
     # implementation over the key: new code on the caller-controlled path, so the
     # "no panic, no out-of-bounds, every corruption rejected" assertions apply to it too.
@@ -933,7 +954,7 @@ if [ "$RUN_FUZZ" -eq 1 ]; then
       fuzz_half=$((FUZZ_SECONDS / 2))
       [ "$fuzz_half" -ge 1 ] || fuzz_half=1
       cargo +nightly fuzz run roundtrip --target-dir "$FUZZ_TARGET_DIR" \
-        --features xchacha20-blake3-siv/ultra -- -max_total_time="$fuzz_half"
+        --features xchacha20-blake3-siv/ultra -- -max_total_time="$fuzz_half" -max_len=8192
     else
       echo "FAILED: no witness symbols in $fuzz_bin -- the ultra feature did not apply," >&2
       echo "        so this run would test the default configuration twice" >&2
@@ -948,6 +969,16 @@ fi
 if [ "$RUN_TOOLS" -eq 1 ]; then
   STAGE_KEY=tools
   step "10. tool-level gates (the tools CI's per-push jobs run; the 4000-vector differential is wide-only there)"
+  # The vendored BLAKE3 C/assembly backends under ASan/UBSan (CI's `blake3-c` job). The
+  # Makefile forces a rebuild with `-fno-sanitize-recover=all`, so a UBSan diagnostic is a
+  # non-zero exit rather than a printed warning the step would treat as success.
+  if command -v make >/dev/null 2>&1 && command -v cc >/dev/null 2>&1; then
+    ( cd blake3/c && make -f Makefile.testing test >/dev/null && make -f Makefile.testing test_asm >/dev/null ) \
+      || { echo "FAILED: the C ASan/UBSan suite (blake3/c) failed" >&2; exit 1; }
+    echo "C ASan/UBSan suite (intrinsics and assembly): ok"
+  else
+    skip "C ASan/UBSan suite (blake3/c)" "needs make and a C compiler"
+  fi
   # The tools that answer 3 for "could not run" are reported as skipped stages (the
   # convention `tools/gate_selftest.sh` checks). `fi_check.sh` answers 3 only for an
   # environmental build failure and 1 for a patch it cannot apply; `fi_instruction.sh`
@@ -1046,7 +1077,7 @@ if [ "$RUN_TOOLS" -eq 1 ]; then
       tail -2 "$work_mut/campaign.log"
       if [ "$mut_rc" -ne 0 ]; then
         echo "FAILED: the mutation campaign reported an uncaught mutant (exit $mut_rc)" >&2
-        grep -E "MISSED" "$work_mut/campaign.log" | head -5 >&2
+        grep -E "MISSED" "$work_mut/campaign.log" | head -5 >&2 || true
         rm -rf "$work_mut"
         exit "$mut_rc"
       fi
@@ -1114,6 +1145,13 @@ if [ "$RUN_TOOLS" -eq 1 ]; then
       # start); before it did, a build failure arrived as exit 101 and was read as a
       # measurement change by the branch below.
       skip "stack residue ($label)" "tools/stack_residue.sh could not run (exit 3; see above)"
+    elif [ "$rc" -eq 4 ]; then
+      # The tool's own positive control did not fire: it did not read the region it
+      # claims to scan, so a PASS would be vacuous. This is not a layout finding and must
+      # not be downgraded to an advisory.
+      echo "FAILED: tools/stack_residue.sh ($label): its positive control did not fire, so" >&2
+      echo "        the measurement is void (exit 4). Fix the probe before trusting a PASS." >&2
+      exit 4
     elif [ "$rc" -ne 0 ]; then
       ADVISORIES+=("stack residue ($label): tools/stack_residue.sh reported a finding (exit $rc)")
       if [ "$STRICT" -eq 1 ]; then
@@ -1123,9 +1161,9 @@ if [ "$RUN_TOOLS" -eq 1 ]; then
         exit "$rc"
       fi
       echo "ADVISORY: tools/stack_residue.sh ($label) reported a change (exit $rc) -- see" >&2
-      echo "          above. This measures compiler-chosen stack layout, so it does not" >&2
-      echo "          fail this run (CI's stack-residue job is continue-on-error); the" >&2
-      echo "          closing summary repeats this." >&2
+      echo "          above. This measures compiler-chosen stack layout, so a narrow run" >&2
+      echo "          does not fail on it; CI's stack-residue job is blocking and does." >&2
+      echo "          The closing summary repeats this." >&2
     fi
   }
   stack_residue_run default

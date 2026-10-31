@@ -53,8 +53,10 @@
 //! `Key::generate_*` constructors (off in this configuration) are entropy plumbing
 //! rather than a property of the input space and are not exercised. Message lengths
 //! are capped by libFuzzer's `-max_len` (4096 by default, 8192 in CI), so a fault
-//! that only appears on messages above that cap needs the flag raised; the
-//! >65535-byte AAD/plaintext split region is likewise above the cap.
+//! that only appears on messages above that cap needs the flag raised. The
+//! >65535-byte AAD/plaintext split region is unreachable at *any* `-max_len`: the
+//! split selector below is 16 bits, so `split <= 65535` regardless of the cap. Raise
+//! the selector to four bytes before claiming that region is covered.
 //!
 //! Structured rather than raw: the first two bytes choose which field to corrupt,
 //! so the fuzzer spends its budget on meaningful cases instead of discarding

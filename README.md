@@ -1056,14 +1056,18 @@ works unprivileged, and the emulator is extracted into `~/.local/bin`.
   key and both lengths reach the hash in the layout the spec fixes for the
   three-part inner shape; that a key change moves *some* output byte (that
   harness is one-sided; the concrete `tag_matches_the_model_with_*` comparisons
-  check all 65); that every AAD and message byte reaches the tag; and that
+  check all 65); that every byte position of its fixed 4-byte AAD and message
+  probes reaches the tag (longer lengths are covered by the runtime sweeps
+  `test_tag_covers_every_aad_and_message_byte` and
+  `test_tag_depends_on_every_aad_byte`, not by Kani); and that
   `derive_enc` consumes all 65 tag bytes (so the ciphertext commits to all 520
   bits), including the byte-order case the perturbation harness cannot see. Two
   boundaries: the **nonce** is symbolic but not read back by the stub, so its
   *value* is not asserted by a symbolic harness; it is pinned instead by the
-  concrete `tag_matches_the_model_with_*` comparisons, which rebuild the head with
-  the nonce in it and compare all 65 tag bytes, so a regression that dropped the
-  nonce from the head fails there (and by
+  concrete `tag_matches_the_model_with_*` comparisons, whose nonce is
+  deliberately non-uniform, so they rebuild the head and compare all 65 tag bytes;
+  a regression that dropped a nonce byte, or used one byte for all 24, fails there
+  (and by
   `test_tag_matches_blake3_over_the_documented_input` on the same input); the
   construction is also compared against `src/witness.rs`, the independent
   `ultra` implementation, by a concrete harness, so a layout or key-choice change
@@ -1071,7 +1075,8 @@ works unprivileged, and the emulator is extracted into `~/.local/bin`.
   contiguous one-part hash shape (2 KiB–64 KiB) is reached by no harness (its
   stub assertions are documentation, and the shape equivalence is pinned by
   `test_both_tag_call_shapes_hash_the_same_bytes`). Plus the ChaCha20 counter sequencing,
-  length-limit harnesses, and a proof of `zeroize_array` itself. `-Z stubbing` is required, and the MAC is stubbed
+  length-limit harnesses, and a proof of `zeroize_array` over the production array types
+  (`[u8; 12]`, `[u8; 32]`, `[u8; 44]`, `[u8; 65]`, `[u32; 16]`). `-Z stubbing` is required, and the MAC is stubbed
   through a single seam so no call site can escape the model. The suite runs with
   CBMC's extra pointer checks, in parallel shards — those checks were
   unaffordable on a hosted runner until the tag harness's input shapes became

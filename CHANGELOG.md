@@ -8,6 +8,53 @@ green push to `main` — which are build artefacts of that job, not construction
 
 ## Unreleased
 
+### AUDIT-REPORT-4 follow-up (full re-scan after `5bec10a`)
+
+No wire-format bytes changed and the AEAD behaviour is identical; the production changes are
+hygiene hardening and doc corrections.
+
+- **Source-shape test gaps closed (the largest part).** The decision-scope guards now reject
+  a method write between the volatile re-reads and the comparison, a shadow binding in
+  `second_gate_comparison`, a rebinding of `agree2` inside `encrypt`, a rebinding of either
+  gate parameter, an early exit in `ct_eq_independent`, and a `decision0` arm that returns
+  instead of rejecting. `tests/locked.rs` requires the `LockedKey` scrubs at brace depth 1,
+  the DODUMP restore to be the *single* statement in its guard, and `LockedKey::drop` to wipe
+  before unlocking. `tests/ultra.rs` binds the witness wipes and scrub counts to their entry
+  points, rejects a constant-false wrapper, and rejects `recomputed_tag` method writes and
+  `use super`/`use ::` escapes. `tests/security.rs`'s cfg scanners now see `# [cfg(…)]`
+  whitespace, trailing commas, empty cfg arguments and `r#test`; enclosing-block and
+  constant-false wrappers are rejected; the wipe and allocation tables are size-pinned and
+  their markers are driven from the table; intact-SIMD-state and primitive wipe counts were
+  added.
+- **Kani proof gaps.** `zeroize_array` is now proved over the production array types
+  (`[u8; 12]`, `[u8; 32]`, `[u8; 44]`, `[u8; 65]`, `[u32; 16]`) and `zeroize_slice` over
+  lengths 0..=79 (multi-chunk and tail); the concrete tag harnesses and the tag KAT use a
+  **non-uniform** 24-byte nonce, so a regression that used one nonce byte for all 24 fails
+  them. Stale comments claiming a `nz != 0`/tag-byte comparison were removed.
+- **Hygiene hardening.** `zeroize_array` is bounded by a private `ZeroizePlain` trait
+  (integer arrays only), so a future call with a padded or niche type fails to compile
+  instead of invoking UB; `chacha20_state_words` writes through a caller slice instead of
+  returning `[u32; 16]` by value; `stack_requirement_bytes()` is computed from `SCRUB_LEN`
+  plus a named ordinary-frame budget rather than a repeated literal.
+- **Docs corrected.** The 32-byte tag boundary (`at least 32 bytes`, and the pure tag route
+  ties the subkey route there), the second-key success probability (existence `≈0.63` vs the
+  one-output game `≈0.368`), the `decrypt` peak-memory formula (`3·M+A+48`, `4·M+A+48` under
+  `ultra`), `decrypt_bounded`'s allocation-bound wording, `&*pt` (a borrow, not a heap
+  allocation), `MAX_MSG_SIZE`'s test reference, missing `# Errors` sections, and the
+  `Page::drop` rationale.
+- **Tools/CI.** `tools/stack_residue.sh` exits 4 when its own positive control does not fire
+  (measurement void) and `verify.sh`/CI treat that as a hard failure rather than an advisory;
+  the C Makefile sets `-fno-sanitize-recover=all` with `UBSAN_OPTIONS=halt_on_error=1` and
+  forces a rebuild so a UBSan diagnostic fails the step; `build.sh debug` no longer passes a
+  non-existent `--debug`; `verify.sh` passes `-max_len=8192` to both fuzz runs and audits the
+  fuzz lock in its deny stage; several `grep | head` pipelines were made SIGPIPE-safe;
+  `build.rs` reads its manifest directory at run time and checks the vendored tree by
+  existence (a comment or a reformatted `path = "blake3"` can no longer satisfy it, and a
+  stale build-script binary from `cargo package` can no longer misfire); `deny.toml`'s
+  duplicate-version note was corrected; the fuzz target's split-selector comment no longer
+  implies the >65535 region is reachable; `criterion`/`proptest` dev-dependencies drop their
+  unused default/short features (the lock loses `rayon`, `plotters`, `bit-set` and friends).
+
 ### AUDIT-REPORT-3 follow-up (`2cf40cc`)
 
 No code or wire-format bytes changed; the production behaviour is identical.

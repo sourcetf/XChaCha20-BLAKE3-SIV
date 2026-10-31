@@ -39,6 +39,7 @@ WORK="$(mktemp -d)"
 # Keep the logs on failure: every FAIL message below points at a file under $WORK,
 # and an unconditional cleanup deleted them in the same exit that printed the path
 # (an audit noted the pointer was dead on arrival). A successful run cleans up.
+rc=0
 trap 'rc=$?; if [ "$rc" -eq 0 ]; then rm -rf "$WORK"; else echo "fault-campaign logs kept in $WORK (exit $rc)" >&2; fi' EXIT
 
 # Every row (and every baseline) gets its OWN target directory, and the reason is a
@@ -105,7 +106,8 @@ baseline_passes() {  # <features> <test target>
   local key="$1|$2" log
   log="$(baseline_log_path "$1" "$2")"
   if [ -z "${BASELINE_PASSES[$key]:-}" ]; then
-    local dir="$WORK/baseline-$(printf '%s' "$key" | tr -c 'a-zA-Z0-9' '_')"
+    local dir
+    dir="$WORK/baseline-$(printf '%s' "$key" | tr -c 'a-zA-Z0-9' '_')"
     copy_tree "$dir"
     local args=(--quiet --release --test "$2")
     if [ -n "$1" ]; then

@@ -392,6 +392,7 @@ gen "$vectors" 00 2 > "$work/in-longer.txt"
 # comparison about branches alone.
 profile() {  # args..., then in-file and out-file are last two
   local extra=("${@:1:$#-2}")
+  # shellcheck disable=SC2124 # each expansion is a single word; the slice is not an array
   local in="${@: -2:1}" out="${@: -1}"
   # Valgrind forwards the client's exit status, so a non-zero return means the profile is
   # of a run that failed -- the counters in it are whatever the client managed before it

@@ -64,16 +64,22 @@ blake3_avx512.o: blake3_avx512.c
 blake3_neon.o: blake3_neon.c
 	$(CC) $(CFLAGS) $(EXTRAFLAGS) -c $^ -o $@
 
-test: CFLAGS += -DBLAKE3_TESTING -fsanitize=address,undefined
-test: all
-	./test.py
+.PHONY: test test_asm clean
+
+test: CFLAGS += -DBLAKE3_TESTING -fsanitize=address,undefined -fno-sanitize-recover=all
+test:
+	# `-B`: a plain `make` may already have built un-sanitized objects, and `make` would
+	# otherwise consider them up to date while the test recipe assumed the sanitizer flags.
+	$(MAKE) -f Makefile.testing -B CC="$(CC)" CFLAGS="$(CFLAGS)" all
+	UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1 ASAN_OPTIONS=halt_on_error=1 python3 test.py
 
 asm: blake3.c blake3_dispatch.c blake3_portable.c main.c $(ASM_TARGETS)
 	$(CC) $(CFLAGS) $(EXTRAFLAGS) $^ -o $(NAME) $(LDFLAGS)
 
-test_asm: CFLAGS += -DBLAKE3_TESTING -fsanitize=address,undefined 
-test_asm: asm
-	./test.py
+test_asm: CFLAGS += -DBLAKE3_TESTING -fsanitize=address,undefined -fno-sanitize-recover=all
+test_asm:
+	$(MAKE) -f Makefile.testing -B CC="$(CC)" CFLAGS="$(CFLAGS)" asm
+	UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1 ASAN_OPTIONS=halt_on_error=1 python3 test.py
 
 example: example.c blake3.c blake3_dispatch.c blake3_portable.c $(ASM_TARGETS)
 	$(CC) $(CFLAGS) $(EXTRAFLAGS) $^ -o $@ $(LDFLAGS)

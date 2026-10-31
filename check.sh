@@ -188,7 +188,7 @@ provision_qemu() {
        set -e
        cd "$tmp"
        apt-get download qemu-user >/dev/null 2>&1
-       deb="$(find . -maxdepth 1 -name 'qemu-user_*.deb' | head -1)"
+       deb="$(find . -maxdepth 1 -name 'qemu-user_*.deb' -print -quit)"
        [ -n "$deb" ]
        dpkg-deb -x "$deb" ./x
        mkdir -p "$(dirname "$dest")"

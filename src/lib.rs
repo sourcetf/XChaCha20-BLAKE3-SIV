@@ -102,7 +102,8 @@
 //!   proven)): an attacker must reproduce a *fixed* value, but
 //!   that value is the 256-bit `subkey = HC(K′, N₁)` under A2′, not the 520-bit tag — an event of
 //!   probability `≈ 2^-256` per candidate key, so a full sweep of the key space expects
-//!   `≈ 1` second key (success `≈ 0.63`), i.e. key-search level.  The width does **not**
+//!   `≈ 1` second key in the key space (existence `≈ 0.63`; a game that requires one
+//!   *output* key different from `K₁` has `≈ 0.368`), i.e. key-search level.  The width does **not**
 //!   set this bound.  Read the "Security level" section
 //!   below before relying on a number: this crate advertised `2^260` for these for a
 //!   while, and that was wrong — the tag is a function of a 256-bit chaining value, so
@@ -136,7 +137,7 @@
 //! | Confidentiality | 256-bit | the ChaCha20 key |
 //! | Forgery resistance | **256-bit** | BLAKE3 keyed mode as a PRF over a 256-bit key |
 //! | Key commitment against a given ciphertext | **`≈ 2^-256` per candidate key under A2′** — `≈ 1` second key over the whole key space (the *target* game) | the 256-bit `subkey` the tag and the keystream are both derived from, **not** the tag's width |
-//! | Context commitment (AAD, nonce fixed) | **`≈ 2^256`** target / **`2^128`** attacker-chosen | the 256-bit inner digest the AAD feeds, not the tag's width; a nonce change is a different game (it re-derives the keys and is hashed into `X`), so it needs a 520-bit tag match, not this `X`-preimage route |
+//! | Context commitment (AAD, nonce fixed) | **`≈ 2^256`** target / **`2^128`** attacker-chosen | the 256-bit inner digest the AAD feeds, not the tag's width; a nonce change is a different game (it re-derives the keys and is hashed into `X`), so a given `(C,T)` is bounded by the `k_out`+`X` route at ≤`2^-320` over the 2^192 nonce space (the direct 520-bit tag match is `2^-328`), not this `X`-preimage route |
 //! | Attacker-chosen commitment (the literature's CMT-1/CMT-3) | **key route `2^128`, AAD-context route `2^128`** — both with identical plaintexts; the different-message salamander is priced at the key-search level (`≈ 2^256`, §4.5) by construction, not by a bound | the `subkey` collision and the inner-digest collision, each a birthday; a nonce-only `subkey` collision alone does not complete because `N₁` is in `X` |
 //! | Collision resistance of the tag | **2^128** | the 256-bit chaining value the tag is a function of, not the tag's width |
 //!
@@ -154,12 +155,13 @@
 //! value is the 256-bit `subkey = HC(K′, N₁)`: it fixes `k_in`, `k_out` and `enc_seed`, and
 //! with them the derived key pair, the recovered message, the inner digest and the tag.  So
 //! the event is `≈ 2^-256` per candidate key, and a full sweep of the `2^256` key space
-//! expects `≈ 1` second key (success `≈ 0.63`) — key-search level, the same tier as the
-//! context route.  An earlier revision of this section said `2^-520` per candidate key
-//! (`≈ 2^-264` over the space) and "the width is what makes the scheme committing"; that
-//! prices only the *pure tag-collision* route, which is dominated above 256 bits.  Below 256
-//! bits it is the *tag* that becomes the binding object: a 32-byte tag would move the
-//! expectation from `≈ 1` to `≈ 2`, and a 16-byte one would be `2^-128` per candidate and
+//! expects `≈ 1` second key (existence `≈ 0.63`; a one-output game `≈ 0.368`) — key-search
+//! level, the same tier as the context route.  An earlier revision of this section said
+//! `2^-520` per candidate key (`≈ 2^-264` over the space) and "the width is what makes the
+//! scheme committing"; that prices only the *pure tag-collision* route, which is dominated
+//! above 256 bits. At 32 bytes the pure tag-collision route ties the `subkey` route (both
+//! are `2^-256` per candidate, so their union expects `≈ 2` second keys), and below 32
+//! bytes it becomes the binding object: a 16-byte tag is `2^-128` per candidate and
 //! therefore the thing to hit.  What the width does *not* buy is collision resistance
 //! (`2^128`, the birthday of the chaining value the tag is a function of), forgery
 //! resistance (`2^256`, bounded by the key), or the target bound, which is `subkey`-bound.
@@ -353,8 +355,9 @@ pub(crate) mod test_counters {
 /// ChaCha20 blocks, so the last block uses counter `u32::MAX` and one block more
 /// would wrap and reuse keystream. The compile-time assertion below enforces that,
 /// `tests/counter_range.rs` pins the call-site arithmetic, and
-/// `test_counter_range_covers_the_maximum_message_and_stops_there` exercises the
-/// accepted maximum and the first rejected length directly.
+/// `test_length_guard_rejects_oversized_inputs` exercises the accepted maximum and the
+/// first rejected length directly (the block-counter relationship is
+/// `test_counter_range_covers_the_maximum_message_and_stops_there`).
 ///
 /// Public so a caller can reject an input *before* reading or allocating it.  The
 /// AEAD cannot bound what it is handed: [`decrypt`] allocates a buffer as large as
@@ -423,7 +426,8 @@ pub const KEY_LEN: usize = 32;
 ///
 /// The rationale used to read: *commitment is a collision property, so an `n`-bit tag caps it
 /// at `2^(n/2)`; 64 bytes gives exactly `2^256`, so 65 bytes gives `2^260`.* The decision was
-/// right — the tag does have to be wider than 32 bytes for the scheme to be *committing* — but
+/// right — the tag has to be at least 32 bytes (256 bits) for the scheme to be
+/// *committing*; 32 bytes sits exactly at the 256-bit level — but
 /// the property it named was the wrong one, and the number was wrong with it. Commitment is a
 /// *target*; collisions are a separate matter where a 256-bit state, not the tag's width, sets
 /// the bound. Keyed BLAKE3's XOF output is
@@ -438,7 +442,8 @@ pub const KEY_LEN: usize = 32;
 ///   that is not the real one opens a given ciphertext by reproducing `subkey = HC(K′, N₁)`
 ///   under A2′,
 ///   at `≈ 2^-256` per candidate, so enumerating the whole `2^256` key space expects `≈ 1`
-///   second key (success `≈ 0.63`): key-search level. An earlier revision of this list said
+///   second key (existence `≈ 0.63`; a one-output game `≈ 0.368`): key-search level. An
+///   earlier revision of this list said
 ///   `2^-520` per candidate and `≈ 2^-264` over the space and attributed that to the width; it
 ///   priced only the *pure tag-collision* route. What the width keeps is that that route is never
 ///   the cheapest one — a 32-byte tag would sit exactly at the 256-bit level, and a 16-byte one
@@ -447,8 +452,9 @@ pub const KEY_LEN: usize = 32;
 /// * **collision resistance is `2^128`, not `2^260`** — the birthday bound of that chaining
 ///   value, since a colliding prefix with a held-fixed tail gives identical tags. That is the
 ///   SHA-256-collision class: still far out of reach of a practical attack, but *below* the
-///   256-bit key strength — the part of the old rationale that was simply false, and the one
-///   place where the scheme is weaker than its key;
+///   256-bit key strength — the part of the old rationale that was simply false, and one
+///   place where a collision bound sits below the key (the attacker-chosen key and context
+///   routes in §4.5 are the other two);
 /// * **a *target* is still the security level away.** The state shortcut is a *birthday* search
 ///   over *pairs* of tags the adversary may both search; a tag that must be hit as given — a
 ///   forgery, or a ciphertext that must also verify under a second key — is unaffected by it,
@@ -548,8 +554,17 @@ pub const DOM_ENC: [u8; 8] = *b"XSIV-ENC";
 /// ```
 #[must_use]
 pub const fn stack_requirement_bytes() -> usize {
-    32 * 1024
+    SCRUB_LEN + STACK_FRAME_BUDGET
 }
+
+// The volatile-scrub frame size. `stack_requirement_bytes()` is computed from this
+// constant rather than repeating the number, so growing the scrub frame cannot leave the
+// public stack contract behind.
+const SCRUB_LEN: usize = 16 * 1024;
+
+// Ordinary entry-point frames plus margin around `SCRUB_LEN`. The measured ordinary
+// frames are ~10 KiB; 16 KiB leaves margin without being a promise about debug builds.
+const STACK_FRAME_BUDGET: usize = 16 * 1024;
 
 // ── Error type ────────────────────────────────────────────────────────
 
@@ -658,9 +673,9 @@ impl core::error::Error for Error {}
 /// `Debug` deliberately prints only the length, never the contents.
 ///
 /// The wipe covers *this* buffer. As with [`Key`]'s `Deref`, a copy made through
-/// the deref — `to_vec()`, `to_owned()`, an explicit `&*pt` — is an ordinary heap
-/// allocation the caller owns and this type cannot reach, so it is not wiped when
-/// this value drops.
+/// the deref — `to_vec()`, `to_owned()` — is a copy the caller owns and this type cannot
+/// reach, so it is not wiped when this value drops; `&*pt` is only a borrow of the same
+/// buffer, not a copy.
 pub struct Plaintext(Vec<u8>);
 
 impl Plaintext {
@@ -2435,11 +2450,12 @@ pub mod locked {
             // leaves no key material in memory the allocator will hand out again.
             //
             // `LockedKey::drop` already wipes — before it unlocks, for a swap-window reason —
-            // but `LockedKey::new`'s failure path drops the page *directly*, with the key and
-            // its integrity tag already written and `mlock` having just refused. That path used
-            // to free the bytes unwiped: a `?` returning through live key material, which is the
-            // same defect class the entry points were fixed for. Doing it here is the one place
-            // that cannot be forgotten when another early return is added to `new`.
+            // but `Page` is also dropped directly by `LockedKey::new`'s early returns (an
+            // impossible `Layout`, a refused `lock_range`, an unreadable page size) and by
+            // every unwind out of `new`. The key is written *after* the fallible `lock_range`,
+            // so today's `lock_range` refusal drops an all-zero page; the wipe earns its place
+            // on the panic/unwind path and as the one place that cannot be forgotten when
+            // another early return is added after the write.
             //
             // Cost: one page of volatile stores, once per key lifetime. It is a *volatile*
             // store rather than a plain one for the same reason the other wipes are: a plain
@@ -2580,14 +2596,13 @@ unsafe fn zeroize_raw(ptr: *mut u8, len: usize) {
 ///   dump, or another process is what `locked` is for, not this.
 #[inline(never)]
 fn scrub_stack() {
-    /// The derivation frames measured ~3.4 KiB deep; this leaves ample margin.
-    ///
-    /// The margin is stack *usage* as well as coverage: this buffer is a 16 KiB frame, so a
-    /// thread whose remaining stack is smaller than that faults here -- measured on a 32 KiB
-    /// thread stack, which survives ~16 KiB of prior consumption in a build without the
-    /// scrub and fails at 8 KiB with it. A caller that runs AEAD on small-stack threads
-    /// must size them for it.
-    const SCRUB_LEN: usize = 16 * 1024;
+    // The derivation frames measured ~3.4 KiB deep; this leaves ample margin.
+    //
+    // The margin is stack *usage* as well as coverage: this buffer is a 16 KiB frame, so a
+    // thread whose remaining stack is smaller than that faults here -- measured on a 32 KiB
+    // thread stack, which survives ~16 KiB of prior consumption in a build without the
+    // scrub and fails at 8 KiB with it. A caller that runs AEAD on small-stack threads
+    // must size them for it.
     let mut buf = [0u8; SCRUB_LEN];
     // The buffer is already zero, so a plain store would be a dead store the
     // optimizer may delete -- and deleting it is exactly what must not happen.
@@ -2597,7 +2612,20 @@ fn scrub_stack() {
     core::hint::black_box(&buf);
 }
 
-/// Volatile-zero the raw memory of any value (array, scalar, ...).
+/// Plain-old-data marker for [`zeroize_array`].
+///
+/// Implemented only for `u8`, `u32` and arrays of them. A padded struct cannot be passed:
+/// `size_of::<T>()` would include padding and the resulting `&mut [u8]` could cover
+/// uninitialized bytes, which is UB even for a write-only slice. A type with an invalid
+/// all-zero bit pattern (an enum, `NonZero*`, a reference) is excluded for the same reason.
+/// The trait is private, so a future call site with such a type fails to compile instead of
+/// silently introducing UB.
+trait ZeroizePlain: Copy {}
+impl ZeroizePlain for u8 {}
+impl ZeroizePlain for u32 {}
+impl<T: ZeroizePlain, const N: usize> ZeroizePlain for [T; N] {}
+
+/// Volatile-zero the raw memory of a plain integer array.
 ///
 /// This replaces the `zeroize` crate.  Stores are issued in `usize`-sized
 /// chunks where alignment permits, because `write_volatile` blocks
@@ -2605,12 +2633,12 @@ fn scrub_stack() {
 /// more than the cipher round itself.  `black_box` stops the optimizer from
 /// eliding the wipe when the value is dead afterwards (e.g. an HChaCha20 state
 /// that has already been consumed).
-fn zeroize_array<T>(value: &mut T) {
+fn zeroize_array<T: ZeroizePlain>(value: &mut T) {
     let bytes = core::mem::size_of::<T>();
     let p = value as *mut T as *mut u8;
-    // SAFETY: `p` points at `bytes` initialised bytes of `T`.  `T` is only ever
-    // an integer or an array of integers here, so every bit pattern is valid
-    // `u8` and the resulting slice is in bounds and uniquely borrowed.
+    // SAFETY: the private `ZeroizePlain` bound admits only integers and arrays of them,
+    // so `p` points at `bytes` initialised bytes, every bit pattern is a valid `u8`, and
+    // the slice is in bounds and uniquely borrowed.
     let slice = unsafe { core::slice::from_raw_parts_mut(p, bytes) };
     crate::zeroize_slice(slice);
     core::hint::black_box(value);
@@ -3006,6 +3034,14 @@ fn alloc_zeroed(len: usize) -> Result<Vec<u8>, Error> {
 ///
 /// SIV construction: the tag is computed first, and the per-message encryption
 /// key and nonce are derived from it.
+///
+/// # Errors
+///
+/// [`Error::MessageTooLong`] / [`Error::AadTooLong`] if an input exceeds
+/// [`MAX_MSG_SIZE`]; [`Error::AllocationFailed`] if the ciphertext buffer cannot be
+/// allocated. Under `ultra`, [`Error::AuthenticationFailed`] if the independent witness
+/// disagrees with the tag computation — a fault-detection path, never a property of the
+/// caller's input.
 #[must_use = "the returned ciphertext and tag must be handled"]
 pub fn encrypt(
     key: &[u8; 32],
@@ -3146,6 +3182,12 @@ pub fn encrypt(
 /// temporary (the inner-hash input, 2 KiB..=64 KiB) when the 48-byte head plus the
 /// AAD and message lands in that window. A refused allocation falls back to the
 /// three-part hash, so it changes performance rather than the result.
+///
+/// # Errors
+///
+/// [`Error::MessageTooLong`] / [`Error::AadTooLong`] if an input exceeds
+/// [`MAX_MSG_SIZE`]. This entry point has no witness cross-check, so it has no
+/// `AuthenticationFailed` path.
 #[must_use = "the returned tag must be handled"]
 pub fn encrypt_in_place_detached(
     key: &[u8; 32],
@@ -3370,8 +3412,9 @@ fn accept_or_reject(
 /// **This allocates a plaintext buffer as large as `ciphertext`** — a second one under
 /// `ultra`, for the independent witness's plaintext. When
 /// `48 + len(aad) + len(ciphertext)` falls in 2 KiB..=64 KiB, `derive_tag` also allocates
-/// a bounded concatenation buffer, so the peak is three times the message (four under
-/// `ultra`) in that window. Bound untrusted input
+/// a bounded concatenation buffer, so the peak is `3·len(M) + len(A) + 48` (the
+/// ciphertext, the plaintext, and that buffer; `4·len(M) + len(A) + 48` under `ultra`,
+/// which adds a second plaintext-sized buffer) in that window. Bound untrusted input
 /// before calling it: [`MAX_MSG_SIZE`] (256 GiB) is the format's ceiling, not a safe
 /// one, and a service that trusts a length field off the wire can be made to
 /// allocate that much per request. [`decrypt_bounded`] takes a policy limit and
@@ -3576,7 +3619,9 @@ pub fn decrypt(
 /// are the same number for the caller's purposes. It does **not** bound the AAD:
 /// an over-long AAD is refused only by the format limit ([`MAX_MSG_SIZE`]), so a
 /// service that reads the AAD off the wire has to cap it separately — `max_len`
-/// bounds the allocation, not the total work.
+/// bounds the ciphertext/plaintext-sized buffers, not the total allocation or work.
+/// `derive_tag` may still allocate up to 64 KiB from `aad + ciphertext`, and hashing
+/// the AAD is not bounded by `max_len`, so cap the AAD separately as well.
 ///
 /// ```
 /// # use xchacha20_blake3_siv::{decrypt_bounded, encrypt, Error};
@@ -3989,21 +4034,25 @@ fn chacha20_block(key: &[u8; 32], counter: u32, nonce: &[u8; 12]) -> [u8; 64] {
     ),
     not(kani)
 ))]
+/// Build the ChaCha20 state words into a caller-owned buffer.
+///
+/// The out-parameter is deliberate: `[u32; 16]` contains the key words, and returning it by
+/// value would create an unnamed return temporary that no `zeroize_array` can name. The
+/// crate's other key-bearing helpers (`chacha20_block_into`, `hchacha20_into`,
+/// `derive_material`, `derive_enc`) use the same shape.
 #[inline]
-fn chacha20_state_words(key: &[u8; 32], counter: u32, nonce: &[u8; 12]) -> [u32; 16] {
-    let mut s = [0u32; 16];
-    s[0] = 0x61707865;
-    s[1] = 0x3320646e;
-    s[2] = 0x79622d32;
-    s[3] = 0x6b206574;
+fn chacha20_state_words(key: &[u8; 32], counter: u32, nonce: &[u8; 12], out: &mut [u32; 16]) {
+    out[0] = 0x61707865;
+    out[1] = 0x3320646e;
+    out[2] = 0x79622d32;
+    out[3] = 0x6b206574;
     for i in 0..8 {
-        s[4 + i] = u32::from_le_bytes(key[i * 4..i * 4 + 4].try_into().unwrap());
+        out[4 + i] = u32::from_le_bytes(key[i * 4..i * 4 + 4].try_into().unwrap());
     }
-    s[12] = counter;
+    out[12] = counter;
     for i in 0..3 {
-        s[13 + i] = u32::from_le_bytes(nonce[i * 4..i * 4 + 4].try_into().unwrap());
+        out[13 + i] = u32::from_le_bytes(nonce[i * 4..i * 4 + 4].try_into().unwrap());
     }
-    s
 }
 
 #[cfg(all(target_arch = "x86_64", not(kani)))]
@@ -4059,7 +4108,8 @@ mod x86_simd {
     #[target_feature(enable = "sse2")]
     pub(super) unsafe fn blocks4(key: &[u8; 32], counter: u32, nonce: &[u8; 12], out: &mut [u8]) {
         assert_eq!(out.len(), 256);
-        let mut s = chacha20_state_words(key, counter, nonce);
+        let mut s = [0u32; 16];
+        chacha20_state_words(key, counter, nonce, &mut s);
 
         let mut x: [__m128i; 16] = [core::mem::zeroed(); 16];
         for i in 0..16 {
@@ -4180,7 +4230,8 @@ mod x86_simd {
     #[target_feature(enable = "avx2")]
     pub(super) unsafe fn blocks8(key: &[u8; 32], counter: u32, nonce: &[u8; 12], out: &mut [u8]) {
         assert_eq!(out.len(), 512);
-        let mut s = chacha20_state_words(key, counter, nonce);
+        let mut s = [0u32; 16];
+        chacha20_state_words(key, counter, nonce, &mut s);
 
         let mut x: [__m256i; 16] = [core::mem::zeroed(); 16];
         for i in 0..16 {
@@ -4417,7 +4468,8 @@ mod aarch64_simd {
     #[target_feature(enable = "neon")]
     pub(super) unsafe fn blocks4(key: &[u8; 32], counter: u32, nonce: &[u8; 12], out: &mut [u8]) {
         assert_eq!(out.len(), 256);
-        let mut s = chacha20_state_words(key, counter, nonce);
+        let mut s = [0u32; 16];
+        chacha20_state_words(key, counter, nonce, &mut s);
 
         let mut x: [uint32x4_t; 16] = [core::mem::zeroed(); 16];
         for i in 0..16 {
@@ -6807,7 +6859,13 @@ mod tests {
     fn test_tag_matches_blake3_over_the_documented_input() {
         let k_in = [0x5Au8; 32];
         let k_out = [0x6Bu8; 32];
-        let nonce = [0x22u8; NONCE_LEN];
+        // Non-uniform on purpose: with a repeated byte, a `derive_tag` that used only
+        // `nonce[0]` for every position would reproduce this KAT exactly. The same array
+        // is used by the concrete Kani tag harnesses in `src/proofs.rs`.
+        let nonce = [
+            0x33u8, 0x34, 0x35, 0x36, 0x37, 0x38, 0x39, 0x3a, 0x3b, 0x3c, 0x3d, 0x3e, 0x3f, 0x40,
+            0x41, 0x42, 0x43, 0x44, 0x45, 0x46, 0x47, 0x48, 0x49, 0x4a,
+        ];
 
         for (aad, msg) in [
             (b"".as_slice(), b"".as_slice()),

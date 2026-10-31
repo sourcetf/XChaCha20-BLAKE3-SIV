@@ -537,6 +537,25 @@ fn dual_mac_is_wired_into_both_decrypt_paths() {
          `let recomputed_tag = ...` after `derive_tag` discards the independent value \
          while every comparison below still reads a variable with the right name"
     );
+    // `recomputed_tag =` does not see a method write. `recomputed_tag.copy_from_slice(
+    // &computed_tag)` (or `fill`, `clone_from_slice`, a raw-pointer store) replaces the
+    // independent recomputation with the stored tag while every count above stays put.
+    for write in [
+        "recomputed_tag.copy_from_slice",
+        "recomputed_tag.clone_from_slice",
+        "recomputed_tag.fill",
+        "&mut recomputed_tag as",
+        "&recomputed_tag as",
+        "recomputed_tag.as_mut_ptr",
+    ] {
+        assert_eq!(
+            body.matches(write).count(),
+            0,
+            "`{write}` can rewrite the independent recomputation after `derive_tag`; the \
+             second gate would then compare the stored tag with itself while every \
+             comparison count above stays true"
+        );
+    }
     // Two, and the count is exact rather than "at least": one comparison of each kind per
     // entry point, on the single `second` line that every configuration compiles. It was
     // four when `ultra` had an arm of its own for this expression, which is the shape the
@@ -635,6 +654,80 @@ fn dual_mac_is_wired_into_both_decrypt_paths() {
         1,
         "the in-place decrypt's witness ciphertext copy must be wiped with the rest"
     );
+    // The counts above are whole-file. A dead helper carrying the same text can keep them
+    // true after a real wipe is deleted, so bind each wipe to its entry point and order it
+    // before the decision.
+    let enc = brace_blocks("pub fn encrypt(");
+    assert_eq!(enc.len(), 1, "one `encrypt` expected");
+    let enc = &enc[0];
+    let dec = brace_blocks("pub fn decrypt(");
+    assert_eq!(dec.len(), 1, "one `decrypt` expected");
+    let dec = &dec[0];
+    let inplace = brace_blocks("pub fn decrypt_in_place_detached(");
+    assert_eq!(inplace.len(), 1, "one `decrypt_in_place_detached` expected");
+    let inplace = &inplace[0];
+    for (name, function, expected_tag, expected_plain, expected_ct) in [
+        ("encrypt", enc, 1usize, 0usize, 0usize),
+        ("decrypt", dec, 1, 1, 0),
+        ("decrypt_in_place_detached", inplace, 1, 1, 1),
+    ] {
+        assert_eq!(
+            function.matches("zeroize_array(&mut witness_tag)").count(),
+            expected_tag,
+            "{name} must wipe `witness_tag` {expected_tag} time(s)"
+        );
+        assert_eq!(
+            function
+                .matches("zeroize_slice(&mut witness_plaintext)")
+                .count(),
+            expected_plain,
+            "{name} must wipe `witness_plaintext` {expected_plain} time(s)"
+        );
+        assert_eq!(
+            function
+                .matches("zeroize_slice(&mut witness_ciphertext)")
+                .count(),
+            expected_ct,
+            "{name} must wipe `witness_ciphertext` {expected_ct} time(s)"
+        );
+        assert!(
+            !function.contains("black_box(false)") && !function.contains("if false"),
+            "{name}'s witness wipes must not be nested in a constant-false block"
+        );
+    }
+    let enc_wipe = enc
+        .find("zeroize_array(&mut witness_tag)")
+        .expect("asserted above");
+    assert!(
+        enc_wipe
+            < enc
+                .find("accept_or_reject(agree, agree2,")
+                .expect("decision call"),
+        "`encrypt` must wipe `witness_tag` before the decision call"
+    );
+    for (name, function) in [("decrypt", dec), ("decrypt_in_place_detached", inplace)] {
+        let gate = function
+            .find("let gate_pair =")
+            .unwrap_or_else(|| panic!("{name} has no `gate_pair`"));
+        for wipe in [
+            "zeroize_array(&mut witness_tag)",
+            "zeroize_slice(&mut witness_plaintext)",
+        ] {
+            let at = function
+                .find(wipe)
+                .unwrap_or_else(|| panic!("{name} has no `{wipe}` (asserted above)"));
+            assert!(at < gate, "{name} must wipe `{wipe}` before the gate");
+        }
+        if name == "decrypt_in_place_detached" {
+            let at = function
+                .find("zeroize_slice(&mut witness_ciphertext)")
+                .expect("asserted above");
+            assert!(
+                at < gate,
+                "{name} must wipe `witness_ciphertext` before the gate"
+            );
+        }
+    }
 }
 
 /// Every `scrub_stack` call site must survive.
@@ -695,11 +788,23 @@ fn scrub_stack_is_called_at_every_entry_point() {
         ("pub fn new(key: &[u8; crate::KEY_LEN])", 1),
         ("fn check_integrity(&self, bytes: &[u8; crate::KEY_LEN])", 1),
     ] {
-        let found = body_of(&body, name).matches("scrub_stack();").count();
+        let function = body_of(&body, name);
+        let found = function.matches("crate::scrub_stack();").count();
         assert_eq!(
             found, expected,
-            "{name} must contain {expected} `scrub_stack();` call sites, found {found}: a \
-             dropped one leaves key material in the region it exists to clear"
+            "{name} must contain {expected} `crate::scrub_stack();` call sites, found \
+             {found}: a dropped one leaves key material in the region it exists to clear"
+        );
+        assert_eq!(
+            function.matches("scrub_stack();").count(),
+            found,
+            "{name} must not contain an unqualified `scrub_stack();`: the absolute path is \
+             what keeps a local import from shadowing the wipe"
+        );
+        assert!(
+            !function.contains("black_box(false)") && !function.contains("if false"),
+            "{name}'s scrub calls must not be nested in a constant-false block: the text \
+             would still count while the region is never overwritten"
         );
         total += found;
     }
@@ -1119,7 +1224,14 @@ fn the_witness_shares_only_the_specification_with_the_crate() {
     // the crate's own hash call, the exact shared code the fault model assumes away -- left
     // this test green while the witness stopped being a second implementation. So the
     // check is over every spelling, after the one permitted import is removed.
-    for escape in ["crate", "super::", "xchacha20_blake3_siv"] {
+    for escape in [
+        "crate",
+        "super::",
+        "use super",
+        "use ::",
+        "xchacha20_blake3_siv",
+        "use xchacha20_blake3_siv",
+    ] {
         assert!(
             !without_imports.contains(escape),
             "the witness uses `{escape}`, which reaches the crate's own code (`crate::`, \

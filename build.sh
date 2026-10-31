@@ -13,8 +13,11 @@ echo "构建模式: ${MODE}"
 echo
 
 case "${MODE}" in
-  release|debug)
-    cargo build --locked --"${MODE}"
+  release)
+    cargo build --locked --release
+    ;;
+  debug)
+    cargo build --locked
     ;;
   *)
     echo "未知模式: ${MODE} (可选: release | debug)" >&2
