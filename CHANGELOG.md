@@ -42,6 +42,11 @@ hygiene hardening and doc corrections.
   `ultra`), `decrypt_bounded`'s allocation-bound wording, `&*pt` (a borrow, not a heap
   allocation), `MAX_MSG_SIZE`'s test reference, missing `# Errors` sections, and the
   `Page::drop` rationale.
+- **Coverage floor kept green.** Deep checks enforce a 95% line floor over
+  `src/lib.rs`/`src/witness.rs`. The audit's added production lines plus the public-API
+  display/borrow spellings left it at 94.84% (below the floor), so
+  `public_api_display_and_borrows` now exercises `Error`'s four `Display` messages and
+  `Plaintext`/`Key`'s `AsRef`/`PartialEq` spellings, restoring 95.35%.
 - **Tools/CI.** `tools/stack_residue.sh` exits 4 when its own positive control does not fire
   (measurement void) and `verify.sh`/CI treat that as a hard failure rather than an advisory;
   the C Makefile sets `-fno-sanitize-recover=all` with `UBSAN_OPTIONS=halt_on_error=1` and

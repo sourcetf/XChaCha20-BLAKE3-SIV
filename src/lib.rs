@@ -7508,4 +7508,56 @@ mod tests {
             );
         }
     }
+
+    /// The public API's display and borrow spellings, which no behavioural test reaches
+    /// for the two failure-only `Error` variants (there is no input that triggers
+    /// `MessageTooLong`/`AadTooLong` in a test) and which no test used for several
+    /// `Plaintext`/`Key` impls. The coverage floor reads `src/lib.rs` line coverage, and
+    /// these are real spellings a caller can use, so they are exercised rather than
+    /// exempted.
+    #[test]
+    fn public_api_display_and_borrows() {
+        use alloc::string::ToString;
+        assert_eq!(
+            Error::MessageTooLong.to_string(),
+            "message exceeds the maximum supported length"
+        );
+        assert_eq!(
+            Error::AadTooLong.to_string(),
+            "associated data exceeds the maximum supported length"
+        );
+        assert_eq!(
+            Error::AllocationFailed.to_string(),
+            "a required buffer could not be allocated"
+        );
+        assert_eq!(
+            Error::AuthenticationFailed.to_string(),
+            "authentication failed"
+        );
+
+        let pt = Plaintext(b"hello".to_vec());
+        assert!(!pt.is_empty());
+        assert_eq!(pt.len(), 5);
+        assert_eq!(pt.as_slice(), b"hello");
+        let borrowed: &[u8] = pt.as_ref();
+        assert_eq!(borrowed, b"hello");
+        assert!(pt == *b"hello");
+        assert!(pt == b"hello");
+        assert!(pt == b"hello".as_slice());
+        assert!(pt == b"hello".to_vec());
+        let other = Plaintext(b"hello".to_vec());
+        assert!(pt == other);
+        // The by-reference spelling uses `PartialEq<&Plaintext>`, which is one of the
+        // impls this test exists to exercise; clippy's `op_ref` prefers the value form.
+        #[allow(clippy::op_ref)]
+        {
+            assert!(pt == &other);
+        }
+        assert!(Plaintext(Vec::new()).is_empty());
+
+        let key = Key::from_bytes([0x11; KEY_LEN]);
+        let key_ref: &[u8; KEY_LEN] = key.as_ref();
+        assert_eq!(*key_ref, [0x11; KEY_LEN]);
+        assert_eq!(&*key, &[0x11; KEY_LEN]);
+    }
 }
