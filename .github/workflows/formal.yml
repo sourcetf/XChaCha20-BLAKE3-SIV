@@ -38,7 +38,12 @@ concurrency:
   # weekly proof run — and it reported as "cancelled", so the missing verification
   # looked like an infrastructure hiccup. Isolating the schedule keeps the proofs
   # (and keeps superseding a previous push or PR run for the same event).
-  group: formal-${{ github.ref }}-${{ github.event_name }}
+  #
+  # Push events also carry the commit SHA, for the same gate reason as `deep.yml`:
+  # `ci.yml`'s release job requires Formal to have completed successfully at the
+  # pushed SHA, and a later push cancelling an earlier push's Formal run would red
+  # that commit's release for no code reason.
+  group: formal-${{ github.ref }}-${{ github.event_name }}-${{ github.event_name == 'push' && github.sha || '' }}
   cancel-in-progress: true
 
 permissions:

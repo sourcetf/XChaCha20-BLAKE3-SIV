@@ -46,7 +46,10 @@ if ! cargo +nightly --version >/dev/null 2>&1; then
   echo "  rustup toolchain install nightly" >&2
   exit 1
 fi
-if ! rustup component list --installed --toolchain nightly 2>/dev/null | grep -q '^rust-src'; then
+# `grep -q` exits at the first match, which used to close the pipe under `pipefail` and
+# make `rustup` die with SIGPIPE (141) -- the same trap verify.sh's tool preflight
+# documents. A here-string lets rustup finish writing.
+if ! grep -q '^rust-src' <<< "$(rustup component list --installed --toolchain nightly 2>/dev/null)"; then
   echo "FAIL: the nightly toolchain's rust-src component is required for -Zbuild-std; run:" >&2
   echo "  rustup component add rust-src --toolchain nightly" >&2
   exit 1

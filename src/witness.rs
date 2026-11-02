@@ -71,8 +71,9 @@ use crate::{DOM_ENC, DOM_PRE, DOM_TAG, NONCE_LEN, SUBKEY_DOMAIN, TAG_LEN};
 
 /// Volatile-zero a slice.
 ///
-/// The witness wipes every key-derived buffer it names, and `ultra` does not count cost, so
-/// this is applied liberally. That includes the primitive-internal state: `block`'s and
+/// The witness wipes every key-derived buffer *it names*, and `ultra` does not count cost,
+/// so this is applied liberally. The by-value temporaries it cannot name -- argument slots
+/// and the like -- are enumerated with what is done about each in the block below. That includes the primitive-internal state: `block`'s and
 /// `hchacha20`'s `s`/`v` (the key words and the permutation state), `compress`'s
 /// `state`/`m`, the compression outputs in `Output::chaining_value`/`root_output_bytes`, and
 /// the streaming locals in `ChunkState::update`/`Hasher::update`/`add_chunk_cv`/
@@ -110,7 +111,7 @@ use crate::{DOM_ENC, DOM_PRE, DOM_TAG, NONCE_LEN, SUBKEY_DOMAIN, TAG_LEN};
 /// place and there is nothing to free at all — which also means a keyed call performs **no
 /// heap allocation** and cannot abort on an allocation refusal (see `CvStack`'s doc).
 #[inline(never)]
-#[cfg(not(kani))]
+#[cfg(any(not(kani), feature = "ultra"))]
 fn wipe<T>(value: &mut T) {
     let bytes = core::mem::size_of::<T>();
     let p = value as *mut T as *mut u8;
@@ -126,13 +127,19 @@ fn wipe<T>(value: &mut T) {
 /// the 64-byte volatile loops otherwise dominate its CBMC cost. `zeroize_array`'s own
 /// harness covers the crate's wipe primitive; the witness's internal copies are not part
 /// of the property under test here.
-#[cfg(kani)]
+///
+/// `not(feature = "ultra")` is load-bearing: `mod witness` compiles under
+/// `cfg(any(feature = "ultra", kani))` (the Kani permit is what lets the concrete harness
+/// call it), so a `--cfg kani` build that *also* has `ultra` on -- which is how the
+/// `ultra` configuration would be verified if anyone ran Kani over it -- would otherwise
+/// compile these no-ops and silently drop every wipe in this file.
+#[cfg(all(kani, not(feature = "ultra")))]
 #[inline(never)]
 fn wipe<T>(_value: &mut T) {}
 
 /// Volatile-zero a `u32` array.
 #[inline(never)]
-#[cfg(not(kani))]
+#[cfg(any(not(kani), feature = "ultra"))]
 fn wipe_words(words: &mut [u32]) {
     for w in words.iter_mut() {
         // SAFETY: `w` is a live `u32`; a volatile store needs no more than that.
@@ -141,8 +148,9 @@ fn wipe_words(words: &mut [u32]) {
     core::sync::atomic::compiler_fence(core::sync::atomic::Ordering::SeqCst);
 }
 
-/// Kani-only no-op; see the matching `wipe` above.
-#[cfg(kani)]
+/// Kani-only no-op; see the matching `wipe` above (including why `not(feature = "ultra")`
+/// is part of the gate).
+#[cfg(all(kani, not(feature = "ultra")))]
 #[inline(never)]
 fn wipe_words(_words: &mut [u32]) {}
 
@@ -607,6 +615,10 @@ impl CvStack {
     }
 }
 
+// `pub`, not `pub(crate)`: the module itself is private (`mod witness;`), so this is
+// already unreachable outside the crate -- and `pub(crate)` would name the crate in this
+// file, which `tests/ultra.rs`'s `the_witness_shares_only_the_specification_with_the_crate`
+// rejects (the witness may share the specification's constants and nothing else).
 pub struct Hasher {
     key_words: [u32; 8],
     chunk: ChunkState,
@@ -643,6 +655,17 @@ impl Hasher {
     }
 
     fn add_chunk_cv(&mut self, mut new_cv: [u32; 8], total_chunks: u64) {
+        // `total_chunks` is the number of chunks completed *including* this one, so it is
+        // never 0: `update` calls this with `chunk_counter + 1` for a counter that starts at
+        // 0. The one way to reach 0 is the counter wrapping at `u64::MAX`, where the tree
+        // position is meaningless in every BLAKE3 implementation (the input would be 2^64
+        // bytes). Without this the merge loop below, for which `0 & 1 == 0` is true, pops an
+        // empty stack and panics on `len - 1` -- a confusing index error for an impossible
+        // input, in place of a statement of the precondition.
+        debug_assert!(
+            total_chunks != 0,
+            "chunk count 0 means the chunk counter wrapped; the tree position is undefined"
+        );
         let mut chunks = total_chunks;
         while chunks & 1 == 0 {
             // The popped CV is key-derived; wipe the slot it leaves behind as well as the copy
@@ -683,7 +706,12 @@ impl Hasher {
         while !input.is_empty() {
             if self.chunk.len() == BLAKE3_CHUNK {
                 let mut cv = self.chunk.output().chaining_value();
-                let total = self.chunk.chunk_counter + 1;
+                // `wrapping_add`, not `+`: the fork made the same change (V-03) because a
+                // debug build panics at `u64::MAX` while the assembly kernels wrap silently.
+                // Unreachable through the public API (`MAX_MSG_SIZE` is 2^38 bytes, so the
+                // counter cannot approach 2^64), but the two implementations must not
+                // disagree on a boundary the other one defines.
+                let total = self.chunk.chunk_counter.wrapping_add(1);
                 self.add_chunk_cv(cv, total);
                 // The stack owns a copy now; wipe this frame's.
                 wipe_words(&mut cv);
@@ -1055,6 +1083,41 @@ mod tests {
             let w_tag = decrypt(&key, &nonce, &aad, &ct, &tag, &mut w_pt);
             assert_eq!(w_pt, pt, "distinct-byte witness plaintext at length {len}");
             assert_eq!(w_tag, tag, "distinct-byte witness tag at length {len}");
+        }
+    }
+    /// The chunk counter is the one boundary the public API cannot reach (`MAX_MSG_SIZE` is
+    /// 2^38 bytes, so `chunk_counter` stays below 2^28) and the one the two implementations
+    /// could disagree about without a public input noticing: this witness advances the
+    /// counter with `wrapping_add`, as the fork does after V-03, so a debug build does not
+    /// panic at `u64::MAX` while the fork's own arithmetic wraps.
+    ///
+    /// The comparison is against the fork's `guts::ChunkState`, the only constructor in
+    /// either implementation that can name an arbitrary chunk counter. It supports regular
+    /// hash mode only, so both sides run unkeyed (BLAKE3's IV, no flags); the counter
+    /// arithmetic under test is the same in both modes.
+    #[test]
+    #[allow(deprecated)]
+    fn the_chunk_counter_agrees_with_the_fork_at_u64_max() {
+        let data = [0x33u8; 1024];
+        for counter in [0u64, 1, (1 << 32) - 1, 1 << 32, u64::MAX] {
+            let mut mine = ChunkState::new(&BLAKE3_IV, counter, 0);
+            mine.update(&data);
+            let mine_cv = mine.output().chaining_value();
+
+            let theirs = {
+                let mut state = blake3::guts::ChunkState::new(counter);
+                state.update(&data);
+                let hash = state.finalize(false);
+                let mut words = [0u32; 8];
+                for (w, b) in words.iter_mut().zip(hash.as_bytes().chunks_exact(4)) {
+                    *w = u32::from_le_bytes([b[0], b[1], b[2], b[3]]);
+                }
+                words
+            };
+            assert_eq!(
+                mine_cv, theirs,
+                "the chunk CV disagrees with the fork at chunk counter {counter}"
+            );
         }
     }
 }

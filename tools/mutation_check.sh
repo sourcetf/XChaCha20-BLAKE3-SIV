@@ -16,7 +16,7 @@
 # working. Both need a human.
 #
 # Usage:  tools/mutation_check.sh            # all mutations
-#         tools/mutation_check.sh ctgrind    # one of them
+#         tools/mutation_check.sh ctgrind    # one of them (ctgrind|kat|wipes)
 #
 # Exit codes: 0 all mutations were caught; 1 one was not (or could not be applied);
 #             3 a mutation could not be *run* (no valgrind), which is not the same as
@@ -62,6 +62,51 @@ old = 'pub const SUBKEY_DOMAIN: [u8; 4] = *b"XSIV";'
 assert old in s, "SUBKEY_DOMAIN declaration moved"
 open(p, "w").write(s.replace(old, 'pub const SUBKEY_DOMAIN: [u8; 4] = *b"XSIX";'))
 PY
+}
+
+# 3. A wipe moved into a closure that is never called. The text counts are unchanged and
+#    the wipe never runs -- exactly the shape the source-shape guards exist for.
+#    `--test security` must catch it: `every_documented_wipe_has_a_witness` and
+#    `primitive_wipe_sites_have_a_witness` reject an enclosing block that cannot execute.
+#    This row exists because those guards once matched only `black_box(false)` / `if false`
+#    literally, so five equivalent forms (`if 1u8 == 2u8`, `match 0u8`, `for _ in 0..0u8`,
+#    a bare closure, a black_box-ed closure) all kept the whole suite green. The bare
+#    closure is the form injected here.
+mutate_dead_wipe() {
+  local dir="$1"
+  python3 - "$dir" <<'PY'
+import sys
+p = sys.argv[1] + "/src/lib.rs"
+s = open(p).read()
+old = (
+    "    crate::zeroize_array(&mut subkey);\n"
+    "    crate::zeroize_array(&mut subkey_nonce);\n"
+    "    crate::zeroize_array(&mut block0);\n"
+    "    crate::zeroize_array(&mut block1);\n"
+)
+new = (
+    "    let _dead = || {\n"
+    "        crate::zeroize_array(&mut subkey);\n"
+    "        crate::zeroize_array(&mut subkey_nonce);\n"
+    "        crate::zeroize_array(&mut block0);\n"
+    "        crate::zeroize_array(&mut block1);\n"
+    "    };\n"
+)
+assert s.count(old) == 1, f"derive_material's wipe block moved (found {s.count(old)})"
+open(p, "w").write(s.replace(old, new))
+PY
+}
+
+# Returns 1 when the suite fails (so the mutation was caught), 0 when it passes, 2 when the
+# tree does not build. Same contract as `run_kat`, for the integration test target.
+run_security() {
+  local dir="$1"
+  ( cd "$dir" && CARGO_TARGET_DIR="$dir/target-sec" \
+      cargo test --release --test security --no-run >/dev/null 2>&1 ) || return 2
+  local status=0
+  ( cd "$dir" && CARGO_TARGET_DIR="$dir/target-sec" cargo test --release --test security >/dev/null 2>&1 ) || status=$?
+  if [ "$status" -eq 0 ]; then return 0; fi
+  return 1
 }
 
 run_shipped_ctgrind() {
@@ -219,9 +264,9 @@ check_one() {
 
 want="${1:-all}"
 case "$want" in
-  all|ctgrind|kat) ;;
+  all|ctgrind|kat|wipes) ;;
   *)
-    echo "FAIL: unknown mutation '$want' (want all, ctgrind or kat)" >&2
+    echo "FAIL: unknown mutation '$want' (want all, ctgrind, kat or wipes)" >&2
     # Without this the two `if`s below match nothing, nothing runs, and the tool
     # reports "all mutations were caught" -- a green verdict for no work at all.
     exit 1 ;;
@@ -257,6 +302,12 @@ fi
 if [ "$want" = "all" ] || [ "$want" = "kat" ]; then
   status=0
   check_one kat mutate_kat run_kat "SUBKEY_DOMAIN XSIV -> XSIX" || status=$?
+  if [ "$status" -eq 3 ]; then skipped=$((skipped + 1)); elif [ "$status" -ne 0 ]; then rc=1; fi
+fi
+if [ "$want" = "all" ] || [ "$want" = "wipes" ]; then
+  status=0
+  check_one dead_wipe mutate_dead_wipe run_security \
+    "derive_material's four wipes moved into a closure nothing calls" || status=$?
   if [ "$status" -eq 3 ]; then skipped=$((skipped + 1)); elif [ "$status" -ne 0 ]; then rc=1; fi
 fi
 # The failure comes first. This used to exit 3 whenever anything was skipped, which

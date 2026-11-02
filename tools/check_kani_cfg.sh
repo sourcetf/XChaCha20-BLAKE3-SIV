@@ -139,6 +139,25 @@ if [ "$harness_count" -ne "$COMMITTED_HARNESSES" ]; then
   exit 1
 fi
 echo "harness count: $harness_count (== the $COMMITTED_HARNESSES committed)"
+
+# Every gate in this file, `tools/kani_shards.py` and the Formal matrix count harnesses in
+# `src/proofs.rs` only, so a `#[kani::proof]` written in another source file is invisible to
+# all of them: the count stays 19, `--plan` does not name it, and Kani -- which does compile
+# it, being `#[cfg(kani)]` -- may not run it in the shard that was planned. Measured on a
+# scratch copy: `#[cfg(kani)] #[kani::proof] fn stray() {}` appended to `src/lib.rs` left
+# every one of those gates green. Harnesses live in `src/proofs.rs` by convention; this keeps
+# that true instead of assuming it.
+stray="$(cd "$ROOT" && find src -name '*.rs' ! -name proofs.rs \
+           -exec grep -Hn '#\[kani::proof\]' {} + 2>/dev/null || true)"
+if [ -n "$stray" ]; then
+  echo "FAIL: a Kani harness appears outside src/proofs.rs:" >&2
+  printf '%s\n' "$stray" | sed 's/^/      /' >&2
+  echo "      The count, the shard plan and this gate all read src/proofs.rs, so a harness" >&2
+  echo "      elsewhere is neither counted nor planned and may never be verified. Move it" >&2
+  echo "      into src/proofs.rs (or extend every one of those readers deliberately)." >&2
+  exit 1
+fi
+echo "no stray #[kani::proof] outside src/proofs.rs"
 # The count is only as trustworthy as the parser that produces it, so the parser's
 # rejection rules get a control of their own. Each shape below once inflated the count
 # while leaving the harness uncompiled: a cfg above or below the marker (including one

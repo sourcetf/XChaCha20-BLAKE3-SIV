@@ -217,8 +217,11 @@ const DIVISION_METHODS: &[&str] = &[
 /// result before restoring `MADV_DODUMP`: a syscall-result branch, not secret content.
 /// `if` 49 -> 50 when `locked_bytes` switched to fallible `Vec::try_reserve`, a branch
 /// on allocation success, not secret content.
+/// `if` 50 -> 51 when `chacha20_apply` began checking that a `Separate` input is the same
+/// length as its output buffer -- the precondition `xor_or_copy` slices on. That branch
+/// tests an enum variant and a length, not secret content.
 const CONTROL_FLOW: &[(&str, usize)] = &[
-    ("if", 50),
+    ("if", 51),
     ("while", 14),
     ("for", 25),
     ("loop", 2),

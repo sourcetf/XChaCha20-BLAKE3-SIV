@@ -83,9 +83,16 @@ def aad_for(n):
 
 
 def load_ref():
-    spec = importlib.util.spec_from_file_location("ref", os.path.join(HERE, "ref_impl.py"))
-    ref = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(ref)
+    try:
+        spec = importlib.util.spec_from_file_location("ref", os.path.join(HERE, "ref_impl.py"))
+        ref = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(ref)
+    except ModuleNotFoundError as e:
+        # `ref_impl.py` imports `blake3`; without it this script cannot run at all, which is
+        # "could not run" (3) -- the convention the other tools follow. It used to raise the
+        # ModuleNotFoundError as a traceback, which reads as a bug in this script.
+        print(f"could not run: {e} (pip install blake3)", file=sys.stderr)
+        sys.exit(3)
     # This is what makes the docstring's claim true. It checks the reference against
     # the published vectors (RFC 8439, draft-irtf-cfrg-xchacha-03, BLAKE3's official
     # file) before a single vector is emitted, and it raises on the first mismatch.

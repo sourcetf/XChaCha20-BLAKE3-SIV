@@ -799,15 +799,17 @@ impl Eq for Plaintext {}
 
 impl Drop for Plaintext {
     fn drop(&mut self) {
-        // Wipe the whole allocation, not just `len` bytes.  `decrypt` builds this
-        // `Vec` with `alloc_zeroed`, which reserves exactly `n` and cannot
-        // reallocate, so the initialized part *is* the allocation today; the
-        // `capacity` tail is handled anyway so a future constructor that grows the
-        // buffer cannot silently leave plaintext behind in it.  (This comment said
-        // `vec![0u8; n]`, which is the *infallible* allocation `alloc_zeroed`
-        // replaced -- the difference is the `Error::AllocationFailed` return rather
-        // than an abort, so a reader trusting the old text would have had the
-        // memory-exhaustion behaviour backwards.)
+        // Wipe the whole allocation, not just `len` bytes. `decrypt` builds this
+        // `Vec` with `alloc_zeroed` (`try_reserve_exact(n)` then `resize(n, 0)`), so
+        // no reallocation can move the buffer, and today's allocator returns a
+        // capacity of exactly `n` -- the initialized part *is* the allocation. The
+        // `capacity` tail is wiped anyway: `try_reserve_exact` is documented to give
+        // *at least* the requested capacity, not exactly it, so a future allocator
+        // (or a constructor that grows the buffer) could leave plaintext in it. (This
+        // comment used to say `vec![0u8; n]`, which is the *infallible* allocation
+        // `alloc_zeroed` replaced -- the difference is the `Error::AllocationFailed`
+        // return rather than an abort, so a reader trusting the old text would have had
+        // the memory-exhaustion behaviour backwards.)
         crate::zeroize_slice(self.0.as_mut_slice());
         let (len, cap) = (self.0.len(), self.0.capacity());
         if cap > len {
@@ -1368,6 +1370,20 @@ pub mod locked {
         /// If the unlock is refused, the range stays non-dumpable; a leaked exclusion is
         /// recoverable, a locked-and-dumpable page is not.
         ///
+        /// One consequence is worth stating: the `MADV_DODUMP` rollback covers the whole
+        /// page-aligned range, so it also clears a `VM_DONTDUMP` that a *different* owner of
+        /// the same mapping had set. `unlock_range`'s doc says the same of its own restore;
+        /// neither function tracks whether it was the one that set the flag, which would need
+        /// a per-page ownership record. The exposure is to core dumps, and only in the
+        /// failure path of a range the caller asked this module to lock.
+        ///
+        /// One consequence is worth stating: the `MADV_DODUMP` rollback covers the whole
+        /// page-aligned range, so it also clears a `VM_DONTDUMP` that a *different* owner of
+        /// the same mapping had set. `unlock_range`'s doc says the same of its own restore;
+        /// neither function tracks whether it was the one that set the flag, which would need
+        /// a per-page ownership record. The exposure is to core dumps, and only in the
+        /// failure path of a range the caller asked this module to lock.
+        ///
         /// A refused `mlock` is **not** rolled back, because this function cannot tell
         /// whether the kernel locked a prefix of the range before failing — and undoing a
         /// lock on a guess is the one direction this module does not take: a page that was
@@ -1433,7 +1449,7 @@ pub mod locked {
                 if !ok(d) {
                     // `madvise` applies as it walks: it can stop at a hole (`ENOMEM`) or a
                     // special VMA (`EINVAL`) *after* flagging the VMAs before it, and
-                    // `VM_DONTDUMP` is sticky. Restore the lock first and only then undo
+                    // `VM_DONTDUMP` is sticky. Release the lock first and only then undo
                     // the advice, the same order as `unlock_range_with`: if `munlock` is
                     // refused, the range stays non-dumpable instead of becoming a
                     // locked-and-dumpable range with a live secret. The `munlock`
@@ -1639,8 +1655,12 @@ pub mod locked {
         /// so calling it with `open`'s two-argument shape passed the *path* as the
         /// directory file descriptor and the open failed. The cross-target test is what
         /// caught that; a single-architecture check could not.
-        fn open_ro(path: &[u8]) -> isize {
-            // SAFETY: `path` is a NUL-terminated byte string in static memory.
+        // `&'static [u8]` rather than `&[u8]`: the safety comment below relies on the string
+        // being in static memory (nothing can free or mutate it while the syscall reads it),
+        // and the type is what enforces that rather than the comment.
+        fn open_ro(path: &'static [u8]) -> isize {
+            // SAFETY: `path` is a NUL-terminated byte string in static memory, which the
+            // parameter type guarantees; both callers pass a `b"...\0"` literal.
             unsafe {
                 syscall3(
                     NR_OPENAT,
@@ -2218,9 +2238,10 @@ pub mod locked {
             // classification, and the copy in the page is covered by the page's own wipe on
             // drop. This local is the copy that is *not*: wipe it before returning.
             crate::zeroize_array(&mut tag);
-            // `integrity_tag` runs a keyed-BLAKE3 finalize; its by-value temporaries are
-            // the same dependency residue every AEAD entry point scrubs. This constructor
-            // is a public entry point too.
+            // `integrity_tag` runs a *unkeyed* BLAKE3 finalize (unkeyed on purpose -- its
+            // own doc says why); the by-value temporaries in that dependency are still the
+            // same kind of residue every AEAD entry point scrubs, and this constructor is a
+            // public entry point too.
             crate::scrub_stack();
             Ok(LockedKey(page))
         }
@@ -2450,9 +2471,10 @@ pub mod locked {
             // leaves no key material in memory the allocator will hand out again.
             //
             // `LockedKey::drop` already wipes — before it unlocks, for a swap-window reason —
-            // but `Page` is also dropped directly by `LockedKey::new`'s early returns (an
-            // impossible `Layout`, a refused `lock_range`, an unreadable page size) and by
-            // every unwind out of `new`. The key is written *after* the fallible `lock_range`,
+            // but `Page` is also dropped directly by `LockedKey::new`'s early return once a
+            // `Page` exists (the refused `lock_range`; the `Layout` and page-size refusals are
+            // raised inside `Page::new`, before any `Page` or allocation exists) and by every
+            // unwind out of `new`. The key is written *after* the fallible `lock_range`,
             // so today's `lock_range` refusal drops an all-zero page; the wipe earns its place
             // on the panic/unwind path and as the one place that cannot be forgotten when
             // another early return is added after the write.
@@ -2627,7 +2649,8 @@ impl<T: ZeroizePlain, const N: usize> ZeroizePlain for [T; N] {}
 
 /// Volatile-zero the raw memory of a plain integer array.
 ///
-/// This replaces the `zeroize` crate.  Stores are issued in `usize`-sized
+/// This replaces the `zeroize` crate **for the buffers this crate owns** (the dependency's
+/// own state is still wiped through its `Zeroize` impl).  Stores are issued in `usize`-sized
 /// chunks where alignment permits, because `write_volatile` blocks
 /// vectorisation and a byte-at-a-time loop over a 512-byte SIMD state costs
 /// more than the cipher round itself.  `black_box` stops the optimizer from
@@ -4593,6 +4616,18 @@ fn chacha20_apply(
     input: &Input<'_>,
     output: &mut [u8],
 ) {
+    // `xor_or_copy` slices the plaintext at `off..off + ks.len()` for the `Separate` input,
+    // so an input shorter than the output would panic there (a bounds check, not UB, but a
+    // confusing one). Every caller goes through `chacha20_keystream`, which checks this --
+    // yet that is a property of today's callers rather than of this function, so it is
+    // stated here and a future direct caller fails at the boundary it crossed.
+    if let Input::Separate(inp) = input {
+        assert_eq!(
+            inp.len(),
+            output.len(),
+            "the separate plaintext input must be the same length as the output buffer"
+        );
+    }
     let n = output.len();
     let mut ctr = counter;
     let mut off = 0usize;
@@ -4774,6 +4809,13 @@ mod tests {
 
     /// Helper: hex decode (handles 0-9, a-f, A-F)
     fn hex(s: &str) -> Vec<u8> {
+        assert!(
+            s.len() % 2 == 0,
+            "hex literal has an odd number of digits ({}), so the last byte has no low nibble; \
+             without this the pair read below panics with a slice index instead of naming the \
+             literal",
+            s.len()
+        );
         let s = s.as_bytes();
         let mut out = Vec::with_capacity(s.len() / 2);
         for i in (0..s.len()).step_by(2) {

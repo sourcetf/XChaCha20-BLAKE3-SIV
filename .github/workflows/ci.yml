@@ -42,17 +42,16 @@ on:
   pull_request:
   workflow_dispatch:
 
-# One run per ref: a new push supersedes an in-flight run rather than queueing
-# behind it -- but **only for pull requests**. On `main` a run carries the
-# `release` job, which tags the commit and uploads the manifest and the three
-# bundles; `gh release create`/`upload` is not atomic, so superseding a
-# main run mid-publish can leave a partially-populated release -- the exact
-# outcome the publish step works to prevent. So pushes to `main` are not
-# cancelled; they queue, and each publishes its own `sha-<commit>` tag, which is
-# safe. (Found while auditing the release job: the unconditional
-# `cancel-in-progress: true` reached the release too.)
+# One run per ref for pull requests: a new push supersedes a pending PR run. On
+# `main` the group additionally carries the commit SHA, because GitHub keeps only the
+# newest *pending* run in a group — with a per-ref group, a burst of main pushes would
+# cancel the middle commits' pending runs, and those commits' `release` jobs would never
+# execute even though the header promises each main push publishes its own
+# `sha-<commit>` tag. A per-SHA group gives every main commit its own run. (Running
+# main runs are never cancelled either way: `cancel-in-progress` is false for pushes,
+# so `gh release create`/`upload` cannot be interrupted mid-publish.)
 concurrency:
-  group: ci-${{ github.ref }}
+  group: ci-${{ github.ref }}-${{ github.event_name == 'push' && github.sha || '' }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
@@ -469,7 +468,7 @@ jobs:
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
           shared-key: windows
-      - name: cargo test (all features, release)
+      - name: cargo test (ultra, release; the Windows asm backend is compiled here)
         run: cargo test --locked --release --features ultra -- --skip timing
       - name: cargo check (no default features)
         run: cargo check --locked --no-default-features --all-targets
@@ -671,6 +670,39 @@ jobs:
         with:
           toolchain: 1.85.0
 
+      # The pin above and `Cargo.toml`'s `rust-version` are two statements of the same
+      # number, and nothing else compares them. If `rust-version` is lowered (say to
+      # 1.82) and this step is forgotten, the job still builds on 1.85.0 and passes --
+      # so the *declared* MSRV would be exported to downstreams without ever having
+      # been built, which is the exact failure this job exists to prevent. (The reverse
+      # drift is caught by the build itself: raising the pin without raising
+      # `rust-version` fails on a newer-API use.) Compare the strings rather than the
+      # versions: `1.85` and `1.85.0` are the same MSRV and both are accepted.
+      - name: the pinned toolchain matches Cargo.toml's rust-version
+        run: |
+          set -euo pipefail
+          declared="$(sed -n 's/^rust-version *= *"\([0-9.]\+\)".*$/\1/p' Cargo.toml)"
+          case "$declared" in
+            [0-9]*) ;;
+            *) echo "::error::no rust-version line in Cargo.toml"; exit 1 ;;
+          esac
+          pinned="$(rustc --version | cut -d' ' -f2)"
+          echo "Cargo.toml rust-version: $declared; job toolchain: $pinned"
+          # Normalise to three components so `1.85` and `1.85.0` compare equal; a real
+          # difference is an error. Compared as strings after normalisation, so `1.10`
+          # is not mistaken for older than `1.9`.
+          norm() {
+            case "$1" in
+              *.*.*) printf '%s\n' "$1" ;;
+              *.*) printf '%s.0\n' "$1" ;;
+              *) printf '%s.0.0\n' "$1" ;;
+            esac
+          }
+          if [ "$(norm "$declared")" != "$(norm "$pinned")" ]; then
+            echo "::error::Cargo.toml declares rust-version = \"$declared\" but this job uses $pinned; update one to match the other"
+            exit 1
+          fi
+
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
           shared-key: msrv
@@ -709,20 +741,19 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        # Only `target` is read. (Each entry used to carry a `mode: check` field that no
+        # step ever referenced, so a `mode: build` row would have silently done nothing.)
         include:
           # aarch64: the NEON backend is compiled for these targets. The -musl
           # variant is the one that is actually built and executed in the
           # `cross-exec` job below; here it is only type-checked.
           - target: aarch64-unknown-linux-gnu
-            mode: check
           - target: aarch64-unknown-linux-musl
-            mode: check
           # riscv64 has no SIMD backend at all, so this is the only target that
           # type-checks the scalar-only configuration. It is also linked and
           # executed in the `cross-exec` job below (with the link flags that job
           # sets), so this entry is the cheap half of the same coverage.
           - target: riscv64gc-unknown-linux-musl
-            mode: check
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
@@ -972,16 +1003,14 @@ jobs:
       - name: default build
         run: |
           set +e
-          tools/stack_residue.sh | tee "$RUNNER_TEMP/residue-default.log"
+          # `2>&1`: the wrapper's `SKIPPED: ... (cargo exited N)` and cargo's own build
+          # errors go to stderr, and the diagnostics below grep this file.
+          tools/stack_residue.sh 2>&1 | tee "$RUNNER_TEMP/residue-default.log"
           rc=${PIPESTATUS[0]}
           set -e
           case "$rc" in
             0) echo "default build: no key or derived-value run at or above the tool's thresholds" ;;
-            1) if grep -qE '^FAIL: the .*positive control' "$RUNNER_TEMP/residue-default.log"; then
-                 echo "::error::stack_residue.sh's own positive control did not take, so the default build's measurement is void: $(grep -E '^FAIL' "$RUNNER_TEMP/residue-default.log" | head -2 | tr '\n' ' ')"
-               else
-                 echo "::error::stack_residue.sh reported residue in the default build: $(grep -E ' \| (KEY|DERIVED) RESIDUE: ' "$RUNNER_TEMP/residue-default.log" | head -3 | tr '\n' ' ')"
-               fi
+            1) echo "::error::stack_residue.sh reported residue in the default build: $(grep -E ' \| (KEY|DERIVED) RESIDUE: ' "$RUNNER_TEMP/residue-default.log" | head -3 | tr '\n' ' ')"
                exit "$rc" ;;
             4) echo "::error::stack_residue.sh's own positive control did not take (exit 4), so the default build's measurement is void: $(grep -E '^FAIL' "$RUNNER_TEMP/residue-default.log" | head -2 | tr '\n' ' ')"
                exit 4 ;;
@@ -998,16 +1027,12 @@ jobs:
       - name: ultra build
         run: |
           set +e
-          tools/stack_residue.sh --ultra | tee "$RUNNER_TEMP/residue-ultra.log"
+          tools/stack_residue.sh --ultra 2>&1 | tee "$RUNNER_TEMP/residue-ultra.log"
           rc=${PIPESTATUS[0]}
           set -e
           case "$rc" in
             0) echo "ultra build: no key or derived-value run at or above the tool's thresholds" ;;
-            1) if grep -qE '^FAIL: the .*positive control' "$RUNNER_TEMP/residue-ultra.log"; then
-                 echo "::error::stack_residue.sh's own positive control did not take, so the ultra build's measurement is void: $(grep -E '^FAIL' "$RUNNER_TEMP/residue-ultra.log" | head -2 | tr '\n' ' ')"
-               else
-                 echo "::error::stack_residue.sh reported residue in the ultra build, where scrub_stack is supposed to erase it: $(grep -E ' \| KEY RESIDUE: ' "$RUNNER_TEMP/residue-ultra.log" | head -3 | tr '\n' ' ')"
-               fi
+            1) echo "::error::stack_residue.sh reported residue in the ultra build, where scrub_stack is supposed to erase it: $(grep -E ' \| (KEY|DERIVED) RESIDUE: ' "$RUNNER_TEMP/residue-ultra.log" | head -3 | tr '\n' ' ')"
                exit "$rc" ;;
             4) echo "::error::stack_residue.sh's own positive control did not take (exit 4), so the ultra build's measurement is void: $(grep -E '^FAIL' "$RUNNER_TEMP/residue-ultra.log" | head -2 | tr '\n' ' ')"
                exit 4 ;;
@@ -1017,8 +1042,10 @@ jobs:
   supply-chain:
     name: dependency advisories and licences
     # A release is a statement about the committed dependency tree, so the audit and the
-    # licence/source policy must pass for the same commit. They also run in Deep checks,
-    # but that workflow is scheduled/dispatched and does not gate a push.
+    # licence/source policy must pass for the same commit. They also run in Deep checks —
+    # that workflow triggers on push and pull_request as well as the weekly schedule, so
+    # the two run twice on a main push — but Deep is not a required branch-protection
+    # check, which is why this job exists as its own blocking gate.
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -1083,11 +1110,76 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
+          # `gh api` failures are *not* the same thing as "the run has not started yet",
+          # and the two used to be indistinguishable: each poll ended in `|| true`, so a
+          # bad token, a lost permission or an API outage produced an empty string and the
+          # loop kept sleeping the same way it does while waiting. The only exit was the
+          # four-hour deadline, with no diagnostic. Now the stderr is captured and shown,
+          # an auth/permission/not-found answer fails immediately (it cannot heal with
+          # time), and a persistently failing API fails after a bounded number of attempts
+          # instead of consuming the whole budget. Empty output from a *successful* call
+          # means "no matching run yet", which is the one case that should wait.
+          fetch_status() {  # <workflow name> -> "<status> <conclusion>", or "missing"
+            local name="$1" err out rc msg
+            err="$(mktemp)"
+            # `if out=$(...); then ... else rc=$?` rather than `if ! out=$(...); then`: after
+            # the negation succeeds, `$?` is the status of `!`, i.e. 0, so `rc` would always
+            # read zero in the failure branch.
+            if out="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs?head_sha=$GITHUB_SHA&per_page=100" \
+              --jq "[.workflow_runs[] | select(.name == \"$name\" and .event == \"push\")][0] | if . then \"\\(.status) \\(.conclusion // \"\")\" else \"missing\" end" \
+              2>"$err")"; then
+              rm -f "$err"
+              printf '%s\n' "${out:-missing}"
+              return 0
+            else
+              rc=$?
+            fi
+            msg="$(tr '\n' ' ' <"$err" | cut -c1-300)"
+            rm -f "$err"
+            echo "::warning::gh api failed for $name (exit $rc): $msg" >&2
+            case "$msg" in
+              *"HTTP 401"*|*"HTTP 403"*|*"HTTP 404"*|*"Bad credentials"*|*"Resource not accessible"*)
+                echo "::error::the Actions runs API for $name is unreachable with this token/repository (not a transient outage); refusing to wait out the deadline" >&2
+                # 2, not `exit 1`: this runs inside `$(...)`, so `exit` would only end the
+                # subshell and the caller would read it as one more transient failure.
+                return 2 ;;
+            esac
+            return 1
+          }
           deadline=$(( $(date +%s) + 240*60 ))
+          # Consecutive *polling rounds* in which the API failed, not total calls: a round
+          # where both reads succeed resets it, so a transient blip does not accumulate
+          # towards a false failure, while a persistent outage stops after ~5 minutes
+          # (10 rounds x 30 s) instead of after the 4-hour deadline.
+          api_failures=0
           while :; do
-            deep="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs?head_sha=$GITHUB_SHA&per_page=100" --jq '[.workflow_runs[] | select(.name == "Deep checks")][0] | "\(.status) \(.conclusion // "")"' || true)"
-            formal="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs?head_sha=$GITHUB_SHA&per_page=100" --jq '[.workflow_runs[] | select(.name == "Formal verification")][0] | "\(.status) \(.conclusion // "")"' || true)"
-            echo "Deep: ${deep:-missing}; Formal: ${formal:-missing}"
+            # `.event == "push"` matters: Deep and Formal also run on pull requests, a
+            # schedule and a manual dispatch, and a non-push run at the same SHA must not
+            # satisfy a push's release gate. The push-triggered run is the one this commit
+            # produced, and (with the per-SHA concurrency groups in deep.yml/formal.yml) a
+            # later push can no longer cancel it.
+            round_failed=0
+            if deep="$(fetch_status "Deep checks")"; then :; else
+              rc=$?; deep=""
+              # 2 = auth/permission/not-found: waiting cannot fix it.
+              [ "$rc" -eq 2 ] && { echo "::error::cannot read the Deep checks runs API; not waiting out the deadline"; exit 1; }
+              round_failed=1
+            fi
+            if formal="$(fetch_status "Formal verification")"; then :; else
+              rc=$?; formal=""
+              [ "$rc" -eq 2 ] && { echo "::error::cannot read the Formal verification runs API; not waiting out the deadline"; exit 1; }
+              round_failed=1
+            fi
+            if [ "$round_failed" -eq 1 ]; then
+              api_failures=$((api_failures + 1))
+            else
+              api_failures=0
+            fi
+            echo "Deep: ${deep:-unknown}; Formal: ${formal:-unknown}"
+            if [ "$api_failures" -ge 10 ]; then
+              echo "::error::the Actions runs API failed in 10 consecutive polling rounds; check the token's permissions and the network instead of waiting" >&2
+              exit 1
+            fi
             case "$deep" in
               "completed success") ;;
               completed\ *)

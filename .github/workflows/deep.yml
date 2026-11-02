@@ -37,7 +37,14 @@ concurrency:
   # keeps the useful cancellation (a later push or PR run supersedes the earlier one
   # for the same event) while giving the scheduled run a group of its own, which
   # nothing cancels.
-  group: deep-${{ github.ref }}-${{ github.event_name }}
+  #
+  # Push events additionally carry the commit SHA: `ci.yml`'s `release` job polls for
+  # this workflow's run *at the pushed SHA* and treats `completed cancelled` as a
+  # failure, so a later push cancelling an earlier push's Deep run would red the
+  # earlier commit's release gate for no code reason. Per-SHA push groups remove that
+  # cancellation; PR runs still supersede each other (their group is ref+event only),
+  # and the added component is empty for non-push events, whose groups are unchanged.
+  group: deep-${{ github.ref }}-${{ github.event_name }}-${{ github.event_name == 'push' && github.sha || '' }}
   cancel-in-progress: true
 
 permissions:
@@ -354,8 +361,9 @@ jobs:
         with:
           shared-key: audit
       # cargo-deny (next job) also checks advisories, but through its own engine and
-      # its own pinned database; running both is deliberate rather than redundant --
-      # a miss in one is not a miss in the other.
+      # its own database fetch (only the tool version is pinned; the RustSec database
+      # content is the default branch and moves between runs); running both is
+      # deliberate rather than redundant -- a miss in one is not a miss in the other.
       - uses: taiki-e/install-action@1e29709c0ec63babbe8f266397a465f29a825f91 # v2
         with:
           # `tool@version` is install-action's pin syntax: an unpinned tool lets a
@@ -409,14 +417,15 @@ jobs:
         with:
           shared-key: reproducible
 
-      # Two clean builds of the same source in different directories, with the
-      # source and registry paths normalised, must produce byte-identical files.
-      # What this establishes is determinism for one toolchain and one dependency
-      # set (`--locked`): the recipe is path-normalised on purpose, because absolute
-      # build paths are the usual reason two builds differ. What it does *not*
-      # establish is reproducibility across machines and toolchains -- that needs
-      # the same compiler version, and the C toolchain as well, since BLAKE3's
-      # kernels are compiled by `cc`.
+      # Two clean builds of the same source directory, with different `CARGO_TARGET_DIR`
+      # values and the source path normalised, must produce byte-identical files. What
+      # this establishes is determinism for one toolchain, one source path and one
+      # dependency set (`--locked`): the recipe is path-normalised on purpose, because
+      # absolute build paths are the usual reason two builds differ. It does *not*
+      # establish that a different source directory normalises identically (the source
+      # directory is not varied here), nor reproducibility across machines and
+      # toolchains -- that needs the same compiler version, and the C toolchain as well,
+      # since BLAKE3's kernels are compiled by `cc`.
       - name: build twice and compare
         run: |
           set -euo pipefail
@@ -588,25 +597,21 @@ jobs:
     # not editable that way: it falls when code is added that nothing runs, which is
     # the change worth stopping.
     #
-    # 95 is a floor this command now comes *close* to, and that is worth knowing:
-    # measured at this revision with the tool version pinned above, one run reports
-    # 95.07% of *lines* (2739/2881 -- `src/lib.rs` 2148/2290 = 93.80%,
-    # `src/witness.rs` 591/591 = 100%) and 97.14% of functions, i.e. about **two lines
-    # of margin**, so a single newly uncovered branch flips this gate -- a gate with no
-    # slack, not "deliberately loose". Earlier runs and two audits read 96.5-96.7% of
-    # *lines* and ~97.7-97.9% of *regions* from the same source (96.51%, 96.66%, 96.71%;
-    # regions 97.71% vs 97.92%), because the totals move when `cargo-llvm-cov` changes
-    # what it counts -- an earlier revision of this comment quoted 97.89% (113/5353),
-    # before that 97.46% (1458/1496), and the counts it paired with a later percentage
-    # did not reproduce it either. So no figure is quoted here as *the* one: the 95
-    # floor is the gate, and the coverage job prints the measured figure, which is where
-    # a reader should take it from.
+    # 95 is deliberately tight, and the measured figure moves with the tool: at this
+    # revision `cargo-llvm-cov 0.9.1` reports 95.35% of *lines* (3077/3227 --
+    # `src/lib.rs` 2482/2632 = 94.30%, `src/witness.rs` 595/595 = 100%), about eleven
+    # lines of margin, while earlier runs and audits read 96.5-96.7% of lines and
+    # ~97.7-97.9% of regions from the same source, because the totals move when
+    # `cargo-llvm-cov` changes what it counts. Do not treat any one figure as "the"
+    # one: the 95 floor is the gate, and the `coverage totals` step below prints the
+    # measured figure whether the gate passed or failed (`--lcov` on its own prints no
+    # number at all), with `lcov.info` uploaded even on failure.
     # `--fail-under-lines` compares against the line figure.
     # The `report`-side *function* column carries llvm-cov's own
     # "N functions have mismatched data" warning, so a function count quoted from it
     # only means what it says alongside that caveat -- one more reason not to put a
     # second figure in this comment.
-    # It is not there to be
+    # The floor is not there to be
     # approached; it is there so that dropping a whole path -- a feature combination
     # that stops being tested, a module that loses its tests -- fails here instead of
     # showing up as a few points in an artifact nobody diffs.
@@ -650,6 +655,20 @@ jobs:
           cargo llvm-cov --all-features --release --lcov --output-path lcov.info \
             --fail-under-lines 95 -- --skip timing
 
+      # `--lcov` writes the file but prints no summary -- verified: neither a pass nor a
+      # `--fail-under-lines` failure prints a percentage, so a red run would otherwise
+      # show only "exit code 1". Print the totals from the lcov with `if: always()`, so
+      # the number survives the floor failure; the block above points a reader here.
+      - name: coverage totals (also when the floor failed)
+        if: always()
+        run: |
+          set -euo pipefail
+          if [ -f lcov.info ]; then
+            awk -F: '/^LF:/ { lf += $2 } /^LH:/ { lh += $2 } END { printf "line coverage: %d/%d = %.2f%%\n", lh, lf, (lf ? 100*lh/lf : 0) }' lcov.info
+          else
+            echo "lcov.info was not produced"
+          fi
+
       # An inventory, deliberately not labelled an SBOM: a CycloneDX or SPDX
       # document needs a generator that is not installed here, and calling
       # `cargo metadata` output an SBOM would be using the word for something it is
@@ -662,6 +681,9 @@ jobs:
           cargo tree --edges normal | sort -u | wc -l
 
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        # Upload even when the coverage step failed: the lcov is the evidence for the
+        # failure, and a default `success()` guard would drop it exactly then.
+        if: always()
         with:
           name: coverage-and-dependencies
           path: |
@@ -777,7 +799,15 @@ jobs:
       - name: instruction-level faults (every symbol-mapped byte; shard ${{ matrix.shard }} of 20)
         run: |
           set -euo pipefail
-          ./tools/fi_instruction.sh --shard "${{ matrix.shard }}/20" \
+          # `--jobs` must be the *same* on every leg and must agree with `wide-verdict`'s
+          # `--shards 20`. `--shard I/N` partitions the region into `JOBS * N` slices and
+          # gives this job the ones congruent to `I - 1` (mod `JOBS * N`), so two legs
+          # could only disagree if `nproc` differed between runners -- and then they would
+          # partition by different moduli, overlap, and leave bytes unswept. The verdict
+          # catches that (`scanned != covered_total`, or two shards with the same digest),
+          # but it would red a correct sweep for an infrastructure reason. 4 is the hosted
+          # runner's vCPU count; passing it explicitly removes the `nproc` dependency.
+          ./tools/fi_instruction.sh --jobs 4 --shard "${{ matrix.shard }}/20" \
             --report "$RUNNER_TEMP/sweep-shard-${{ matrix.shard }}.json"
 
       # `if: always()`: a shard that failed still uploads its numbers, so the verdict job can
@@ -826,7 +856,10 @@ jobs:
       - name: instruction-level faults (every symbol-mapped byte, bit-flip model; shard ${{ matrix.shard }} of 20)
         run: |
           set -euo pipefail
-          ./tools/fi_instruction.sh --bits --shard "${{ matrix.shard }}/20" \
+          # Same `--jobs 4` as `wide-sweep`, for the same reason: the partition is
+          # `JOBS * N` slices, so every leg must agree on `JOBS` or the union is not the
+          # region.
+          ./tools/fi_instruction.sh --jobs 4 --bits --shard "${{ matrix.shard }}/20" \
             --report "$RUNNER_TEMP/sweep-bits-shard-${{ matrix.shard }}.json"
 
       # `if: always()` as in `wide-sweep`: a failed shard still uploads its numbers, so the
@@ -1020,6 +1053,19 @@ jobs:
           toolchain: nightly
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
 
+      # libFuzzer's corpus *is* the accumulated coverage, and `fuzz/corpus/` is gitignored
+      # (a run artefact, not a source), so without a cache every CI run restarted from the
+      # seeds the target writes and the bounded budget below bought much less than it could:
+      # nothing found in one run made the next one start further along. The SHA is the same
+      # one `formal.yml` pins for its CBMC cache. The key includes the target's hash, so a
+      # changed target starts a fresh corpus while still restoring the previous one.
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: fuzz/corpus
+          key: fuzz-corpus-${{ runner.os }}-${{ hashFiles('fuzz/fuzz_targets/roundtrip.rs') }}
+          restore-keys: |
+            fuzz-corpus-${{ runner.os }}-
+
       # This job was red for exactly this reason: `@cargo-fuzz` is not one of
       # install-action's tool tags, so the action warned "no tool specified",
       # exited 0, and `cargo fuzz` then failed with "no such command: fuzz" --
@@ -1047,10 +1093,12 @@ jobs:
           command -v cargo-fuzz >/dev/null || cargo install --locked cargo-fuzz --version 0.13.2
           host="$(rustc +nightly -vV | sed -n 's/^host: //p')"
           echo "fuzzing for host triple: $host"
-          # `-max_len=8192`: libFuzzer's default ceiling is 4096, and the target
-          # header names what that leaves out -- multi-KiB messages, including the
-          # two-byte AAD/plaintext split selector's region above 65535 bytes. 8192
-          # doubles the cap at a per-input cost the ASan build can afford.
+          # `-max_len=8192`: libFuzzer's default ceiling is 4096. The target header
+          # records what that leaves out -- multi-KiB messages above the cap -- and also
+          # that the two-byte AAD/plaintext split selector cannot reach a split above
+          # 65535 bytes at *any* cap (`sel <= 65535`). Raising the cap is still useful
+          # for the >4 KiB message region; 8192 doubles it at a per-input cost the ASan
+          # build can afford.
           cargo +nightly fuzz run roundtrip --target "$host" \
             -- -max_len=8192 -max_total_time=300 -print_final_stats=1
 

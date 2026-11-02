@@ -67,6 +67,12 @@ trap 'rm -rf "$WORK"' EXIT
 # `--pure` forces BLAKE3's portable Rust backends; `--ultra` runs against the
 # feature bundle whose `scrub_stack` is supposed to clear the residue.
 FEATURES=""
+if [ "$#" -gt 1 ]; then
+  # The first version read only `$1`, so `--pure --ultra` ran the `pure` build while the
+  # caller read it as both, and a second option was dropped without a word.
+  echo "usage: tools/stack_residue.sh [--pure | --ultra]  (got $# arguments)" >&2
+  exit 1
+fi
 case "${1:-}" in
   "") ;;
   --pure)  FEATURES="--features=xchacha20-blake3-siv/pure" ;;
@@ -809,8 +815,17 @@ if cargo fetch --offline >/dev/null 2>&1; then
 fi
 # shellcheck disable=SC2086
 cargo run --release --quiet $offline_flag $FEATURES || rc=$?
-if [ "$rc" -ne 0 ] && [ "$rc" -ne 1 ]; then
-  echo "SKIPPED: the measurement could not run (cargo exited $rc; see above)" >&2
-  exit 3
-fi
-exit "$rc"
+# The program exits 0 (clean), 1 (residue found), 4 (measurement void: one of the
+# scan's own positive controls did not fire) or anything else (build/run failure).
+# 4 must pass through as 4: the wrapper used to let only 0 and 1 through and mapped
+# 4 to 3 ("could not run"), which made every exit-4 branch in verify.sh and CI dead
+# and reclassified a blind probe as an infrastructure failure.
+case "$rc" in
+  0 | 1 | 4)
+    exit "$rc"
+    ;;
+  *)
+    echo "SKIPPED: the measurement could not run (cargo exited $rc; see above)" >&2
+    exit 3
+    ;;
+esac

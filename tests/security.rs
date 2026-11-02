@@ -1787,13 +1787,19 @@ fn brace_depth_at(body: &str, at: usize) -> usize {
 }
 
 /// Occurrences of `needle` in `body` that are direct statements of the outer block
-/// (depth 1), not nested in an `if`/`match`/loop or a local function.
+/// (depth 1), not nested in an `if`/`match`/loop, a local function, or a *closure body*.
+///
+/// The closure exclusion is not decorative: a closure body is also one brace deep, so
+/// `let _dead = || { wipe };` counts as a top-level statement of the enclosing function
+/// while never running. The old version compared the brace depth alone and accepted it
+/// (measured: the whole suite stayed green with `derive_material`'s four wipes moved into
+/// such a closure).
 fn top_level_count(body: &str, needle: &str) -> usize {
     let mut count = 0usize;
     let mut from = 0usize;
     while let Some(i) = body[from..].find(needle) {
         let at = from + i;
-        if brace_depth_at(body, at) == 1 {
+        if brace_depth_at(body, at) == 1 && !inside_closure_body(body, at) {
             count += 1;
         }
         from = at + needle.len();
@@ -1834,6 +1840,21 @@ fn enclosing_block_attributes(body: &str, at: usize) -> Vec<(usize, &str)> {
 /// `if decision.is_err()` or a `while` loop, which are legitimate enclosing shapes in this
 /// crate, so only the constant-false forms are rejected.
 fn constant_false_enclosing_block(body: &str, at: usize) -> Option<String> {
+    for (open, head) in enclosing_block_heads(body, at) {
+        if let Some(reason) = deadening_head(body, open, &head) {
+            return Some(format!("{head}  [{reason}]"));
+        }
+    }
+    None
+}
+
+/// The head text of every `{` block that encloses byte `at`, innermost last.
+///
+/// A head is the text between the block's opening `{` and the previous delimiter
+/// (`\n`, `;`, `{`, `}`), trimmed — that is, the `if …`/`match …`/`fn …`/`let x = …`
+/// fragment the block belongs to. Callers use it to judge the *shape* of the enclosing
+/// statement rather than the spelling of any particular condition.
+fn enclosing_block_heads(body: &str, at: usize) -> Vec<(usize, String)> {
     let mut opens = Vec::new();
     for (i, c) in body.char_indices() {
         if i >= at {
@@ -1847,21 +1868,421 @@ fn constant_false_enclosing_block(body: &str, at: usize) -> Option<String> {
             _ => {}
         }
     }
-    for open in opens {
-        let head_start = body[..open]
-            .rfind(['\n', ';', '{', '}'])
-            .map_or(0, |i| i + 1);
-        let head = body[head_start..open].trim();
-        if head.contains("black_box(false)")
-            || head == "if false"
-            || head.starts_with("if false ")
-            || head == "while false"
-            || head.starts_with("while false ")
-        {
-            return Some(head.to_string());
+    opens
+        .into_iter()
+        .map(|open| {
+            let head_start = body[..open]
+                .rfind(['\n', ';', '{', '}'])
+                .map_or(0, |i| i + 1);
+            (open, body[head_start..open].trim().to_string())
+        })
+        .collect()
+}
+
+/// The `if` condition that selects the *other* branch of an enclosing `else` block at
+/// `open`, if the block really is an `else`/`else if` and the condition can be recovered.
+///
+/// Walking back is what makes the `else` half of the constant-condition class checkable:
+/// the wipe in `if true { … } else { wipe }` is not enclosed by the `if` at all, so the
+/// condition has to be reached through the then-branch's closing brace. `else if c { … }`
+/// heads are handled by `deadening_head` directly (they are `if`s).
+fn else_branch_condition(body: &str, open: usize) -> Option<&str> {
+    let head_start = body[..open]
+        .rfind(['\n', ';', '{', '}'])
+        .map_or(0, |i| i + 1);
+    let before = body[..head_start].trim_end();
+    if !before.ends_with('}') {
+        return None;
+    }
+    let bytes = before.as_bytes();
+    let mut i = before.len() - 1;
+    let mut depth = 0i32;
+    loop {
+        match bytes[i] {
+            b'}' => depth += 1,
+            b'{' => {
+                depth -= 1;
+                if depth == 0 {
+                    break;
+                }
+            }
+            _ => {}
+        }
+        if i == 0 {
+            return None;
+        }
+        i -= 1;
+    }
+    let head = before[..i].trim_end();
+    let pos = head.rfind("if ")?;
+    Some(head[pos + 3..].trim())
+}
+
+/// Why the block with head `head` cannot execute the statement it encloses, if it cannot.
+///
+/// This is deliberately a *reachability* judgement, not a list of spellings. The earlier
+/// version matched `if false`, `while false` and `black_box(false)` literally, so five
+/// equivalent formulations walked straight past it while the whole six-configuration
+/// matrix, `cargo fmt --check` and `cargo clippy -D warnings` stayed green (measured on
+/// the enclosing wipes of `derive_material`, `scrub_stack` and `encrypt`):
+///
+/// * `if 1u8 == 2u8 { … }`            — a constant comparison, not the `false` literal;
+/// * `match 0u8 { 1 => { … }, _ => {} }` — a constant scrutinee, so the arm is unreachable;
+/// * `for _ in 0..0u8 { … }`          — an empty range;
+/// * `let _dead = || { … };` and `… black_box(&_dead);` — a closure that is never called.
+///
+/// What this does **not** catch, measured on this tree and deliberately left as a documented
+/// limit rather than chased with more spellings (which is the trap the first version fell
+/// into): a deadening condition built from an *expression* over literals -- `1 + 1 == 3`,
+/// `0u8 as u32 == 1`, `1.0 == 2.0` -- because `literal_value` requires one literal per
+/// operand; `b'a' == b'b'`, which the char/string blanking turns into the non-literal
+/// `b == b`; a comparison of two *string* literals (`"" == "x"` becomes `"" == ""`); and an
+/// empty iterator that is not a literal range (`for _ in v.iter()` with `v: [u8; 0]`). Each
+/// of those needs the *raw* line to decide, and the scan runs on `strip_comments`'s output
+/// for the reason its own docs give. The structural half -- a wipe inside a constant
+/// condition, a constant `match`, an empty range, a `let`-bound closure, a constant-selected
+/// `else` -- is what this file actually pins.
+///
+/// The first three are decided from the *condition* (via [`constant_condition_value`] and
+/// the literal/empty-range helpers); the fourth is decided from the head ending in `|`,
+/// which is what every closure parameter list does (`||`, `|x|`, `move |x|`, `…for_each(|x|`).
+/// `cfg!(…)`-guarded `if`s are included because `cfg!` is an expression, so an attribute
+/// check alone would miss `if cfg!(any()) { … }`.
+fn deadening_head(body: &str, open: usize, head: &str) -> Option<&'static str> {
+    // A closure body runs when the closure runs, and it usually is not run at all. Only a
+    // *`let`-bound* closure is treated as dead, because the called forms are legitimate:
+    // `(|| { … })();` and `v.iter().for_each(|_| { … });` are reached, and an earlier version
+    // of this rule rejected them (measured: both went red), which would have forced the next
+    // author to delete a live wipe to get a green build. `let f = || { … };` with a later
+    // `f();` is not covered by that argument -- it is not a shape this crate writes, and the
+    // alternative (calling it reachable) is the shape the guards exist for.
+    if head.starts_with("let ") && head.contains('|') {
+        return Some(
+            "the enclosing block is a closure body bound with `let`, which only runs if it is \
+             called",
+        );
+    }
+    if let Some(cond) = head
+        .strip_prefix("if ")
+        .or_else(|| head.strip_prefix("while "))
+        .or_else(|| head.strip_prefix("else if "))
+    {
+        if constant_condition_value(cond) == Some(false) {
+            return Some(
+                "the enclosing block's condition is a constant false, so its body never runs",
+            );
+        }
+    }
+    // `else` is the reverse test: the branch runs only when the paired `if` condition is
+    // *false*, so a constant-true condition leaves it unreachable.
+    if head == "else" {
+        if let Some(cond) = else_branch_condition(body, open) {
+            if constant_condition_value(cond) == Some(true) {
+                return Some(
+                    "the enclosing `else` branch is reached only when its `if` condition is a \
+                     constant true, so the branch never runs",
+                );
+            }
+        }
+    }
+    // The scanned text is `strip_comments`'s output, and that stripper removes a char
+    // literal (`'a'`) entirely while blanking a string literal's contents. So a condition
+    // like `'a' == 'b'` reaches here as `if  == ` — no operand at all. That shape cannot
+    // come from valid Rust, so it means a literal was blanked and the condition's value is
+    // unknown: reject it rather than assume the branch is live.
+    if both_comparison_operands_blanked(head) {
+        return Some(
+            "both operands of this block's comparison were blanked out of the scanned text \
+             (char or string literals: `'a' == 'b'` reaches here as `== `), so the condition \
+             is constant and its body never runs",
+        );
+    }
+    // A `match` with no scrutinee is the same shape: `match 'a' { … }` loses the literal and
+    // the head arrives as just `match` (the trim in `enclosing_block_heads` removes the
+    // space that `strip_prefix("match ")` would need).
+    if head == "match" {
+        return Some(
+            "this `match`'s scrutinee was blanked out of the scanned text (a char or string \
+             literal), so its arms are decided at compile time",
+        );
+    }
+    if let Some(scrutinee) = head.strip_prefix("match ") {
+        if literal_value(scrutinee.trim()).is_some() {
+            return Some("the enclosing `match` has a constant scrutinee, so its arms are decided at compile time");
+        }
+    }
+    if let Some(rest) = head.strip_prefix("for ") {
+        if let Some((_, iter)) = rest.split_once(" in ") {
+            if empty_range(iter.trim()) {
+                return Some("the enclosing `for` iterates an empty range, so its body never runs");
+            }
         }
     }
     None
+}
+
+/// Whether a comparison in `head` lost *both* operands to `strip_comments`'s char/string
+/// literal blanking, i.e. the condition was two literals (`'a' == 'b'` reaches here as
+/// `== `) and is therefore constant.
+///
+/// Both sides, not either: `let c = 'a'; if c == 'a' { … }` blanks only the right-hand
+/// literal, and that condition is *live* -- an earlier version of this helper rejected it,
+/// which would have failed the build for a correct edit.
+fn both_comparison_operands_blanked(head: &str) -> bool {
+    for op in ["==", "!="] {
+        if let Some((left, right)) = head.split_once(op) {
+            // The left operand may still carry the `if`/`while`/`else if` keyword; strip it.
+            let left = left
+                .trim_start_matches("if ")
+                .trim_start_matches("while ")
+                .trim();
+            if left.is_empty() && right.trim().is_empty() {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// The truth value of `cond` when it is a compile-time constant, `None` when it is not.
+///
+/// Handles, in binding order (`||` loosest, then `&&`, then comparisons, then `!`):
+/// the boolean literals, `black_box(false)` in any path spelling, `cfg!(…)` with a constant
+/// predicate, `!`-negation, `==`/`!=`, the ordering operators, and `&&`/`||` where one
+/// operands forces the result (`false && x` is false whatever `x` is). Everything else — a
+/// call, a field access, a comparison against a non-literal — is `None`, which the caller
+/// reads as "not a known-constant gate" and does not reject: this crate legitimately guards
+/// counted wipes with `if decision0.is_err()`, `if off < n` and
+/// `while off + CHACHA20_BLOCK <= n`.
+///
+/// The `&&`/`||` and ordering cases are here because the first version decided only
+/// `==`/`!=`: an adversarial pass on this very guard showed `if false && x { wipe }` and
+/// `while 1 > 2 { wipe }` both walked past it. (`literal_value` was also too lax — it read
+/// the leading digits of `1 > 2` as the literal `1` — so it now requires the whole string to
+/// be a literal plus an integer suffix.)
+fn constant_condition_value(cond: &str) -> Option<bool> {
+    let cond = strip_outer_parens(cond.trim());
+    let peeled = peel_black_box(cond);
+    if peeled != cond {
+        // `black_box` is the compiler barrier an adversarial edit uses to keep a constant
+        // condition from being folded; its argument is the real condition.
+        return constant_condition_value(peeled);
+    }
+    if let Some(pred) = cond.strip_prefix("cfg!(").and_then(|s| s.strip_suffix(')')) {
+        return constant_cfg_value(pred);
+    }
+    // `||` before `&&` before the comparisons: that is Rust's own precedence, and the
+    // recursive calls below re-enter here so `false && (1 == 2)` is decided too.
+    if let Some((left, right)) = split_at_top_level_op(cond, "||") {
+        return match (
+            constant_condition_value(left),
+            constant_condition_value(right),
+        ) {
+            (Some(true), _) | (_, Some(true)) => Some(true),
+            (Some(false), other) => other,
+            (other, Some(false)) => other,
+            _ => None,
+        };
+    }
+    if let Some((left, right)) = split_at_top_level_op(cond, "&&") {
+        return match (
+            constant_condition_value(left),
+            constant_condition_value(right),
+        ) {
+            (Some(false), _) | (_, Some(false)) => Some(false),
+            (Some(true), other) => other,
+            (other, Some(true)) => other,
+            _ => None,
+        };
+    }
+    if let Some(inner) = cond.strip_prefix('!') {
+        return constant_condition_value(inner).map(|v| !v);
+    }
+    for (op, eq_when) in [("==", true), ("!=", false)] {
+        if let Some((left, right)) = split_at_top_level_op(cond, op) {
+            let (l, r) = (literal_value(left.trim())?, literal_value(right.trim())?);
+            return Some(if eq_when { l == r } else { l != r });
+        }
+    }
+    for (op, want) in [(">=", true), ("<=", true), (">", false), ("<", false)] {
+        if let Some((left, right)) = split_at_top_level_op(cond, op) {
+            // `>=`/`<=` are equality-or-greater, so `want` records which side of the
+            // comparison keeps the result true.
+            let (l, r) = (literal_value(left.trim())?, literal_value(right.trim())?);
+            let ordered = if want { l >= r } else { l > r };
+            return Some(if op.starts_with('>') {
+                ordered
+            } else {
+                !ordered
+            });
+        }
+    }
+    literal_value(cond).map(|v| v != 0)
+}
+
+/// Remove one balanced outer `( … )` pair, if the whole string is wrapped in one.
+fn strip_outer_parens(s: &str) -> &str {
+    // To a fixpoint: `(((false)))` is a constant too, and peeling one layer per call left
+    // `((false))` unreadable (measured as a bypass).
+    let mut t = s.trim();
+    while t.starts_with('(') && t.ends_with(')') && balanced_inside(t) {
+        t = t[1..t.len() - 1].trim();
+    }
+    t
+}
+
+/// Whether the parentheses around `t` (which starts with `(` and ends with `)`) are one
+/// matched pair, i.e. the leading `(` closes only at the end.
+fn balanced_inside(t: &str) -> bool {
+    let mut depth = 0i32;
+    for (i, c) in t.char_indices() {
+        match c {
+            '(' => depth += 1,
+            ')' => {
+                depth -= 1;
+                if depth == 0 {
+                    return i == t.len() - 1;
+                }
+            }
+            _ => {}
+        }
+    }
+    false
+}
+
+/// If `s` is exactly a `black_box(<expr>)` call, the `<expr>`; otherwise `s` unchanged.
+///
+/// `if black_box(false)` was matched as a substring before, which missed
+/// `black_box(1u8 == 2u8)`, `black_box( false )` and any path-qualified spelling.
+fn peel_black_box(s: &str) -> &str {
+    let t = s.trim();
+    let Some(open) = t.find("black_box(") else {
+        return t;
+    };
+    // Only when the call is the whole condition and its paren closes it.
+    if !t[open..].ends_with(')') {
+        return t;
+    }
+    let inner = &t[open + "black_box(".len()..t.len() - 1];
+    if balanced_inside(&format!("({inner})")) {
+        inner.trim()
+    } else {
+        t
+    }
+}
+
+/// Split `expr` at the first top-level occurrence of `op` (not inside parentheses), when the
+/// operator is not part of a longer one (`>=`/`<=` are not `=`).
+fn split_at_top_level_op<'a>(expr: &'a str, op: &str) -> Option<(&'a str, &'a str)> {
+    let mut depth = 0i32;
+    let bytes = expr.as_bytes();
+    let mut i = 0usize;
+    while i + op.len() <= bytes.len() {
+        match bytes[i] {
+            b'(' => depth += 1,
+            b')' => depth -= 1,
+            _ => {}
+        }
+        if depth == 0 && expr[i..].starts_with(op) {
+            let after = bytes.get(i + op.len());
+            // `=` immediately after `!`/`=` would make `!=`/`==` part of a longer token; a
+            // third `=` is not a comparison this crate writes.
+            if after == Some(&b'=') {
+                return None;
+            }
+            return Some((&expr[..i], &expr[i + op.len()..]));
+        }
+        i += 1;
+    }
+    None
+}
+
+/// The integer value of a Rust literal, or `None` when `text` is not *exactly* one literal.
+///
+/// `true`/`false` map to 1/0, so boolean comparisons are decided too. Anything after the
+/// digits must be a recognised integer suffix: the whole string is the literal, which is what stops `1 > 2` from parsing
+/// as `1` (a bug in the first version that made `while 1 > 2 { … }` look like a constant
+/// *true* condition and therefore acceptable).
+fn literal_value(text: &str) -> Option<i128> {
+    let t: String = text.trim().chars().filter(|c| *c != '_').collect();
+    let t = t.trim();
+    match t {
+        "true" => return Some(1),
+        "false" => return Some(0),
+        _ => {}
+    }
+    // `1u8`, `0xFFu32`, `0b1010_u8`, `0o17i32`: split the prefix, the digits, and the
+    // suffix, and require the suffix to be one this language allows.
+    let (radix, rest) = if let Some(h) = t.strip_prefix("0x").or_else(|| t.strip_prefix("0X")) {
+        (16u32, h)
+    } else if let Some(b) = t.strip_prefix("0b").or_else(|| t.strip_prefix("0B")) {
+        (2, b)
+    } else if let Some(o) = t.strip_prefix("0o").or_else(|| t.strip_prefix("0O")) {
+        (8, o)
+    } else {
+        (10, t)
+    };
+    let digits: String = match radix {
+        16 => rest.chars().take_while(char::is_ascii_hexdigit).collect(),
+        2 => rest
+            .chars()
+            .take_while(|c| matches!(c, '0' | '1'))
+            .collect(),
+        8 => rest
+            .chars()
+            .take_while(|c| matches!(c, '0'..='7'))
+            .collect(),
+        _ => rest.chars().take_while(char::is_ascii_digit).collect(),
+    };
+    if digits.is_empty() || !is_integer_suffix(&rest[digits.len()..]) {
+        return None;
+    }
+    i128::from_str_radix(&digits, radix).ok()
+}
+
+/// Whether `suffix` is an integer literal suffix (or empty). `f32`/`f64` are included so a
+/// float comparison is not silently treated as an integer one.
+fn is_integer_suffix(suffix: &str) -> bool {
+    matches!(
+        suffix,
+        "" | "i8"
+            | "i16"
+            | "i32"
+            | "i64"
+            | "i128"
+            | "isize"
+            | "u8"
+            | "u16"
+            | "u32"
+            | "u64"
+            | "u128"
+            | "usize"
+            | "f32"
+            | "f64"
+    )
+}
+
+/// Whether `iter` is a range literal that is empty by construction (`0..0`, `3..0u8`).
+/// `..=` is excluded: `0..=0` has one element and is not an empty loop.
+fn empty_range(iter: &str) -> bool {
+    let iter = strip_outer_parens(iter.trim());
+    if iter.contains("..=") {
+        return false;
+    }
+    let Some((lo, hi)) = iter.split_once("..") else {
+        return false;
+    };
+    match (literal_value(lo.trim()), literal_value(hi.trim())) {
+        (Some(lo), Some(hi)) => lo >= hi,
+        _ => false,
+    }
+}
+
+/// True when `at` sits inside a closure body, which nothing guarantees is ever called.
+fn inside_closure_body(body: &str, at: usize) -> bool {
+    enclosing_block_heads(body, at)
+        .iter()
+        .any(|(_, head)| head.ends_with('|'))
 }
 
 fn assert_wipes_are_not_deadened(
@@ -1903,9 +2324,9 @@ fn assert_wipes_are_not_deadened(
         }
         if let Some(head) = constant_false_enclosing_block(body, stmt_at) {
             panic!(
-                "`{name}`'s wipe `{wipe}` is nested in a constant-false block (`{head}`): the \
-                 text this file counts is unchanged while the wipe never runs. Delete the \
-                 wrapper."
+                "`{name}`'s wipe `{wipe}` is deadened by an enclosing block that cannot run: \
+                 `{head}`. The text this file counts is unchanged while the wipe never \
+                 executes. Delete the wrapper."
             );
         }
         let mut attrs = preceding_attributes(body, stmt_at);
@@ -2315,6 +2736,11 @@ fn every_allocation_happens_before_any_derivation() {
                 &[]
             };
             assert_wipes_are_not_deadened(name, &body, body_line, &wipe, allowed);
+            // The per-wipe check above pins the shapes around the *counted* rows. This one
+            // also covers the wipes those rows do not name -- `encrypt`'s and `decrypt`'s
+            // `crate::scrub_stack()` calls among them, whose deadening the suite used to
+            // leave entirely to `tools/stack_residue.sh`.
+            assert_no_deadened_wipe(name, &body);
             // The count alone cannot see a wipe moved into an existing rejection branch:
             // every entry point's success-path wipe is a direct statement of the function
             // body (depth 1). `encrypt`'s `tag` is the one exception -- the tag is
@@ -2572,6 +2998,9 @@ fn every_documented_wipe_has_a_witness() {
             );
             assert_wipes_are_not_deadened(site.label, &body, body_line, wipe, allowed_cfg);
         }
+        // Same second pass as the entry-point table: every wipe primitive in the site's
+        // body must be reachable, not only the rows listed above.
+        assert_no_deadened_wipe(site.label, &body);
     }
 
     // The BLAKE3-state pair, counted as a total across its two call sites: `Cargo.toml`
@@ -3006,10 +3435,37 @@ fn primitive_wipe_sites_have_a_witness() {
             "`{marker}` must contain `{call}` {expected} time(s): the state holds key words \
              or key-derived keystream, and no behavioural test can see a volatile store:\n{body}"
         );
-        assert!(
-            !body.contains("black_box(false)") && !body.contains("if false"),
-            "`{marker}`'s wipes must not be nested in a constant-false block:\n{body}"
-        );
+        assert_no_deadened_wipe(marker, &body);
+    }
+}
+
+/// Every wipe call in `body` must be reachable: not inside a constant-false condition, a
+/// constant `match`, an empty `for`, or a closure body that is never called.
+///
+/// This is the *shape* judgement the two-string check used to stand in for. That check only
+/// recognised `black_box(false)` and `if false`, so `if 1u8 == 2u8 { wipe }` and
+/// `let _dead = || { wipe };` were called "reachable" while the count above stayed exact and
+/// the whole six-configuration matrix, `cargo fmt --check` and `cargo clippy -D warnings`
+/// passed (measured).
+fn assert_no_deadened_wipe(label: &str, body: &str) {
+    for primitive in [
+        "zeroize_array(",
+        "zeroize_slice(",
+        "zeroize_raw(",
+        "zeroize_xmm(",
+        "zeroize_ymm(",
+        "zeroize_neon(",
+        "scrub_stack(",
+    ] {
+        for (at, _) in body.match_indices(primitive) {
+            if let Some(shape) = constant_false_enclosing_block(body, at) {
+                panic!(
+                    "`{label}`'s `{primitive}…` call is deadened: {shape}. The text survives \
+                     compilation exactly as it is written, so every count stays correct while \
+                     the wipe never runs. Delete the wrapper."
+                );
+            }
+        }
     }
 }
 
@@ -3056,10 +3512,47 @@ fn simd_kernels_wipe_their_key_state() {
                  reaches this path:\n{body}"
             );
         }
-        assert!(
-            !body.contains("black_box(false)") && !body.contains("if false"),
-            "the SIMD wipe calls must be reachable, not nested in a constant-false block:\n{body}"
-        );
+        assert_no_deadened_wipe(module, &body);
+    }
+}
+
+/// No local definition may provide its own `ct_eq`, which would shadow `subtle`'s
+/// constant-time comparison inside a scanned body while every text pin around the call
+/// stays true.
+///
+/// `witness_tag.ct_eq(&computed_tag)` is text, and text is satisfied by any method named
+/// `ct_eq` in scope: a trait (or an inherent impl) whose `ct_eq` returns `Choice::from(1)`
+/// makes `ultra`'s witness agreement a constant true, silently dropping the gate operand.
+/// The audit that raised this named exactly that shape, and nothing here rejected it --
+/// `tests/decision_scope.rs` pins the *bindings and lines* of the decision, not the
+/// resolution of the method name. The crate defines no such method (its own fold is
+/// `ct_eq_independent`, whose name does not match `fn ct_eq(`) and implements no
+/// `ConstantTimeEq`, so the rejection has nothing to carve out.
+#[test]
+fn no_local_method_can_shadow_the_constant_time_comparison() {
+    for (name, src) in [
+        ("src/lib.rs", non_test_source()),
+        (
+            "src/witness.rs",
+            strip_comments(include_str!("../src/witness.rs")),
+        ),
+    ] {
+        for shape in [
+            "fn ct_eq(",
+            "impl ConstantTimeEq",
+            "impl subtle::ConstantTimeEq",
+            "impl core::cmp::PartialEq",
+        ] {
+            assert_eq!(
+                src.matches(shape).count(),
+                0,
+                "`{name}` contains `{shape}`: a definition in the crate's own sources can \
+                 shadow or replace a constant-time comparison at its call site -- an \
+                 always-true `ct_eq` for `[u8; TAG_LEN]` turns `ultra`'s witness agreement \
+                 into a constant while every text pin around the call stays true. Use \
+                 `subtle`'s implementations (imported, not reimplemented)."
+            );
+        }
     }
 }
 

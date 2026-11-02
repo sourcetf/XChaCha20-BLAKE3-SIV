@@ -44,8 +44,8 @@ targets = [
 # is recommended to pass `--all-features` on the cmd line instead
 #
 # Repo note: left `false` deliberately, and the checks in this file are scoped to
-# exactly that graph -- the dependencies the published library builds with, 12
-# crates printed by `cargo deny --offline list` (11 dependencies plus this crate).
+# exactly that graph -- the dependencies the published library builds with, 13
+# crates printed by `cargo deny --offline list` (12 dependencies plus this crate).
 # The graph excludes *both* dev-dependencies (always, however this is set: cargo-deny
 # never puts dev edges in the checked graph) and non-default features, so the
 # optional `rng` -> getrandom 0.4 edge is absent too. `--all-features` on the
@@ -103,7 +103,7 @@ git-fetch-with-cli = true
 # See https://spdx.org/licenses/ for list of possible licenses
 # [possible values: any SPDX 3.11 short identifier (+ optional exception)].
 # Derived from the crates in the checked graph -- the default-feature, non-dev graph
-# described in the `[graph]` note above, the same 12 crates `cargo deny --offline
+# described in the `[graph]` note above, the same 13 crates `cargo deny --offline
 # list` prints -- not copied from the template and not "the whole dependency tree":
 # dev-only crates (criterion, proptest, chacha20poly1305, aead, ...) never enter
 # this check, and the optional `rng` -> getrandom 0.4 edge is off. Each crate named
@@ -114,12 +114,18 @@ git-fetch-with-cli = true
 #   MIT OR Apache-2.0                                     (arrayvec, cc, cfg-if,
 #                                                          cpufeatures,
 #                                                          find-msvc-tools, libc,
-#                                                          shlex, this crate)
+#                                                          rustversion, shlex,
+#                                                          this crate)
 #   Apache-2.0 OR MIT                                     (zeroize)
 #   BSD-3-Clause                                          (subtle)
 #   CC0-1.0 OR Apache-2.0 OR Apache-2.0 WITH LLVM-exception (blake3)
 #   CC0-1.0 OR MIT-0 OR Apache-2.0                        (constant_time_eq)
 #
+# `rustversion` is a *build* dependency of `constant_time_eq`, so it is in this graph:
+# the list above used to omit it and the note said "12 crates", which was eleven
+# dependencies. `cargo deny --offline list` names it, and the allow list already
+# covers it (`MIT OR Apache-2.0`), so the omission was only a documentation error --
+# but a licence list that does not match the graph is the wrong thing to leave broken.
 # cargo-deny satisfies an OR when any alternative is allowed, so MIT and
 # Apache-2.0 cover the first two and the two CC0 ones. BSD-3-Clause is subtle's
 # only licence and therefore required; the LLVM exception is listed explicitly

@@ -142,11 +142,13 @@ fuzz_target!(|data: &[u8]| {
     // must be rejected. Corrupting ciphertext/tag/AAD (property 2 below) cannot see a
     // key- or nonce-ignoring build: encrypt and decrypt stay mutually consistent.
     assert!(
-        decrypt(&other_key, &nonce, aad, &ct, &tag).is_err(),
+        decrypt(&other_key, &nonce, aad, &ct, &tag)
+            == Err(xchacha20_blake3_siv::Error::AuthenticationFailed),
         "a ciphertext must not authenticate under a different key"
     );
     assert!(
-        decrypt(&key, &other_nonce, aad, &ct, &tag).is_err(),
+        decrypt(&key, &other_nonce, aad, &ct, &tag)
+            == Err(xchacha20_blake3_siv::Error::AuthenticationFailed),
         "a ciphertext must not authenticate under a different nonce"
     );
 
@@ -162,7 +164,8 @@ fuzz_target!(|data: &[u8]| {
             let i = (tweak * 256 + mode as usize / 3) % bad_ct.len();
             bad_ct[i] ^= 1 << (mode % 8);
             assert!(
-                decrypt(&key, &nonce, aad, &bad_ct, &bad_tag).is_err(),
+                decrypt(&key, &nonce, aad, &bad_ct, &bad_tag)
+                    == Err(xchacha20_blake3_siv::Error::AuthenticationFailed),
                 "a corrupted ciphertext byte must not authenticate"
             );
         }
@@ -170,7 +173,8 @@ fuzz_target!(|data: &[u8]| {
             let i = (tweak * 256 + mode as usize / 3) % TAG_LEN;
             bad_tag[i] ^= 1 << (mode % 8);
             assert!(
-                decrypt(&key, &nonce, aad, &ct, &bad_tag).is_err(),
+                decrypt(&key, &nonce, aad, &ct, &bad_tag)
+                    == Err(xchacha20_blake3_siv::Error::AuthenticationFailed),
                 "a corrupted tag byte must not authenticate"
             );
         }
@@ -178,7 +182,8 @@ fuzz_target!(|data: &[u8]| {
             let i = (tweak * 256 + mode as usize / 3) % bad_aad.len();
             bad_aad[i] ^= 1 << (mode % 8);
             assert!(
-                decrypt(&key, &nonce, &bad_aad, &ct, &tag).is_err(),
+                decrypt(&key, &nonce, &bad_aad, &ct, &tag)
+                    == Err(xchacha20_blake3_siv::Error::AuthenticationFailed),
                 "a corrupted AAD byte must not authenticate"
             );
         }
@@ -186,7 +191,8 @@ fuzz_target!(|data: &[u8]| {
             let i = (tweak * 256 + mode as usize / 3) % TAG_LEN;
             bad_tag[i] ^= 1 << (mode % 8);
             assert!(
-                decrypt(&key, &nonce, aad, &ct, &bad_tag).is_err(),
+                decrypt(&key, &nonce, aad, &ct, &bad_tag)
+                    == Err(xchacha20_blake3_siv::Error::AuthenticationFailed),
                 "a corrupted tag byte must not authenticate"
             );
         }
@@ -200,7 +206,8 @@ fuzz_target!(|data: &[u8]| {
     // there.
     let other_aad: &[u8] = if aad.is_empty() { &[0x5A] } else { &[] };
     assert!(
-        decrypt(&key, &nonce, other_aad, &ct, &tag).is_err(),
+        decrypt(&key, &nonce, other_aad, &ct, &tag)
+            == Err(xchacha20_blake3_siv::Error::AuthenticationFailed),
         "a tag bound to one AAD must not authenticate under another (empty is a value)"
     );
 
@@ -273,7 +280,8 @@ fuzz_target!(|data: &[u8]| {
     bad_tag2[0] ^= 0x01;
     let mut buf3 = ct.clone();
     assert!(
-        decrypt_in_place_detached(&key, &nonce, aad, &mut buf3, &bad_tag2).is_err(),
+        decrypt_in_place_detached(&key, &nonce, aad, &mut buf3, &bad_tag2)
+            == Err(xchacha20_blake3_siv::Error::AuthenticationFailed),
         "a corrupted tag must not authenticate in place"
     );
     assert!(

@@ -201,8 +201,21 @@ fn the_key_itself_is_locked() {
         if kb > 0 {
             return;
         }
+        let reporting = smaps_reports_locks();
+        // A probe that could not lock means the strong check was not evaluated at all; say
+        // so instead of falling through to the weak fallback, which a decoy lock satisfies.
+        assert_ne!(
+            reporting,
+            LockReporting::CouldNotProbe,
+            "the per-mapping `Locked:` probe could not lock its own page, so the strongest \
+             check beneath this one was never evaluated and the `VmLck` fallback alone \
+             cannot see a lock placed on the wrong address. Raise `RLIMIT_MEMLOCK` (the \
+             probe needs one page *in addition to* the key's) and re-run; this is a \
+             could-not-run, reported as a failure because silence here is how the decoy \
+             mutant passed before"
+        );
         assert!(
-            !smaps_reports_locks(),
+            reporting != LockReporting::Reported,
             "the mapping containing the key ({ptr:#x}) reports `Locked: 0` while this \
              environment does report per-mapping locks (a probe range locked here shows \
              one), so the key's own page is not locked — locking any *other* address \
@@ -237,7 +250,7 @@ fn the_key_itself_is_locked() {
 /// channel is unreliable" when it is only out of allowance. An audit measured exactly that
 /// at `ulimit -l 12`, where the strong check this probe guards silently degraded to the
 /// process-wide fallback. Aligning here makes the probe cost what a `LockedKey` costs.
-fn smaps_reports_locks() -> bool {
+fn smaps_reports_locks() -> LockReporting {
     let mut backing = vec![0u8; 8192];
     let base = backing.as_mut_ptr() as usize;
     let aligned = (base + 4095) & !4095;
@@ -254,11 +267,33 @@ fn smaps_reports_locks() -> bool {
             let reported = locked_kb_at(ptr).unwrap_or(0) > 0;
             // SAFETY: the range was just locked above, and `probe` is still live.
             unsafe { xchacha20_blake3_siv::locked::unlock_range(probe.as_ptr(), probe.len()) };
-            reported
+            if reported {
+                LockReporting::Reported
+            } else {
+                LockReporting::NotReported
+            }
         }
-        // Nothing can be locked here at all; `lock_or_skip` has already dealt with that.
-        Err(_) => false,
+        // The probe could not lock, which is *not* the same as "this channel does not
+        // report locks": the key's own page is still locked while the probe runs, so a
+        // tight `RLIMIT_MEMLOCK` (one page, measured at `ulimit -l 4`) leaves no allowance
+        // for a second page. Treating that as `false` silently degraded the strong check to
+        // the process-wide `VmLck` fallback, which a lock on a decoy buffer satisfies --
+        // exactly the mutant this check exists to catch. The caller now sees the difference.
+        Err(_) => LockReporting::CouldNotProbe,
     }
+}
+
+/// What [`smaps_reports_locks`] found, with "the probe itself could not lock" kept apart
+/// from "this environment does not report per-mapping locks".
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum LockReporting {
+    /// The probe locked a page and `/proc/self/smaps` showed it as `Locked:`.
+    Reported,
+    /// The probe locked a page and smaps showed zero, i.e. this channel is uninformative
+    /// here (qemu-user).
+    NotReported,
+    /// The probe could not lock at all, so the channel was never tested.
+    CouldNotProbe,
 }
 
 /// Being boxed and locked must not change what the key does.

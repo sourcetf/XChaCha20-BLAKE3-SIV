@@ -1056,6 +1056,29 @@ mod guts_tests {
         );
     }
 
+    // The root output of a single chunk does not depend on the chunk's *index*: the root
+    // compression counter is the output block counter (0 for the first block), as
+    // `reference_impl::Output::root_output_bytes` and the C library's `output_root_bytes`
+    // both implement. So `ChunkState::new(k).finalize(true)` must equal `hash()` of the
+    // same bytes for every k -- `hash()` is pinned against the official test vectors, so
+    // it is an independent oracle here, not a second reading of the same code.
+    //
+    // Negative control: making `Output::root_hash` pass `self.counter` instead of 0 (the
+    // local change this test was added to catch) makes every k != 0 case fail.
+    #[test]
+    fn test_root_hash_ignores_the_chunk_counter() {
+        let input = b"the root output of a chunk does not depend on its chunk index";
+        assert!(input.len() <= crate::CHUNK_LEN);
+        let expected = crate::hash(input);
+        for k in [0u64, 1, 2, 7, 1 << 32, u64::MAX] {
+            assert_eq!(
+                ChunkState::new(k).update(input).finalize(true),
+                expected,
+                "chunk counter {k}",
+            );
+        }
+    }
+
     #[test]
     fn test_parents() {
         let mut hasher = crate::Hasher::new();

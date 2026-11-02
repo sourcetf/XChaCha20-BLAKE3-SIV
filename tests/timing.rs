@@ -469,12 +469,33 @@ fn timing_screens_are_present_and_not_ignored() {
              advisory job then passes without running the screen. Offending line: {line}"
         );
     }
-    for name in [
-        "fn timing_tag_position_screen_finds_no_gross_difference(",
-        "fn timing_does_not_depend_on_key_contents(",
+    // Each name must match a *definition line* — `fn <short>(` at column 0 — not any
+    // occurrence of the text. This file also contains the names as string literals in the
+    // list below, so `source.find(name)` was satisfied by the guard's own array and reported
+    // "present" after the screen had been deleted or renamed (measured by replaying this
+    // logic against a renamed copy: the old form passed). The attribute check then reads the
+    // lines above the real definition.
+    for short in [
+        "timing_tag_position_screen_finds_no_gross_difference",
+        "timing_does_not_depend_on_key_contents",
     ] {
-        let at = source.find(name).unwrap_or_else(|| {
-            panic!("the timing presence gate names `{name}`, but the function is gone")
+        let needle = format!("fn {short}(");
+        let mut at = None;
+        let mut offset = 0usize;
+        for line in source.lines() {
+            if line.starts_with(&needle) {
+                at = Some(offset);
+                break;
+            }
+            offset += line.len() + 1; // + the newline
+        }
+        let at = at.unwrap_or_else(|| {
+            panic!(
+                "the timing presence gate names `{needle}`, but no definition line starts \
+                 with it: the screen was deleted or renamed. Only `cargo test --release \
+                 --test timing -- --list` (a separate CI step) would otherwise notice, and a \
+                 plain run of this file would not."
+            )
         });
         let prefix_start = source[..at].rfind("\n\n").map_or(0, |i| i + 2);
         let attributes = &source[prefix_start..at];
@@ -482,7 +503,7 @@ fn timing_screens_are_present_and_not_ignored() {
             let compact: String = line.chars().filter(|c| !c.is_whitespace()).collect();
             assert!(
                 !compact.starts_with("#[") || compact.starts_with("#[test]"),
-                "leak screen `{name}` is wrapped in an extra attribute ({line}); a cfg or \
+                "leak screen `{needle}` is wrapped in an extra attribute ({line}); a cfg or \
                  ignore can remove it while the source-text check still sees the name"
             );
         }

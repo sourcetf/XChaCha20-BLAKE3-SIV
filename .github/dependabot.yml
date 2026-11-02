@@ -14,8 +14,16 @@
 #
 # `cargo` is here for the same reason: `Cargo.lock` is committed, so the dependency set is
 # pinned too, and a fix only arrives if something proposes the bump. (Advisories are already
-# caught automatically — `cargo-deny` runs in the Deep workflow and fails on an advisory that
-# lands on a locked crate — but "caught" and "fixed" are different events.)
+# caught automatically — `cargo audit --deny warnings` runs over `Cargo.lock` in the Deep
+# workflow and fails on an advisory that lands on *any* locked crate, dev-dependencies
+# included — but "caught" and "fixed" are different events.)
+#
+# Note which tool does that: `cargo audit`, not `cargo-deny`. `deny.toml`'s graph deliberately
+# excludes dev edges (`cargo-deny` never puts them in the checked graph, whatever `[graph]
+# all-features` says), so a dev-only advisory such as one on `proptest` or `criterion` is
+# invisible to `cargo deny check advisories` and is only caught by `cargo audit`'s
+# lockfile-wide read. The advisory entries below therefore do not rely on a cargo-deny
+# fallback for dev crates; there isn't one.
 version: 2
 updates:
   - package-ecosystem: github-actions
@@ -74,8 +82,9 @@ updates:
       # go stale, and the upgrade buys a dev-only dependency being current.
       #
       # Ignored for *version* updates with the reasoning recorded; advisory detection is not
-      # affected, because `cargo-deny` fails the Deep workflow if an advisory reaches the
-      # lockfile. Do the migration when the performance table is next refreshed - that is the
+      # affected, because `cargo audit --deny warnings` reads the whole `Cargo.lock` (dev
+      # edges included) in the Deep workflow and fails if an advisory reaches it. Do the
+      # migration when the performance table is next refreshed - that is the
       # commit where the numbers are re-measured anyway.
       - dependency-name: chacha20poly1305
       - dependency-name: aead

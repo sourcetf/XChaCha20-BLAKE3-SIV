@@ -126,7 +126,9 @@ record() { SUMMARY+=("$*"); }
 # means that target's stage is skipped.
 ensure_target() {
   local target="$1"
-  if rustup target list --installed 2>/dev/null | grep -qx "$target"; then
+  # Here-string rather than a pipe: `grep -q` would exit early and, under `pipefail`,
+  # turn rustup's SIGPIPE into a failure of this function.
+  if grep -qx "$target" <<< "$(rustup target list --installed 2>/dev/null)"; then
     return 0
   fi
   note "installing rust target: $target"

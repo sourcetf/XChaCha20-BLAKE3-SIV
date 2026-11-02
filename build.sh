@@ -3,6 +3,10 @@ set -euo pipefail
 
 cd "$(dirname "$0")"
 
+# Same PATH fix-up as verify.sh/check.sh/tools/*: rustup's shims live under
+# ~/.cargo/bin, which a non-login shell on this host does not have.
+export PATH="$HOME/.cargo/bin:$PATH"
+
 echo "=== XChaCha20-BLAKE3-SIV 构建脚本 ==="
 
 # 默认 release 构建

@@ -44,8 +44,10 @@ linker = "rust-lld"
 #     static-PIE link starts and then segfaults under qemu-user (measured both
 #     ways; the non-PIE binary runs).
 #
-# With those, all fourteen test binaries link, and twelve of them run under
-# `qemu-riscv64` in the loops below, which skip `timing-*` and `ctgrind-*`.
+# With those, all seventeen test executables link, and fifteen of them run under
+# `qemu-riscv64` in the loops below, which skip `timing-*` and `ctgrind-*` (the
+# count is `cargo test --no-run`'s `Executable` list; it moves as test files are
+# added, so the loop does not depend on the number).
 # `timing` does run when it is asked for by hand (3/3 in 383 s here) — the loop
 # skips it only because an emulated clock cannot resolve the differences it
 # measures — while `ctgrind` is the one binary that *cannot* run, for the same

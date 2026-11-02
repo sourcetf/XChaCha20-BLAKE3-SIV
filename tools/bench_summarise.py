@@ -153,6 +153,12 @@ def main():
                     pass_spreads.append((max(vals) - min(vals)) / statistics.median(vals))
     pass_spreads.sort()
     n = len(pass_spreads)
+    if n == 0:
+        # `statistics.median([])` and `pass_spreads[-1]` both raise, which reads as a
+        # crash of this script rather than "the run files carried no comparable cells".
+        print("  no pass-to-pass cells in the given files: nothing to summarise "
+              "(is the run directory the one tools/bench_3pass.sh wrote?)", file=sys.stderr)
+        return 3
     print(f"  {len(CONFIGS)*3*len(GROUPS)*len(SIZES)} reference measurements; "
           f"{n} pass-to-pass cells")
     print(f"  median spread {statistics.median(pass_spreads)*100:.1f}%   "
@@ -170,10 +176,16 @@ def main():
                 all_spreads.append((max(vals) - min(vals)) / statistics.median(vals))
     all_spreads.sort()
     n = len(all_spreads)
+    if n == 0:
+        print("  no cross-run cells to summarise in the given files", file=sys.stderr)
+        return 3
     print(f"  across all nine runs: median {statistics.median(all_spreads)*100:.1f}%   "
           f"p90 {all_spreads[min(n-1, int(0.9*n))]*100:.1f}%   "
           f"worst {all_spreads[-1]*100:.1f}%")
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    # `sys.exit(main())`: `main()` alone discarded the diagnostic status the empty-input
+    # checks above return, so the script exited 0 having printed nothing.
+    sys.exit(main())

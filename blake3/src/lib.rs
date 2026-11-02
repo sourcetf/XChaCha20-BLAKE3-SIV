@@ -456,14 +456,20 @@ impl Output {
     }
 
     fn root_hash(&self) -> Hash {
+        // A root compression's counter is the *output block counter*, and the first output
+        // block is block 0 -- not the node's chunk counter. `reference_impl`'s
+        // `Output::root_output_bytes` and the C library's `output_root_bytes` both use a
+        // counter starting at `seek / 64` and ignore the chunk counter, so the two numbers
+        // coincide only where the chunk counter is 0. That is the invariant upstream
+        // documented with `debug_assert_eq!(self.counter, 0)`. Passing `self.counter` here
+        // (as a local audit change once did) makes the deprecated
+        // `guts::ChunkState::new(k).finalize(true)` return a value no BLAKE3
+        // implementation agrees with, for every k != 0; see
+        // `test_root_hash_ignores_the_chunk_counter` in `test.rs`, which pins the
+        // reference behaviour against the KAT-verified `hash()`.
         let mut cv = self.input_chaining_value;
-        self.platform.compress_in_place(
-            &mut cv,
-            &self.block,
-            self.block_len,
-            self.counter,
-            self.flags | ROOT,
-        );
+        self.platform
+            .compress_in_place(&mut cv, &self.block, self.block_len, 0, self.flags | ROOT);
         Hash(platform::le_bytes_from_words_32(&cv))
     }
 

@@ -372,6 +372,56 @@ else
   echo "  ok: tools/stack_residue.sh -> exit 3 when its build cannot run"
 fi
 
+# 5b. The wrapper must pass the tool's *own* void-measurement status through, not flatten
+#     it into 3. The convention above is exit 4 = "the scan's positive control did not
+#     fire, so a PASS would be vacuous", and verify.sh treats 4 as a hard failure while 3
+#     is a skipped stage. A wrapper that allows only 0 and 1 rewrites 4 to 3, which
+#     reclassifies a blind probe as missing tooling and makes every `4)` branch in
+#     verify.sh and ci.yml dead code -- measured before this check existed. The stub below
+#     is a `cargo` whose `run` answers 4, which is exactly what the tool returns: the
+#     wrapper's mapping is the subject, so nothing needs to be built.
+make_exit4_home() {
+  local home="$WORK/home-exit4"
+  mkdir -p "$home/.cargo/bin"
+  cat > "$home/.cargo/bin/cargo" <<'STUB'
+#!/bin/sh
+case " $* " in
+  *" run "*) exit 4 ;;
+esac
+# `fetch --offline` and anything else: fail, so the wrapper takes its online path and
+# still reaches `cargo run`.
+exit 1
+STUB
+  chmod +x "$home/.cargo/bin/cargo"
+  printf '%s\n' "$home"
+}
+HOME_4="$(make_exit4_home)"
+set +e
+sr4_out="$(HOME="$HOME_4" PATH="$HOME_4/.cargo/bin:$PYTHON_BIN_DIR:/usr/bin:/bin" \
+           timeout 300 bash tools/stack_residue.sh 2>&1)"
+sr4_rc=$?
+set -e
+if [ "$sr4_rc" -eq 124 ]; then
+  echo "FAIL: tools/stack_residue.sh did not finish within 300 s under the exit-4 stub, so" >&2
+  echo "      the stub is not the cargo it used." >&2
+  fail=1
+elif [ "$sr4_rc" -ne 4 ]; then
+  echo "FAIL: tools/stack_residue.sh exited $sr4_rc when its program reported a void" >&2
+  echo "      measurement (4), expected 4. Mapping it to 3 turns 'the probe is blind, do" >&2
+  echo "      not trust a PASS' into 'the tooling is missing', which verify.sh records as a" >&2
+  echo "      skipped stage and CI reports as 'could not run'." >&2
+  printf '%s\n' "$sr4_out" | tail -3 | sed 's/^/      | /' >&2
+  fail=1
+elif printf '%s\n' "$sr4_out" | grep -q 'SKIPPED'; then
+  echo "FAIL: tools/stack_residue.sh exited 4 but printed the 'SKIPPED: could not run'" >&2
+  echo "      message, so the status and the reason disagree; 4 must pass through as a" >&2
+  echo "      void measurement, not as an infrastructure skip." >&2
+  printf '%s\n' "$sr4_out" | tail -3 | sed 's/^/      | /' >&2
+  fail=1
+else
+  echo "  ok: tools/stack_residue.sh -> exit 4 passes through (void measurement is not a skip)"
+fi
+
 # 6. `tools/cache_profile.sh --trace`'s determinism control must fire. The mode
 #    compares address traces, so two runs of the same input that differ mean the
 #    environment cannot hold a layout; without the control the mode compares two

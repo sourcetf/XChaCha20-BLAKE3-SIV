@@ -137,6 +137,15 @@ use core::sync::atomic::{AtomicUsize, Ordering};
 /// misaligned-start case — where the previous implementation began its chunked loop at
 /// the first aligned byte and left the prefix intact — is
 /// `zeroize_slice_clears_unaligned_window` below, which sweeps all eight offsets.
+///
+/// `unwind(40)` is sized against the `len` bound above: `len <= 25` is at most three
+/// 8-byte chunk stores (24 bytes) plus a 1-byte tail, so the chunk loop, the tail store
+/// loop and the verification loop each unroll far fewer than 40 times on a 64-bit target.
+/// The relationship is not decorative — if the `% 26` above is ever raised without raising
+/// this, CBMC's unwinding assertions report the truncated unrolling as a *failure* rather
+/// than letting the proof go through on a partial loop, so the two numbers cannot silently
+/// drift apart in the unsafe direction. (Raising `unwind` needs no corresponding change:
+/// the extra bound is simply unused.)
 #[kani::proof]
 #[kani::unwind(40)]
 fn zeroize_slice_clears_all_bytes() {
@@ -208,9 +217,12 @@ fn zeroize_array_clears_all_bytes() {
 /// "unwinding assertion loop 2" failure rather than a counterexample.  Nothing
 /// is lost by shrinking it: `off` still sweeps all eight misalignments and `len`
 /// still reaches 15, so a window with `off > 0` exercises the byte-prefix path
-/// and (when `len >= 8 + off`) at least one full `usize` chunk write. `len` is at
+/// and (when `len + off >= 16`) at least one full `usize` chunk write --
+/// `zeroize_raw` skips the `8 - off` bytes before the next alignment boundary, so
+/// the condition is on the aligned length, not on `len` alone (with `off = 1` a
+/// 9-byte window is one byte short of a chunk). `len` is at
 /// most 15 here, so at most **one** chunk store fits; the longer multi-chunk
-/// iteration is covered by `zeroize_slice_clears_all_bytes` (lengths 0..=79) and by
+/// iteration is covered by `zeroize_slice_clears_all_bytes` (lengths 0..=25) and by
 /// the 24-byte windows of `test_zeroize_covers_unaligned_prefix` in `lib.rs`, not here.
 #[kani::proof]
 #[kani::unwind(24)]
@@ -303,10 +315,13 @@ fn stub_chacha20_block_into(key: &[u8; 32], counter: u32, nonce: &[u8; 12], out:
 ///
 /// Zeroization is *not* left unverified: `zeroize_slice_clears_all_bytes`,
 /// `zeroize_array_clears_all_bytes` and `zeroize_slice_clears_unaligned_window` below
-/// exercise the real implementation directly. The array harness covers the
-/// production-representative types (`[u8; 12]`, `[u8; 32]`, `[u8; 44]`, `[u8; 65]`,
-/// `[u32; 16]`); the slice harness covers lengths 0..=79, including multi-chunk and tail
-/// stores. What none of them prove is that a *call site* is present -- `tests/security.rs`'s
+/// exercise the real implementation directly. The array harness covers five
+/// production-representative sizes (`[u8; 12]`, `[u8; 32]`, `[u8; 44]`, `[u8; 65]`,
+/// `[u32; 16]`); the crate also instantiates `[u8; 64]` (`chacha20_block_into`'s
+/// `blocks`) and `[u8; 73]` (`derive_enc`'s input), which those five sizes cover
+/// size-wise -- the harness is a proof over *lengths*, so 65 plus the tail stores
+/// already says what 73 would. The slice harness covers lengths 0..=25, including
+/// multi-chunk and tail stores. What none of them prove is that a *call site* is present -- `tests/security.rs`'s
 /// exact source-shape counts are the device for that.
 fn noop_zeroize_array<T>(_value: &mut T) {}
 

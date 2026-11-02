@@ -138,15 +138,6 @@ def main(argv=None):
                     f"shard {r.get('shard')} ({label}) carries no valid offsets_sha256: the "
                     "report is not bound to the bytes it swept, so its numbers are unverifiable"
                 )
-        digests = {
-            (label, cfg.get("offsets_sha256"))
-            for label, cfg in r.get("configs", {}).items()
-            if cfg.get("offsets_sha256")
-        }
-        if len(digests) > 1:
-            # The three configurations sweep different regions, so their digests differ;
-            # two shards sharing one is only a finding if the *same* label does.
-            pass
     # Two shards with the same (label, digest) swept identical byte sets, which the
     # partition makes impossible: one report was copied from another (or one shard never
     # ran and its numbers were duplicated).

@@ -422,3 +422,146 @@ fn hash_many_counter_wraps_at_u64_max() {
         }
     }
 }
+
+/// The vendored fork must be reached through a `path` dependency edge, not resolved from
+/// crates.io under the same name and version.
+///
+/// `build.rs` guards the *output* of `cargo package` by requiring `blake3/Cargo.toml` to
+/// exist. That check cannot see the other failure mode: dropping `path = "blake3"` from the
+/// dependency leaves the directory in the tree, so the guard passes and `cargo build`
+/// silently links unpatched registry BLAKE3 1.8.7. Measured on this tree: with both `path`
+/// keys removed, `cargo build --offline` succeeds (`Compiling blake3 v1.8.7`, no path
+/// suffix) and only the tests in this file fail -- a run that selects other targets, or a
+/// consumer that runs only its own tests, would not notice.
+///
+/// The manifest is parsed structurally rather than substring-matched, because a
+/// `path = "blake3"` inside a comment or a reformatted inline table must not satisfy the
+/// check -- the same reason `build.rs` moved away from substring matching. Negative
+/// controls: deleting either `path = "blake3"`, changing its value, or moving the entry to
+/// a non-dependency section all fail here.
+#[test]
+fn the_vendored_fork_is_wired_in_by_path() {
+    let manifest = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml"),
+    )
+    .expect("the parent manifest must be readable");
+
+    let entries = dependency_entries(&manifest);
+    let blake3: Vec<&(String, String, String)> = entries
+        .iter()
+        .filter(|(_, key, _)| key == "blake3")
+        .collect();
+    assert_eq!(
+        blake3.len(),
+        2,
+        "expected exactly two `blake3` dependency entries (normal + dev); found {}. All \
+         entries: {entries:?}",
+        blake3.len()
+    );
+    for (section, _, value) in &blake3 {
+        assert_eq!(
+            inline_value(value, "path").as_deref(),
+            Some("blake3"),
+            "the `blake3` entry in [{section}] is missing `path = \"blake3\"` (value: \
+             `{value}`). Without it the build resolves crates.io BLAKE3 1.8.7 and every fix \
+             in `blake3/PATCHES.md` is silently absent."
+        );
+    }
+
+    let fork_manifest = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("blake3/Cargo.toml"),
+    )
+    .expect("the vendored fork manifest must be readable");
+    assert!(
+        fork_manifest.contains("publish = false"),
+        "the vendored fork must stay unpublishable (`publish = false`), or a release of this \
+         patched tree could be published under upstream's name and version"
+    );
+}
+
+/// `(section, key, value)` for every `key = value` entry in a dependency section of a
+/// Cargo manifest, following the section header that governs it and joining continuation
+/// lines of a multi-line inline table.
+fn dependency_entries(manifest: &str) -> Vec<(String, String, String)> {
+    fn is_dependency_section(name: &str) -> bool {
+        name == "dependencies"
+            || name == "dev-dependencies"
+            || name == "build-dependencies"
+            || name.ends_with(".dependencies")
+            || name.ends_with(".dev-dependencies")
+            || name.ends_with(".build-dependencies")
+    }
+
+    let mut section = String::new();
+    let mut out = Vec::new();
+    let mut pending: Option<(String, String)> = None;
+    let mut depth = 0i32;
+
+    for raw in manifest.lines() {
+        let line = raw.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        if let Some((_key, value)) = pending.as_mut() {
+            value.push(' ');
+            value.push_str(line);
+            depth += opening_brackets(line) - closing_brackets(line);
+            if depth <= 0 {
+                let (key, value) = pending.take().expect("checked above");
+                if is_dependency_section(&section) {
+                    out.push((section.clone(), key, value));
+                }
+            }
+            continue;
+        }
+        if line.starts_with('[') {
+            section = line.trim_matches(['[', ']']).trim().to_string();
+            continue;
+        }
+        let Some((key, value)) = line.split_once('=') else {
+            continue;
+        };
+        let (key, value) = (key.trim().to_string(), value.trim().to_string());
+        depth = opening_brackets(&value) - closing_brackets(&value);
+        if depth <= 0 {
+            if is_dependency_section(&section) {
+                out.push((section.clone(), key, value));
+            }
+        } else {
+            pending = Some((key, value));
+        }
+    }
+    out
+}
+
+fn opening_brackets(s: &str) -> i32 {
+    s.matches(['{', '[']).count() as i32
+}
+
+fn closing_brackets(s: &str) -> i32 {
+    s.matches(['}', ']']).count() as i32
+}
+
+/// The string value of `key` in an inline table such as `{ version = "1", path = "blake3" }`.
+/// The key has to start at a delimiter so `apathetic = "x"` cannot answer for `path`.
+fn inline_value(table: &str, key: &str) -> Option<String> {
+    let mut from = 0usize;
+    while let Some(i) = table[from..].find(key) {
+        let at = from + i;
+        let starts_word =
+            at == 0 || matches!(table.as_bytes()[at - 1], b' ' | b',' | b'{' | b'(' | b'\t');
+        let rest = table[at + key.len()..].trim_start();
+        if starts_word {
+            if let Some(rest) = rest.strip_prefix('=') {
+                let rest = rest.trim_start();
+                if let Some(rest) = rest.strip_prefix('"') {
+                    if let Some(end) = rest.find('"') {
+                        return Some(rest[..end].to_string());
+                    }
+                }
+            }
+        }
+        from = at + key.len();
+    }
+    None
+}

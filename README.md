@@ -680,8 +680,10 @@ agreement in rejects. It is not two physically independent machines: same CPU, s
 compiler, same source file tree, so a *systematic* fault (a compiler bug, a wrong constant
 in both implementations, a fault that hits both code paths in one glitch) is still outside
 what this can see. What it does not share, and what makes it worth its price on a large
-message — 6.3x at 64 KiB and 9.2x at 1 MiB on decryption, measured against `ultra` minus the
-witness above — is the *machine code that computes the tag*.
+message — **11.0x at 64 KiB and 12.4x at 1 MiB on decryption**, measured against `ultra`
+minus the witness above and re-measured after the residue-wipe pass (`performance.md` is the
+source; the 6.3x/9.2x pair quoted above is the older reading of the same measurement) — is
+the *machine code that computes the tag*.
 
 **`encrypt_in_place_detached` has no encrypt-side cross-check, and that asymmetry is now stated
 rather than implied.** The earlier revision of this paragraph said "on every encrypt", which was
@@ -1191,10 +1193,11 @@ dependent crate:
 - **Safe-API hardening.** `Platform` is an opaque struct over a private enum in this
   fork, so safe code can no longer name an ISA its CPU lacks; `hash_many` rejects a
   short `out` and a non-block input length in release; `guts::ChunkState::update`
-  rejects more than one chunk; `Output::root_hash` uses its counter; and `copy_wide`'s
-  stack buffer is 16 KiB instead of 64 KiB. The fork also vendors upstream's
-  `reference_impl` and test vectors, so its own 44 default-feature tests and 13 doctests
-  run in CI (45 unit tests with `zeroize`; the source also has feature-gated tests).
+  rejects more than one chunk; `Output::root_hash` drives a root compression from the
+  output-block counter (0 for the first block), not the node's chunk counter; and
+  `copy_wide`'s stack buffer is 16 KiB instead of 64 KiB. The fork also vendors upstream's
+  `reference_impl` and test vectors, so its own 45 default-feature tests and 13 doctests
+  run in CI (46 unit tests with `zeroize`; the source also has feature-gated tests).
 
 The C library is patched too: `blake3/c/blake3_dispatch.c` keeps only complete SIMD
 groups on the AVX2/AVX-512 kernels and sends tails to SSE/portable, the unix compress

@@ -4619,6 +4619,7 @@ _blake3_xof_many_avx512:
 2:
         test   r10,0x2
         je     2f
+        movzx edx,dl
         vbroadcasti128 ymm0,XMMWORD PTR [rdi]
         vbroadcasti128 ymm1,XMMWORD PTR [rdi+0x10]
         vmovd  xmm13,DWORD PTR [rsp]
@@ -4718,6 +4719,7 @@ _blake3_xof_many_avx512:
 2:
         test   r10,0x1
         je     9b
+        movzx edx,dl
         vmovdqu xmm0,XMMWORD PTR [rdi]
         vmovdqu xmm1,XMMWORD PTR [rdi+0x10]
         vmovd  xmm14,DWORD PTR [rsp]

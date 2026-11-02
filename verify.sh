@@ -879,7 +879,13 @@ if [ "$RUN_TSAN" -eq 1 ]; then
   # `--toolchain` answers for the default toolchain, so a machine with rust-src
   # only on stable would pass this guard and then fail the build.
   if cargo +nightly --version >/dev/null 2>&1 && grep -E '^rust-src' >/dev/null <<< "$(rustup component list --installed --toolchain nightly 2>/dev/null)"; then
-    tools/tsan.sh
+    # Through `run_tool`, like every other script stage: calling `tools/tsan.sh`
+    # directly meant its exit 3 ("the control could not run here") propagated out of
+    # verify.sh as a bare `3`, aborting the run mid-stage with no SKIPPED record --
+    # which contradicts the "exit 3 is a skipped stage" contract this script documents
+    # at the top and uses everywhere else. `run_tool` maps 3/127 to skip and anything
+    # else to FAILED.
+    run_tool "ThreadSanitizer" tools/tsan.sh
   else
     skip "ThreadSanitizer" "needs the nightly toolchain and rust-src (rustup component add rust-src)"
     echo "           rustup component add rust-src"
@@ -1221,10 +1227,14 @@ if [ "$RUN_KANI" -eq 1 ]; then
     skip "Kani" "$1"
     exit 3
   }
-  # `grep -c` prints 0 and exits 1 when it matches nothing, hence `|| true`; a
-  # missing or unreadable file leaves the variable empty, and an empty string is
-  # reported as unparseable below rather than read as a count of zero.
-  kani_harnesses="$(grep -c '^[[:space:]]*#\[kani::proof\]' src/proofs.rs 2>/dev/null || true)"
+  # The count comes from the *same parser* the Formal job's shard matrix is planned with
+  # (`tools/kani_shards.py --count`), not a second line-anchored regex here. The regex this
+  # replaced missed legal spellings the parser accepts -- `#[kani::unwind(9)]` on the line
+  # above `#[kani::proof]`, `# [kani :: proof ]` -- so it could report a *smaller* count
+  # than the parser and fail the stage for a formatting choice, contradicting the parser's
+  # own documented rule. An unreadable file or a parser error leaves the variable empty,
+  # which is reported as unparseable below rather than read as a count of zero.
+  kani_harnesses="$("$PYTHON" tools/kani_shards.py --count 2>/dev/null || true)"
   kani_required="$(sed -n 's/^COMMITTED_HARNESSES=\([0-9][0-9]*\)$/\1/p' tools/check_kani_cfg.sh 2>/dev/null)"
   echo "harness count: ${kani_harnesses:-?} #[kani::proof] attribute(s) in src/proofs.rs;" \
        "requirement: ${kani_required:-?} (tools/check_kani_cfg.sh)"

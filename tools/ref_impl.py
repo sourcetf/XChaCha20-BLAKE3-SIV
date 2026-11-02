@@ -257,6 +257,14 @@ def _official_input(n):
 
 
 def self_check():
+    # Everything below is an `assert`, and `python -O` (or PYTHONOPTIMIZE) removes asserts
+    # entirely: the script would then print PASS having compared nothing. `__debug__` is
+    # False exactly in that mode, and this test is a real `if`, so it survives.
+    if not __debug__:
+        raise RuntimeError(
+            "ref_impl.self_check() was imported under python -O/PYTHONOPTIMIZE, which strips "
+            "the assertions this function is made of; re-run without -O"
+        )
     # RFC 8439 §2.3.2 ChaCha20 block function.
     key = bytes(range(0x00, 0x20))
     nonce = bytes.fromhex("000000090000004a00000000")

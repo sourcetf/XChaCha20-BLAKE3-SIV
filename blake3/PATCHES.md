@@ -22,12 +22,20 @@ Packaging differences from the published archive:
   `f3149ec5bb5449af877ba20377a11008ff499fa2` (the commit named by the published
   `.crate`). They restore the published crate's missing test dev-dependency
   (`reference_impl`) and the C test vectors, so the fork's own suite can run.
+- `c/cmake/BLAKE3/{Utils,Examples,Testing,ContinuousIntegration}.cmake` are byte-identical
+  to the published archive's copies. They had been deleted from this tree (the whole
+  `c/cmake/` directory was absent), which made `cmake -S c -B <dir>` fail at
+  `CMakeLists.txt:32` with `include could not find requested file: BLAKE3/Utils` — so the
+  `ci.yml` step that *expects* CMake to refuse big-endian NEON instead got a configure
+  error for an unrelated reason and the guard was never actually exercised. Restored, a
+  plain configure succeeds and `-DBLAKE3_BIG_ENDIAN=ON -DBLAKE3_SIMD_TYPE=neon-intrinsics`
+  fails with the intended message.
 
 | Report ID | File(s) | Change |
 | --- | --- | --- |
 | D-01 (Medium) | `src/platform.rs` | `Platform::hash_many` sends complete SIMD groups to the widest kernel; on AVX-512 an 8..=15-input tail peels one safe 8-wide `hash8` group, and the final 1..=7 inputs use the 4-wide SSE2/SSE4.1 kernels (portable elsewhere). The AVX2/AVX-512 2/4-wide tail loads at +16/+32/+48 cross the end of the **last 64-byte block of any input** (the guard-page reproducer used `n=2` on AVX512; the 16-byte SSE and AVX-512 8-wide loads end exactly at +64). Empty input is a no-op. The first fix sent every tail to `portable::hash_many`; that was safe but made 4 KiB keyed BLAKE3 ~3.3x slower (an audit measured it), so the tail now uses the safe SIMD kernels. The AVX2 tail falls back to portable if SSE4.1 is absent, so an explicit `Platform::avx2()` cannot execute an unsupported SSE4.1 instruction. |
 | C library D-01 (Medium) | `c/blake3_dispatch.c` | The C API used to pass arbitrary `num_inputs` to the AVX2/AVX-512 kernels, selecting their over-reading 2/4-wide tails. It now keeps only complete SIMD groups (16 AVX-512, 8 AVX2) on those kernels, routes 4-wide remainders to SSE, and sends 1..3 to SSE/portable. Checked against Python BLAKE3 for every CPU-feature mask, 0..2048 bytes. |
-| C library D-03 (Low) | `c/blake3_sse2_x86-64_unix.S`, `c/blake3_sse41_x86-64_unix.S`, `c/blake3_avx512_x86-64_unix.S` | Zero-extend the narrow `block_len`/`flags` arguments (`movzx`) before packing or broadcasting them. Normal C/Rust callers already zero-extend; this removes the hand-written-FFI ABI hazard too. |
+| C library D-03 (Low) | `c/blake3_sse2_x86-64_unix.S`, `c/blake3_sse41_x86-64_unix.S`, `c/blake3_avx512_x86-64_unix.S` | Zero-extend the narrow `block_len`/`flags` arguments (`movzx`) before packing or broadcasting them. Normal C/Rust callers already zero-extend; this removes the hand-written-FFI ABI hazard too. The first pass covered the single-block compress and the wide `hash_many`/`xof_many` prologues but missed the 2-wide and 1-wide `xof_many` tails, which kept `edx` (a 32-bit register whose upper bits are ABI-undefined on entry) and `r8d` unzeroed; the second pass added `movzx edx,dl` and `movzx r8d,r8b` there. Verified by `objdump -d` (five `movzx edx,dl` sites, eight `movzbl %dl,%edx` instructions after assembly) and by `make test` / `make test_asm`. |
 | C library hygiene | `c/CMakeLists.txt`, `c/blake3_avx2.c` | Reject NEON on big-endian targets (`TestBigEndian`), use `list(APPEND ...)` for the C++20 flags, and type the AVX2 `storeu` destination as 32 bytes. |
 | D-02 (Low) | `src/platform.rs` | Multi-block `xof_many` uses the documented `compress_xof` loop instead of unix AVX-512 assembly that does not zero-extend `block_len`/`flags`. Single-block output is unchanged. |
 | Parent audit D1 (Medium) | `src/platform.rs` | A non-multiple-of-64 `xof_many` output (1..=63 bytes) is computed with `compress_xof` and copied as a prefix. The single-block AVX-512 path wrote a full 64-byte block in release (up to 63 bytes past the caller's slice), where the `debug_assert` was compiled out. The same prefix calculation also fixes the under-write the audit found for 65..=127-byte outputs (134 of 137 non-multiples). |
@@ -36,8 +44,10 @@ Packaging differences from the published archive:
 | D-06 (Low) | `src/lib.rs` | `OutputReader::position` uses saturating arithmetic at the end of the addressable stream. |
 | V-03 (Low, debug) | `src/portable.rs`, `src/rust_sse2.rs`, `src/rust_sse41.rs`, `src/rust_avx2.rs`, `src/wasm32_simd.rs`, `src/platform.rs`, `src/lib.rs` | `hash_many`/`xof_many` and `OutputReader::fill`/`fill_one_block` use wrapping counter increments. `counter += 1` panicked in debug at `u64::MAX` while the assembly kernels wrapped silently. |
 | D-09 (Medium, safety) | `src/platform.rs` | `Platform` is now an opaque struct over a private implementation enum. Upstream exposes the enum variants publicly, so safe code could pass `Platform::AVX512` to a safe method on a CPU without AVX-512 and execute an unsupported instruction. The checked constructors (`detect`, `portable`, `sse2`, `sse41`, `avx2`, `avx512`, `neon`, `wasm32_simd`) are unchanged in name, and the parent's use of `detect()` is unaffected. The enum-to-struct change is a deliberate API break for the doc-hidden benchmark interface; code that matched on `Platform::AVX512` must use the checked constructors instead. |
-| Safe-API length checks | `src/platform.rs`, `src/lib.rs` | `Platform::hash_many` now asserts that `N` is a whole number of 64-byte blocks and that `out.len() >= inputs.len() * 32`. Both were `debug_assert!`/documentation-only, so a safe caller with a short `out` could trigger an out-of-bounds write in release. The deprecated `guts::ChunkState::update` rejects input longer than its remaining 1024-byte chunk, and `Output::root_hash` uses `self.counter` like `root_output_block` instead of hard-coding zero. |
+| Safe-API length checks | `src/platform.rs`, `src/lib.rs` | `Platform::hash_many` now asserts that `N` is a whole number of 64-byte blocks and that `out.len() >= inputs.len() * 32`. Both were `debug_assert!`/documentation-only, so a safe caller with a short `out` could trigger an out-of-bounds write in release. The deprecated `guts::ChunkState::update` rejects input longer than its remaining 1024-byte chunk. |
+| Parent audit D2-01 (Low) | `src/lib.rs`, `src/test.rs` | `Output::root_hash` keeps using output-block counter **0** rather than `self.counter`. A local audit change once "unified" it with `root_output_block` (which passes `self.counter`); that is wrong for a root, and it silently changed the value returned by the deprecated `guts::ChunkState::new(k).finalize(true)` for every k != 0. Both the upstream Rust `reference_impl::Output::root_output_bytes` and the C library's `output_root_bytes` drive the root compression from an output-block counter that starts at `seek / 64` and ignore the chunk counter, so for a root the chunk counter must be 0 -- upstream said so with `debug_assert_eq!(self.counter, 0)`. `test_root_hash_ignores_the_chunk_counter` pins `ChunkState::new(k).finalize(true) == hash(input)` for k in {0,1,2,7,2^32,u64::MAX}, against the KAT-verified `hash()`; the negative control (restoring `self.counter`) fails it. `root_output_block`/`OutputReader` are unaffected: every root they see has counter 0, and the reader's counter is the output-block counter, which is 0 for the first block. |
 | Small-stack DoS | `src/io.rs` | `copy_wide`'s stack buffer is 16 KiB instead of 64 KiB, so a safe `update_reader` call cannot require 64 KiB of thread stack. |
+| Test build hygiene | `c/Makefile.testing` | The `test` and `test_asm` targets built through `all`/`asm` with the sanitizer flags only appended in a prerequisite; a plain `make` earlier in the same tree left un-sanitized objects that the timestamp check considered current, so `test.py` ran against a binary without ASan/UBSan. Both targets now invoke a recursive `$(MAKE) -f Makefile.testing -B` with the sanitizer `CFLAGS` (forced rebuild), set `UBSAN_OPTIONS`/`ASAN_OPTIONS` to halt on the first report, and are `.PHONY` so `clean`/`test` are always run. `test.py` is invoked with `python3` rather than the executable bit. CI (`ci.yml`'s `blake3-c` job) runs both. |
 
 Regression tests live in the parent, `tests/blake3_fork_equivalence.rs`: `hash_many`
 against portable on every backend the host can execute (portable, SSE2, SSE4.1, AVX2,
@@ -56,10 +66,13 @@ The fork's own upstream suite can also be run now:
 cargo test --manifest-path blake3/Cargo.toml
 ```
 
-It includes the per-backend `hash_many`/`xof_many`/compression tests, the upstream
-reference implementation comparison, and the C test vectors. CI runs it in a dedicated
-job; the parent's equivalence tests remain the primary guard for the tail fix because
-they run on the parent's actual feature set.
+It includes the per-backend `hash_many`/`xof_many`/compression tests and the upstream
+reference implementation comparison. It does **not** read `test_vectors/`: those are the
+C library's vectors, consumed by `c/test.py`, which CI runs separately through
+`make -f Makefile.testing test` and `test_asm` (`ci.yml`'s `blake3-c` job). An earlier
+revision of this paragraph attributed them to the Rust suite. The parent's equivalence
+tests remain the primary guard for the tail fix because they run on the parent's actual
+feature set.
 
 Throughput after the D-01 routing is back within the registry build at
 1 KiB/16 KiB/64 KiB/1 MiB; the 4 KiB cell is about 10-20% behind the registry depending

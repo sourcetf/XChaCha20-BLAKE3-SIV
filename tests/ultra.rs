@@ -537,23 +537,30 @@ fn dual_mac_is_wired_into_both_decrypt_paths() {
          `let recomputed_tag = ...` after `derive_tag` discards the independent value \
          while every comparison below still reads a variable with the right name"
     );
-    // `recomputed_tag =` does not see a method write. `recomputed_tag.copy_from_slice(
-    // &computed_tag)` (or `fill`, `clone_from_slice`, a raw-pointer store) replaces the
-    // independent recomputation with the stored tag while every count above stays put.
-    for write in [
-        "recomputed_tag.copy_from_slice",
-        "recomputed_tag.clone_from_slice",
-        "recomputed_tag.fill",
-        "&mut recomputed_tag as",
-        "&recomputed_tag as",
-        "recomputed_tag.as_mut_ptr",
-    ] {
-        assert_eq!(
-            body.matches(write).count(),
-            0,
-            "`{write}` can rewrite the independent recomputation after `derive_tag`; the \
-             second gate would then compare the stored tag with itself while every \
-             comparison count above stays true"
+    // `recomputed_tag =` does not see a write through any other shape. The earlier version
+    // of this check was a *blocklist of spellings* (`recomputed_tag.copy_from_slice`,
+    // `.fill`, `.as_mut_ptr`, `&mut recomputed_tag as`), which an adversarial pass walked
+    // straight past with `recomputed_tag[..].copy_from_slice(&computed_tag);` -- the `[..]`
+    // sits between the identifier and the method name, so no listed substring appears, and a
+    // subsequent copy-to-`computed_tag` makes the second gate compare the stored tag with
+    // itself. The shape is judged instead: after the binding, every use of the identifier
+    // must be a read (`.ct_eq(`), the binding itself, or the wipe's argument.
+    for (at, _) in body.match_indices("recomputed_tag") {
+        let after = body[at + "recomputed_tag".len()..].trim_start();
+        let allowed = after.starts_with("= derive_tag(")
+            || after.starts_with(".ct_eq(")
+            // The wipe: `crate::zeroize_array(&mut recomputed_tag);`
+            || after.starts_with(')');
+        assert!(
+            allowed,
+            "`recomputed_tag` is used in a shape that is not the `derive_tag` binding, a \
+             `.ct_eq(` read or the wipe's argument: `recomputed_tag{}`. A write through any \
+             other shape (indexing, `iter_mut`, a raw pointer, `fill`) replaces the \
+             independent recomputation with the stored tag, and the second gate then \
+             compares the stored tag with itself -- the exact rewritten-stored-tag fault \
+             the recomputation exists to catch -- while every count above stays true.",
+            &body[at + "recomputed_tag".len()
+                ..at + "recomputed_tag".len() + 40.min(body.len() - at - "recomputed_tag".len())]
         );
     }
     // Two, and the count is exact rather than "at least": one comparison of each kind per

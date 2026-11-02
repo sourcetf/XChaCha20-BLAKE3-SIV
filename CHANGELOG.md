@@ -28,7 +28,9 @@ hygiene hardening and doc corrections.
   added.
 - **Kani proof gaps.** `zeroize_array` is now proved over the production array types
   (`[u8; 12]`, `[u8; 32]`, `[u8; 44]`, `[u8; 65]`, `[u32; 16]`) and `zeroize_slice` over
-  lengths 0..=79 (multi-chunk and tail); the concrete tag harnesses and the tag KAT use a
+  lengths 0..=25 (multi-chunk and tail; the bound is 25 rather than a larger value because
+  CBMC ran out of memory at 79 on the CI-sized runner, and 25 still crosses two `usize`
+  chunk boundaries); the concrete tag harnesses and the tag KAT use a
   **non-uniform** 24-byte nonce, so a regression that used one nonce byte for all 24 fails
   them. Stale comments claiming a `nz != 0`/tag-byte comparison were removed.
 - **Hygiene hardening.** `zeroize_array` is bounded by a private `ZeroizePlain` trait
@@ -59,6 +61,113 @@ hygiene hardening and doc corrections.
   duplicate-version note was corrected; the fuzz target's split-selector comment no longer
   implies the >65535 region is reachable; `criterion`/`proptest` dev-dependencies drop their
   unused default/short features (the lock loses `rayon`, `plotters`, `bit-set` and friends).
+
+### AUDIT-REPORT-5 follow-up (lands after `d1d261d`)
+
+No wire-format bytes changed and the AEAD behaviour is identical. This round is about the
+*recognition power of the verification device*: the audit's five findings were all in guards
+or their documentation, not in the construction.
+
+- **Wipe guards judge reachability, not spelling (high).** The constant-false /
+  closure guards in `tests/security.rs` recognised only `black_box(false)`, `if false` and
+  `while false` literally, so five equivalent forms kept the entire six-configuration matrix,
+  `cargo fmt --check` and `cargo clippy -D warnings` green while the wipe never ran:
+  `if 1u8 == 2u8 { … }`, `match 0u8 { 1 => { … }, _ => {} }`, `for _ in 0..0u8 { … }`,
+  `let _dead = || { … };`, and the same closure under `black_box`. `constant_false_enclosing_block`
+  now decides from the enclosing block's *head* — a constant condition evaluated by
+  `constant_condition_value` (literals, `!`, `cfg!(…)`, `==`/`!=` between literals), a
+  literal `match` scrutinee, an empty `for` range, or a head ending in `|` (a closure body) —
+  and `top_level_count` no longer counts statements inside a closure body, which is one
+  brace deep and used to read as a top-level statement. `primitive_wipe_sites_have_a_witness`
+  and `simd_kernels_wipe_their_key_state` route through the same scan, and every entry-point
+  and site body is also scanned for the wipe primitives its table does not name (which is
+  what covers `crate::scrub_stack()`). Each of the five shapes was re-injected as a negative
+  control and is now caught; `tools/mutation_check.sh` gained a `wipes` row that injects the
+  closure form and requires `--test security` to catch it.
+- **The void-measurement status reaches its callers (medium).** `tools/stack_residue.sh`
+  grew `exit 4` after an earlier round, but its own wrapper allowed only 0 and 1 through and
+  rewrote 4 to 3, so `verify.sh` and `ci.yml`'s `4)` branches were dead code and a blind probe
+  was reported as "could not run" (a skipped stage) rather than "the measurement is void".
+  The wrapper now whitelists `0|1|4`, and `tools/gate_selftest.sh` check 5b drives it with a
+  stub `cargo run` that exits 4 and fails if the status comes back as anything but 4.
+- **`build.rs` checks the dependency edge, not only the directory (low).** Existence of
+  `blake3/Cargo.toml` does not cover a manifest that drops `path = "blake3"` while leaving
+  the tree in place: measured, `cargo build --offline` then linked crates.io BLAKE3 1.8.7 and
+  only `blake3_fork_equivalence` noticed. `build.rs` now parses `[dependencies]` /
+  `[dev-dependencies]` and requires `path = "blake3"` on every `blake3` entry (structurally,
+  so a comment cannot satisfy it), and
+  `tests/blake3_fork_equivalence::the_vendored_fork_is_wired_in_by_path` asserts the same
+  property (plus `publish = false` on the fork) with the missing-`path` mutation as its
+  negative control.
+- **Doc numbers corrected.** Three places said the `zeroize_slice` proof covers lengths
+  `0..=79`; the harness is `kani::any::<u8>() % 26`, i.e. `0..=25` (CBMC ran out of memory at
+  79 on the CI-sized runner). `src/proofs.rs` and `CHANGELOG.md` now say `0..=25` and keep
+  the reason. The `unwind(40)` bound is documented against that length (≤3 chunk stores plus
+  a tail), including that a future raise of the length bound fails the unwinding assertions
+  rather than silently truncating the proof.
+- **`Output::root_hash` keeps output-block counter 0**, not the node's chunk counter: both
+  the upstream reference implementation and the C library drive the root compression from an
+  output-block counter starting at `seek / 64`, so passing `self.counter` (a local change an
+  earlier round made) returned a value no implementation agrees with for the deprecated
+  `guts::ChunkState::new(k).finalize(true)` at `k != 0`.
+  `blake3/src/test.rs::test_root_hash_ignores_the_chunk_counter` pins
+  `ChunkState::new(k).finalize(true) == hash(input)` for `k ∈ {0,1,2,7,2^32,u64::MAX}`. The
+  fork's own suite is therefore 45 default-feature tests + 13 doctests (46 + 13 with
+  `zeroize`), one more than the 44/45 quoted in the earlier entries below.
+
+### Round-7 line-by-line re-scan (same working tree)
+
+No wire-format bytes changed. Findings from a second line-by-line pass over `src/`,
+`tests/`, `tools/`, the workflows and the docs; the ones that mattered were in the
+verification device again.
+
+- **The wipe guards now judge reachability, not spelling** (see the entry above): constant
+  conditions are evaluated (`&&`/`||` with a forcing operand, `==`/`!=`, the ordering
+  operators, `!`, `cfg!(…)`), a literal `match` scrutinee, an empty `for` range, a closure
+  body and a constant-selected `else` branch are all rejected, and a comparison operand the
+  scanner blanked (a char literal) is rejected rather than assumed live. Ten injected
+  deadening shapes were confirmed caught, and a legitimate non-constant condition was
+  confirmed *not* rejected, before and after each change.
+- **`ultra`'s independent recomputation is pinned structurally.** The guard against
+  rewriting `recomputed_tag` was a blocklist of method names; `recomputed_tag[..]
+  .copy_from_slice(&computed_tag);` walked past it and made the second gate compare the
+  stored tag with itself. Every use of the identifier must now be the `derive_tag` binding,
+  a `.ct_eq(` read or the wipe's argument.
+- **No local `ct_eq` may shadow the constant-time comparison.** A trait or inherent impl
+  providing `fn ct_eq(…)` for `[u8; TAG_LEN]` would make `ultra`'s witness agreement a
+  constant while every text pin stayed true; the crate's own sources must contain no
+  `fn ct_eq(`, no `impl ConstantTimeEq`.
+- **`locked`'s per-mapping check can no longer degrade silently.** The probe that decides
+  whether `/proc/self/smaps` is informative could fail to lock its own page under a tight
+  `RLIMIT_MEMLOCK`, which was read as "this channel says nothing" and fell back to the
+  process-wide `VmLck` delta -- satisfied by a lock on a decoy buffer. The probe is a
+  tri-state and "could not probe" is now a loud failure, verified at `ulimit -l 4`.
+- **`tests/timing.rs`'s presence guard is anchored to definitions.** It searched its own
+  file for the screen names, which its own literal array satisfied, so deleting or renaming
+  a screen left it green (`cargo test --test timing -- --list` in CI was the only other
+  detector). It now requires a column-0 `fn <name>(` definition; renaming a screen fails it.
+- **Kani: a harness outside `src/proofs.rs` is refused.** The count, the shard matrix and
+  both gates read `proofs.rs` only, so a `#[kani::proof]` elsewhere would never be planned;
+  `tools/check_kani_cfg.sh` now rejects that shape (demonstrated on a scratch copy), and
+  `verify.sh` reads its harness count from `tools/kani_shards.py --count` instead of a second
+  line-anchored regex that rejected legal spellings.
+- **Tooling.** `tools/stack_residue.sh` rejects more than one argument (it silently used
+  only the first); `tools/{tsan.sh,check.sh}` use here-strings instead of `rustup | grep -q`,
+  whose SIGPIPE under `pipefail` could fail a passing check; `tools/ref_impl.py` refuses to
+  run under `python -O` (its self-checks are asserts, which `-O` strips); `gen_test_vectors.py`
+  reports a missing `blake3` as exit 3 rather than a traceback; `bench_summarise.py` exits
+  non-zero on empty input instead of raising; `build.sh` puts `~/.cargo/bin` on `PATH` like
+  every other script; a dead no-op block left `tools/fi_instruction_verdict.py`.
+- **Fuzzing.** The corpus is cached in CI (it is gitignored, so coverage never accumulated
+  across runs), and every rejection assertion now requires `Error::AuthenticationFailed`
+  rather than `is_err()`, so a wrong-variant-on-tag-failure regression is visible.
+- **Docs.** The dependency count (`85`, was `107`), the test-binary count (`17` link, `15`
+  run), the witness's current decryption cost (`11.0x`/`12.4x`, matching `performance.md`,
+  not the older `6.3x`/`9.2x`), the `lock_range` rollback's DODUMP caveat, `Plaintext::drop`'s
+  `try_reserve_exact` wording, the `zeroize_slice` chunk-store bound and the array-type list
+  in `src/proofs.rs`, the `variable_latency.rs` vs `every_source_file_is_accounted_for`
+  attribution, and the Cargo.toml note about `blake3::platform` (the library does not call it;
+  `examples/blake3_guard_probe.rs` deliberately does).
 
 ### AUDIT-REPORT-3 follow-up (`2cf40cc`)
 
