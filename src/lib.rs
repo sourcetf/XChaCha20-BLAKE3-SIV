@@ -2587,7 +2587,10 @@ unsafe fn zeroize_raw(ptr: *mut u8, len: usize) {
 /// therefore outside this claim, is a value the compiler keeps in an architectural
 /// register or an unnamed spill slot: the scalar quarter-round words
 /// (`chacha20_rounds`'s `a`/`b`/`c`/`d`), and the SIMD transposes' `t*`/`s*`
-/// temporaries. `zeroize_xmm`/`zeroize_ymm`/`zeroize_neon` wipe the named state
+/// temporaries. `blocks8`'s per-word `init = _mm256_set1_epi32(s[i] as i32)`
+/// broadcast is the same class: the final addition's operand is a nameless
+/// temporary, so the word it broadcasts is not swept even though `x` and `s`
+/// are. `zeroize_xmm`/`zeroize_ymm`/`zeroize_neon` wipe the named state
 /// arrays (`x`, `orig`, `w`) they are handed; they cannot clear XMM/YMM/NEON
 /// registers. An audit measured that making those three helpers no-ops leaves the
 /// functional tests green -- they are residue measures, not behaviour -- so this
@@ -6397,12 +6400,22 @@ mod tests {
             TAG_LEN * 8
         );
 
-        // Flip one bit of the nonce: everything must change.
+        // Flip one bit of the nonce: everything must change. The key and AAD
+        // cases above are quantitative (40% of tag bits); the nonce is the same
+        // avalanche property, so it gets the same bound rather than a bare
+        // `assert_ne!` -- a construction that responded to a nonce flip with few
+        // tag-bit changes would pass a qualitative check.
         let mut nonce1 = nonce;
         nonce1[23] ^= 0x01;
         let (ct3, tag3) = encrypt(&key, &nonce1, aad, &pt).unwrap();
         assert_ne!(ct0, ct3);
         assert_ne!(tag0, tag3);
+        let bits = differing_bits(&tag0, &tag3);
+        assert!(
+            bits > (TAG_LEN * 8 * 2 / 5) as u32,
+            "nonce bit flip changed only {bits} of {} tag bits",
+            TAG_LEN * 8
+        );
 
         // Flip one bit of the AAD: the tag must change widely.  The ciphertext
         // only changes through the tag, so check the tag here.

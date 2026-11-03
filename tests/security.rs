@@ -1895,7 +1895,30 @@ fn enclosing_block_heads(body: &str, at: usize) -> Vec<(usize, String)> {
 /// the wipe in `if true { … } else { wipe }` is not enclosed by the `if` at all, so the
 /// condition has to be reached through the then-branch's closing brace. `else if c { … }`
 /// heads are handled by `deadening_head` directly (they are `if`s).
-fn else_branch_condition(body: &str, open: usize) -> Option<&str> {
+fn else_branch_condition(body: &str, open: usize) -> Option<Vec<&str>> {
+    /// The opening `{` of the block that ends at the `}` immediately before `end`.
+    fn block_open_before(body: &str, end: usize) -> Option<usize> {
+        let bytes = body.as_bytes();
+        let mut i = end;
+        let mut depth = 0i32;
+        loop {
+            match bytes[i] {
+                b'}' => depth += 1,
+                b'{' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return Some(i);
+                    }
+                }
+                _ => {}
+            }
+            if i == 0 {
+                return None;
+            }
+            i -= 1;
+        }
+    }
+
     let head_start = body[..open]
         .rfind(['\n', ';', '{', '}'])
         .map_or(0, |i| i + 1);
@@ -1903,28 +1926,39 @@ fn else_branch_condition(body: &str, open: usize) -> Option<&str> {
     if !before.ends_with('}') {
         return None;
     }
-    let bytes = before.as_bytes();
-    let mut i = before.len() - 1;
-    let mut depth = 0i32;
+    // Walk the whole `else if` chain, not just to the nearest `if`. For
+    // `if A { } else if B { } else { wipe }` the nearest preceding `if` is B, but the wipe
+    // runs only when A *and* B are false -- so a constant-true A kills the branch even when
+    // B is not constant. The previous version stopped at B and accepted the case (measured:
+    // `if true { } else if <non-const> { } else { wipe }` stayed green). Every condition in
+    // the chain is needed, so all of them are returned.
+    let mut conds: Vec<&str> = Vec::new();
+    let mut cursor = before.len(); // one past the most recent `}`
     loop {
-        match bytes[i] {
-            b'}' => depth += 1,
-            b'{' => {
-                depth -= 1;
-                if depth == 0 {
-                    break;
-                }
+        let close = cursor - 1; // the `}` that ends this block
+        let open_at = block_open_before(body, close)?;
+        let hs = body[..open_at]
+            .rfind(['\n', ';', '{', '}'])
+            .map_or(0, |i| i + 1);
+        let head = body[hs..open_at].trim();
+        let Some(pos) = head.rfind("if ") else {
+            // Not an `if` (a plain `else` has no condition of its own): keep walking.
+            let prefix_end = hs;
+            cursor = prefix_end;
+            if cursor == 0 {
+                return Some(conds);
             }
-            _ => {}
+            continue;
+        };
+        conds.push(head[pos + 3..].trim());
+        // Is this `else if`? Then another block precedes it and the walk continues.
+        let before_this = body[..hs].trim_end();
+        if before_this.ends_with('}') {
+            cursor = before_this.len();
+            continue;
         }
-        if i == 0 {
-            return None;
-        }
-        i -= 1;
+        return Some(conds);
     }
-    let head = before[..i].trim_end();
-    let pos = head.rfind("if ")?;
-    Some(head[pos + 3..].trim())
 }
 
 /// Why the block with head `head` cannot execute the statement it encloses, if it cannot.
@@ -1977,7 +2011,6 @@ fn deadening_head(body: &str, open: usize, head: &str) -> Option<&'static str> {
     if let Some(cond) = head
         .strip_prefix("if ")
         .or_else(|| head.strip_prefix("while "))
-        .or_else(|| head.strip_prefix("else if "))
     {
         if constant_condition_value(cond) == Some(false) {
             return Some(
@@ -1985,14 +2018,56 @@ fn deadening_head(body: &str, open: usize, head: &str) -> Option<&'static str> {
             );
         }
     }
-    // `else` is the reverse test: the branch runs only when the paired `if` condition is
-    // *false*, so a constant-true condition leaves it unreachable.
+    // `else` and `else if` need the whole preceding chain, not just one condition:
+    // `if true { } else if <non-const> { wipe }` is dead because the outer `if` is constant
+    // true -- the `else if` branch is never reached even though its own condition is not
+    // constant. Conversely `else if false { wipe }` is dead because its *own* condition is
+    // constant false. The chain walk (see `else_branch_condition`) is what makes both
+    // forms checkable, and it is what the previous version missed (measured: both stayed
+    // green under an injection that put the wipe behind one of these).
     if head == "else" {
-        if let Some(cond) = else_branch_condition(body, open) {
-            if constant_condition_value(cond) == Some(true) {
+        if let Some(conds) = else_branch_condition(body, open) {
+            if conds
+                .iter()
+                .any(|cond| constant_condition_value(cond) == Some(true))
+            {
                 return Some(
-                    "the enclosing `else` branch is reached only when its `if` condition is a \
-                     constant true, so the branch never runs",
+                    "the enclosing `else` branch is reached only when all of its `if` conditions \
+                     are false, and one of them is a constant true, so the branch never runs",
+                );
+            }
+        }
+    }
+    if let Some(inner) = head.strip_prefix("else if ") {
+        // The branch itself: unreachable when its own condition is a constant false.
+        if constant_condition_value(inner) == Some(false) {
+            return Some(
+                "the enclosing `else if` condition is a constant false, so the branch is never \
+                 reached",
+            );
+        }
+        // ...and unreachable when any condition *before* it in the chain is constant true.
+        if let Some(conds) = else_branch_condition(body, open) {
+            if conds
+                .iter()
+                .any(|cond| constant_condition_value(cond) == Some(true))
+            {
+                return Some(
+                    "an `if` condition preceding this `else if` is a constant true, so the \
+                     branch is never reached",
+                );
+            }
+        }
+    }
+    // A match *arm* guard: `_ if false => { … }` is an arm whose guard never matches, and its
+    // body is dead. The outer `match` may have a non-constant scrutinee, so the scrutinee
+    // check below does not see it; a guard is a separate condition and is checked here.
+    if head.contains("=>") {
+        if let Some(guard) = arm_guard_condition(head) {
+            if constant_condition_value(guard) == Some(false) {
+                return Some(
+                    "the enclosing `match` arm has a guard that is a constant false, so the \
+                     arm is never matched",
                 );
             }
         }
@@ -3626,4 +3701,17 @@ fn every_source_file_is_accounted_for() {
          wipes or call sites that none of the guards read; add it to the scanner or \
          explain why it holds no secret-bearing code."
     );
+}
+
+/// The `if <expr>` guard of a `match` arm: `_ if a < b => { … }` yields `"a < b"`,
+/// `_ => { … }` yields None. Only the guard text between the first `if ` and the `=>`
+/// is read; a pattern like `Some(x) if a < b` also yields `"a < b"`, which is fine
+/// because [`constant_condition_value`] only decides on literals and known-constant
+/// expressions -- `Some(x) if a < b` with non-literal `a`, `b` yields None and the arm
+/// is treated as reachable.
+fn arm_guard_condition(head: &str) -> Option<&str> {
+    // Everything from the start of the arm to `=>`.
+    let arm = head.split_once("=>").map(|(a, _)| a)?.trim();
+    let guard = arm.split_once("if ").map(|(_, g)| g)?;
+    Some(guard.trim())
 }

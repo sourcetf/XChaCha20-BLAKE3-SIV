@@ -132,7 +132,11 @@ ensure_target() {
     return 0
   fi
   note "installing rust target: $target"
-  rustup target add "$target" >/dev/null 2>&1
+  # `|| return 1` is required by the comment above: under `set -e` (and this script's
+  # ERR trap) a failed `rustup target add` -- a network error, a rate-limited mirror --
+  # aborts the whole run instead of skipping that one stage. The skip branch in the
+  # caller was only reachable when the target was already installed (measured).
+  rustup target add "$target" >/dev/null 2>&1 || return 1
 }
 
 # `qemu-user` ships every emulator this project uses (qemu-aarch64, qemu-i386,

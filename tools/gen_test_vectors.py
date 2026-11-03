@@ -216,14 +216,14 @@ def main():
     for path, text, count in ((OUT, build(), len(PAIRS)),
                               (OUT_LARGE, build_digests(), len(DIGEST_PAIRS))):
         if check:
-            with open(path) as fh:
+            with open(path, encoding="utf-8") as fh:
                 if fh.read() == text:
                     print(f"{path} is current ({count} vectors)")
                     continue
             print(f"{path} is STALE -- re-run without --check")
             sys.exit(1)
         os.makedirs(os.path.dirname(path), exist_ok=True)
-        with open(path, "w") as fh:
+        with open(path, "w", encoding="utf-8") as fh:
             fh.write(text)
         print(f"wrote {path} ({count} vectors)")
 

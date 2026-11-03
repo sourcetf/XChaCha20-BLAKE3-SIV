@@ -113,6 +113,21 @@ exit "$status"
 STUB
   } > "$home/.cargo/bin/cargo"
   chmod +x "$home/.cargo/bin/cargo"
+  # A `rustup` shim too: verify.sh's TSAN preflight asks
+  # `rustup component list --installed --toolchain nightly` before it calls `run_tool`,
+  # and without one the stage *skips* -- so check 11's `--tsan` arm never reached
+  # `run_tool` and could not see a missing definition at all (measured: moving
+  # `run_tool` back into the later block left that arm green). The shim answers
+  # `rust-src`, which is the one component the preflight greps for, and does nothing
+  # else; the stub `cargo` failing is what keeps the stage short after it.
+  cat > "$home/.cargo/bin/rustup" <<'STUB'
+#!/bin/sh
+case " $* " in
+  *" component list "*) printf '%s\n' 'rust-src (installed)' ;;
+esac
+exit 0
+STUB
+  chmod +x "$home/.cargo/bin/rustup"
   printf '%s\n' "$home"
 }
 
@@ -538,10 +553,6 @@ else
 fi
 
 echo
-if [ "$fail" -ne 0 ]; then
-  echo "gate contract: FAILED" >&2
-  exit 1
-fi
 # 10. The script itself must be executable end to end. Two defects of the "the gate is
 #     broken, not the code" kind shipped in `verify.sh` at once and CI could not see
 #     either, because CI does not run those two stages:
@@ -558,7 +569,10 @@ fi
 #     defined before their first call, and every variable the script expands must be
 #     assigned in it, defaulted with `${NAME:-…}`, or on the environment allowlist below.
 #     (`bash -n` parses neither, and running the stages needs the real toolchains.)
-"$PYTHON" - verify.sh <<'PYCHECK'
+#     The python probe runs under `set -e`; it must not abort the gate before check 11
+#     has run, so its failure is captured with `|| rc=$?` rather than left to the shell.
+rc=0
+"$PYTHON" - verify.sh <<'PYCHECK' || rc=$?
 import re
 import sys
 
@@ -574,6 +588,11 @@ ALLOWED = {
     "FUZZ_SECONDS", "CC", "CFLAGS", "AR", "CXX", "HOST", "TARGET", "XSIV_IN_GATE_SELFTEST",
 }
 ASSIGN = re.compile(r"(?:^|\s)(?:export\s+|readonly\s+|local\s+)?([A-Za-z_][A-Za-z0-9_]*)=")
+# Limit: a static scanner cannot see that an assignment sits in an `if false` branch or
+# behind a never-taken case arm, so `if false; then PYTHON=x; fi` counts here as an
+# assignment. That gap is closed end to end by check 11, which runs `--kani-only` under
+# the stub toolchain and fails on the `unbound variable` the dead assignment actually
+# produces -- not by more spellings in this check.
 USE = re.compile(r"\$\{?([A-Za-z_][A-Za-z0-9_]*)\b")
 DEFAULTED = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*):-")
 # `for x in …`, `while read -r x y`, `local x` and `case`-less shells assign without `=`.
@@ -583,6 +602,12 @@ NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 assigned = set()
 defaulted = set()
 for line in lines:
+    # A comment that *mentions* an assignment is not an assignment. The USE loop below
+    # already skips comment lines; the ASSIGN collection did not, so replacing
+    # `PYTHON="${PYTHON:-python3}"` with a comment that quotes it passed this check while
+    # the variable was genuinely unbound at run time (measured).
+    if line.lstrip().startswith("#"):
+        continue
     for m in ASSIGN.finditer(line):
         assigned.add(m.group(1))
     for m in DEFAULTED.finditer(line):
@@ -622,13 +647,23 @@ for i, line in enumerate(lines, 1):
     if m and m.group(1) not in defs:
         defs[m.group(1)] = i
 for name, defline in defs.items():
-    call = re.compile(r"^\s*" + re.escape(name) + r"\s")
+    # A call may carry environment prefixes: `XSIV_FEATURES=ultra run_tool …`. The old
+    # matcher required the name at line start, so a pre-definition call spelled with a
+    # prefix (`VAR=v run_tool …`) was invisible -- measured: when *every* pre-definition
+    # call used a prefix, no check fired for the function. Allow any run of
+    # `NAME=value` words before the name, and any shell separator before those.
+    call = re.compile(
+        r"(?:^|[\s;&|(])"
+        r"(?:(?:[A-Za-z_][A-Za-z0-9_]*=\S*)\s+)*"
+        + re.escape(name)
+        + r"\s"
+    )
     for i, line in enumerate(lines, 1):
         if line.lstrip().startswith("#"):
             continue
         if i >= defline:
             break
-        if call.match(line):
+        if call.search(line):
             problems.append(
                 f"verify.sh:{i}: `{name}` is called before its definition at line {defline}; "
                 "a shell function only exists once its definition has run"
@@ -642,7 +677,6 @@ if problems:
     sys.exit(1)
 print("  ok: verify.sh defines every function before its first call and assigns every variable it expands")
 PYCHECK
-rc=$?
 if [ "$rc" -ne 0 ]; then fail=1; fi
 
 # 11. Same two defects, end to end rather than statically: with a *stub* toolchain the
@@ -684,3 +718,11 @@ echo "               layout it cannot hold; the ctgrind suppression validator re
 echo "               a widened entry; a campaign that cannot run does not report"
 echo "               completion; and a campaign whose cargo runs no tests does not"
 echo "               judge a row."
+
+# The final verdict. It must come *after* every check: an earlier version put it before
+# checks 10 and 11, so a FAIL printed by either of them never changed the exit status --
+# the gate reported the very defect class it exists for and still exited 0 (measured).
+if [ "$fail" -ne 0 ]; then
+  echo "gate contract: FAILED" >&2
+  exit 1
+fi

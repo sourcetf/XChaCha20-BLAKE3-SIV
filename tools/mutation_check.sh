@@ -97,8 +97,12 @@ open(p, "w").write(s.replace(old, new))
 PY
 }
 
-# Returns 1 when the suite fails (so the mutation was caught), 0 when it passes, 2 when the
-# tree does not build. Same contract as `run_kat`, for the integration test target.
+# Returns 1 when the suite fails *as a test failure* (cargo test's exit 101, so the
+# mutation was caught), 0 when it passes, 2 when the tree does not build or the suite
+# exits with something else (an unrelated panic or a build-step failure reads as "not
+# caught" rather than as "caught": the baseline guard prevents a broken suite, but a
+# flaky or unrelated failure on the mutated run alone must not masquerade as the
+# mutation being caught). Same contract as `run_kat`.
 run_security() {
   local dir="$1"
   ( cd "$dir" && CARGO_TARGET_DIR="$dir/target-sec" \
@@ -106,7 +110,8 @@ run_security() {
   local status=0
   ( cd "$dir" && CARGO_TARGET_DIR="$dir/target-sec" cargo test --release --test security >/dev/null 2>&1 ) || status=$?
   if [ "$status" -eq 0 ]; then return 0; fi
-  return 1
+  if [ "$status" -eq 101 ]; then return 1; fi
+  return 2
 }
 
 run_shipped_ctgrind() {
@@ -205,7 +210,11 @@ run_kat() {
   local status=0
   ( cd "$dir" && CARGO_TARGET_DIR="$dir/target-kat" cargo test --release --lib >/dev/null 2>&1 ) || status=$?
   if [ "$status" -eq 0 ]; then return 0; fi
-  return 1
+  # 101 is `cargo test`'s "a test failed". Anything else (a panic outside a test, a
+  # build-step failure after `--no-run` succeeded, SIGKILL) is not evidence that the
+  # mutation was caught, so it must not read as a "caught" verdict.
+  if [ "$status" -eq 101 ]; then return 1; fi
+  return 2
 }
 
 check_one() {
@@ -249,8 +258,9 @@ check_one() {
   set -e
   case "$status" in
     1) echo "    ok: caught" ;;
-    2) echo "FAIL: the mutated tree does not build, so $check never ran and this row" >&2
-       echo "      proves nothing. A mutation must be a semantic fault, not a syntax one." >&2
+    2) echo "FAIL: $check could not produce a verdict on the mutated tree (exit 2 -- the" >&2
+       echo "      build failed or the suite exited with something other than a test" >&2
+       echo "      failure, e.g. an unrelated panic). This row proves nothing." >&2
        return 1 ;;
     # `return 3`, not a bare `echo`: the driver distinguishes "not caught" from
     # "could not run", and a skip that returns 0 makes the whole tool report

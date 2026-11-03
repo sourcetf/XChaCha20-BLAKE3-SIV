@@ -333,6 +333,11 @@ VECTORS = [
 
 
 def main():
+    unknown = [a for a in sys.argv[1:] if a != "--kat"]
+    if unknown:
+        print(f"error: unknown argument(s) {unknown}; usage: "
+              "python3 tools/ref_impl.py [--kat]", file=sys.stderr)
+        sys.exit(2)
     self_check()
 
     for name, test_name, k, n, aad, pt in VECTORS:

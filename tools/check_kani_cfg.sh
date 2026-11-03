@@ -209,7 +209,7 @@ for name, source, ok, expected in cases:
         os.makedirs(os.path.join(root, "tools"))
         os.makedirs(os.path.join(root, "src"))
         shutil.copy(parser, os.path.join(root, "tools", "kani_shards.py"))
-        with open(os.path.join(root, "src", "proofs.rs"), "w") as fh:
+        with open(os.path.join(root, "src", "proofs.rs"), "w", encoding="utf-8", newline="\n") as fh:
             fh.write(source)
         proc = subprocess.run(
             [sys.executable, os.path.join(root, "tools", "kani_shards.py"), "--count"],

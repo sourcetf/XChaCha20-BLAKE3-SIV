@@ -449,6 +449,13 @@ fn run() {
 
     let mut failures = 0usize;
     let mut dependency_leaks_tag = false;
+    // The blake3-only control runs the dependency's XOF with no crate code and no
+    // scrub, so a tag hit there is the dependency's own frame. It is recorded but does
+    // NOT exculpate the crate cases: a crate case calls `scrub_stack`, whose job is to
+    // overwrite the region below the entry point's frame -- the region this dependency
+    // frame sits in. A tag hit in a crate case is therefore a scrub regression whether
+    // or not the control also leaves the tag, and the old attribution branch (which
+    // blamed every crate tag hit on blake3) masked such a regression into a PASS.
     // The blake3-only control runs the dependency with no crate code around it. Its
     // `Hasher::update(key)` leaves a by-value copy of the master key in that backend's
     // frame under `--pure` (measured: a 16-byte run, and the clean-tree run failed on
@@ -457,7 +464,6 @@ fn run() {
     // recorded separately instead of counted as entry-point failures.
     let mut dependency_leaks_key = false;
     let mut dependency_leaks_derived = false;
-    let mut locked_tag_hit = false;
     let mut planted_found = false;
     let mut split_found = false;
     let mut seven_found = false;
@@ -631,24 +637,24 @@ fn run() {
                 ));
             } else if tag_case && hit {
                 if is_control {
-                    // The dependency itself leaves the pattern: record it, and exculpate
-                    // the crate cases below.
+                    // The dependency itself leaves the pattern: record it, but do NOT
+                    // exculpate the crate cases. A crate case calls `scrub_stack`, whose
+                    // whole job is to overwrite the region below the entry point's frame
+                    // -- the region this dependency frame sits in. So a tag hit in a
+                    // crate case is a scrub regression whether or not the control also
+                    // leaves the tag (the control runs the dependency with no crate code
+                    // and no scrub). Attributing it to blake3 (the old `dependency_leaks_tag`
+                    // branch) masked a scrub regression into a PASS.
                     dependency_leaks_tag = true;
                     line.push_str(&format!(
                         " | TAG RESIDUE in blake3 itself: {}-byte run @{}{}",
                         best, at, split_note
                     ));
-                } else if dependency_leaks_tag {
-                    locked_tag_hit = true;
-                    line.push_str(&format!(
-                        " | TAG RESIDUE ({}-byte run @{}) attributable to blake3",
-                        best, at
-                    ));
                 } else {
                     failures += 1;
                     line.push_str(&format!(
-                        " | TAG RESIDUE: {}-byte run @{}{}",
-                        best, at, split_note
+                        " | TAG RESIDUE ({}-byte run @{}) -- scrub_stack should have covered this region",
+                        best, at
                     ));
                 }
             } else if derived_case && hit {
@@ -720,17 +726,10 @@ fn run() {
             println!("      does leave key material (see the note below): it runs the dependency's");
             println!("      own XOF path with no crate code, so that residue is blake3's by-value");
             println!("      copy, not this crate's.");
-            if locked_tag_hit {
-                println!("      The 8-byte locked integrity tag above is likewise left by blake3's");
-                println!("      XOF buffer, as the note below says.");
-            } else if !locked_supported {
+            if !locked_supported {
                 println!("      The locked integrity tag was not measurable because the locked");
                 println!("      module is unsupported on this platform.");
             }
-        } else if locked_tag_hit {
-            println!("PASS: no master key in the call-chain stack region, and no residue of");
-            println!("      this crate's own code -- the 8-byte locked integrity tag above IS");
-            println!("      left, by the blake3 dependency's XOF buffer, as the note below says.");
         } else if locked_supported {
             println!("PASS: this crate leaves neither the master key, the locked integrity");
             println!("      tag, nor any derived key in the call-chain stack region.");
@@ -743,18 +742,13 @@ fn run() {
         println!("      scan reads this region and sees both of the shapes an 8-byte single-run");
         println!("      threshold used to miss, and the never-used pattern shows it produces no");
         println!("      false positives.");
-        if locked_tag_hit {
-            println!();
-            println!("Note: the blake3-only control DOES leave the 8-byte tag, with the same");
-            println!("wipe discipline and no crate code -- so the tag residue in the `locked`");
-            println!("case is the dependency's XOF output buffer, in a frame this crate cannot");
-            println!("wipe (the same finding as the derived values, README 'cannot fix'). The");
-            println!("crate's own copies are wiped; this is the residual that is not its code.");
-        } else if dependency_leaks_tag {
+        if dependency_leaks_tag {
             println!();
             if locked_supported {
-                println!("The blake3-only control leaves the dependency's 8-byte XOF tag; the");
-                println!("crate's `locked` entry point now scrubs that region, so its case is clean.");
+                println!("The blake3-only control leaves the dependency's 8-byte XOF tag in its own");
+                println!("frame, with no crate code around it and no scrub. Every crate case above");
+                println!("scrubbed its region, so none of them left the tag: a crate case that did");
+                println!("would be counted as a scrub regression, not attributed to the dependency.");
             } else {
                 println!("The blake3-only control leaves the dependency's 8-byte XOF tag. The");
                 println!("`locked` entry point was not run on this platform, so this note makes no");

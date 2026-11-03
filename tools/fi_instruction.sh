@@ -265,12 +265,16 @@ PY
          | cargo_decision_executable)"; then
     echo "FAIL: the detector sensitivity control could not build the forced-accept copy" >&2
     tail -20 "$build_log" >&2
-    exit 1
+    # exit 3, not 1: this is an environmental failure (a build the kernel killed, a
+    # full disk, a missing linker) that the caller must not read as a verdict. fi_check.sh
+    # classifies ENOSPC/SIGBUS/SIGKILL the same way. A tree that genuinely does not build
+    # is caught by the main test stages, not by this control.
+    exit 3
   fi
   [ -n "$bin" ] || {
     echo "FAIL: the detector sensitivity control could not build the forced-accept copy" >&2
     tail -20 "$build_log" >&2
-    exit 1
+    exit 3
   }
   set +e
   local out rc
@@ -490,12 +494,19 @@ scan() {  # label, features
   local label="$1" features="$2"
   local bin
   # shellcheck disable=SC2086
-  bin="$(cargo test --release --test decision --no-run \
+  # `if !`, not a bare assignment: under `set -e` a cargo failure aborts the script
+  # inside the substitution, so the exit-3 classification below would be dead code and
+  # cargo's exit status would leak out as the script's -- a build failure reading as a
+  # verdict rather than as "could not run".
+  if ! bin="$(cargo test --release --test decision --no-run \
            --config 'profile.release.strip=false' --message-format=json $features 2>/dev/null \
-         | cargo_decision_executable)"
+         | cargo_decision_executable)"; then
+    echo "FAIL: no decision binary (cargo could not build the decision test)" >&2
+    exit 3
+  fi
   [ -n "$bin" ] || {
     echo "FAIL: no decision binary (cargo reported no executable for it)" >&2
-    exit 1
+    exit 3
   }
 
   # The named test has to have RUN, not merely left the binary exiting 0. libtest

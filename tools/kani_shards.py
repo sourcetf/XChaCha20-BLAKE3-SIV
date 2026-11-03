@@ -255,7 +255,11 @@ def harnesses():
     this parser does not understand into a loud error rather than a harness that
     is never sharded and never proven.
     """
-    with open(PROOFS) as fh:
+    # `encoding="utf-8"` is not optional: proofs.rs contains non-ASCII (em-dashes in
+    # comments), and a probe under `LC_ALL=C` without `PYTHONUTF8` raised
+    # UnicodeDecodeError here, which verify.sh swallowed into "could not be counted" and
+    # the Kani stage skipped (exit 3) -- losing the right diagnosis.
+    with open(PROOFS, encoding="utf-8") as fh:
         # A harness inside `/* ... */` is not compiled, but a line scanner sees and
         # counts it: the count floor, the shard matrix and the Formal run then agree on
         # a name Kani never builds. Strip block comments (nested, newlines preserved so

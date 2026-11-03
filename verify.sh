@@ -163,7 +163,7 @@ run_tool() {  # name, tool-path, args...
   local rc=0
   set +e
   case "$tool" in
-    *.py) python3 "$tool" "$@" ;;
+    *.py) "$PYTHON" "$tool" "$@" ;;
     *)    bash "$tool" "$@" ;;
   esac
   rc=$?
@@ -283,19 +283,33 @@ installed_targets="$(rustup target list --installed 2>/dev/null || true)"
 
 if [ "$KANI_ONLY" -eq 0 ]; then
   step "1. reference implementation self-checks"
-  if command -v python3 >/dev/null 2>&1 && python3 -c "import blake3" 2>/dev/null; then
-    python3 tools/ref_impl.py >/dev/null
-    python3 tools/gen_test_vectors.py --check
+  if command -v "$PYTHON" >/dev/null 2>&1; then
+    if "$PYTHON" -c "import blake3" 2>/dev/null; then
+      "$PYTHON" tools/ref_impl.py >/dev/null
+      "$PYTHON" tools/gen_test_vectors.py --check
+    else
+      echo "         the 'blake3' module is not importable from $PYTHON: $("$PYTHON" -c 'import blake3' 2>&1 | tail -1)" >&2
+      skip "reference implementation self-checks" "$PYTHON with the 'blake3' module is required (pip install blake3). The committed fixture is still replayed by cargo test below; what is skipped is its regeneration against the published vectors, which is the anchor the whole fixture rests on."
+    fi
   else
-    skip "reference implementation self-checks" "python3 with the 'blake3' module is required (pip install blake3). The committed fixture is still replayed by cargo test below; what is skipped is its regeneration against the published vectors, which is the anchor the whole fixture rests on."
+    skip "reference implementation self-checks" "$PYTHON is not installed. The committed fixture is still replayed by cargo test below; what is skipped is its regeneration against the published vectors, which is the anchor the whole fixture rests on."
   fi
 
   step "2. formatting and lints"
-  cargo fmt --check
+  cargo fmt --all --check
+  # The vendored fork is excluded from the workspace (Cargo.toml), so `--all` does
+  # not reach it; CI formats it separately and `--deep` must check the same set.
+  cargo fmt --manifest-path blake3/Cargo.toml -- --check
   cargo clippy --locked --all-targets -- -D warnings
   # The `rng` feature adds a public module and a dependency; lint it too, or a
   # warning there would only surface once someone enabled the feature.
   cargo clippy --locked --all-targets --features rng -- -D warnings
+  # CI runs `--all-features`; `--deep` must cover the same code or a `-D warnings`
+  # violation in `ultra`- or `locked`-only code passes here and fails there.
+  # `--all-features` itself is not used: it pulls `pure`, which routes BLAKE3 through
+  # its C kernels and changes what the build.rs cfgs see -- the union below is the
+  # Rust-feature set CI lints, minus that interaction.
+  cargo clippy --locked --all-targets --features ultra,locked -- -D warnings
 
   # The tools' contract with this script: a gate that could not run answers exit 3,
   # and this script reports that as a skipped stage. Both halves are checked here
@@ -871,7 +885,13 @@ if [ "$RUN_DENY" -eq 1 ]; then
   STAGE_KEY=deny
   step "8. cargo-deny and cargo-audit (advisories, licences, bans, sources)"
   if cargo deny --version >/dev/null 2>&1; then
-    cargo deny check
+    # `cargo deny check` fetches the advisory database from GitHub, which is not reachable
+    # from every host this certifies on (measured: a local `--deep` ran stages 1-7 green and
+    # died here on a 135 s connect timeout while the same check succeeded offline). `--offline`
+    # uses the on-disk database the tool already downloaded, so it is the *fallback* rather
+    # than the rare case -- mirroring `audit_with_fallback` below. A cold cache is still a
+    # failure, not a silent pass: `--offline` cannot invent database content.
+    cargo deny check || cargo deny --offline check
   else
     skip "cargo-deny" "not installed (cargo install cargo-deny)"
     echo "         (cargo install cargo-deny --locked)"
@@ -1111,7 +1131,7 @@ if [ "$RUN_TOOLS" -eq 1 ]; then
       # `|| ev_rc=$?` rather than a bare call: under `set -e` a non-zero exit (1 *or* 3)
       # would abort the script here before the branches below could run.
       ev_rc=0
-      python3 tools/mutation_evidence.py "$work_mut/committed" mutants.out || ev_rc=$?
+      "$PYTHON" tools/mutation_evidence.py "$work_mut/committed" mutants.out || ev_rc=$?
       if [ "$ev_rc" -eq 0 ]; then
         rm -rf mutants.out && cp -r "$work_mut/committed" mutants.out
       elif [ "$ev_rc" -eq 3 ]; then
@@ -1237,9 +1257,17 @@ if [ "$RUN_KANI" -eq 1 ]; then
       echo "        meaningfully: $1" >&2
       exit 1
     fi
+    # Record the skip and *return* rather than `exit 3`: the closing summary below is
+    # what turns a skipped stage in a `--deep`/`--all` run into a FAILED (the stage
+    # was named implicitly by the run claiming completeness). `exit 3` here would
+    # abort before that summary and print a bare SKIPPED line with no verdict. The
+    # guard also sets the flag the rest of this stage checks, so a run the guard
+    # declared unusable never reaches `cargo kani`.
     skip "Kani" "$1"
-    exit 3
+    kani_unusable=1
+    return 0
   }
+  kani_unusable=0
   # The count comes from the *same parser* the Formal job's shard matrix is planned with
   # (`tools/kani_shards.py --count`), not a second line-anchored regex here. The regex this
   # replaced missed legal spellings the parser accepts -- `#[kani::unwind(9)]` on the line
@@ -1262,7 +1290,9 @@ if [ "$RUN_KANI" -eq 1 ]; then
   elif [ "$kani_harnesses" -ne "$kani_required" ]; then
     kani_count_guard "src/proofs.rs contains $kani_harnesses #[kani::proof] harness(es) but tools/check_kani_cfg.sh commits $kani_required; the two counts disagree, so the requirement cannot be taken from either without guessing (update the gate in the same change that adds a harness)"
   fi
-  if ! command -v cargo-kani >/dev/null 2>&1; then
+  if [ "$kani_unusable" -eq 1 ]; then
+    : # the guard above already recorded the SKIPPED line; skip the run entirely
+  elif ! command -v cargo-kani >/dev/null 2>&1; then
     # Without this, `cargo kani` exits 101 (no such subcommand) and `set -e` fails the whole
     # run -- a request for an optional stage turning into a hard failure, instead of the
     # skipped stage the convention and check.sh's help describe.
