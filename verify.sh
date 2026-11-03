@@ -124,6 +124,12 @@ fi
 
 step() { echo; echo "=== $* ==="; }
 
+# The interpreter the Python tools are run with. Assigned rather than assumed: the Kani
+# stage's harness count used `"$PYTHON"` while nothing in this script ever set it, so
+# `set -u` aborted `--kani`/`--kani-only` (and `--deep`/`--all`) on an unbound variable
+# before the count guard it was added for could run.
+PYTHON="${PYTHON:-python3}"
+
 # Skips are recorded, not just printed: a stage that did not run must not be reported
 # as one that passed. `--deep` and `--all` claim to have run everything, so they
 # refuse to finish while anything was skipped; a narrow invocation lists what it
@@ -140,6 +146,35 @@ skip() {
     STAGE_KEY=""
   fi
   echo "SKIPPED ($stage): $*"
+}
+
+# `run_tool` is defined here, at the top, because it is called from the TSAN stage --
+# which runs *before* the `RUN_TOOLS` block. Defining it beside its other callers left
+# `verify.sh --tsan` (and therefore `--deep`/`--all`, which set `RUN_TSAN=1`) dying with
+# `run_tool: command not found` and exit 127 under `set -e`, before any of the later
+# stages ran. Its own comment inside the tools block still explains why the tools go
+# through it at all.
+run_tool() {  # name, tool-path, args...
+  local name="$1" tool="$2"; shift 2
+  if [ ! -f "$tool" ]; then
+    skip "$name" "$tool is missing"
+    return 0
+  fi
+  local rc=0
+  set +e
+  case "$tool" in
+    *.py) python3 "$tool" "$@" ;;
+    *)    bash "$tool" "$@" ;;
+  esac
+  rc=$?
+  set -e
+  case "$rc" in
+    0) : ;;
+    # 3 is the documented "could not run"; 127 is the interpreter itself missing,
+    # which is the same situation from this script's point of view.
+    3|127) skip "$name" "$tool could not run here (its output above says why)" ;;
+    *) echo "FAILED: $name (exit $rc)" >&2; exit "$rc" ;;
+  esac
 }
 
 # Findings from an advisory tool that did not fail the run (`tools/stack_residue.sh`
@@ -994,28 +1029,6 @@ if [ "$RUN_TOOLS" -eq 1 ]; then
   # the toolchain is missing rather than exiting 0 -- which is what the gate self-test
   # asserts for `fi_check.sh`. This stage is where the convention is exercised: the
   # tools were all wired into CI before any of them were wired into this script.
-  run_tool() {  # name, tool-path, args...
-    local name="$1" tool="$2"; shift 2
-    if [ ! -f "$tool" ]; then
-      skip "$name" "$tool is missing"
-      return 0
-    fi
-    local rc=0
-    set +e
-    case "$tool" in
-      *.py) python3 "$tool" "$@" ;;
-      *)    bash "$tool" "$@" ;;
-    esac
-    rc=$?
-    set -e
-    case "$rc" in
-      0) : ;;
-      # 3 is the documented "could not run"; 127 is the interpreter itself missing,
-      # which is the same situation from this script's point of view.
-      3|127) skip "$name" "$tool could not run here (its output above says why)" ;;
-      *) echo "FAILED: $name (exit $rc)" >&2; exit "$rc" ;;
-    esac
-  }
 
   # The fault campaign: fourteen rows, each a source change (or its absence) with an
   # expected effect on a detector. `tools/mutation_check.sh` is the other direction --

@@ -115,6 +115,46 @@ or their documentation, not in the construction.
   fork's own suite is therefore 45 default-feature tests + 13 doctests (46 + 13 with
   `zeroize`), one more than the 44/45 quoted in the earlier entries below.
 
+### AUDIT-REPORT-6 follow-up (after `a45c0d3`)
+
+No wire-format bytes changed. This round's findings were mostly *my own*: the previous
+commit's changes to the verification device introduced two immediate failures and left two
+of the new guards spoofable.
+
+- **`verify.sh` ran at all again.** Two defects shipped together, neither visible to CI
+  (which does not run these stages): `run_tool` was called from the TSAN stage while its
+  definition sat in the later tools block, so `--tsan` -- and `--deep`/`--all`, which set
+  `RUN_TSAN=1` -- died with `run_tool: command not found` (127) before any later stage ran;
+  and the Kani harness count used `"$PYTHON"`, a variable the script never assigned, so
+  `--kani-only`/`--deep`/`--all` aborted on `unbound variable` (1) before the count guard it
+  was added for. `run_tool` is now defined with the other helpers and `PYTHON` is assigned.
+  `tools/gate_selftest.sh` gained a static check (shell functions must be defined before
+  their first call; every ALL-CAPS variable the script expands must be assigned, defaulted or
+  on an environment allowlist) plus an end-to-end one (with a stub toolchain, `--tsan` and
+  `--kani-only` must reach their own logic rather than a shell error). Both were verified by
+  reintroducing each defect.
+- **The brace-less closure is deadening too.** `let _dead = || crate::zeroize_array(&mut
+  enc_key);` has no `{` for the block-head scan to find and still sits at brace depth 1, so
+  `encrypt`'s wipe counted as a live top-level statement while never running (measured: the
+  whole suite green). `brace_less_closure_head` judges the statement head instead, and
+  `top_level_count` no longer counts it.
+- **`recomputed_tag` is pinned to its own wipe.** The shape check allowed any occurrence
+  followed by `)`, which every call whose last argument is `&mut recomputed_tag` satisfies;
+  `(|src, dst| { *dst = *src; })(&computed_tag, &mut recomputed_tag);` degraded `ultra`'s
+  second gate to a self-comparison with `ultra` 8/8 and `lib` 74/74 green. The wipe is now
+  matched as `crate::zeroize_array(&mut recomputed_tag)`.
+- **The manifest checks strip comments.** `build.rs` skipped only whole-line comments, so a
+  trailing `# path = "blake3"` satisfied the dependency-edge check while `cargo build` linked
+  crates.io BLAKE3 (and the test that was added as its negative control shared the flaw).
+  Both strip `#`-to-end-of-line outside string literals now, and the test's *primary* oracle
+  is `cargo metadata` -- the resolver itself, which no comment can fool -- asserting that
+  `blake3`'s `source` is null. `publish = false` is likewise matched as a key rather than as
+  a substring (a commented-out `# publish = false` used to satisfy it).
+- **Docs.** The `lock_range` caveat paragraph was duplicated (removed), and the ignored
+  `MADV_DODUMP` return value is now stated where the choice is made: a failed restore leaves
+  the range non-dumpable for the process's lifetime, which is the fail-safe direction, rather
+  than being left to inference.
+
 ### Round-7 line-by-line re-scan (same working tree)
 
 No wire-format bytes changed. Findings from a second line-by-line pass over `src/`,

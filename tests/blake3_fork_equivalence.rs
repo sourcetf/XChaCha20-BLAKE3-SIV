@@ -441,11 +441,67 @@ fn hash_many_counter_wraps_at_u64_max() {
 /// a non-dependency section all fail here.
 #[test]
 fn the_vendored_fork_is_wired_in_by_path() {
-    let manifest = std::fs::read_to_string(
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml"),
-    )
-    .expect("the parent manifest must be readable");
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
 
+    // Primary, and deliberately *independent* of the parser below: `cargo metadata` is the
+    // resolver itself, so it cannot be fooled by a comment, a reformatted inline table or a
+    // spelling this file's scanner does not know. A `path` dependency has `source: null`;
+    // a registry dependency carries `source: "registry+…"`.
+    let metadata = std::process::Command::new(env!("CARGO"))
+        .args([
+            "metadata",
+            "--locked",
+            "--offline",
+            "--format-version",
+            "1",
+            "--manifest-path",
+        ])
+        .arg(root.join("Cargo.toml"))
+        .output()
+        .expect("`cargo metadata` must be runnable from a test (CARGO is always set)");
+    assert!(
+        metadata.status.success(),
+        "`cargo metadata --locked --offline` failed: {}",
+        String::from_utf8_lossy(&metadata.stderr)
+    );
+    let json = String::from_utf8(metadata.stdout).expect("metadata is UTF-8");
+    // A *package* object opens `{"name":"blake3","version":…}`; a dependency object is
+    // `{"name":"blake3","source":…}`. Matching the former keeps this from reading the
+    // registry `blake3` out of some other package's dependency list.
+    let mut blake3_sources: Vec<String> = Vec::new();
+    for part in json.split("\"name\":\"blake3\",\"version\"").skip(1) {
+        let window = &part[..part.len().min(4096)];
+        let Some(rest) = window.split("\"source\":").nth(1) else {
+            continue;
+        };
+        let value = rest.trim_start();
+        if value.starts_with("null") {
+            blake3_sources.push("<path>".to_string());
+        } else {
+            let end = value.find(',').unwrap_or(value.len());
+            blake3_sources.push(value[..end].trim().trim_matches('"').to_string());
+        }
+    }
+    assert!(
+        !blake3_sources.is_empty(),
+        "`cargo metadata` reported no `blake3` package at all; the dependency edge is gone"
+    );
+    for src in &blake3_sources {
+        assert_eq!(
+            src, "<path>",
+            "`cargo metadata` resolves `blake3` from {src}, not from the vendored path: the \
+             build would link unpatched crates.io BLAKE3 1.8.7 and every fix in \
+             `blake3/PATCHES.md` would be silently absent. Restore `path = \"blake3\"`."
+        );
+    }
+
+    // Secondary, and cheap: the manifest text, parsed with comments stripped. It is *not*
+    // the oracle -- the metadata above is -- but it fails with a message that names the
+    // entry, and it is what catches the case where `cargo metadata` itself would refuse to
+    // run. Both matter: the first version of this test was this parser alone, and a trailing
+    // `# path = "blake3"` comment satisfied it (measured).
+    let manifest = std::fs::read_to_string(root.join("Cargo.toml"))
+        .expect("the parent manifest must be readable");
     let entries = dependency_entries(&manifest);
     let blake3: Vec<&(String, String, String)> = entries
         .iter()
@@ -468,15 +524,68 @@ fn the_vendored_fork_is_wired_in_by_path() {
         );
     }
 
-    let fork_manifest = std::fs::read_to_string(
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("blake3/Cargo.toml"),
-    )
-    .expect("the vendored fork manifest must be readable");
-    assert!(
-        fork_manifest.contains("publish = false"),
-        "the vendored fork must stay unpublishable (`publish = false`), or a release of this \
-         patched tree could be published under upstream's name and version"
+    // `publish = false` on the fork, matched as a *key* rather than as a substring: the
+    // previous `contains("publish = false")` was satisfied by `# publish = false`.
+    let fork_manifest = std::fs::read_to_string(root.join("blake3/Cargo.toml"))
+        .expect("the vendored fork manifest must be readable");
+    let publishable = fork_manifest
+        .lines()
+        .map(strip_toml_comment)
+        .map(|l| l.trim().to_string())
+        .find_map(|l| {
+            l.strip_prefix("publish")?
+                .split_once('=')
+                .map(|(_, v)| v.trim().to_string())
+        });
+    assert_eq!(
+        publishable.as_deref(),
+        Some("false"),
+        "the vendored fork must declare `publish = false` as a key (found {publishable:?}); a \
+         release of this patched tree could otherwise be published under upstream's name and \
+         version. A commented-out `# publish = false` does not count."
     );
+}
+
+/// Remove a TOML comment (an unquoted `#` to end of line), leaving quoted strings alone.
+///
+/// Shared by the manifest assertions and by `build.rs`'s parser in spirit: a trailing comment
+/// is where `# path = "blake3"` hid, and both halves have to strip it.
+fn strip_toml_comment(line: &str) -> String {
+    let bytes = line.as_bytes();
+    let mut out = String::with_capacity(line.len());
+    let mut quote: Option<u8> = None;
+    let mut i = 0usize;
+    while i < bytes.len() {
+        let c = bytes[i];
+        match quote {
+            Some(q) => {
+                if q == b'"' && c == b'\\' {
+                    out.push(c as char);
+                    i += 1;
+                    if i < bytes.len() {
+                        out.push(bytes[i] as char);
+                        i += 1;
+                    }
+                    continue;
+                }
+                if c == q {
+                    quote = None;
+                }
+                out.push(c as char);
+            }
+            None => {
+                if c == b'#' {
+                    break;
+                }
+                if c == b'"' || c == b'\'' {
+                    quote = Some(c);
+                }
+                out.push(c as char);
+            }
+        }
+        i += 1;
+    }
+    out
 }
 
 /// `(section, key, value)` for every `key = value` entry in a dependency section of a

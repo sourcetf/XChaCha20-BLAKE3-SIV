@@ -1799,7 +1799,10 @@ fn top_level_count(body: &str, needle: &str) -> usize {
     let mut from = 0usize;
     while let Some(i) = body[from..].find(needle) {
         let at = from + i;
-        if brace_depth_at(body, at) == 1 && !inside_closure_body(body, at) {
+        if brace_depth_at(body, at) == 1
+            && !inside_closure_body(body, at)
+            && brace_less_closure_head(body, at).is_none()
+        {
             count += 1;
         }
         from = at + needle.len();
@@ -1840,6 +1843,12 @@ fn enclosing_block_attributes(body: &str, at: usize) -> Vec<(usize, &str)> {
 /// `if decision.is_err()` or a `while` loop, which are legitimate enclosing shapes in this
 /// crate, so only the constant-false forms are rejected.
 fn constant_false_enclosing_block(body: &str, at: usize) -> Option<String> {
+    if let Some(head) = brace_less_closure_head(body, at) {
+        return Some(format!(
+            "{head}  [a `let`-bound closure whose body is this statement, so it runs only \
+             if the closure is called]"
+        ));
+    }
     for (open, head) in enclosing_block_heads(body, at) {
         if let Some(reason) = deadening_head(body, open, &head) {
             return Some(format!("{head}  [{reason}]"));
@@ -1929,7 +1938,10 @@ fn else_branch_condition(body: &str, open: usize) -> Option<&str> {
 /// * `if 1u8 == 2u8 { … }`            — a constant comparison, not the `false` literal;
 /// * `match 0u8 { 1 => { … }, _ => {} }` — a constant scrutinee, so the arm is unreachable;
 /// * `for _ in 0..0u8 { … }`          — an empty range;
-/// * `let _dead = || { … };` and `… black_box(&_dead);` — a closure that is never called.
+/// * `let _dead = || { … };`, `… black_box(&_dead);` and the brace-less
+///   `let _dead = || crate::zeroize_array(&mut enc_key);` — a closure that is never
+///   called. The brace-less form has no `{` to find, so it is judged from the statement
+///   head instead (see [`brace_less_closure_head`]).
 ///
 /// What this does **not** catch, measured on this tree and deliberately left as a documented
 /// limit rather than chased with more spellings (which is the trap the first version fell
@@ -2276,6 +2288,31 @@ fn empty_range(iter: &str) -> bool {
         (Some(lo), Some(hi)) => lo >= hi,
         _ => false,
     }
+}
+
+/// A `let`-bound closure whose body is an *expression* rather than a braced block:
+/// `let _dead = || crate::zeroize_array(&mut enc_key);`.
+///
+/// There is no `{` for [`enclosing_block_heads`] to find, and the statement still sits at
+/// brace depth 1, so the wipe reads as a top-level statement of the function while never
+/// running. Measured on this tree: the whole six-configuration matrix, `fmt` and `clippy`
+/// stayed green with `encrypt`'s success-path `enc_key` wipe moved here, and the write-up
+/// that found it is the reason the previous version's docs no longer claim the closure
+/// shape is covered. The statement head -- the text between the previous delimiter and the
+/// wipe -- is where the shape is visible.
+fn brace_less_closure_head(body: &str, at: usize) -> Option<String> {
+    let head_start = body[..at].rfind(['\n', ';', '{', '}']).map_or(0, |i| i + 1);
+    let head = body[head_start..at].trim();
+    if !head.starts_with("let ") || head.contains('{') {
+        return None;
+    }
+    // A closure parameter list is `||` or a matched `|…|`; either way two pipe characters.
+    // A bitwise `a | b` in a `let` head would also have two, but a statement the guards are
+    // asked about always contains a wipe, and no legitimate one of those writes `|`.
+    if head.matches('|').count() >= 2 {
+        return Some(head.to_string());
+    }
+    None
 }
 
 /// True when `at` sits inside a closure body, which nothing guarantees is ever called.

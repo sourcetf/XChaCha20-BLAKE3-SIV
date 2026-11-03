@@ -547,10 +547,15 @@ fn dual_mac_is_wired_into_both_decrypt_paths() {
     // must be a read (`.ct_eq(`), the binding itself, or the wipe's argument.
     for (at, _) in body.match_indices("recomputed_tag") {
         let after = body[at + "recomputed_tag".len()..].trim_start();
+        // The wipe is allowed only as *this* wipe: `crate::zeroize_array(&mut
+        // recomputed_tag);`. The earlier version allowed any occurrence followed by `)`,
+        // which includes every call whose last argument is `&mut recomputed_tag` --
+        // `(|src, dst| { *dst = *src; })(&computed_tag, &mut recomputed_tag);` passed, and
+        // it makes the second gate compare the stored tag with itself, which is exactly the
+        // fault this guard exists for (measured: `ultra` 8/8 and `lib` 74/74 green).
         let allowed = after.starts_with("= derive_tag(")
             || after.starts_with(".ct_eq(")
-            // The wipe: `crate::zeroize_array(&mut recomputed_tag);`
-            || after.starts_with(')');
+            || (after.starts_with(')') && body[..at].ends_with("crate::zeroize_array(&mut "));
         assert!(
             allowed,
             "`recomputed_tag` is used in a shape that is not the `derive_tag` binding, a \

@@ -57,6 +57,10 @@ CARGO_BIN_DIR="$(dirname "$(command -v cargo)")"
 # PATH, and pin the user-site base so a throwaway HOME does not hide a `blake3`
 # installed with `pip --user`.
 PYTHON_BIN_DIR="$(dirname "$(command -v python3)")"
+# The interpreter this script runs its Python checks with (the same variable name
+# `verify.sh` uses; a bare `"$PYTHON"` without this line is exactly the unbound-variable
+# defect check 10 exists to catch).
+PYTHON="${PYTHON:-python3}"
 PYTHON_USER_BASE="$(python3 -m site --user-base 2>/dev/null || true)"
 if [ -n "$PYTHON_USER_BASE" ]; then
   export PYTHONUSERBASE="$PYTHON_USER_BASE"
@@ -538,6 +542,138 @@ if [ "$fail" -ne 0 ]; then
   echo "gate contract: FAILED" >&2
   exit 1
 fi
+# 10. The script itself must be executable end to end. Two defects of the "the gate is
+#     broken, not the code" kind shipped in `verify.sh` at once and CI could not see
+#     either, because CI does not run those two stages:
+#
+#       * `run_tool` was *called* from the TSAN stage (line 888) while its definition sat
+#         in the later `RUN_TOOLS` block (line 997), so `--tsan` -- and `--deep`/`--all`,
+#         which set `RUN_TSAN=1` -- died with `run_tool: command not found` (127) before
+#         any later stage ran;
+#       * the Kani stage's harness count used `"$PYTHON"`, which the script never
+#         assigned, so `set -u` aborted `--kani-only`/`--deep`/`--all` with `unbound
+#         variable` (1) before the count guard it was added for could run.
+#
+#     Both are static properties, so they are checked statically: shell functions must be
+#     defined before their first call, and every variable the script expands must be
+#     assigned in it, defaulted with `${NAME:-…}`, or on the environment allowlist below.
+#     (`bash -n` parses neither, and running the stages needs the real toolchains.)
+"$PYTHON" - verify.sh <<'PYCHECK'
+import re
+import sys
+
+path = sys.argv[1]
+lines = open(path, encoding="utf-8").read().splitlines()
+
+# Environment variables the script may read without assigning: set by the caller, the
+# shell, or CI, and none of them is a place a definition could be forgotten.
+ALLOWED = {
+    "PATH", "HOME", "PWD", "OLDPWD", "SHELL", "USER", "TMPDIR", "TERM", "LANG", "LC_ALL",
+    "RUNNER_TEMP", "GITHUB_ACTIONS", "GITHUB_STEP_SUMMARY", "CI", "CARGO", "CARGO_HOME",
+    "CARGO_TARGET_DIR", "RUSTUP_HOME", "RUSTFLAGS", "RUST_BACKTRACE", "VALGRIND",
+    "FUZZ_SECONDS", "CC", "CFLAGS", "AR", "CXX", "HOST", "TARGET", "XSIV_IN_GATE_SELFTEST",
+}
+ASSIGN = re.compile(r"(?:^|\s)(?:export\s+|readonly\s+|local\s+)?([A-Za-z_][A-Za-z0-9_]*)=")
+USE = re.compile(r"\$\{?([A-Za-z_][A-Za-z0-9_]*)\b")
+DEFAULTED = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*):-")
+# `for x in …`, `while read -r x y`, `local x` and `case`-less shells assign without `=`.
+FOR = re.compile(r"^\s*for\s+([A-Za-z_][A-Za-z0-9_]*)\b")
+READ = re.compile(r"(?:^|[|;&(]\s*)read\s+(.*)$")
+NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+assigned = set()
+defaulted = set()
+for line in lines:
+    for m in ASSIGN.finditer(line):
+        assigned.add(m.group(1))
+    for m in DEFAULTED.finditer(line):
+        defaulted.add(m.group(1))
+    m = FOR.match(line)
+    if m:
+        assigned.add(m.group(1))
+    m = READ.search(line)
+    if m:
+        for word in m.group(1).split():
+            if word.startswith("-"):
+                continue
+            if NAME.match(word):
+                assigned.add(word)
+problems = []
+for i, line in enumerate(lines, 1):
+    if line.lstrip().startswith("#"):
+        continue
+    for m in USE.finditer(line):
+        name = m.group(1)
+        # Only the environment-style names: `$PYTHON` (the defect this replaces) is
+        # upper-case, while the lower-case ones in embedded `awk`/`sed` programs are that
+        # language's own variables and cannot be told apart from shell locals by a check
+        # this size. A missing *lower-case* shell variable is a much smaller risk -- it is
+        # almost always a `local` or a `for` binding, both of which bash reports at use.
+        if not re.fullmatch(r"[A-Z][A-Z0-9_]{2,}", name):
+            continue
+        if name in assigned or name in defaulted or name in ALLOWED:
+            continue
+        problems.append(f"verify.sh:{i}: ${name} is never assigned in this script")
+
+# Function definitions and their first call: a shell function only exists once the
+# definition has been *executed*, so a call earlier in the file cannot succeed.
+defs = {}
+for i, line in enumerate(lines, 1):
+    m = re.match(r"\s*(?:function\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*\(\)\s*\{", line)
+    if m and m.group(1) not in defs:
+        defs[m.group(1)] = i
+for name, defline in defs.items():
+    call = re.compile(r"^\s*" + re.escape(name) + r"\s")
+    for i, line in enumerate(lines, 1):
+        if line.lstrip().startswith("#"):
+            continue
+        if i >= defline:
+            break
+        if call.match(line):
+            problems.append(
+                f"verify.sh:{i}: `{name}` is called before its definition at line {defline}; "
+                "a shell function only exists once its definition has run"
+            )
+            break
+
+if problems:
+    print("FAIL: verify.sh cannot run as written:", file=sys.stderr)
+    for p in problems:
+        print(f"      {p}", file=sys.stderr)
+    sys.exit(1)
+print("  ok: verify.sh defines every function before its first call and assigns every variable it expands")
+PYCHECK
+rc=$?
+if [ "$rc" -ne 0 ]; then fail=1; fi
+
+# 11. Same two defects, end to end rather than statically: with a *stub* toolchain the
+#     `--tsan` and `--kani-only` stages must get as far as their own skip/verdict logic.
+#     Neither may die with `command not found` (127) or on an unbound variable -- both were
+#     shipped at once and neither is visible to CI, which does not run these stages.
+#     `--kani-only` goes straight to the Kani stage (nothing before it), so this is cheap;
+#     the stub `cargo` fails, which is what makes the stages short.
+for flag in --tsan --kani-only; do
+  set +e
+  vo="$("$PYTHON" -c "import sys;print('x')" >/dev/null 2>&1; \
+       XSIV_IN_GATE_SELFTEST=1 HOME="$HOME_OK" \
+       PATH="$HOME_OK/.cargo/bin:$PYTHON_BIN_DIR:/usr/bin:/bin" \
+       timeout 300 bash ./verify.sh "$flag" 2>&1)"
+  vrc=$?
+  set -e
+  if printf '%s\n' "$vo" | grep -qE 'command not found|unbound variable'; then
+    echo "FAIL: verify.sh $flag died on a shell error rather than reaching its own logic:" >&2
+    printf '%s\n' "$vo" | grep -E 'command not found|unbound variable' | head -2 | sed 's/^/      | /' >&2
+    fail=1
+  elif [ "$vrc" -eq 127 ]; then
+    echo "FAIL: verify.sh $flag exited 127 (a name it calls does not exist)" >&2
+    fail=1
+  elif [ "$vrc" -eq 124 ]; then
+    echo "FAIL: verify.sh $flag did not finish within 300 s under the stub toolchain" >&2
+    fail=1
+  else
+    echo "  ok: verify.sh $flag -> exit $vrc without a shell-level failure"
+  fi
+done
+
 echo "gate contract: the tools checked here answer exit 3 under hidden tooling;"
 echo "               verify.sh fails a stage it was asked for that did not run, and"
 echo "               its Miri ran-count guard fails a run that reports no passed"

@@ -20,8 +20,10 @@
 //!   succeeds against crates.io BLAKE3 1.8.7 and only the `blake3_fork_equivalence` tests
 //!   notice, which a run selecting other targets would miss.
 //!
-//! The second check parses the manifest rather than substring-matching it, for the reason
-//! the first one exists at all: `a comment saying path = "blake3"` must not satisfy it.
+//! The second check parses the manifest rather than substring-matching it -- comments are
+//! stripped, *including trailing ones* (which is what `# path = "blake3"` on a dependency
+//! line is), and the value has to be a `path = "…"` key in the entry -- so a comment cannot
+//! satisfy it.
 //!
 //! `cargo package --no-verify` writes the archive without running this script.
 //! Nothing can prevent that locally; such an archive is untrusted, is never
@@ -95,8 +97,15 @@ fn check_blake3_is_a_path_dependency(manifest: &str) {
     };
 
     for raw in manifest.lines() {
+        // Strip a trailing comment *outside string literals* before anything else: a TOML
+        // comment runs to end of line, and `# path = "blake3"` appended to a dependency line
+        // satisfied the previous parser without being a key at all (measured: with both real
+        // `path` keys removed and that comment added, `cargo build` linked crates.io BLAKE3
+        // while this check stayed quiet). A `#` inside a quoted value is data, hence the
+        // string-state walk rather than `split_at('#')`.
+        let raw = strip_comment(raw);
         let line = raw.trim();
-        if line.is_empty() || line.starts_with('#') {
+        if line.is_empty() {
             continue;
         }
         if let Some((_key, value)) = pending.as_mut() {
@@ -135,6 +144,50 @@ fn check_blake3_is_a_path_dependency(manifest: &str) {
              manifest parser in build.rs no longer matches the manifest's shape."
         );
     }
+}
+
+/// Remove a TOML comment (an unquoted `#` to end of line) from `line`.
+///
+/// Single- and double-quoted strings are tracked, because `#` inside one is data: a
+/// `path = "blake#3"` must survive. Backslash escapes inside a double-quoted string are
+/// carried through so a `\"` does not close it early.
+fn strip_comment(line: &str) -> String {
+    let bytes = line.as_bytes();
+    let mut out = String::with_capacity(line.len());
+    let mut quote: Option<u8> = None;
+    let mut i = 0usize;
+    while i < bytes.len() {
+        let c = bytes[i];
+        match quote {
+            Some(q) => {
+                if q == b'"' && c == b'\\' {
+                    // Keep the escape and the escaped byte together.
+                    out.push(c as char);
+                    i += 1;
+                    if i < bytes.len() {
+                        out.push(bytes[i] as char);
+                        i += 1;
+                    }
+                    continue;
+                }
+                if c == q {
+                    quote = None;
+                }
+                out.push(c as char);
+            }
+            None => {
+                if c == b'#' {
+                    break;
+                }
+                if c == b'"' || c == b'\'' {
+                    quote = Some(c);
+                }
+                out.push(c as char);
+            }
+        }
+        i += 1;
+    }
+    out
 }
 
 fn is_dependency_section(name: &str) -> bool {

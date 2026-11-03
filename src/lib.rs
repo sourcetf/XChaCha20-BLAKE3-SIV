@@ -1377,12 +1377,15 @@ pub mod locked {
         /// a per-page ownership record. The exposure is to core dumps, and only in the
         /// failure path of a range the caller asked this module to lock.
         ///
-        /// One consequence is worth stating: the `MADV_DODUMP` rollback covers the whole
-        /// page-aligned range, so it also clears a `VM_DONTDUMP` that a *different* owner of
-        /// the same mapping had set. `unlock_range`'s doc says the same of its own restore;
-        /// neither function tracks whether it was the one that set the flag, which would need
-        /// a per-page ownership record. The exposure is to core dumps, and only in the
-        /// failure path of a range the caller asked this module to lock.
+        /// The `MADV_DODUMP` in that rollback is issued for its effect, not for its result:
+        /// its return value is deliberately ignored, so if it fails the range keeps
+        /// `VM_DONTDUMP` for the rest of the process's life. That is the fail-safe direction
+        /// (an exclusion that outlives its use costs core-dump completeness; a secret in a
+        /// core dump cannot be taken back), and it is stated here because "ignored" is
+        /// otherwise indistinguishable from "forgotten" -- an earlier revision of this doc
+        /// described only the range-ownership caveat and left this case unmentioned. The
+        /// condition needs `munlock` to succeed and the advice to fail, which on Linux needs
+        /// an invalid address inside a range the caller asked this module to lock.
         ///
         /// A refused `mlock` is **not** rolled back, because this function cannot tell
         /// whether the kernel locked a prefix of the range before failing — and undoing a
