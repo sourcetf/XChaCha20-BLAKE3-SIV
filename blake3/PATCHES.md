@@ -22,6 +22,12 @@ Packaging differences from the published archive:
   `f3149ec5bb5449af877ba20377a11008ff499fa2` (the commit named by the published
   `.crate`). They restore the published crate's missing test dev-dependency
   (`reference_impl`) and the C test vectors, so the fork's own suite can run.
+- `Cargo.toml` (and `Cargo.toml.orig`) require `constant_time_eq = "0.6.1"`, where the
+  checksum-matched `blake3 1.8.7` archive requires `0.4.2`. This is the dependency bump
+  the parent's `deny.toml` licence note records: `constant_time_eq 0.6.x` is the release
+  whose build-dependency graph is `rustversion`-only. `Hash`'s constant-time equality is
+  built on this crate (`src/lib.rs`), so the version is visible to an evaluator reading
+  the packaging diff and belongs in this list rather than only in the parent.
 - `c/cmake/BLAKE3/{Utils,Examples,Testing,ContinuousIntegration}.cmake` are byte-identical
   to the published archive's copies. They had been deleted from this tree (the whole
   `c/cmake/` directory was absent), which made `cmake -S c -B <dir>` fail at

@@ -496,7 +496,7 @@ fn hchacha20_matches_draft_vector() {
 //   HChaCha20 and BLAKE3-official vectors before it emits anything.
 // * `test_message_swap_under_a_reused_nonce_is_rejected`,
 //   `test_tag_changes_when_only_the_key_changes`,
-//   `test_decrypt_reports_authentication_failure_without_returning_plaintext`,
+//   `test_decrypt_reports_authentication_failure`,
 //   `test_detached_rejects_tampering_and_wipes`, the `test_avalanche_*`
 //   diffusion checks, and the construction pins
 //   (`test_blake3_keyed_matches_official_vectors`,

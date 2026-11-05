@@ -5,11 +5,12 @@
 # harness that executes the real 20-round permutation takes tens of minutes on a
 # 16-core machine, and a CI runner is slower still.
 #
-# Relationship to releases: the release job in ci.yml is gated on the CI jobs
-# only, so a release can exist for a commit whose proofs are still running. If
-# you want the proofs to block releases (defensible for a cryptographic
-# library), add a `workflow_run` trigger on this workflow and gate the release
-# there -- cross-workflow ordering cannot be expressed with `needs`.
+# Relationship to releases: ci.yml's release job polls this workflow for the
+# pushed SHA and refuses to publish unless it concluded successfully (the same
+# poll it runs for Deep), so the proofs do block a release. Cross-workflow
+# ordering cannot be expressed with `needs:` -- that is why the gate is a poll
+# rather than a dependency -- and a `workflow_run` trigger on this workflow
+# remains an alternative for proofs run locally or outside CI.
 #
 # The harness set is derived from the source by tools/kani_shards.py rather than
 # listed here, so a newly added `#[kani::proof]` is picked up automatically. A

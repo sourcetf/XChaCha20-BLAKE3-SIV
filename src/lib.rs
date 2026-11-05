@@ -2544,6 +2544,11 @@ fn zeroize_slice(slice: &mut [u8]) {
 /// `ptr` must be valid for writes of `len` bytes, and those bytes must not be
 /// reachable through a live reference for the duration of the call.
 unsafe fn zeroize_raw(ptr: *mut u8, len: usize) {
+    // The leading loop aligns to `align` and the wide loop advances by `chunk`, so the
+    // `*mut usize` stores stay aligned only while the two are equal. They are on every
+    // target this crate supports; assert it here rather than assume it, because a target
+    // with `size_of::<usize>() != align_of::<usize>()` would make those stores UB.
+    const _: () = assert!(core::mem::size_of::<usize>() == core::mem::align_of::<usize>());
     let chunk = core::mem::size_of::<usize>();
     let align = core::mem::align_of::<usize>();
 
@@ -4624,9 +4629,11 @@ fn chacha20_apply(
 ) {
     // `xor_or_copy` slices the plaintext at `off..off + ks.len()` for the `Separate` input,
     // so an input shorter than the output would panic there (a bounds check, not UB, but a
-    // confusing one). Every caller goes through `chacha20_keystream`, which checks this --
-    // yet that is a property of today's callers rather than of this function, so it is
-    // stated here and a future direct caller fails at the boundary it crossed.
+    // confusing one). The `Input::Separate` callers reach here through
+    // `chacha20_keystream`, which checks this -- yet that is a property of today's callers
+    // rather than of this function, so it is stated here and a future direct caller fails
+    // at the boundary it crossed. (The two `Input::InPlace` callers share the caller's
+    // buffer and need no such check.)
     if let Input::Separate(inp) = input {
         assert_eq!(
             inp.len(),
@@ -5125,7 +5132,7 @@ mod tests {
     /// showed that flipping the production guard to a constant left the whole suite green,
     /// because nothing could exercise the branch; the decision is now a pure function and
     /// the rows below are the device.
-    #[cfg(target_arch = "x86_64")]
+    #[cfg(all(target_arch = "x86_64", not(kani)))]
     #[test]
     fn avx2_usability_follows_the_cpuid_rules() {
         const OSXSAVE: u32 = 1 << 27;
@@ -5199,7 +5206,7 @@ mod tests {
     /// Explicitly exercise the SSE2 (4-block) and AVX2 (8-block) kernels in
     /// isolation where the target supports them, so a broken backend cannot
     /// hide behind the dispatcher's fallback.
-    #[cfg(target_arch = "x86_64")]
+    #[cfg(all(target_arch = "x86_64", not(kani)))]
     #[test]
     fn test_x86_simd_kernels_match_scalar() {
         // Non-uniform key and nonce: with all-equal bytes a swapped key word index or a
@@ -5244,7 +5251,7 @@ mod tests {
     /// architecture: aarch64 without NEON (for example
     /// `aarch64-unknown-none-softfloat`, or `-C target-feature=-neon`) falls back
     /// to the scalar path, and this test must compile out with the module.
-    #[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
+    #[cfg(all(target_arch = "aarch64", target_feature = "neon", not(kani)))]
     #[test]
     fn test_aarch64_neon_kernel_matches_scalar() {
         // Non-uniform, for the same reason as the x86 test above.
@@ -5489,7 +5496,7 @@ mod tests {
     }
 
     #[test]
-    fn test_decrypt_reports_authentication_failure_without_returning_plaintext() {
+    fn test_decrypt_reports_authentication_failure() {
         let key = [0x42u8; 32];
         let nonce = [0u8; 24];
         let plaintext = b"Secret message";

@@ -1113,7 +1113,9 @@ works unprivileged, and the emulator is extracted into `~/.local/bin`.
   AddressSanitizer, asserting round-trip correctness, rejection of every
   single-bit corruption, and the wipe-on-failure contract.
 - **Dependency hygiene** — `cargo deny check` (advisories, licences, bans,
-  sources) and `cargo-audit`.
+  sources) over the default non-dev graph, plus `cargo-audit` over the lock
+  files (which is what reaches the dev/optional crates `cargo-deny`'s graph
+  excludes; see `deny.toml`).
 - **Measured performance** — throughput and latency against RustCrypto's
   `chacha20poly1305` in all three configurations, with the noise floor measured
   rather than assumed ([`performance.md`](performance.md)).

@@ -495,11 +495,17 @@ fn the_vendored_fork_is_wired_in_by_path() {
         );
     }
 
-    // Secondary, and cheap: the manifest text, parsed with comments stripped. It is *not*
-    // the oracle -- the metadata above is -- but it fails with a message that names the
-    // entry, and it is what catches the case where `cargo metadata` itself would refuse to
-    // run. Both matter: the first version of this test was this parser alone, and a trailing
-    // `# path = "blake3"` comment satisfied it (measured).
+    // Secondary, and cheap: the manifest text, with whole-line comments skipped. It is
+    // *not* the oracle -- the metadata above is -- but it fails with a message that names
+    // the entry, and it is what catches the case where `cargo metadata` itself would refuse
+    // to run. Both matter: the first version of this test was this parser alone, and a
+    // trailing `# path = "blake3"` comment satisfied it (measured).
+    //
+    // Limit, stated rather than implied: `dependency_entries` skips only comments that
+    // occupy a whole line, so a *trailing* comment on a real `[dependencies]` line is not
+    // removed. That is why this is not the oracle: the `cargo metadata` check above is
+    // authoritative, and a trailing comment could only make this parser *see* an entry
+    // that is not there, which the metadata check would already have failed on.
     let manifest = std::fs::read_to_string(root.join("Cargo.toml"))
         .expect("the parent manifest must be readable");
     let entries = dependency_entries(&manifest);

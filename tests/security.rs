@@ -822,6 +822,22 @@ fn non_test_source() -> String {
     non_test_source_of(LIB)
 }
 
+/// The total number of `crate::zeroize_array(` / `zeroize_slice(` / `zeroize_raw(` calls
+/// in the non-test source, the backstop [`every_documented_wipe_has_a_witness`] pins. The
+/// qualified form is required by the same file's shadow check, so counting it counts every
+/// wipe primitive the crate calls.
+fn full_wipe_calls() -> usize {
+    let source = non_test_source();
+    [
+        "crate::zeroize_array(",
+        "crate::zeroize_slice(",
+        "crate::zeroize_raw(",
+    ]
+    .iter()
+    .map(|p| source.matches(p).count())
+    .sum()
+}
+
 /// See [`non_test_source`]: the same cut applied to `text` rather than to `LIB`, for
 /// the two files `no_constant_cfg_attribute_can_deaden_the_crypto_source` scans.
 fn non_test_source_of(text: &str) -> String {
@@ -2008,14 +2024,24 @@ fn deadening_head(body: &str, open: usize, head: &str) -> Option<&'static str> {
              called",
         );
     }
-    if let Some(cond) = head
-        .strip_prefix("if ")
-        .or_else(|| head.strip_prefix("while "))
-    {
+    if let Some(cond) = if_condition_of(head) {
         if constant_condition_value(cond) == Some(false) {
             return Some(
                 "the enclosing block's condition is a constant false, so its body never runs",
             );
+        }
+    }
+    // `if { false } { wipe }`: the condition is a block expression, so it is not an
+    // enclosing block of the wipe (it closed before the wipe's own block opened) and the
+    // head is empty. Read the `if`/`while` and its `{ … }` from just before the block.
+    if head.is_empty() {
+        if let Some(cond) = block_condition_before(body, open) {
+            if constant_condition_value(cond) == Some(false) {
+                return Some(
+                    "the enclosing block's `{ … }` condition is a constant false, so its body \
+                     never runs",
+                );
+            }
         }
     }
     // `else` and `else if` need the whole preceding chain, not just one condition:
@@ -2093,13 +2119,31 @@ fn deadening_head(body: &str, open: usize, head: &str) -> Option<&'static str> {
              literal), so its arms are decided at compile time",
         );
     }
-    if let Some(scrutinee) = head.strip_prefix("match ") {
-        if literal_value(scrutinee.trim()).is_some() {
-            return Some("the enclosing `match` has a constant scrutinee, so its arms are decided at compile time");
+    // A `match` arm: whether it can be *selected* depends on the scrutinee, not on the
+    // arm alone. Rejecting every arm of a constant-scrutinee `match` was over-broad --
+    // `match 5u8 { 5 => { wipe }, _ => {} }` runs the `5` arm and its wipe is live
+    // (measured). Only a *literal arm pattern the constant scrutinee cannot equal* is
+    // dead; a wildcard or binding pattern is reachable and is not rejected.
+    if let Some(pat) = arm_pattern(head) {
+        let scrutinee = enclosing_block_heads(body, open)
+            .iter()
+            .find_map(|(_, h)| h.strip_prefix("match "))
+            .and_then(|s| literal_value(strip_outer_parens(s.trim())));
+        if let (Some(pat_val), Some(scrut)) = (literal_value(strip_outer_parens(pat)), scrutinee) {
+            if pat_val != scrut {
+                return Some(
+                    "the enclosing `match` has a constant scrutinee that this arm's literal \
+                     pattern cannot equal, so the arm never runs",
+                );
+            }
         }
     }
     if let Some(rest) = head.strip_prefix("for ") {
-        if let Some((_, iter)) = rest.split_once(" in ") {
+        // Whitespace-normalise the header: `for _ in\t0..0u8 {` is the same loop as
+        // `for _ in 0..0u8 {`, but `split_once(" in ")` required single spaces and the
+        // tab spelling slipped (measured).
+        let normalized: String = rest.split_whitespace().collect::<Vec<_>>().join(" ");
+        if let Some((_, iter)) = normalized.split_once(" in ") {
             if empty_range(iter.trim()) {
                 return Some("the enclosing `for` iterates an empty range, so its body never runs");
             }
@@ -2115,15 +2159,18 @@ fn deadening_head(body: &str, open: usize, head: &str) -> Option<&'static str> {
 /// Both sides, not either: `let c = 'a'; if c == 'a' { … }` blanks only the right-hand
 /// literal, and that condition is *live* -- an earlier version of this helper rejected it,
 /// which would have failed the build for a correct edit.
+///
+/// Every comparison operator, not only `==`/`!=`: `'b' < 'a'` blanks to `if  < ` and
+/// deadens the wipe the same way (measured). All six are undecidable once blanked --
+/// `'a' == 'a'`, `'a' != 'b'`, `'a' < 'b'` are the live halves of the same shapes -- so the
+/// guard rejects the whole class rather than guess; a wash that responds to the rejection
+/// by rewriting a comparison of two literals in a wipe gate is the outcome the guard wants.
 fn both_comparison_operands_blanked(head: &str) -> bool {
-    for op in ["==", "!="] {
-        if let Some((left, right)) = head.split_once(op) {
-            // The left operand may still carry the `if`/`while`/`else if` keyword; strip it.
-            let left = left
-                .trim_start_matches("if ")
-                .trim_start_matches("while ")
-                .trim();
-            if left.is_empty() && right.trim().is_empty() {
+    let cond = if_condition_of(head).unwrap_or(head);
+    // `<=`/`>=` before `<`/`>`: splitting `a <= b` on `<` leaves a non-empty `= b`.
+    for op in ["==", "!=", "<=", ">=", "<", ">"] {
+        if let Some((left, right)) = cond.split_once(op) {
+            if left.trim().is_empty() && right.trim().is_empty() {
                 return true;
             }
         }
@@ -2187,7 +2234,7 @@ fn constant_condition_value(cond: &str) -> Option<bool> {
     }
     for (op, eq_when) in [("==", true), ("!=", false)] {
         if let Some((left, right)) = split_at_top_level_op(cond, op) {
-            let (l, r) = (literal_value(left.trim())?, literal_value(right.trim())?);
+            let (l, r) = (literal_operand(left)?, literal_operand(right)?);
             return Some(if eq_when { l == r } else { l != r });
         }
     }
@@ -2195,7 +2242,7 @@ fn constant_condition_value(cond: &str) -> Option<bool> {
         if let Some((left, right)) = split_at_top_level_op(cond, op) {
             // `>=`/`<=` are equality-or-greater, so `want` records which side of the
             // comparison keeps the result true.
-            let (l, r) = (literal_value(left.trim())?, literal_value(right.trim())?);
+            let (l, r) = (literal_operand(left)?, literal_operand(right)?);
             let ordered = if want { l >= r } else { l > r };
             return Some(if op.starts_with('>') {
                 ordered
@@ -2205,6 +2252,15 @@ fn constant_condition_value(cond: &str) -> Option<bool> {
         }
     }
     literal_value(cond).map(|v| v != 0)
+}
+
+/// [`literal_value`] after peeling a balanced outer `( … )` pair from the operand.
+///
+/// The comparison branches above use this, not `literal_value` directly: `if (1u8) ==
+/// (2u8) { wipe }` is a constant false that deadens the wipe, but `literal_value("(1u8)")`
+/// is `None`, so the whole condition was undecidable and the wipe passed (measured).
+fn literal_operand(text: &str) -> Option<i128> {
+    literal_value(strip_outer_parens(text.trim()))
 }
 
 /// Remove one balanced outer `( … )` pair, if the whole string is wrapped in one.
@@ -2243,14 +2299,22 @@ fn balanced_inside(t: &str) -> bool {
 /// `black_box(1u8 == 2u8)`, `black_box( false )` and any path-qualified spelling.
 fn peel_black_box(s: &str) -> &str {
     let t = s.trim();
-    let Some(open) = t.find("black_box(") else {
+    let Some(pos) = t.find("black_box") else {
         return t;
     };
+    // Rust accepts whitespace between a path's last segment and its `(`:
+    // `core::hint::black_box (false)` is legal and the compiler folds it like
+    // `black_box(false)`, but a matcher that required the literal `black_box(` evaded it
+    // (measured: `black_box (false)` deadened a counted wipe with the suite green). Skip
+    // the whitespace before requiring `(`.
+    let rest = &t[pos + "black_box".len()..];
+    let ws = rest.len() - rest.trim_start().len();
+    let open = pos + "black_box".len() + ws;
     // Only when the call is the whole condition and its paren closes it.
-    if !t[open..].ends_with(')') {
+    if !t[open..].starts_with('(') || !t[open..].ends_with(')') {
         return t;
     }
-    let inner = &t[open + "black_box(".len()..t.len() - 1];
+    let inner = &t[open + 1..t.len() - 1];
     if balanced_inside(&format!("({inner})")) {
         inner.trim()
     } else {
@@ -2359,7 +2423,9 @@ fn empty_range(iter: &str) -> bool {
     let Some((lo, hi)) = iter.split_once("..") else {
         return false;
     };
-    match (literal_value(lo.trim()), literal_value(hi.trim())) {
+    // Each bound may itself be parenthesized: `0..(0)` is the same empty range as `0..0`,
+    // and `literal_value("(0)")` was `None`, so the loop slipped (measured).
+    match (literal_operand(lo), literal_operand(hi)) {
         (Some(lo), Some(hi)) => lo >= hi,
         _ => false,
     }
@@ -2397,12 +2463,95 @@ fn inside_closure_body(body: &str, at: usize) -> bool {
         .any(|(_, head)| head.ends_with('|'))
 }
 
+/// The condition of an `if`/`while` head that may carry a keyword prefix.
+///
+/// `enclosing_block_heads` builds the head as all text back to the previous
+/// `\n`/`;`/`{`/`}`, so a keyword prefix stays attached: `let _ = if false { wipe };` and
+/// `return if false { wipe };` both reach the guard with a head that does *not* start with
+/// `if `, and `strip_prefix` alone missed them (measured: both deadened a counted wipe with
+/// the suite green). Strip a leading `let … = ` or `return ` before re-reading the keyword.
+fn if_condition_of(head: &str) -> Option<&str> {
+    if let Some(c) = head
+        .strip_prefix("if ")
+        .or_else(|| head.strip_prefix("while "))
+    {
+        return Some(c);
+    }
+    for prefix in ["let ", "return "] {
+        if let Some(rest) = head.strip_prefix(prefix) {
+            let rest = rest.trim();
+            let rhs = rest.rsplit_once(" = ").map_or(rest, |(_, rhs)| rhs.trim());
+            if let Some(c) = rhs
+                .strip_prefix("if ")
+                .or_else(|| rhs.strip_prefix("while "))
+            {
+                return Some(c);
+            }
+        }
+    }
+    None
+}
+
+/// The pattern of a `match` arm head (`5 =>`, `_ =>`, `Some(x) if c =>`), with any
+/// ` if <guard>` removed. `None` when `head` is not an arm (does not end in `=>`).
+fn arm_pattern(head: &str) -> Option<&str> {
+    let arm = head.strip_suffix("=>")?;
+    let pat = arm.split_once(" if ").map_or(arm, |(p, _)| p);
+    Some(pat.trim())
+}
+
+/// The `{ … }` condition of an `if { … }` / `while { … }` whose keyword sits immediately
+/// before the block opening at `open` (the wipe block for `if { false } { wipe }`).
+fn block_condition_before(body: &str, open: usize) -> Option<&str> {
+    let before = body[..open].trim_end();
+    if !before.ends_with('}') {
+        return None;
+    }
+    let close = before.len() - 1;
+    // The matching `{` of that `}`.
+    let mut depth = 0i32;
+    let mut content_open = None;
+    for (i, c) in body[..=close].char_indices().rev() {
+        match c {
+            '}' => depth += 1,
+            '{' => {
+                depth -= 1;
+                if depth == 0 {
+                    content_open = Some(i);
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+    let content_open = content_open?;
+    let kw = body[..content_open].trim_end();
+    if kw.ends_with("while") || kw.ends_with("if") {
+        let start = if kw.ends_with("while") {
+            kw.len() - "while".len()
+        } else {
+            kw.len() - "if".len()
+        };
+        // The keyword must be a whole word (`elif`/`iff` are not it).
+        let boundary_ok = start == 0
+            || !kw[..start]
+                .chars()
+                .next_back()
+                .is_some_and(|c| c.is_alphanumeric() || c == '_');
+        if boundary_ok {
+            return Some(&body[content_open + 1..close]);
+        }
+    }
+    None
+}
+
 fn assert_wipes_are_not_deadened(
     name: &str,
     body: &str,
     body_line: usize,
     wipe: &str,
     allowed_cfg: &[&str],
+    ungated_success_path: bool,
 ) {
     // The raw read below turns a line number in `body` into a line of `src/lib.rs`.
     // That mapping holds because every stage of the cut blanks spans and comments while
@@ -2463,17 +2612,37 @@ fn assert_wipes_are_not_deadened(
             if is_cfg_attribute(attr) {
                 let line = body_line + line_no;
                 let predicate = raw_cfg_predicate_at(line);
+                // The allow-list is per wipe, but a wipe can occur several times in one
+                // body (encrypt's `k_in`/`k_out`/`enc_seed` occur twice inside the
+                // `#[cfg(feature = "ultra")]` witness block and once on the unconditional
+                // success path). Passing one list for all of them let
+                // `#[cfg(feature = "ultra")]` sit on the success-path wipe, compiling it
+                // out of the default build while the suite stayed green (measured). When
+                // the caller marks the success path as required-ungated, a depth-1
+                // occurrence (a direct statement of the function body -- the path every
+                // build takes) may carry no `cfg` at all, whatever the allow-list says.
+                // The `sites` table, whose rows may name a genuinely feature-gated wipe
+                // (`decrypt`'s `recomputed_tag` exists only to be compared under
+                // `dual-mac`), passes `false` and keeps the per-wipe list.
+                let effective_allowed: &[&str] =
+                    if ungated_success_path && brace_depth_at(body, stmt_at) <= 1 {
+                        &[]
+                    } else {
+                        allowed_cfg
+                    };
                 assert!(
-                    allowed_cfg.contains(&predicate.as_str()),
+                    effective_allowed.contains(&predicate.as_str()),
                     "`{name}`'s wipe `{wipe}` is directly preceded by `{}` (line {line}), \
                      whose predicate `{predicate}` is not one of the configurations this \
-                     table enumerates for this wipe ({allowed_cfg:?}). A `cfg` on a counted \
-                     wipe compiles the wipe out of every build the predicate is false in \
-                     while leaving the counted text unchanged: `#[cfg(feature = \"pure\")]` \
+                     wipe's occurrence may be gated by ({effective_allowed:?}). A `cfg` on a \
+                     counted wipe compiles the wipe out of every build the predicate is false \
+                     in while leaving the counted text unchanged: `#[cfg(feature = \"pure\")]` \
                      on `encrypt`'s `enc_key` wipe was measured taking the wipe out of the \
-                     default and `ultra` builds with the whole suite green. Delete the \
-                     attribute, or add the predicate to the table deliberately, with the \
-                     reason the wipe is not counted in the configurations it excludes.",
+                     default and `ultra` builds with the whole suite green, and the same \
+                     predicate is not allowed on the unconditional success path even though \
+                     the ultra witness block is enumerated for it. Delete the attribute, or \
+                     add the predicate to the table deliberately, with the reason the wipe is \
+                     not counted in the configurations it excludes.",
                     raw_lib_line(line).trim()
                 );
             }
@@ -2847,7 +3016,7 @@ fn every_allocation_happens_before_any_derivation() {
             } else {
                 &[]
             };
-            assert_wipes_are_not_deadened(name, &body, body_line, &wipe, allowed);
+            assert_wipes_are_not_deadened(name, &body, body_line, &wipe, allowed, true);
             // The per-wipe check above pins the shapes around the *counted* rows. This one
             // also covers the wipes those rows do not name -- `encrypt`'s and `decrypt`'s
             // `crate::scrub_stack()` calls among them, whose deadening the suite used to
@@ -3080,6 +3249,21 @@ fn every_documented_wipe_has_a_witness() {
         "the wipe table has {wipe_entries} entries, expected 26: a deleted entry must be a \
          deliberate change to this count"
     );
+    // The table witnesses the wipes it *names*; it cannot see a wipe added in a function
+    // that is not listed, so a new wipe-bearing function would ship unwitnessed. Pin the
+    // total number of `crate::zeroize_*` calls in the non-test source as an independent
+    // backstop: a new one -- or a deleted one outside a listed site -- changes the total
+    // and has to update this number in the same change (measured: adding a
+    // `fn new_secret_helper() { … crate::zeroize_array(&mut secret); }` left the suite
+    // green until this count existed).
+    let wipe_calls = full_wipe_calls();
+    assert_eq!(
+        wipe_calls, 81,
+        "the non-test source contains {wipe_calls} `crate::zeroize_*` call(s), expected 81. \
+         This count is the backstop the per-site table cannot provide: a wipe added in a \
+         function the table does not list would otherwise be unwitnessed. Count it, add the \
+         site, or record why the new wipe is not listed."
+    );
     // And every marker must still be a single definition, driven from the table rather
     // than a hand-kept list that can drift: `body_of` takes the *first* match, so a decoy
     // with the same marker would otherwise satisfy the counts for a deleted real wipe.
@@ -3108,7 +3292,7 @@ fn every_documented_wipe_has_a_witness() {
                  separately, below.",
                 site.label
             );
-            assert_wipes_are_not_deadened(site.label, &body, body_line, wipe, allowed_cfg);
+            assert_wipes_are_not_deadened(site.label, &body, body_line, wipe, allowed_cfg, false);
         }
         // Same second pass as the entry-point table: every wipe primitive in the site's
         // body must be reachable, not only the rows listed above.

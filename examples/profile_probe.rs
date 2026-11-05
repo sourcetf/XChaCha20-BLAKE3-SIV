@@ -32,6 +32,11 @@ fn main() {
         .map(|s| s.parse().expect("iterations"))
         .unwrap_or(1000);
 
+    if iters == 0 {
+        eprintln!("iterations must be at least 1 (got 0: the mean would be 0/0)");
+        std::process::exit(2);
+    }
+
     let key = [0x42u8; 32];
     let nonce = [0x55u8; 24];
     let aad = b"aad";

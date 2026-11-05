@@ -53,11 +53,15 @@ def load(directory):
             sys.exit(EXIT_COULD_NOT_RUN)
 
     try:
-        with open(mutants_path) as fh:
+        # `encoding="utf-8"`: `mutants.json` carries the mutated source, whose em-dashes
+        # are non-ASCII; the locale default raises UnicodeDecodeError under a C locale,
+        # which surfaced as exit 1 ("stale evidence") rather than the exit 3 this tool
+        # documents for "could not run" (the error was not even in the except tuple).
+        with open(mutants_path, encoding="utf-8") as fh:
             mutants = json.load(fh)
-        with open(outcomes_path) as fh:
+        with open(outcomes_path, encoding="utf-8") as fh:
             outcomes = json.load(fh)
-    except (OSError, json.JSONDecodeError) as e:
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as e:
         print(f"FAIL: {directory} could not be parsed: {e}", file=sys.stderr)
         sys.exit(EXIT_COULD_NOT_RUN)
 

@@ -115,7 +115,13 @@ def build_example(features):
     cmd = ["cargo", "build", "--release", "--quiet", "--example", "xsiv_stdin"]
     if features:
         cmd += ["--features", features]
-    proc = subprocess.run(cmd, cwd=ROOT, capture_output=True, text=True)
+    try:
+        proc = subprocess.run(cmd, cwd=ROOT, capture_output=True, text=True)
+    except FileNotFoundError as e:
+        # `cargo` is not on PATH: exit 3 (could not run), not a traceback (rc 1, which
+        # verify.sh reports as FAILED rather than the skip it is).
+        print(f"could not run: {e}", file=sys.stderr)
+        sys.exit(3)
     if proc.returncode != 0:
         print(f"could not run: could not build the crate's example:\n{proc.stderr}", file=sys.stderr)
         sys.exit(3)
@@ -178,6 +184,12 @@ def main():
         seed = int(argv[1]) if len(argv) > 1 else 20260925
     except ValueError:
         print(f"FAIL: want numeric <count> [seed], got {argv!r}", file=sys.stderr)
+        sys.exit(1)
+    if len(argv) > 2:
+        # Extra positionals used to be ignored silently: `… 3 1 junk` ran count=3 seed=1
+        # and exited 0, so a mistyped invocation looked like it had done what was asked.
+        print(f"FAIL: unexpected extra argument(s) {argv[2:]!r}; usage: "
+              "broad_differential.py [<count>] [<seed>] [--features <f>]", file=sys.stderr)
         sys.exit(1)
     if count < 1:
         # Not exit 3: nothing about the environment prevents this run, the caller asked for

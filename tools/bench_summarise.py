@@ -41,7 +41,7 @@ def to_seconds(text):
 def parse(path):
     """{(group, impl, size): seconds} — the first `time:` line after each id."""
     out = {}
-    with open(path, errors="replace") as fh:
+    with open(path, encoding="utf-8", errors="replace") as fh:
         lines = fh.read().splitlines()
     for i, line in enumerate(lines):
         m = ID_RE.match(line.strip())

@@ -468,8 +468,24 @@ jobs:
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
           shared-key: windows
+      # `shell: bash` + the reported-vs-run guard: the Linux test matrix and
+      # cross-exec both refuse a "0 passed" run (a change that gated the
+      # integration targets off would otherwise leave this release-gate leg green
+      # while the Windows-only asm backend is compiled but never executed), and
+      # this leg had no such check.
       - name: cargo test (ultra, release; the Windows asm backend is compiled here)
-        run: cargo test --locked --release --features ultra -- --skip timing
+        shell: bash
+        run: |
+          set -o pipefail
+          LOG=win-test.log
+          cargo test --locked --release --features ultra -- --skip timing 2>&1 | tee "$LOG"
+          result="$(grep -E 'test result:' ${LOG} | tail -1 || true)"
+          passed="$(printf '%s' "$result" | sed -n 's/.* \([0-9][0-9]*\) passed.*/\1/p')"
+          ignored="$(printf '%s' "$result" | sed -n 's/.* \([0-9][0-9]*\) ignored.*/\1/p')"
+          if [ -z "$passed" ] || [ -z "$ignored" ] || [ $((passed + ignored)) -eq 0 ]; then
+            echo "::error::the suite reported ${passed:-no} passed and ${ignored:-no} ignored test(s): it built and executed nothing (tests compiled away, filtered out, or no libtest summary). The Linux test matrix and cross-exec carry the same guard."
+            exit 1
+          fi
       - name: cargo check (no default features)
         run: cargo check --locked --no-default-features --all-targets
 
@@ -715,7 +731,17 @@ jobs:
       # t ~ 11 with no possible cause, against a threshold of 10), so it must not
       # gate a job whose subject is the minimum toolchain.
       - name: build and test at the declared MSRV
-        run: cargo test --locked --release --all-features -- --skip timing
+        run: |
+          set -o pipefail
+          LOG=msrv-test.log
+          cargo test --locked --release --all-features -- --skip timing 2>&1 | tee "$LOG"
+          result="$(grep -E 'test result:' ${LOG} | tail -1 || true)"
+          passed="$(printf '%s' "$result" | sed -n 's/.* \([0-9][0-9]*\) passed.*/\1/p')"
+          ignored="$(printf '%s' "$result" | sed -n 's/.* \([0-9][0-9]*\) ignored.*/\1/p')"
+          if [ -z "$passed" ] || [ -z "$ignored" ] || [ $((passed + ignored)) -eq 0 ]; then
+            echo "::error::the suite reported ${passed:-no} passed and ${ignored:-no} ignored test(s): it built and executed nothing (tests compiled away, filtered out, or no libtest summary). The Linux test matrix and cross-exec carry the same guard."
+            exit 1
+          fi
 
       # Deliberately NOT running clippy here. An MSRV is a statement about the
       # language and library API surface, which is what building and testing

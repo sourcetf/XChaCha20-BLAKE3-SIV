@@ -1,9 +1,12 @@
 # The audit checks that need external tooling: Miri, ctgrind, cargo-deny, fuzzing.
 #
 # Kept out of ci.yml because each needs its own install and they are much slower
-# than the ordinary test suite. Like formal.yml, this is not a gate for releases;
-# it exists so the checks in tests/README.md actually run somewhere other than one
-# developer's machine.
+# than the ordinary test suite. It is not a `needs:` dependency of any other
+# workflow -- cross-workflow ordering cannot be expressed that way -- but ci.yml's
+# release job polls this workflow for the pushed SHA and refuses to publish until
+# it has concluded successfully, so a Deep failure (or a Deep run still in flight
+# past the poll's timeout) blocks a release. It also exists so the checks in
+# tests/README.md actually run somewhere other than one developer's machine.
 #
 # Every step here was verified locally first. Where a tool needed a workaround to
 # run at all, the workaround is in the step and the reason is in a comment.

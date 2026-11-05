@@ -197,31 +197,46 @@ fn the_key_itself_is_locked() {
     // unlocked, and `Some(0)` for the key's mapping was treated as "no information" while
     // the process-wide `VmLck` delta below was satisfied by the decoy's lock. The test
     // passed. Now a zero from a channel that demonstrably reports locks is a failure.
-    if let Some(kb) = locked_kb_at(ptr) {
-        if kb > 0 {
-            return;
-        }
-        let reporting = smaps_reports_locks();
-        // A probe that could not lock means the strong check was not evaluated at all; say
-        // so instead of falling through to the weak fallback, which a decoy lock satisfies.
-        assert_ne!(
-            reporting,
-            LockReporting::CouldNotProbe,
-            "the per-mapping `Locked:` probe could not lock its own page, so the strongest \
-             check beneath this one was never evaluated and the `VmLck` fallback alone \
-             cannot see a lock placed on the wrong address. Raise `RLIMIT_MEMLOCK` (the \
-             probe needs one page *in addition to* the key's) and re-run; this is a \
-             could-not-run, reported as a failure because silence here is how the decoy \
-             mutant passed before"
-        );
+    // `locked_kb_at` returns `None` when `/proc/self/smaps` is unreadable or carries no
+    // `Locked:` field, i.e. the strongest check was not evaluated at all. Falling through
+    // to the `VmLck` fallback below is a false green -- any lock (a decoy's) satisfies it
+    // -- so the missing channel is loud, with the same recorded override the sibling
+    // `unlocking_restores_core_dump_inclusion` uses. (An audit stubbed `locked_kb_at` to
+    // `None` and the decoy mutant passed.)
+    let Some(kb) = locked_kb_at(ptr) else {
         assert!(
-            reporting != LockReporting::Reported,
-            "the mapping containing the key ({ptr:#x}) reports `Locked: 0` while this \
-             environment does report per-mapping locks (a probe range locked here shows \
-             one), so the key's own page is not locked — locking any *other* address \
-             satisfies the `VmLck` fallback below, which is how this test was blind"
+            allow_unobservable_dump_flags(),
+            "/proc/self/smaps is unreadable or reports no `Locked:` field, so the \
+             per-mapping lock check -- the only check that can see a lock placed on the \
+             wrong address -- was not evaluated, and the `VmLck` fallback alone is \
+             satisfied by a decoy lock. Set XSIV_ALLOW_UNOBSERVABLE_DUMP_FLAGS=1 to record \
+             that this host cannot observe it."
         );
+        return;
+    };
+    if kb > 0 {
+        return;
     }
+    let reporting = smaps_reports_locks();
+    // A probe that could not lock means the strong check was not evaluated at all; say
+    // so instead of falling through to the weak fallback, which a decoy lock satisfies.
+    assert_ne!(
+        reporting,
+        LockReporting::CouldNotProbe,
+        "the per-mapping `Locked:` probe could not lock its own page, so the strongest \
+         check beneath this one was never evaluated and the `VmLck` fallback alone \
+         cannot see a lock placed on the wrong address. Raise `RLIMIT_MEMLOCK` (the \
+         probe needs one page *in addition to* the key's) and re-run; this is a \
+         could-not-run, reported as a failure because silence here is how the decoy \
+         mutant passed before"
+    );
+    assert!(
+        reporting != LockReporting::Reported,
+        "the mapping containing the key ({ptr:#x}) reports `Locked: 0` while this \
+         environment does report per-mapping locks (a probe range locked here shows \
+         one), so the key's own page is not locked — locking any *other* address \
+         satisfies the `VmLck` fallback below, which is how this test was blind"
+    );
 
     // Fallback, and still not vacuous: the kernel's own accounting must have risen when
     // this key was locked. A no-op `lock_range`, a wrong syscall number or a lock on an
@@ -230,7 +245,7 @@ fn the_key_itself_is_locked() {
     assert!(
         after > before,
         "neither the mapping containing the key ({ptr:#x}) nor the kernel's `VmLck` \
-         accounting shows a lock ({before} -> {after} kB): the bytes the caller uses are \
+         accounting shows a lock ({before} -> {after} bytes): the bytes the caller uses are \
          not the bytes that were locked"
     );
 }
@@ -679,7 +694,7 @@ fn a_refused_lock_is_reported_and_returns_the_allowance() {
     let released = LockedKey::locked_bytes().expect("VmLck is readable on Linux");
     assert_eq!(
         released, baseline,
-        "a dropped key's charge stayed in VmLck ({baseline} -> {released} kB)"
+        "a dropped key's charge stayed in VmLck ({baseline} -> {released} bytes)"
     );
     // The allowance is *usable* again: with nothing else held, the call that just failed
     // succeeds, which is the property a caller depends on.

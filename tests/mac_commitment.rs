@@ -44,8 +44,20 @@ fn a_tag_must_commit_to_the_message_it_was_issued_for() {
         // earlier revision returned here unconditionally, so an `encrypt` that failed for
         // *any* reason (a broken `check_lengths`, an allocation failure, an implementation
         // that always errored) satisfied this test with zero assertions executed. The arm
-        // therefore asserts the only legitimate cause: the `ultra` witness disagreeing,
-        // which surfaces as `AuthenticationFailed`.
+        // therefore requires the failure to be `AuthenticationFailed`, plus the in-place
+        // positive control below.
+        //
+        // Residual gap, stated rather than implied: under the planted
+        // message-independent-tag fault the `ultra` witness disagrees for *every* message,
+        // so `encrypt` returns `AuthenticationFailed` for every input — indistinguishable,
+        // by construction, from an `encrypt` that unconditionally refuses. The in-place
+        // control below separates the two only when the refusal is *global* (it too
+        // breaks); a `pub fn encrypt` that always errored while the in-place path kept
+        // working would still pass this arm. No single-build discriminator exists, because
+        // the countermeasure and the fault produce the same observable. The behavioural
+        // cover for that shape is elsewhere: `tests/decision.rs` and
+        // `tools/fi_check.sh`'s `msg-independent-mac-witness` row exercise the success path
+        // under `hardened`, where the `.unwrap()`s below run.
         Err(e) => {
             if !cfg!(feature = "ultra") {
                 panic!("encrypt refused a legitimate small message outside `ultra`: {e:?}");
