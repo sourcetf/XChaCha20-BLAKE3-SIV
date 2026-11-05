@@ -1088,6 +1088,12 @@ jobs:
         # The root workspace excludes `fuzz/`, so the fuzz-only lock (libfuzzer-sys,
         # arbitrary, jobserver, cc) is not in the graph the step above scans.
         run: cargo audit --deny warnings --file fuzz/Cargo.lock
+      - name: audit the vendored blake3 fork
+        # The root workspace also excludes `blake3/`, so its lock -- and the
+        # `digest`/`traits-preview` chain (`ctutils`) plus the fork's dev deps -- is
+        # outside both graphs above. This scan is what found RUSTSEC-2026-0385
+        # (`ctutils` < 0.4.4, non-constant-time mask/u128 comparison).
+        run: cargo audit --deny warnings --file blake3/Cargo.lock
       - uses: taiki-e/install-action@1e29709c0ec63babbe8f266397a465f29a825f91 # v2
         with:
           tool: cargo-deny@0.20.2

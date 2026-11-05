@@ -4726,6 +4726,7 @@ _blake3_xof_many_avx512:
         vpinsrd xmm14,xmm14,DWORD PTR [rsp+0x40],0x1
         vpinsrd xmm14,xmm14,edx,0x2
         vmovdqa xmm2,XMMWORD PTR [BLAKE3_IV+rip]
+        movzx r8d,r8b
         vpinsrd xmm3,xmm14,r8d,0x3
         vmovups xmm8,XMMWORD PTR [rsi]
         vmovups xmm9,XMMWORD PTR [rsi+0x10]

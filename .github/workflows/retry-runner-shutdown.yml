@@ -99,14 +99,20 @@ jobs:
             # Only the runner's explicit shutdown annotations are infra. A bare
             # "The operation was canceled" is also what a job killed by its own
             # `timeout-minutes` says, and retrying a budget hit would turn it green by
-            # repetition. A canceled job without an explicit shutdown/lost/143 marker
-            # stays red; that is the fail-closed direction.
+            # repetition. A canceled job without an explicit shutdown/lost marker stays
+            # red; that is the fail-closed direction.
+            #
+            # A bare "exit code 143" is deliberately NOT accepted: 143 is SIGTERM, which
+            # is also what a `timeout-minutes` hit or an OOM kill leaves, so accepting it
+            # would re-run a budget/OOM failure as if it were infra. The runner's own
+            # shutdown text ("received a shutdown signal" / "lost communication with the
+            # server") is the specific marker; anything else stays red.
             # `case`, not `printf ... | grep -q`: under `pipefail` grep exits at its
             # first match, a large annotation set gives printf SIGPIPE, and the
             # pipeline reports 141 -- so a real shutdown is read as "some other
             # failure" and a recoverable run stays red.
             case "$notes" in
-              *"received a shutdown signal"*|*"lost communication with the server"*|*"exit code 143"*)
+              *"received a shutdown signal"*|*"lost communication with the server"*)
                 infra=$((infra + 1))
                 if [ "$conclusion" = "cancelled" ]; then
                   cancelled_infra=$((cancelled_infra + 1))

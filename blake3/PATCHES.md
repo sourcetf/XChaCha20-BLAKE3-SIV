@@ -28,6 +28,17 @@ Packaging differences from the published archive:
   whose build-dependency graph is `rustversion`-only. `Hash`'s constant-time equality is
   built on this crate (`src/lib.rs`), so the version is visible to an evaluator reading
   the packaging diff and belongs in this list rather than only in the parent.
+- `Cargo.lock` pins `ctutils = "0.4.4"`, not the `0.4.2` the archive's lock resolves.
+  `ctutils < 0.4.4` is RUSTSEC-2026-0385 (a `crypto-failure`: `Choice` mask generation
+  and `u128` comparisons branched on secrets). It reaches this graph through the
+  optional `digest`/`traits-preview` feature (`digest 0.11 -> ctutils`) and through the
+  fork's `hmac` dev-dependency; the parent never enables `digest`, so its own lock has
+  neither `digest` nor `ctutils`, and only this lock could carry the advisory -- which is
+  why `verify.sh` and `ci.yml` now audit `blake3/Cargo.lock` alongside the root and fuzz
+  locks. `ctutils 0.4.4` requires Rust 1.87, so the `digest`/`traits-preview` feature
+  (and this fork's own test build) has a per-feature MSRV of 1.87; the crate's overall
+  `rust-version = "1.85"` is unchanged because the parent and every default-feature
+  consumer never build it.
 - `c/cmake/BLAKE3/{Utils,Examples,Testing,ContinuousIntegration}.cmake` are byte-identical
   to the published archive's copies. They had been deleted from this tree (the whole
   `c/cmake/` directory was absent), which made `cmake -S c -B <dir>` fail at
@@ -99,7 +110,16 @@ published or attached, and it is untrusted if produced locally.
 **The reviewed public C API paths have no known memory-safety or ABI defect in this
 tree.** The C dispatch splits groups, the unix compress/xof assembly zero-extends its
 narrow arguments, and the C library's own tests run in CI (`make test` and
-`make test_asm`). The backend symbols (`blake3_hash_many_avx512`, etc.) are internal;
+`make test_asm`). Scope of those C tests, stated rather than implied: they run the
+intrinsics and assembly kernels against the reference per input length under
+ASan/UBSan, which catches an out-of-bounds *store* or an ASan-poisoned access, but
+`test.py` allocates its inputs inside one large `malloc` with no redzone and calls
+only a couple of `xof_many` tails, so it does **not** exercise the D-01 over-read
+boundary (the 2/4-wide tail loads that cross the last 64-byte block). That boundary
+is covered by the parent's Rust tests in `tests/blake3_fork_equivalence.rs`, whose
+`PROT_NONE`/`PAGE_NOACCESS` guard-page cases place each input at a page boundary; a
+C-side guard-page target would make the C harness prove it too. The backend symbols
+(`blake3_hash_many_avx512`, etc.) are internal;
 a caller invoking them directly bypasses the safe dispatch and its grouping contract. D-08
 (riscv64-musl getrandom) is outside this fork's use. The Rust build still uses only
 the assembly kernels through the patched Rust dispatcher; the C library is now a

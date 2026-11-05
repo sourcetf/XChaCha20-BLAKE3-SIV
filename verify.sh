@@ -897,10 +897,13 @@ if [ "$RUN_DENY" -eq 1 ]; then
     echo "         (cargo install cargo-deny --locked)"
   fi
   # `cargo deny`'s advisory check and `cargo audit` read different databases and different
-  # graphs: the lock workspace excludes `fuzz/`, so the fuzz-only dependencies are audited
-  # by the second command only (CI runs both). The `--no-fetch` retry keeps an offline host
-  # with a cached advisory database usable; if the cache is cold too, the retry fails and
-  # the stage is a failure rather than a silent pass.
+  # graphs: the workspace root's lock excludes `fuzz/` and the vendored `blake3/`, so their
+  # dependencies are audited by the per-lock commands only (CI runs the same three). The
+  # `blake3/Cargo.lock` scan found a real advisory the other two cannot see
+  # (RUSTSEC-2026-0385 in `ctutils`, pulled by `digest`/`traits-preview` and the fork's dev
+  # deps). The `--no-fetch` retry keeps an offline host with a cached advisory database
+  # usable; if the cache is cold too, the retry fails and the stage is a failure rather than
+  # a silent pass.
   audit_with_fallback() {  # <file>
     local file="$1"
     if [ -n "$file" ]; then
@@ -913,6 +916,7 @@ if [ "$RUN_DENY" -eq 1 ]; then
   if cargo audit --version >/dev/null 2>&1; then
     audit_with_fallback ""
     audit_with_fallback fuzz/Cargo.lock
+    audit_with_fallback blake3/Cargo.lock
   else
     skip "cargo-audit" "not installed (cargo install cargo-audit)"
     echo "         (cargo install cargo-audit --locked)"

@@ -2010,6 +2010,16 @@ fn else_branch_condition(body: &str, open: usize) -> Option<Vec<&str>> {
 /// which is what every closure parameter list does (`||`, `|x|`, `move |x|`, `…for_each(|x|`).
 /// `cfg!(…)`-guarded `if`s are included because `cfg!` is an expression, so an attribute
 /// check alone would miss `if cfg!(any()) { … }`.
+///
+/// Residual limits found by a round-10 adversarial pass, left as limits because each is
+/// caught elsewhere in the suite rather than only here: `loop { break; wipe }`,
+/// `while true { break; wipe }` and `if true { return; wipe }` (unreachable code after a
+/// diverge) are caught by `clippy -D warnings` in CI and `verify.sh`; a `<0`-spaced
+/// `let _=if false { … }` is caught by `cargo fmt --check`; `for _ in [0u8; 0] { … }` and
+/// `for _ in Vec::<u8>::new() { … }` (empty non-range iterators) are not caught at all --
+/// the same class as the documented `for _ in v.iter()` limit above; and the `if 'a' ==
+/// 'a'` over-rejection below is accepted as the conservative cost of rejecting the whole
+/// blanked-comparison class.
 fn deadening_head(body: &str, open: usize, head: &str) -> Option<&'static str> {
     // A closure body runs when the closure runs, and it usually is not run at all. Only a
     // *`let`-bound* closure is treated as dead, because the called forms are legitimate:
@@ -2029,6 +2039,20 @@ fn deadening_head(body: &str, open: usize, head: &str) -> Option<&'static str> {
             return Some(
                 "the enclosing block's condition is a constant false, so its body never runs",
             );
+        }
+        // `if let <pat> = <constant> { wipe }` / `while let …`: a pattern match on a
+        // constant scrutinee the pattern cannot agree with is dead. `if let Some(_x) =
+        // None::<u8>` was measured green; only the *literal/`None`* RHS forms are
+        // rejected, so a live `if let Some(x) = opt` (RHS a binding or a call) is not.
+        if cond.starts_with("let ") {
+            if let Some((pat, rhs)) = cond.split_once(" = ") {
+                if dead_if_let_rhs(rhs) && pat.trim() != "let None" {
+                    return Some(
+                        "the enclosing `if let`/`while let` matches a constant scrutinee the \
+                         pattern cannot agree with, so its body never runs",
+                    );
+                }
+            }
         }
     }
     // `if { false } { wipe }`: the condition is a block expression, so it is not an
@@ -2094,6 +2118,17 @@ fn deadening_head(body: &str, open: usize, head: &str) -> Option<&'static str> {
                 return Some(
                     "the enclosing `match` arm has a guard that is a constant false, so the \
                      arm is never matched",
+                );
+            }
+            // Same blanked-literal class as the `if`/`while` heads: F4 extended
+            // `both_comparison_operands_blanked` to the ordering operators but the arm
+            // guard was not routed through it, so `_ if 'a' == 'b' =>` stayed green
+            // (measured).
+            if both_comparison_operands_blanked(guard) {
+                return Some(
+                    "the enclosing `match` arm's guard compares two literals that were \
+                     blanked out of the scanned text, so the guard is constant and the arm \
+                     is decided at compile time",
                 );
             }
         }
@@ -2490,6 +2525,17 @@ fn if_condition_of(head: &str) -> Option<&str> {
         }
     }
     None
+}
+
+/// Whether the scrutinee of an `if let`/`while let` is a constant a non-`None` pattern
+/// cannot agree with (`None`, `None::<T>`, or a literal). A live `if let` matches a
+/// binding or a call, so this rejects only the constant forms.
+fn dead_if_let_rhs(rhs: &str) -> bool {
+    let rhs = strip_outer_parens(rhs.trim());
+    if literal_value(rhs).is_some() {
+        return true;
+    }
+    rhs == "None" || rhs.starts_with("None::") || rhs.starts_with("None.")
 }
 
 /// The pattern of a `match` arm head (`5 =>`, `_ =>`, `Some(x) if c =>`), with any
@@ -3637,6 +3683,99 @@ fn macro_bodies(source: &str) -> Vec<String> {
     out
 }
 
+/// The names of every `macro_rules!` defined in `source`.
+fn macro_names(source: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut rest = source;
+    while let Some(start) = rest.find("macro_rules") {
+        let after = &rest[start..];
+        let tail = after.get("macro_rules".len()..).unwrap_or("");
+        let trimmed = tail.trim_start();
+        if let Some(after_bang) = trimmed.strip_prefix('!') {
+            let name: String = after_bang
+                .trim_start()
+                .chars()
+                .take_while(|c| c.is_alphanumeric() || *c == '_')
+                .collect();
+            if !name.is_empty() {
+                out.push(name);
+            }
+        }
+        rest = &after["macro_rules".len()..];
+    }
+    out
+}
+
+/// The byte index of the delimiter matching the one at `open` (same-delimiter counting:
+/// Rust requires balanced delimiters, so the matching close is the one that returns the
+/// count to zero).
+fn matching_delim(source: &str, open: usize, open_ch: char, close_ch: char) -> Option<usize> {
+    let mut depth = 0i32;
+    for (i, c) in source[open..].char_indices() {
+        if c == open_ch {
+            depth += 1;
+        } else if c == close_ch {
+            depth -= 1;
+            if depth == 0 {
+                return Some(open + i);
+            }
+        }
+    }
+    None
+}
+
+/// Every invocation of a `macro_rules!` *defined in this source*, as the token text from
+/// the opening delimiter through its match.
+///
+/// [`macro_bodies`] catches a wipe inside a macro that is never expanded. It cannot see
+/// the other half: a macro that takes the wipe as a token-tree argument and discards it --
+/// `macro_rules! run_dead { ($($t:tt)*) => {{ let _ = 0u8; }} }` invoked as
+/// `run_dead!(crate::zeroize_array(&mut enc_key);)` -- removes a live wipe while the count
+/// still sees the text and `fmt`, `clippy -D warnings`, the default suite and
+/// `--all-features` all stay green (measured). Scanning the invocations of locally defined
+/// macros closes it.
+fn macro_invocations(source: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    for name in macro_names(source) {
+        let bytes = source.as_bytes();
+        let mut from = 0usize;
+        while let Some(rel) = source[from..].find(&name) {
+            let at = from + rel;
+            from = at + name.len();
+            // Word boundary before the name (`notqr128` is not `qr128`).
+            let before_ok = at == 0
+                || !source[..at]
+                    .chars()
+                    .next_back()
+                    .is_some_and(|c| c.is_alphanumeric() || c == '_');
+            let after = &source[at + name.len()..];
+            let trimmed = after.trim_start();
+            if !before_ok {
+                continue;
+            }
+            let Some(after_bang) = trimmed.strip_prefix('!') else {
+                continue;
+            };
+            let arg = after_bang.trim_start();
+            let Some(open_ch) = arg.chars().next() else {
+                continue;
+            };
+            let close_ch = match open_ch {
+                '(' => ')',
+                '[' => ']',
+                '{' => '}',
+                _ => continue,
+            };
+            let open = source.len() - arg.len();
+            debug_assert_eq!(bytes[open], open_ch as u8);
+            if let Some(end) = matching_delim(source, open, open_ch, close_ch) {
+                out.push(source[open..=end].to_string());
+            }
+        }
+    }
+    out
+}
+
 #[test]
 fn no_wipe_is_hidden_in_an_unexpanded_macro() {
     for (name, source) in [
@@ -3650,7 +3789,10 @@ fn no_wipe_is_hidden_in_an_unexpanded_macro() {
             strip_comments(include_str!("../src/proofs.rs")),
         ),
     ] {
-        for body in macro_bodies(&source) {
+        for body in macro_bodies(&source)
+            .into_iter()
+            .chain(macro_invocations(&source))
+        {
             for marker in [
                 "zeroize_array(",
                 "zeroize_slice(",
@@ -3659,9 +3801,11 @@ fn no_wipe_is_hidden_in_an_unexpanded_macro() {
             ] {
                 assert!(
                     !body.contains(marker),
-                    "`{name}` hides `{marker}` inside an unexpanded `macro_rules!`; the \
-                     wipe count sees the text but no build executes it. Inline the calls \
-                     or make the macro invocation part of the counted path:\n{body}"
+                    "`{name}` hides `{marker}` inside an unexpanded `macro_rules!` or an \
+                     invocation of a locally defined macro; the wipe count sees the text but \
+                     no build necessarily executes it (a macro may discard a token-tree \
+                     argument). Inline the calls or make the wipe part of the counted \
+                     path:\n{body}"
                 );
             }
         }
