@@ -2562,6 +2562,7 @@ _blake3_xof_many_avx512:
         mov    r10,QWORD PTR [rsp+0x8]
         cmp    r10,0x1
         ja     2f
+        jb     4f
         vmovdqu xmm0,XMMWORD PTR [rdi]
         vmovdqu xmm1,XMMWORD PTR [rdi+0x10]
         movzx  eax,r8b
@@ -2643,6 +2644,7 @@ _blake3_xof_many_avx512:
         vmovdqu XMMWORD PTR [r9+0x10],xmm1
         vmovdqu XMMWORD PTR [r9+0x20],xmm2
         vmovdqu XMMWORD PTR [r9+0x30],xmm3
+4:
         ret    
 .p2align 6
 2:

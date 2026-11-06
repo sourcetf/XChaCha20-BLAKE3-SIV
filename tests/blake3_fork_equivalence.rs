@@ -21,6 +21,13 @@ use blake3::{Hasher, IncrementCounter};
 /// The fork's routing differs per backend (`hash16`/`hash8`/`hash4`/`hash1`), and a
 /// runner whose CPU has AVX-512 would otherwise leave the AVX2 and SSE routes untested.
 fn platforms_to_test() -> Vec<Platform> {
+    // The `extend`s below are all target- or feature-gated, so on a target with no
+    // backend to add (anything but x86/x86_64) the binding is never mutated and
+    // `cargo check --target <other>` reported the unused `mut`. Allowed only there.
+    #[cfg_attr(
+        not(any(target_arch = "x86", target_arch = "x86_64")),
+        allow(unused_mut)
+    )]
     let mut platforms = vec![Platform::portable(), Platform::detect()];
     #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
     {

@@ -166,4 +166,36 @@ mod test {
         }
         crate::test::test_xof_many_fn(xof_many);
     }
+
+    // `Platform::xof_many` returns early on an empty slice and the `test_xof_many_fn`
+    // loop starts at one block, so nothing in the crate asks the assembly for zero
+    // blocks today. This wrapper is `pub` inside the crate and passes `out.len() /
+    // BLOCK_LEN` straight through, so a direct caller with an empty slice would reach the
+    // assembly's single-block tail, which writes a full 64-byte block (upstream's commit
+    // "xof_many: don't write anything for zero outputs" added the `num_outputs == 0`
+    // guard to `blake3_avx512_x86-64_unix.S` after 1.8.7). Pin that guard: the assembly
+    // must leave the buffer untouched when it is asked for no blocks.
+    #[cfg(unix)]
+    #[test]
+    fn test_xof_many_zero_blocks_writes_nothing() {
+        if !crate::platform::avx512_detected() {
+            return;
+        }
+        let mut block = [0; BLOCK_LEN];
+        let block_len = 42;
+        crate::test::paint_test_input(&mut block[..block_len]);
+        let cv = [40, 41, 42, 43, 44, 45, 46, 47];
+        let mut canary = [0xAAu8; BLOCK_LEN];
+        // SAFETY: `xof_many` is called on this machine only after `avx512_detected()`.
+        // The zero-length slice is deliberate: it is the input whose misuse this test
+        // pins, and a correct implementation writes nothing through it.
+        let empty: &mut [u8] = unsafe { core::slice::from_raw_parts_mut(canary.as_mut_ptr(), 0) };
+        unsafe {
+            xof_many(&cv, &block, block_len as u8, 0, crate::KEYED_HASH, empty);
+        }
+        assert_eq!(
+            canary, [0xAAu8; BLOCK_LEN],
+            "a zero-block xof_many wrote a block into the output buffer"
+        );
+    }
 }

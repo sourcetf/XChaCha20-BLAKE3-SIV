@@ -209,6 +209,81 @@ verification device again.
   attribution, and the Cargo.toml note about `blake3::platform` (the library does not call it;
   `examples/blake3_guard_probe.rs` deliberately does).
 
+### Round-8 re-scan: the attribute a per-line guard could not see, and an assembled `xof_many` that wrote for zero blocks
+
+No wire-format bytes changed. A line-by-line pass over the vendored C and assembly, the
+`locked` module's raw syscalls and the test guards, plus a re-check of every dependency
+advisory in all three lockfiles.
+
+- **`tests/timing.rs`'s presence guard now reads the whole attribute.** Anchoring it to the
+  `fn` definition (the round above) still left the *attribute check* per line: a screen
+  wrapped in `#[cfg_attr(all(),\n\n    ignore)]` has no line that both starts with `#[` and
+  mentions `ignore`, so the guard stayed green while libtest skipped the screen it names.
+  The attributes directly above a definition are now gathered by walking back over balanced
+  `#[ … ]` groups, whitespace-stripped, and required to be exactly `#[test]`. Reproduced by
+  inserting that multi-line attribute (the guard failed) and re-run on the clean file (it
+  passed).
+- **The six copies of `find_cfg_test_attribute` are one function again.** `tests/locked.rs`,
+  `counter_range.rs`, `decision_scope.rs`, `construction_inventory.rs`, `variable_latency.rs`
+  and `ultra.rs` each carried a byte-identical, *older* copy that missed the whitespace and
+  `r#` cases `tests/security.rs` already handled, so a decoy attribute could satisfy the
+  local copy while the real one was ignored. All six now call the robust scanner (a
+  `#[cfg(test,)]` decoy next to a `MADV_DODUMP` edit was confirmed caught by the fixed
+  `locked` copy).
+- **The vendored AVX-512 `xof_many` wrote a full block for a zero-block request.**
+  `c/blake3_avx512_x86-64_unix.S`'s single-block tail is reached for `num_outputs == 0` as
+  well as `1` (`cmp r10,0x1; ja 2f` falls through for both), so a caller passing an empty
+  output slice got 64 bytes written through its zero-length pointer. `Platform::xof_many`
+  returns early on an empty slice and the C dispatcher returns early on `outblocks == 0`, but
+  the crate-internal `avx512::xof_many` wrapper is `pub` and forwards `out.len() / BLOCK_LEN`
+  unchanged, so the hazard was one direct call away. Upstream added the guard (`jb 4f` plus a
+  `4:` label) after 1.8.7 and it is adopted verbatim;
+  `src/ffi_avx512.rs::test_xof_many_zero_blocks_writes_nothing` pins it — with the two
+  instructions removed the canary buffer comes back as 64 bytes of keystream, with them it is
+  untouched. See `blake3/PATCHES.md` (C library D-10).
+- **The `/proc` reads under `locked` no longer retry forever.** `page_size` and
+  `locked_bytes` retried `read(2)` on `EINTR` without a bound, which is a livelock under a
+  signal storm; both retry at most 16 times and then report "unknown" (`None`), the answer
+  their callers already treat as "use the fallback" (`src/lib.rs:1710`, `:1812`). The two
+  added branches turn on a retry counter against a constant, so the crate's `CONTROL_FLOW`
+  inventory moved from 51 to 53 `if`s (`tests/variable_latency.rs`, `tests/README.md`), which
+  is the tripwire doing its job.
+- **The C library's `storeu` declarations match the widths they write.** `c/blake3_avx512.c`'s
+  `storeu_256`/`storeu_512` declare `uint8_t dest[16]` and store 32 and 64 bytes. That is
+  inherited from upstream and is documentation only (an array parameter decays to a pointer),
+  but the fork had already typed the AVX2 `storeu` as 32 bytes, so the AVX-512 pair now
+  matches. `blake3/PATCHES.md`'s D-03 row also claimed the SSE2/SSE4.1 files only *load*
+  their narrow arguments with `movzx`; they in fact carry the same two-instruction 2-wide-tail
+  fix as the AVX-512 file, and the row now names the sites.
+- **Dependencies: every advisory re-checked against actual usage.** `cargo audit` and
+  `cargo deny check` are clean on all three graphs (root, `fuzz/`, vendored `blake3/`), and
+  the open issues behind the security-relevant crates were read one by one: `subtle`'s 14
+  open issues include one soundness report (#155, the invalid `Ordering` discriminant in
+  `conditional_select`) and the crate never calls `conditional_select`, `ConditionallySelectable`
+  or `CtOption` — only `ConstantTimeEq::ct_eq` on fixed 65-byte arrays and `Choice::from(1)`;
+  RustCrypto's 27 open issues cover `zeroize`'s design proposals (#1269 volatile operations,
+  #1046 redesign), its derive-macro ergonomics (#1271, #901), a `CString` test failure on i386
+  (#774) and `cpufeatures` feature requests; `getrandom`'s 6 open issues are wasm/libc/tracking
+  items that do not reach the `rng` path; and `cpufeatures`' #1510 (CPUID leaf 7 read without
+  consulting leaf 0) is unreachable as a mis-detection because every feature this crate can
+  select is gated on a leaf-1 bit or on `XCR0` (checked against the vendored 0.3.1 source:
+  `__xgetbv!` requires `CPUID.1:ECX` bits 26|27 before `_xgetbv`, and `avx2` additionally
+  requires leaf-1 ECX bit 28, which only exists on CPUs that have leaf 7). `generic-array`
+  #170 affects 1.x only (the graph resolves 0.14.7), and GHSA-3rjw-m598-pq24 is patched in the
+  `cmov 0.5.4` the `blake3/` lock resolves. `c/` was also diffed file by file against upstream
+  `master`: the only deltas are the documented ones plus the fix above. The one upstream-only
+  discrepancy found is `c/cmake/BLAKE3/ContinuousIntegration.cmake`'s appended
+  `BLAKE3_TESTING_AMD64_ASM_SOURCES` against the consumed `BLAKE3_AMD64_ASM_SOURCES` — it is
+  upstream's own, present in `master`, and harmless: the consumed variable is set globally by
+  `c/CMakeLists.txt`, so the testing target still receives the asm sources. (BLAKE3's own
+  tracker could not be read this round — the proxy answered GitHub's API with a rate-limit
+  error and timed out on the issue pages — so the vendored-tree diff above is what stands in
+  for it, and that comparison is the stronger one because it reads the code we actually ship.)
+- **Tooling noise.** `tests/blake3_fork_equivalence.rs`'s `extend`s are all target-gated, so
+  on any target that is not x86/x86_64 the `let mut platforms` binding is never mutated;
+  `cargo check --target aarch64-unknown-linux-gnu` printed that `unused_mut` on every push.
+  The allowance is now `cfg_attr`-scoped to exactly those targets.
+
 ### AUDIT-REPORT-3 follow-up (`2cf40cc`)
 
 No code or wire-format bytes changed; the production behaviour is identical.

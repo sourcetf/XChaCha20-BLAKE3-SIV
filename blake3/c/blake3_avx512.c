@@ -22,11 +22,11 @@ INLINE void storeu_128(__m128i src, uint8_t dest[16]) {
   _mm_storeu_si128((void*)dest, src);
 }
 
-INLINE void storeu_256(__m256i src, uint8_t dest[16]) {
+INLINE void storeu_256(__m256i src, uint8_t dest[32]) {
   _mm256_storeu_si256((void*)dest, src);
 }
 
-INLINE void storeu_512(__m512i src, uint8_t dest[16]) {
+INLINE void storeu_512(__m512i src, uint8_t dest[64]) {
   _mm512_storeu_si512((void*)dest, src);
 }
 

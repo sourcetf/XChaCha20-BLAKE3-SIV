@@ -478,6 +478,7 @@ fn timing_screens_are_present_and_not_ignored() {
     for short in [
         "timing_tag_position_screen_finds_no_gross_difference",
         "timing_does_not_depend_on_key_contents",
+        "timing_screen_can_detect_a_real_difference",
     ] {
         let needle = format!("fn {short}(");
         let mut at = None;
@@ -497,15 +498,55 @@ fn timing_screens_are_present_and_not_ignored() {
                  plain run of this file would not."
             )
         });
-        let prefix_start = source[..at].rfind("\n\n").map_or(0, |i| i + 2);
-        let attributes = &source[prefix_start..at];
-        for line in attributes.lines() {
-            let compact: String = line.chars().filter(|c| !c.is_whitespace()).collect();
-            assert!(
-                !compact.starts_with("#[") || compact.starts_with("#[test]"),
-                "leak screen `{needle}` is wrapped in an extra attribute ({line}); a cfg or \
-                 ignore can remove it while the source-text check still sees the name"
-            );
+        // The attributes directly above the definition, gathered by walking back over
+        // balanced `#[ … ]` groups rather than over lines: a per-line (or per-blank-line
+        // block) scan misses `#[cfg_attr(all(),\n\n    ignore)]`, whose first line carries
+        // no `ignore` and whose continuation line carries no `#[`. What must hold is that
+        // the whole group, whitespace removed, is exactly `#[test]`.
+        let bytes = source.as_bytes();
+        let mut start = at;
+        let mut end = at;
+        loop {
+            let mut i = end;
+            while i > 0 && bytes[i - 1].is_ascii_whitespace() {
+                i -= 1;
+            }
+            if i == 0 || bytes[i - 1] != b']' {
+                break;
+            }
+            let mut depth = 0i32;
+            let mut j = i;
+            let mut opened = None;
+            while j > 0 {
+                j -= 1;
+                match bytes[j] {
+                    b']' => depth += 1,
+                    b'[' => {
+                        depth -= 1;
+                        if depth == 0 {
+                            opened = Some(j);
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            let Some(open) = opened else { break };
+            if open == 0 || bytes[open - 1] != b'#' {
+                break;
+            }
+            start = open - 1;
+            end = start;
         }
+        let compact: String = source[start..at]
+            .chars()
+            .filter(|c| !c.is_whitespace())
+            .collect();
+        assert_eq!(
+            compact, "#[test]",
+            "leak screen `{needle}` must carry exactly `#[test]` and nothing else; found \
+             `{compact}`. A cfg or ignore attribute can remove the screen while the \
+             source-text check still sees its name"
+        );
     }
 }

@@ -1703,13 +1703,23 @@ pub mod locked {
             }
             let fd = fd as usize;
             let mut buf = [0u8; 512];
+            // A signal storm must not spin here forever: `read(2)` makes no progress on
+            // EINTR, so an unbounded retry is a livelock. Past the bound we fall through
+            // with `-4`, which the `n < 16` test below turns into `None` — the caller's
+            // existing "unknown, use the fallback" answer.
+            const MAX_EINTR_RETRIES: u32 = 16;
+            let mut retries = 0u32;
             let n = loop {
                 // SAFETY: `buf` is a live local of exactly the length passed.
                 let n = unsafe { syscall3(NR_READ, fd, buf.as_mut_ptr() as usize, buf.len()) };
                 if n != -4 {
                     break n;
                 }
-                // EINTR: nothing was consumed; retry.
+                // EINTR: nothing was consumed; retry a bounded number of times.
+                retries += 1;
+                if retries >= MAX_EINTR_RETRIES {
+                    break -4;
+                }
             };
             // SAFETY: closing a descriptor this function owns.
             unsafe {
@@ -1796,11 +1806,25 @@ pub mod locked {
             // reported `None`, which a caller cannot distinguish from the kernel refusing.
             let mut buf = alloc::vec::Vec::new();
             let mut chunk = [0u8; 4096];
+            // Bounded like `page_size`'s read: EINTR makes no progress, so an unbounded
+            // retry is a livelock under a signal storm. Past the bound this reports
+            // "unknown" (`None`), the same answer as a refused syscall.
+            const MAX_EINTR_RETRIES: u32 = 16;
+            let mut retries = 0u32;
             loop {
                 // SAFETY: `chunk` is a live local of exactly the length passed.
                 let n = unsafe { syscall3(NR_READ, fd, chunk.as_mut_ptr() as usize, chunk.len()) };
                 if n == -4 {
-                    // EINTR: the read did not consume anything; retry.
+                    // EINTR: the read did not consume anything; retry a bounded number
+                    // of times, then close and report unknown.
+                    retries += 1;
+                    if retries >= MAX_EINTR_RETRIES {
+                        // SAFETY: closing a descriptor this function owns.
+                        unsafe {
+                            let _ = syscall2(NR_CLOSE, fd, 0);
+                        }
+                        return None;
+                    }
                     continue;
                 }
                 if n < 0 {

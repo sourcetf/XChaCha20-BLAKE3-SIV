@@ -689,9 +689,18 @@ fn find_cfg_test_attribute(source: &str, from: usize) -> Option<(usize, usize, b
     while i < b.len() {
         if b[i] == b'#' {
             let mut j = i + 1;
+            // `# [cfg(test)]` is the same attribute as `#[cfg(test)]`; rustc accepts
+            // whitespace between every token, and a scanner that requires adjacency is
+            // one space away from being evaded.
+            while j < b.len() && b[j].is_ascii_whitespace() {
+                j += 1;
+            }
             let inner = b.get(j) == Some(&b'!');
             if inner {
                 j += 1;
+                while j < b.len() && b[j].is_ascii_whitespace() {
+                    j += 1;
+                }
             }
             if b.get(j) == Some(&b'[') {
                 j += 1;
@@ -708,10 +717,27 @@ fn find_cfg_test_attribute(source: &str, from: usize) -> Option<(usize, usize, b
                         while j < b.len() && b[j].is_ascii_whitespace() {
                             j += 1;
                         }
-                        if b[j..].starts_with(b"test") {
-                            let mut k = j + 4;
+                        // `r#test` is the same atom as `test` (raw identifiers are
+                        // accepted in cfg predicates), and `#[cfg(test,)]` is the same
+                        // predicate with a trailing comma. Both were measured to evade
+                        // the earlier scanner.
+                        let atom = if b[j..].starts_with(b"r#test") {
+                            6
+                        } else if b[j..].starts_with(b"test") {
+                            4
+                        } else {
+                            0
+                        };
+                        if atom != 0 {
+                            let mut k = j + atom;
                             while k < b.len() && b[k].is_ascii_whitespace() {
                                 k += 1;
+                            }
+                            if b.get(k) == Some(&b',') {
+                                k += 1;
+                                while k < b.len() && b[k].is_ascii_whitespace() {
+                                    k += 1;
+                                }
                             }
                             if b.get(k) == Some(&b')') {
                                 k += 1;
