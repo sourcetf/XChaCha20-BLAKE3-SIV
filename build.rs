@@ -95,6 +95,27 @@ fn check_blake3_is_a_path_dependency(manifest: &str) {
             }
         }
     };
+    // The table-header form `[dependencies.blake3]`, whose keys (`version`, `path`, …) are
+    // on their own lines: `(crate name, the `path` value seen so far)`. The key parser
+    // above cannot see this form, which is how the decoy-section bypass worked -- the real
+    // edges were moved to this form and metadata decoys satisfied the count.
+    let mut table_dep: Option<(String, Option<String>)> = None;
+    let finalize_table = |table_dep: &mut Option<(String, Option<String>)>, checked: &mut usize| {
+        if let Some((krate, path)) = table_dep.take() {
+            if krate == "blake3" {
+                *checked += 1;
+                if path.as_deref() != Some("blake3") {
+                    panic!(
+                        "the `blake3` dependency table `[*.{krate}]` does not carry \
+                         `path = \"blake3\"` (path is {path:?}). Without the path edge the \
+                         build resolves crates.io BLAKE3 1.8.7 and none of the fixes in \
+                         blake3/PATCHES.md are present. Restore the `path` key (see the \
+                         distribution policy in PATCHES.md)."
+                    );
+                }
+            }
+        }
+    };
 
     for raw in manifest.lines() {
         // Strip a trailing comment *outside string literals* before anything else: a TOML
@@ -119,13 +140,23 @@ fn check_blake3_is_a_path_dependency(manifest: &str) {
             continue;
         }
         if line.starts_with('[') {
+            finalize_table(&mut table_dep, &mut checked);
             section = line.trim_matches(['[', ']']).trim().to_string();
+            table_dep = dep_section_crate(&section).map(|c| (c.to_string(), None));
             continue;
         }
         let Some((key, value)) = line.split_once('=') else {
             continue;
         };
         let (key, value) = (key.trim(), value.trim());
+        if let Some((_, path)) = table_dep.as_mut() {
+            // A line inside a `[<dep section>.<crate>]` table. Only `path` matters here;
+            // the crate name is already known from the header.
+            if key == "path" {
+                *path = Some(value.trim_matches('"').to_string());
+            }
+            continue;
+        }
         depth = opening_brackets(value) - closing_brackets(value);
         if depth <= 0 {
             finish(&section, key, value, &mut checked);
@@ -133,6 +164,7 @@ fn check_blake3_is_a_path_dependency(manifest: &str) {
             pending = Some((key.to_string(), value.to_string()));
         }
     }
+    finalize_table(&mut table_dep, &mut checked);
     if checked == 0 {
         // `cargo` itself rejects a manifest with no `blake3` dependency at all (it is
         // imported by `src/lib.rs`), so reaching here means the parser above stopped
@@ -190,13 +222,40 @@ fn strip_comment(line: &str) -> String {
     out
 }
 
+/// Whether a TOML section name denotes a real dependency table.
+///
+/// A dot-path segment list, not a suffix: an earlier `name.ends_with(".dependencies")` also
+/// matched `[package.metadata.<any>.dependencies]`, where a decoy
+/// `blake3 = { path = "blake3" }` satisfied the "every blake3 entry has a path" count while
+/// the *real* edge was a registry dependency in a table-header form the key parser did not
+/// recognise (measured: `cargo build` linked crates.io BLAKE3). Only the three dependency
+/// kinds, bare or under `target.<cfg>` / `workspace`, are real edges.
 fn is_dependency_section(name: &str) -> bool {
-    name == "dependencies"
-        || name == "dev-dependencies"
-        || name == "build-dependencies"
-        || name.ends_with(".dependencies")
-        || name.ends_with(".dev-dependencies")
-        || name.ends_with(".build-dependencies")
+    let (prefix, last) = match name.rsplit_once('.') {
+        Some((p, l)) => (Some(p), l),
+        None => (None, name),
+    };
+    if !matches!(
+        last,
+        "dependencies" | "dev-dependencies" | "build-dependencies"
+    ) {
+        return false;
+    }
+    match prefix {
+        None => true,
+        Some(p) => p == "workspace" || p.starts_with("target."),
+    }
+}
+
+/// If a section name is `<dependency section>.<crate>` (the table-header form,
+/// `[dependencies.blake3]`), the crate name.
+fn dep_section_crate(name: &str) -> Option<&str> {
+    let (prefix, last) = name.rsplit_once('.')?;
+    if is_dependency_section(prefix) && !last.is_empty() {
+        Some(last)
+    } else {
+        None
+    }
 }
 
 fn opening_brackets(s: &str) -> i32 {

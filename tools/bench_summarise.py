@@ -62,7 +62,13 @@ def main():
         for p in (1, 2, 3):
             path = os.path.join(BENCH_DIR, f"{cfg}-pass{p}.txt")
             if not os.path.isfile(path):
-                sys.exit(f"missing {path}")
+                # Exit 3 ("could not run"), not 1: a missing run directory usually means
+                # the benchmark was never run, which is an environment gap, not a finding.
+                # `sys.exit(<string>)` prints the message but exits 1, the code the
+                # convention reserves for "a finding".
+                print(f"could not run: missing {path} -- the benchmark has not been run "
+                      f"here (tools/bench_3pass.sh writes {BENCH_DIR}/)", file=sys.stderr)
+                sys.exit(3)
             got.append(parse(path))
         passes[cfg] = got
 

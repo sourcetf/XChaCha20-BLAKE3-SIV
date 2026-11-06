@@ -36,12 +36,12 @@ static SAW_RESIDUE: AtomicBool = AtomicBool::new(false);
 /// of the same size stand in for it, so a refactor that added one would hide a missing
 /// wipe (measured: a same-sized `vec![0u8; n]` after `check_lengths` plus both failure
 /// wipes deleted left this test at `2 passed`). Watching all of them puts the real buffer
-/// in the set. `SAW_WATCHED_FREE` is the liveness witness: without it a `mem::forget` of
-/// the buffer passes the residue check by never freeing anything.
+/// in the set. The liveness witness is `watched_leaked() == 0` (no watched buffer left
+/// live): without it a `mem::forget` of the buffer passes the residue check by never
+/// freeing anything.
 static ARM_ALLOC: AtomicBool = AtomicBool::new(false);
 static WATCHED: [AtomicUsize; MAX_WATCHED] = [const { AtomicUsize::new(0) }; MAX_WATCHED];
 static WATCHED_COUNT: AtomicUsize = AtomicUsize::new(0);
-static SAW_WATCHED_FREE: AtomicBool = AtomicBool::new(false);
 /// libtest runs the tests in a binary concurrently; the watch state is global.
 static SERIAL: Mutex<()> = Mutex::new(());
 
@@ -68,10 +68,20 @@ unsafe impl GlobalAlloc for WatchAlloc {
         // SAFETY: the caller of `GlobalAlloc::realloc` guarantees that `ptr` is currently
         // allocated with `layout`; the arguments are forwarded to the system allocator.
         let new = unsafe { System.realloc(ptr, layout, new_size) };
-        if ARM_ALLOC.load(Ordering::SeqCst) && new_size == WATCH_LEN.load(Ordering::SeqCst) {
-            let i = WATCHED_COUNT.fetch_add(1, Ordering::SeqCst);
-            if i < MAX_WATCHED {
-                WATCHED[i].store(new as usize, Ordering::SeqCst);
+        if ARM_ALLOC.load(Ordering::SeqCst) {
+            // The old allocation no longer exists (moved or resized): clear any slot for it
+            // so the leak check does not count it as still live.
+            let n = WATCHED_COUNT.load(Ordering::SeqCst).min(MAX_WATCHED);
+            for slot in WATCHED.iter().take(n) {
+                if slot.load(Ordering::SeqCst) == ptr as usize {
+                    slot.store(0, Ordering::SeqCst);
+                }
+            }
+            if new_size == WATCH_LEN.load(Ordering::SeqCst) {
+                let i = WATCHED_COUNT.fetch_add(1, Ordering::SeqCst);
+                if i < MAX_WATCHED {
+                    WATCHED[i].store(new as usize, Ordering::SeqCst);
+                }
             }
         }
         new
@@ -84,7 +94,6 @@ unsafe impl GlobalAlloc for WatchAlloc {
             if slot.load(Ordering::SeqCst) != ptr as usize {
                 continue;
             }
-            SAW_WATCHED_FREE.store(true, Ordering::SeqCst);
             if layout.size() >= len && len != 0 {
                 // SAFETY: `ptr` is the allocation being deallocated, `len` is no larger than
                 // its layout size, and a buffer recorded while the window was armed was
@@ -115,6 +124,23 @@ unsafe impl GlobalAlloc for WatchAlloc {
 
 #[global_allocator]
 static ALLOC: WatchAlloc = WatchAlloc;
+
+/// How many plaintext-sized buffers recorded in the armed window were never deallocated.
+///
+/// The failure-path witness's liveness must be *this*, not "some same-sized buffer was
+/// freed": under `ultra` `decrypt` also allocates a same-sized `witness_plaintext` and
+/// frees it, so a `mem::forget` of the real plaintext buffer left the old "any free"
+/// witness satisfied and the test passed (measured: default FAILED, `--features ultra` 2
+/// passed). A leaked buffer is not a wiped one, and demanding zero leaked slots makes the
+/// forgotten-buffer mutant fail in every configuration.
+fn watched_leaked() -> usize {
+    let n = WATCHED_COUNT.load(Ordering::SeqCst).min(MAX_WATCHED);
+    WATCHED
+        .iter()
+        .take(n)
+        .filter(|slot| slot.load(Ordering::SeqCst) != 0)
+        .count()
+}
 
 #[test]
 fn plaintext_vec_is_wiped_before_deallocation() {
@@ -168,7 +194,6 @@ fn decrypt_failure_wipes_internal_plaintext() {
     bad_ciphertext[0] ^= 1;
 
     SAW_RESIDUE.store(false, Ordering::SeqCst);
-    SAW_WATCHED_FREE.store(false, Ordering::SeqCst);
     WATCHED_COUNT.store(0, Ordering::SeqCst);
     WATCH_LEN.store(message.len(), Ordering::SeqCst);
     ARM_ALLOC.store(true, Ordering::SeqCst);
@@ -183,13 +208,18 @@ fn decrypt_failure_wipes_internal_plaintext() {
          {MAX_WATCHED} the watch set holds: the real plaintext buffer may have been pushed \
          out of the watched set, so a missing wipe could go unseen. Raise MAX_WATCHED."
     );
-    // Liveness: the failure path must actually free the buffer it decrypted into. Without
-    // this, `mem::forget(plaintext)` leaks it and the residue assertion below passes by
-    // never seeing a deallocation at all.
-    assert!(
-        SAW_WATCHED_FREE.load(Ordering::SeqCst),
-        "a failed decrypt never deallocated the plaintext-sized buffer it allocated, so \
-         the residue check below would be vacuous (a leaked buffer is not a wiped one)"
+    // Liveness: every plaintext-sized buffer the failed decrypt allocated must have been
+    // deallocated. Without this, `mem::forget(plaintext)` leaks the buffer and the residue
+    // assertion below passes by never seeing a deallocation. "Every", not "some": under
+    // `ultra` a same-sized `witness_plaintext` is also allocated and freed, so the weaker
+    // "a same-sized buffer was freed" witness is satisfied by it and a forgotten real
+    // buffer goes unseen (measured).
+    let leaked = watched_leaked();
+    assert_eq!(
+        leaked, 0,
+        "{leaked} of the {watched} plaintext-sized buffer(s) the failed decrypt allocated \
+         were never deallocated: a leaked buffer is not a wiped one, and the residue check \
+         below cannot see it"
     );
     assert!(
         !SAW_RESIDUE.load(Ordering::SeqCst),

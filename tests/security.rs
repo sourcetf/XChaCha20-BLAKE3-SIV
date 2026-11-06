@@ -1896,10 +1896,23 @@ fn enclosing_block_heads(body: &str, at: usize) -> Vec<(usize, String)> {
     opens
         .into_iter()
         .map(|open| {
-            let head_start = body[..open]
-                .rfind(['\n', ';', '{', '}'])
-                .map_or(0, |i| i + 1);
-            (open, body[head_start..open].trim().to_string())
+            // The head is the text back to the previous statement/block boundary. A
+            // newline is normally that boundary, but the `{` may sit on its own line
+            // (`if false\n{`), where the last newline is just the line break before the
+            // block and the head would come out empty -- making every head-based rule
+            // (constant condition, closure, else-chain) miss. When the plain extraction is
+            // empty, re-scan without `\n` as a boundary so the condition on the line above
+            // is captured. A genuinely empty head (a block that follows `;`/`}`/`)`) stays
+            // empty, because those delimiters are still boundaries.
+            let head = |dels: &[char]| -> String {
+                let head_start = body[..open].rfind(dels).map_or(0, |i| i + 1);
+                body[head_start..open].trim().to_string()
+            };
+            let mut h = head(&['\n', ';', '{', '}']);
+            if h.is_empty() {
+                h = head(&[';', '{', '}']);
+            }
+            (open, h)
         })
         .collect()
 }
@@ -2164,11 +2177,12 @@ fn deadening_head(body: &str, open: usize, head: &str) -> Option<&'static str> {
             .iter()
             .find_map(|(_, h)| h.strip_prefix("match "))
             .and_then(|s| literal_value(strip_outer_parens(s.trim())));
-        if let (Some(pat_val), Some(scrut)) = (literal_value(strip_outer_parens(pat)), scrutinee) {
-            if pat_val != scrut {
+        if let Some(scrut) = scrutinee {
+            if arm_pattern_may_match(pat, scrut) == Some(false) {
                 return Some(
-                    "the enclosing `match` has a constant scrutinee that this arm's literal \
-                     pattern cannot equal, so the arm never runs",
+                    "the enclosing `match` has a constant scrutinee that this arm's pattern \
+                     (literals, `|` alternatives and ranges) cannot match, so the arm never \
+                     runs",
                 );
             }
         }
@@ -2273,16 +2287,20 @@ fn constant_condition_value(cond: &str) -> Option<bool> {
             return Some(if eq_when { l == r } else { l != r });
         }
     }
-    for (op, want) in [(">=", true), ("<=", true), (">", false), ("<", false)] {
+    // `>=`/`<=` before `>`/`<` so a two-character operator is found before its
+    // one-character prefix (`split_at_top_level_op` also refuses to match `>` inside
+    // `>=`). Each operator is evaluated directly: an earlier version drove both from a
+    // shared `ordered = l >= r`/`l > r` and negated for the `<` side, which swapped
+    // `<` with `<=` -- `if 1u8 <= 1u8 { wipe }` (a live wipe) was reported dead, and
+    // `if 1u8 < 1u8 { wipe }` (a dead wipe) was not reported at all (measured).
+    for op in [">=", "<=", ">", "<"] {
         if let Some((left, right)) = split_at_top_level_op(cond, op) {
-            // `>=`/`<=` are equality-or-greater, so `want` records which side of the
-            // comparison keeps the result true.
             let (l, r) = (literal_operand(left)?, literal_operand(right)?);
-            let ordered = if want { l >= r } else { l > r };
-            return Some(if op.starts_with('>') {
-                ordered
-            } else {
-                !ordered
+            return Some(match op {
+                ">=" => l >= r,
+                "<=" => l <= r,
+                ">" => l > r,
+                _ => l < r,
             });
         }
     }
@@ -2479,13 +2497,25 @@ fn empty_range(iter: &str) -> bool {
 fn brace_less_closure_head(body: &str, at: usize) -> Option<String> {
     let head_start = body[..at].rfind(['\n', ';', '{', '}']).map_or(0, |i| i + 1);
     let head = body[head_start..at].trim();
-    if !head.starts_with("let ") || head.contains('{') {
+    if head.contains('{') {
         return None;
     }
-    // A closure parameter list is `||` or a matched `|…|`; either way two pipe characters.
-    // A bitwise `a | b` in a `let` head would also have two, but a statement the guards are
-    // asked about always contains a wipe, and no legitimate one of those writes `|`.
-    if head.matches('|').count() >= 2 {
+    // A closure parameter list always ends with `|` (`||`, `|x|`, `move |x|`); a bitwise
+    // `a | b` ends with an operand, not a pipe. Requiring two pipes excludes a lone `|`.
+    if !head.ends_with('|') || head.matches('|').count() < 2 {
+        return None;
+    }
+    // The closure must be the statement's *value*, not an argument to an eager call:
+    // `v.iter().for_each(|_| wipe)` runs its closure, so it is not dead. A binding
+    // (`let x = …`) or an assignment (`_ = …`, `x = …`) stores the closure without
+    // calling it. The `let`-only version of this rule left `_ = || wipe;` (a discard
+    // assignment) unflagged (measured: `fmt`, `--test security` and `--all-features` all
+    // green with `encrypt`'s `enc_key` wipe moved there).
+    let before_pipes = head[..head.len() - 1].trim_end_matches('|').trim_end();
+    let before_pipes = before_pipes
+        .strip_suffix("move")
+        .map_or(before_pipes, str::trim_end);
+    if head.starts_with("let ") || before_pipes.ends_with('=') {
         return Some(head.to_string());
     }
     None
@@ -2544,6 +2574,82 @@ fn arm_pattern(head: &str) -> Option<&str> {
     let arm = head.strip_suffix("=>")?;
     let pat = arm.split_once(" if ").map_or(arm, |(p, _)| p);
     Some(pat.trim())
+}
+
+/// Whether `pat` *might* match the constant `scrut`.
+///
+/// `Some(false)` only when every alternative is a literal or a literal range and none
+/// contains `scrut` -- the dead-arm case. A wildcard, a binding, a path pattern
+/// (`Some(_)`, `Foo::Bar`) or an unparseable part is "may match" (`Some(true)`), because
+/// the guard must not reject a live arm. This covers the `6 | 7` and `6..=9` patterns the
+/// plain `literal_value(pat)` comparison missed.
+fn arm_pattern_may_match(pat: &str, scrut: i128) -> Option<bool> {
+    let mut saw_decidable = false;
+    for alt in split_top_level(pat, '|') {
+        let alt = strip_outer_parens(alt.trim());
+        if alt == "_" || alt.is_empty() {
+            return Some(true);
+        }
+        if let Some((lo, hi, inclusive)) = split_range(alt) {
+            let (Some(lo), Some(hi)) = (literal_operand(lo), literal_operand(hi)) else {
+                return Some(true);
+            };
+            saw_decidable = true;
+            let in_range = if inclusive {
+                scrut >= lo && scrut <= hi
+            } else {
+                scrut >= lo && scrut < hi
+            };
+            if in_range {
+                return Some(true);
+            }
+            continue;
+        }
+        match literal_operand(alt) {
+            Some(v) => {
+                saw_decidable = true;
+                if v == scrut {
+                    return Some(true);
+                }
+            }
+            // A non-literal part (a binding, `Some(_)`, a path): may match.
+            None => return Some(true),
+        }
+    }
+    if saw_decidable {
+        Some(false)
+    } else {
+        Some(true)
+    }
+}
+
+/// Split `s` on top-level occurrences of `sep` (not inside `()`, `[]`, `{}`).
+fn split_top_level(s: &str, sep: char) -> Vec<&str> {
+    let mut out = Vec::new();
+    let mut depth = 0i32;
+    let mut start = 0usize;
+    for (i, c) in s.char_indices() {
+        match c {
+            '(' | '[' | '{' => depth += 1,
+            ')' | ']' | '}' => depth -= 1,
+            _ if c == sep && depth == 0 => {
+                out.push(&s[start..i]);
+                start = i + c.len_utf8();
+            }
+            _ => {}
+        }
+    }
+    out.push(&s[start..]);
+    out
+}
+
+/// `a..=b` / `a..b` split into `(a, b, inclusive)`, if `s` is a range.
+fn split_range(s: &str) -> Option<(&str, &str, bool)> {
+    if let Some((lo, hi)) = s.split_once("..=") {
+        return Some((lo, hi, true));
+    }
+    let (lo, hi) = s.split_once("..")?;
+    Some((lo, hi, false))
 }
 
 /// The `{ … }` condition of an `if { … }` / `while { … }` whose keyword sits immediately

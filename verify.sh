@@ -284,11 +284,17 @@ installed_targets="$(rustup target list --installed 2>/dev/null || true)"
 if [ "$KANI_ONLY" -eq 0 ]; then
   step "1. reference implementation self-checks"
   if command -v "$PYTHON" >/dev/null 2>&1; then
-    if "$PYTHON" -c "import blake3" 2>/dev/null; then
+    # Probe the attribute the tools actually use (`blake3.blake3`), not just `import
+    # blake3`. The repo has a `blake3/` directory, which Python treats as a *namespace
+    # package* when no real one is installed; from the repo root `import blake3` then
+    # succeeds with `__file__ = None` and no attributes, so the probe used to pass and the
+    # `tools/ref_impl.py` call below failed instead -- and under `set -e` that aborted the
+    # script, leaving the SKIPPED branch unreachable (measured: a pip-less python).
+    if "$PYTHON" -c "import blake3; blake3.blake3" 2>/dev/null; then
       "$PYTHON" tools/ref_impl.py >/dev/null
       "$PYTHON" tools/gen_test_vectors.py --check
     else
-      echo "         the 'blake3' module is not importable from $PYTHON: $("$PYTHON" -c 'import blake3' 2>&1 | tail -1)" >&2
+      echo "         the 'blake3' module (or its 'blake3' attribute) is not usable from $PYTHON: $("$PYTHON" -c 'import blake3; blake3.blake3' 2>&1 | tail -1)" >&2
       skip "reference implementation self-checks" "$PYTHON with the 'blake3' module is required (pip install blake3). The committed fixture is still replayed by cargo test below; what is skipped is its regeneration against the published vectors, which is the anchor the whole fixture rests on."
     fi
   else
@@ -901,17 +907,49 @@ if [ "$RUN_DENY" -eq 1 ]; then
   # dependencies are audited by the per-lock commands only (CI runs the same three). The
   # `blake3/Cargo.lock` scan found a real advisory the other two cannot see
   # (RUSTSEC-2026-0385 in `ctutils`, pulled by `digest`/`traits-preview` and the fork's dev
-  # deps). The `--no-fetch` retry keeps an offline host with a cached advisory database
-  # usable; if the cache is cold too, the retry fails and the stage is a failure rather than
-  # a silent pass.
+  # deps).
+  #
+  # The three outcomes are kept distinct instead of collapsing into one non-zero exit: an
+  # advisory is a hard failure, a missing lock file is a recorded skip, and a fetch that
+  # fails with no usable cache is a recorded skip rather than a silent pass. The `--no-fetch`
+  # retry keeps an offline host with a cached database usable, but it is reported as such --
+  # a stale cache can miss a newly published advisory, so its "clean" verdict is not the
+  # same claim as an online one.
   audit_with_fallback() {  # <file>
     local file="$1"
-    if [ -n "$file" ]; then
-      cargo audit --deny warnings --file "$file" \
-        || cargo audit --no-fetch --deny warnings --file "$file"
-    else
-      cargo audit --deny warnings || cargo audit --no-fetch --deny warnings
+    local label="${file:-the root Cargo.lock}"
+    if [ -n "$file" ] && [ ! -f "$file" ]; then
+      skip "cargo-audit ($label)" "$label is missing from this tree, so there is nothing to audit"
+      return 0
     fi
+    local out rc=0
+    set +e
+    if [ -n "$file" ]; then
+      out="$(cargo audit --deny warnings --file "$file" 2>&1)"; rc=$?
+      if [ "$rc" -ne 0 ]; then
+        out="$(cargo audit --no-fetch --deny warnings --file "$file" 2>&1)"; rc=$?
+        echo "         (offline: scanned $label against the cached advisory database; a" >&2
+        echo "          stale cache can miss a new advisory -- see ${CARGO_HOME:-$HOME/.cargo}/advisory-db)" >&2
+      fi
+    else
+      out="$(cargo audit --deny warnings 2>&1)"; rc=$?
+      if [ "$rc" -ne 0 ]; then
+        out="$(cargo audit --no-fetch --deny warnings 2>&1)"; rc=$?
+        echo "         (offline: scanned $label against the cached advisory database; a" >&2
+        echo "          stale cache can miss a new advisory -- see ${CARGO_HOME:-$HOME/.cargo}/advisory-db)" >&2
+      fi
+    fi
+    set -e
+    printf '%s\n' "$out"
+    if [ "$rc" -eq 0 ]; then
+      return 0
+    fi
+    if printf '%s' "$out" | grep -qiE "couldn't fetch|failed to fetch|no such file|advisory database"; then
+      skip "cargo-audit ($label)" "the advisory database could not be fetched and no usable cache is present, so no advisory verdict was produced for $label"
+      return 0
+    fi
+    echo "FAILED: cargo-audit found advisories in $label" >&2
+    return 1
   }
   if cargo audit --version >/dev/null 2>&1; then
     audit_with_fallback ""

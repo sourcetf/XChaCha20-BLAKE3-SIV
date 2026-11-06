@@ -468,22 +468,30 @@ jobs:
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
           shared-key: windows
-      # `shell: bash` + the reported-vs-run guard: the Linux test matrix and
-      # cross-exec both refuse a "0 passed" run (a change that gated the
-      # integration targets off would otherwise leave this release-gate leg green
-      # while the Windows-only asm backend is compiled but never executed), and
-      # this leg had no such check.
+      # `shell: bash` + the per-target guard: the Linux test matrix and cross-exec both
+      # refuse a binary that ran zero tests (a change that gated the integration targets
+      # off would otherwise leave this release-gate leg green while the Windows-only asm
+      # backend is compiled but never executed). The guard attributes every `test result:`
+      # to its `Running <bin>` line; the version this replaced took the *last* `test
+      # result:` line, which is always doc-tests, so it never saw an integration target.
       - name: cargo test (ultra, release; the Windows asm backend is compiled here)
         shell: bash
         run: |
           set -o pipefail
           LOG=win-test.log
           cargo test --locked --release --features ultra -- --skip timing 2>&1 | tee "$LOG"
-          result="$(grep -E 'test result:' ${LOG} | tail -1 || true)"
-          passed="$(printf '%s' "$result" | sed -n 's/.* \([0-9][0-9]*\) passed.*/\1/p')"
-          ignored="$(printf '%s' "$result" | sed -n 's/.* \([0-9][0-9]*\) ignored.*/\1/p')"
-          if [ -z "$passed" ] || [ -z "$ignored" ] || [ $((passed + ignored)) -eq 0 ]; then
-            echo "::error::the suite reported ${passed:-no} passed and ${ignored:-no} ignored test(s): it built and executed nothing (tests compiled away, filtered out, or no libtest summary). The Linux test matrix and cross-exec carry the same guard."
+          ran="$(grep -cE '^[[:space:]]*Running ' "$LOG" || true)"
+          if [ "${ran:-0}" -eq 0 ]; then
+            echo "::error::cargo ran no test binaries at all (every target was filtered out or compiled away)"
+            exit 1
+          fi
+          bad="$(awk '
+            /^[[:space:]]*Running / { target=""; for (k=1;k<=NF;k++) if ($k ~ /\.rs$/) { target=$k; break } next }
+            /^[[:space:]]*Doc-tests / { target="doc-tests"; next }
+            /^test result:/ { if (target != "doc-tests" && $4 + $8 == 0) print target }
+          ' "$LOG")"
+          if [ -n "$bad" ]; then
+            echo "::error::these test binaries ran zero tests (passed+ignored == 0): $bad"
             exit 1
           fi
       - name: cargo check (no default features)
@@ -730,16 +738,26 @@ jobs:
       # statistical timing screen is advisory by measurement (a hosted VM reports
       # t ~ 11 with no possible cause, against a threshold of 10), so it must not
       # gate a job whose subject is the minimum toolchain.
+      # The per-target guard, same as the windows leg: every test binary must have run at
+      # least one test. A `tail -1` of `test result:` is always doc-tests, so it cannot
+      # see an integration target compiled away at this toolchain.
       - name: build and test at the declared MSRV
         run: |
           set -o pipefail
           LOG=msrv-test.log
           cargo test --locked --release --all-features -- --skip timing 2>&1 | tee "$LOG"
-          result="$(grep -E 'test result:' ${LOG} | tail -1 || true)"
-          passed="$(printf '%s' "$result" | sed -n 's/.* \([0-9][0-9]*\) passed.*/\1/p')"
-          ignored="$(printf '%s' "$result" | sed -n 's/.* \([0-9][0-9]*\) ignored.*/\1/p')"
-          if [ -z "$passed" ] || [ -z "$ignored" ] || [ $((passed + ignored)) -eq 0 ]; then
-            echo "::error::the suite reported ${passed:-no} passed and ${ignored:-no} ignored test(s): it built and executed nothing (tests compiled away, filtered out, or no libtest summary). The Linux test matrix and cross-exec carry the same guard."
+          ran="$(grep -cE '^[[:space:]]*Running ' "$LOG" || true)"
+          if [ "${ran:-0}" -eq 0 ]; then
+            echo "::error::cargo ran no test binaries at all (every target was filtered out or compiled away)"
+            exit 1
+          fi
+          bad="$(awk '
+            /^[[:space:]]*Running / { target=""; for (k=1;k<=NF;k++) if ($k ~ /\.rs$/) { target=$k; break } next }
+            /^[[:space:]]*Doc-tests / { target="doc-tests"; next }
+            /^test result:/ { if (target != "doc-tests" && $4 + $8 == 0) print target }
+          ' "$LOG")"
+          if [ -n "$bad" ]; then
+            echo "::error::these test binaries ran zero tests (passed+ignored == 0): $bad"
             exit 1
           fi
 

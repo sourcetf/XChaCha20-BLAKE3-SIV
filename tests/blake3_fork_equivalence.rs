@@ -598,13 +598,25 @@ fn strip_toml_comment(line: &str) -> String {
 /// Cargo manifest, following the section header that governs it and joining continuation
 /// lines of a multi-line inline table.
 fn dependency_entries(manifest: &str) -> Vec<(String, String, String)> {
+    // The same whitelist as `build.rs`'s `is_dependency_section`: a dot-path, not a
+    // suffix. `ends_with(".dependencies")` also matched
+    // `[package.metadata.<any>.dependencies]`, where a decoy satisfied this parser while
+    // the real edge was a registry dependency.
     fn is_dependency_section(name: &str) -> bool {
-        name == "dependencies"
-            || name == "dev-dependencies"
-            || name == "build-dependencies"
-            || name.ends_with(".dependencies")
-            || name.ends_with(".dev-dependencies")
-            || name.ends_with(".build-dependencies")
+        let (prefix, last) = match name.rsplit_once('.') {
+            Some((p, l)) => (Some(p), l),
+            None => (None, name),
+        };
+        if !matches!(
+            last,
+            "dependencies" | "dev-dependencies" | "build-dependencies"
+        ) {
+            return false;
+        }
+        match prefix {
+            None => true,
+            Some(p) => p == "workspace" || p.starts_with("target."),
+        }
     }
 
     let mut section = String::new();
