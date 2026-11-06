@@ -144,7 +144,7 @@ ensure_target() {
 # stage; only the lookup is per-architecture.  Mirrors verify.sh's find_qemu.
 find_qemu() {
   local name="$1" arch var c
-  arch="$(printf '%s' "${name#qemu-}" | tr '[:lower:]-' '[:upper:]_')"
+  arch="$(printf '%s' "${name#qemu-}" | tr 'a-z-' 'A-Z_')"
   var="QEMU_${arch}"
   for c in "${!var:-}" "$HOME/.local/bin/$name" \
            "$(command -v "$name" 2>/dev/null || true)"; do

@@ -208,7 +208,7 @@ trap cleanup_logs EXIT
 # whatever is on $PATH.
 find_qemu() {
   local name="$1" arch var
-  arch="$(printf '%s' "${name#qemu-}" | tr '[:lower:]-' '[:upper:]_')"
+  arch="$(printf '%s' "${name#qemu-}" | tr 'a-z-' 'A-Z_')"
   var="QEMU_${arch}"
   if [ -n "${!var:-}" ] && [ -x "${!var}" ]; then
     echo "${!var}"; return 0
@@ -563,7 +563,7 @@ if [ "$RUN_CROSS_EXEC" -eq 1 ]; then
       # Same derivation `find_qemu` uses (`qemu-aarch64` -> `$QEMU_AARCH64`); the
       # hint used to upper-case the whole name and print `$QEMU_QEMU-AARCH64`, a
       # variable nothing reads.
-      hint_var="QEMU_$(printf '%s' "${emulator#qemu-}" | tr '[:lower:]-' '[:upper:]_')"
+      hint_var="QEMU_$(printf '%s' "${emulator#qemu-}" | tr 'a-z-' 'A-Z_')"
       echo "         Expected \$$hint_var, \$HOME/.local/bin/$emulator, or"
       echo "         $emulator on \$PATH.  On Debian/Ubuntu this needs no root:"
       echo "           apt-get download qemu-user && dpkg-deb -x qemu-user_*.deb ~/.local"
@@ -891,13 +891,35 @@ if [ "$RUN_DENY" -eq 1 ]; then
   STAGE_KEY=deny
   step "8. cargo-deny and cargo-audit (advisories, licences, bans, sources)"
   if cargo deny --version >/dev/null 2>&1; then
+    # All three crates in the tree: the root workspace excludes `fuzz/` and the vendored
+    # `blake3/`, so `cargo deny check` at the root saw only the root graph's licences, bans
+    # and sources. The excluded graphs are checked by running the tool inside their
+    # directories (cargo-deny has no `--manifest-path`; it finds the root `deny.toml` by
+    # walking up). A git or non-allow-listed-licence dependency added to either would
+    # otherwise reach the release-gated supply-chain job unseen (measured).
+    #
     # `cargo deny check` fetches the advisory database from GitHub, which is not reachable
     # from every host this certifies on (measured: a local `--deep` ran stages 1-7 green and
     # died here on a 135 s connect timeout while the same check succeeded offline). `--offline`
     # uses the on-disk database the tool already downloaded, so it is the *fallback* rather
     # than the rare case -- mirroring `audit_with_fallback` below. A cold cache is still a
     # failure, not a silent pass: `--offline` cannot invent database content.
-    cargo deny check || cargo deny --offline check
+    deny_check() {  # <dir>
+      local dir="$1"
+      ( cd "$dir" && {
+        if ! cargo deny check; then
+          # Same caveat as `audit_with_fallback` below: a cached advisory database can be
+          # stale, so say which one produced a clean verdict rather than reading it as an
+          # online one.
+          echo "         (offline: re-checked $dir against the cached advisory database; a" >&2
+          echo "          stale cache can miss a new advisory -- see ${CARGO_HOME:-$HOME/.cargo}/advisory-db)" >&2
+          cargo deny --offline check
+        fi
+      } )
+    }
+    deny_check .
+    deny_check fuzz
+    deny_check blake3
   else
     skip "cargo-deny" "not installed (cargo install cargo-deny)"
     echo "         (cargo install cargo-deny --locked)"
@@ -1197,6 +1219,11 @@ if [ "$RUN_TOOLS" -eq 1 ]; then
   # pushes vectors this crate never committed through the Python reference.
   run_tool "Kani cfg check"     tools/check_kani_cfg.sh
   run_tool "broad differential" tools/broad_differential.py "${BROAD_VECTORS:-4000}"
+  # The same vectors through BLAKE3's `pure` backend, which the README claims is compared
+  # ("the same script with and without `--features pure`"); no caller passed the flag, so
+  # the two-backend comparison the README names was never run (measured).
+  run_tool "broad differential (pure backend)" tools/broad_differential.py \
+    "${BROAD_VECTORS:-4000}" --features pure
 
   # What this measures is residue in frames the *compiler* chose, so a change in
   # layout reports instead of blocking -- CI's `stack-residue` job is `continue-on-error`
@@ -1275,7 +1302,7 @@ if [ "$RUN_KANI" -eq 1 ]; then
   # report that as a pass -- a request for the proof stage answered by a run that
   # proved nothing. But the source count is not the requirement either: a
   # `#[cfg(any())]` above a harness leaves the count intact and removes the
-  # harness from the build, so with twelve of the thirteen attributes disabled
+  # harness from the build, so with all but one of the committed attributes disabled
   # Kani proves the one that survives and prints "Complete - 1 successfully
   # verified harnesses, 0 failures, 1 total." at exit 0 (measured). The
   # requirement is therefore anchored to the run below: Kani's own summary must
@@ -1368,10 +1395,10 @@ if [ "$RUN_KANI" -eq 1 ]; then
     # ...and the run itself, from Kani's own summary line, because neither the source
     # count above nor the "no proof harnesses" grep can see a harness that is present
     # in the source and absent from this particular run: `#[cfg(any())]` above a
-    # `#[kani::proof]` leaves the count at 13 while Kani builds and proves one, exits 0
+    # `#[kani::proof]` leaves the source count intact while Kani builds and proves one, exits 0
     # and prints "Complete - 1 successfully verified harnesses, 0 failures, 1 total."
-    # (measured on a scratch copy with twelve of the thirteen attributes disabled:
-    # without this block the stage prints the 13/13 source count and "all requested
+    # (measured on a scratch copy with all but one attribute disabled: without this
+    # block the stage prints the source count as if it were the run's and "all requested
     # checks passed", exit 0).
     # The summary is the independent witness of what was verified, so it must report at
     # least the committed number of verified harnesses *and* of total harnesses, with

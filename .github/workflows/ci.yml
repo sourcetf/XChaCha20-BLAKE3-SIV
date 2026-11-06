@@ -990,7 +990,14 @@ jobs:
         with:
           tool: cargo-deny@0.20.2
       - name: cargo deny check
-        run: cargo deny check
+        # All three crates: the root workspace excludes `fuzz/` and the vendored `blake3/`,
+        # so a bare `cargo deny check` covered only the root graph's licences, bans and
+        # sources. cargo-deny has no `--manifest-path`; running it inside each directory
+        # picks up that graph and the root `deny.toml` (found by walking up).
+        run: |
+          cargo deny check
+          ( cd fuzz && cargo deny check )
+          ( cd blake3 && cargo deny check )
 
   release:
     name: tag the commit and publish a release

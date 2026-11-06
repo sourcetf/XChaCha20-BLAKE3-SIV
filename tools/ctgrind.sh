@@ -258,12 +258,16 @@ if ! BIN="$(RUSTFLAGS="-C target-feature=+crt-static -C strip=none -C debuginfo=
   # diagnostics went to /dev/null -- and verify.sh saw 101 rather than the tool's 1.
   echo "could not build the ctgrind test binary:" >&2
   tail -20 "$build_log" >&2
-  exit 1
+  # exit 3 ("could not run"), not 1: a build that fails for an environmental reason (a
+  # killed compiler, a full disk) is a skipped stage, the convention `fi_check.sh`,
+  # `fi_instruction.sh` and `stack_residue.sh` follow and `verify.sh` maps to SKIPPED. A
+  # real finding (a leak) is 99/1, never this path.
+  exit 3
 fi
 [ -n "$BIN" ] || {
   echo "could not find the ctgrind test binary: cargo reported no executable for it" >&2
   tail -20 "$build_log" >&2
-  exit 1
+  exit 3
 }
 rm -f "$build_log"
 echo "binary: $BIN"

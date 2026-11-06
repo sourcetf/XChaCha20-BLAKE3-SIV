@@ -81,10 +81,21 @@ else
 fi
 
 echo "=== 2/2 the crate's own concurrent test must be clean ==="
-cargo +nightly test "${args[@]}" --test threads > "$out" 2>&1
+# Capture the status instead of letting `set -e` act on it: TSan exits 66 when it reports a
+# race, so a bare command aborted the script *before* the `grep` below and the
+# "reported a race" diagnosis was dead code (measured with a fake cargo that emits a
+# warning and exits 66: the tool exited 66 with no message).
+run_rc=0
+cargo +nightly test "${args[@]}" --test threads > "$out" 2>&1 || run_rc=$?
 if grep -q "WARNING: ThreadSanitizer" "$out"; then
   echo "FAIL: ThreadSanitizer reported a race in this crate:" >&2
   grep -A20 "WARNING: ThreadSanitizer" "$out" >&2
+  exit 1
+fi
+if [ "$run_rc" -ne 0 ]; then
+  echo "FAIL: the concurrent test exited $run_rc under ThreadSanitizer without a race" >&2
+  echo "report, so this is a build/run failure rather than a clean run. Full output:" >&2
+  tail -20 "$out" >&2
   exit 1
 fi
 grep -E "^test result" "$out"

@@ -83,7 +83,7 @@ fn check_blake3_is_a_path_dependency(manifest: &str) {
     let mut depth = 0i32;
 
     let finish = |section: &str, key: &str, value: &str, checked: &mut usize| {
-        if key == "blake3" && is_dependency_section(section) {
+        if unquote(key) == "blake3" && is_dependency_section(section) {
             *checked += 1;
             if inline_value(value, "path").as_deref() != Some("blake3") {
                 panic!(
@@ -247,12 +247,29 @@ fn is_dependency_section(name: &str) -> bool {
     }
 }
 
+/// A TOML bare or quoted key as its bare form: `"blake3"` -> `blake3`. Cargo accepts
+/// `[dependencies."blake3"]` and `"blake3" = …`, and a parser that compared the raw text
+/// missed them: a *valid* manifest spelled that way made `checked == 0` and this build
+/// script panic (a false positive), and the entry was invisible to the path check
+/// (measured).
+fn unquote(key: &str) -> &str {
+    let key = key.trim();
+    if key.len() >= 2
+        && ((key.starts_with('"') && key.ends_with('"'))
+            || (key.starts_with('\'') && key.ends_with('\'')))
+    {
+        &key[1..key.len() - 1]
+    } else {
+        key
+    }
+}
+
 /// If a section name is `<dependency section>.<crate>` (the table-header form,
-/// `[dependencies.blake3]`), the crate name.
+/// `[dependencies.blake3]` or `[dependencies."blake3"]`), the crate name.
 fn dep_section_crate(name: &str) -> Option<&str> {
     let (prefix, last) = name.rsplit_once('.')?;
     if is_dependency_section(prefix) && !last.is_empty() {
-        Some(last)
+        Some(unquote(last))
     } else {
         None
     }

@@ -3,6 +3,9 @@ name = "xchacha20-blake3-siv-fuzz"
 version = "0.0.0"
 publish = false
 edition = "2021"
+# Named so `cargo deny check` (which runs in this directory too) sees a licensed crate:
+# the fuzz workspace is not published, but an unlicensed manifest is a deny error.
+license = "MIT OR Apache-2.0"
 
 [package.metadata]
 cargo-fuzz = true
@@ -17,6 +20,7 @@ libfuzzer-sys = "0.4"
 # default 4096 cap leaves unreachable.
 
 [dependencies.xchacha20-blake3-siv]
+version = "0.1.0"
 path = ".."
 
 # The parent uses the maintained BLAKE3 fork under `../blake3` as a direct path

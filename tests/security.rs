@@ -3892,11 +3892,10 @@ fn macro_invocations(source: &str) -> Vec<String> {
 }
 
 /// `src/lib.rs`, parsed. Every structural check below reads the AST rather than the text.
-fn parsed_lib() -> syn::File {
-    syn::parse_file(LIB).expect("src/lib.rs must parse as a Rust file")
-}
-
 /// Whether `func` is a call target named like one of the crate's wipe primitives.
+///
+/// `wipe`/`wipe_words` are the vendored witness's own helpers; they are as much a wipe
+/// as `crate::zeroize_array`.
 fn is_wipe_path(func: &syn::Expr) -> bool {
     let syn::Expr::Path(p) = func else {
         return false;
@@ -3904,9 +3903,24 @@ fn is_wipe_path(func: &syn::Expr) -> bool {
     p.path.segments.last().is_some_and(|seg| {
         matches!(
             seg.ident.to_string().as_str(),
-            "zeroize_array" | "zeroize_slice" | "zeroize_raw" | "scrub_stack"
+            "zeroize_array"
+                | "zeroize_slice"
+                | "zeroize_raw"
+                | "scrub_stack"
+                | "wipe"
+                | "wipe_words"
         )
     })
+}
+
+/// Whether a method call is a wipe: `.zeroize()` on the BLAKE3 `Hasher`/`XofReader` at the
+/// keyed seam (`src/lib.rs:2197-2198`, `:2809-2810`) is the *only* clearing of the MAC key
+/// state, and a method call is not an `ExprCall`, so the path test above never saw it.
+fn is_wipe_method(m: &syn::ExprMethodCall) -> bool {
+    matches!(
+        m.method.to_string().as_str(),
+        "zeroize" | "wipe" | "wipe_words"
+    )
 }
 
 /// Whether `expr` contains a call to a wipe primitive anywhere inside it.
@@ -3921,10 +3935,70 @@ fn contains_wipe_call(expr: &syn::Expr) -> bool {
             }
             syn::visit::visit_expr_call(self, c);
         }
+        fn visit_expr_method_call(&mut self, m: &'ast syn::ExprMethodCall) {
+            if is_wipe_method(m) {
+                self.hit = true;
+            }
+            syn::visit::visit_expr_method_call(self, m);
+        }
     }
     let mut v = V { hit: false };
     syn::visit::Visit::visit_expr(&mut v, expr);
     v.hit
+}
+
+/// The line numbers of every wipe call in `source` (path calls and `.zeroize()` methods),
+/// outside the `tests` module.
+fn wipe_call_lines(source: &str) -> Vec<usize> {
+    use syn::spanned::Spanned;
+    struct V {
+        lines: Vec<usize>,
+    }
+    impl<'ast> syn::visit::Visit<'ast> for V {
+        fn visit_expr_call(&mut self, c: &'ast syn::ExprCall) {
+            if is_wipe_path(&c.func) {
+                self.lines.push(c.span().start().line);
+            }
+            syn::visit::visit_expr_call(self, c);
+        }
+        fn visit_expr_method_call(&mut self, m: &'ast syn::ExprMethodCall) {
+            if is_wipe_method(m) {
+                self.lines.push(m.span().start().line);
+            }
+            syn::visit::visit_expr_method_call(self, m);
+        }
+        fn visit_item_mod(&mut self, m: &'ast syn::ItemMod) {
+            if m.ident == "tests" {
+                return;
+            }
+            syn::visit::visit_item_mod(self, m);
+        }
+    }
+    let file = syn::parse_file(source).expect("the source must parse as a Rust file");
+    let mut v = V { lines: Vec::new() };
+    syn::visit::Visit::visit_file(&mut v, &file);
+    v.lines.sort_unstable();
+    v.lines
+}
+
+/// The witness's own wipe calls are local helpers (`wipe`, `wipe_words`) and a `.zeroize()`
+/// on the keyed seam, none of which the table-driven count in
+/// `every_documented_wipe_has_a_witness` names (it lists `crate::zeroize_*` sites in
+/// `src/lib.rs`). Pin the witness's total so a deleted witness wipe is caught rather than
+/// silently surviving the whole suite.
+#[test]
+fn witness_wipe_sites_are_pinned() {
+    let lines = wipe_call_lines(include_str!("../src/witness.rs"));
+    assert_eq!(
+        lines.len(),
+        42,
+        "src/witness.rs has {} wipe call(s) at line(s) {lines:?}, not the 42 this count \
+         pins: a deleted witness wipe would leave derived material in the frames it runs \
+         in, and no other guard counts these (the table in \
+         `every_documented_wipe_has_a_witness` names only `src/lib.rs`'s `crate::zeroize_*` \
+         sites). Update this number deliberately.",
+        lines.len()
+    );
 }
 
 /// No counted wipe may sit inside a closure body -- of any kind.
@@ -3964,19 +4038,27 @@ fn no_counted_wipe_is_inside_a_closure() {
             syn::visit::visit_item_mod(self, m);
         }
     }
-    let file = parsed_lib();
-    let mut v = V { lines: Vec::new() };
-    syn::visit::Visit::visit_file(&mut v, &file);
-    assert!(
-        v.lines.is_empty(),
-        "a counted wipe sits inside a closure body (closure begins at line(s) {:?}). This \
-         crate's convention is that every wipe is a plain statement in a function body; a \
-         wipe inside a closure -- stored, `move`, parameterised, passed to an iterator \
-         adapter, or even immediately invoked -- is not written that way here, and the \
-         guard requires the convention so it never has to reason about whether a closure \
-         runs. Hoist the wipe to a plain statement.",
-        v.lines
-    );
+    // Both production sources: `src/lib.rs` and the vendored witness (which the ultra
+    // configuration runs and whose `wipe`/`wipe_words`/`.zeroize()` calls are wipes too).
+    for (name, source) in [
+        ("src/lib.rs", LIB),
+        ("src/witness.rs", include_str!("../src/witness.rs")),
+    ] {
+        let file = syn::parse_file(source)
+            .unwrap_or_else(|e| panic!("{name} must parse as a Rust file: {e}"));
+        let mut v = V { lines: Vec::new() };
+        syn::visit::Visit::visit_file(&mut v, &file);
+        assert!(
+            v.lines.is_empty(),
+            "{name}: a counted wipe sits inside a closure body (closure begins at line(s) \
+             {:?}). This crate's convention is that every wipe is a plain statement in a \
+             function body; a wipe inside a closure -- stored, `move`, parameterised, \
+             passed to an iterator adapter, or even immediately invoked -- is not written \
+             that way here, and the guard requires the convention so it never has to reason \
+             about whether a closure runs. Hoist the wipe to a plain statement.",
+            v.lines
+        );
+    }
 }
 
 #[test]
@@ -4001,6 +4083,11 @@ fn no_wipe_is_hidden_in_an_unexpanded_macro() {
                 "zeroize_slice(",
                 "zeroize_raw(",
                 "scrub_stack(",
+                // The keyed seam's method wipes and the witness's local helpers: the same
+                // clearing as the path calls above, and just as hideable in a macro.
+                "zeroize(",
+                "wipe(",
+                "wipe_words(",
             ] {
                 assert!(
                     !body.contains(marker),

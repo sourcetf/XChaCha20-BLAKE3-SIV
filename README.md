@@ -1032,7 +1032,8 @@ works unprivileged, and the emulator is extracted into `~/.local/bin`.
   `tools/tsan.sh` runs it under ThreadSanitizer, after proving the sanitizer can
   see a race at all: a deliberately racy `#[ignore]`d test must be reported before
   the clean run is allowed to mean anything. The suite also runs under
-  AddressSanitizer.
+  AddressSanitizer -- over the test targets in the scheduled `wide` audit and over
+  the fuzz target in `deep.yml`, not on every push.
 - **Cross-architecture execution** — four configurations are *executed* under
   qemu, not merely type-checked. On x86 the aarch64 (NEON) backend is compiled
   out entirely, so `qemu-aarch64` is the only *per-push* execution of it (a manually

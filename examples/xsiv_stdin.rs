@@ -42,21 +42,23 @@ fn from_hex(name: &str, field: &str) -> Vec<u8> {
     // its contents into stderr, where they could be logged. The field index is in
     // the name, so the offending field is still identified.
     assert!(field.len() % 2 == 0, "{name}: odd-length hex field");
-    // A leading sign is the one thing `from_str_radix` *accepts* that hex must not
-    // (`+1` decodes to 0x01); everything else that is not a hex digit is rejected by
-    // `from_str_radix` itself, loudly, through the `.expect` below.
+    // A sign is the one thing `from_str_radix` *accepts* that hex must not (`+1` decodes to
+    // 0x01), and it is accepted at the start of *every* two-character pair, not only the
+    // field's first byte: `"…00+3"` chunks to `["00", "+3"]`, and `u8::from_str_radix("+3",
+    // 16)` is 3, so a signed key was silently accepted and decoded to the unsigned one
+    // (measured: identical tag to the `…03` key). The whole field is scanned.
     //
-    // Deliberately not a per-byte `bytes().all(is_ascii_hexdigit)` scan, and the reason
-    // is measured: `tools/cache_profile.sh` compares *instruction counts* for two
-    // different keys, so a value-dependent predicate over the hex characters makes the
-    // harness's own profile depend on the key. With such a guard here the counts
-    // differential failed on a pristine tree ("FAIL: the enc cache or branch profile
-    // depends on the key", exit 1), because '0' and 'f' take different paths through it.
-    // These two comparisons execute the same instructions whatever the first byte is.
-    assert!(
-        !field.starts_with('+') && !field.starts_with('-'),
-        "{name}: signed hex field"
-    );
+    // The scan is a non-short-circuiting `fold` rather than `bytes().all(...)`, and the
+    // reason is measured: `tools/cache_profile.sh` compares *instruction counts* for two
+    // different keys, so a predicate that stopped at the first non-hex byte would make the
+    // harness's own profile depend on the key (it did: "FAIL: the enc cache or branch
+    // profile depends on the key", exit 1, because '0' and 'f' left the scan at different
+    // points). `fold` with `|` visits every byte whatever the field holds, so two keys of
+    // the same length execute the same instructions.
+    let signed = field
+        .bytes()
+        .fold(false, |seen, b| seen | (b == b'+' || b == b'-'));
+    assert!(!signed, "{name}: signed hex field");
     // Chunked over the *bytes* rather than `&field[i..i + 2]`: slicing a `&str` by byte
     // index panics when the pair straddles a character boundary, and the panic message
     // quotes the offending character — which put a byte of the caller's field into stderr,

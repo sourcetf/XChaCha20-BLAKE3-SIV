@@ -55,6 +55,14 @@ targets = [
 # otherwise (it named `aead`, a dev-dependency). Advisories are the one check that
 # does cover the whole locked tree: `cargo audit --deny warnings` reads Cargo.lock,
 # dev dependencies included (deep.yml, `audit` job).
+#
+# Coverage across the tree's *three* workspaces: the root graph is checked here, and
+# `verify.sh` and `ci.yml` also run `cargo deny check` inside `fuzz/` and the vendored
+# `blake3/` (both are excluded from the root workspace, so a bare root run did not see
+# their licences, bans or sources -- fuzz pulls `libfuzzer-sys`'s NCSA, allowed per-crate
+# in the `exceptions` list below). Each of those graphs is still *its own* graph: the
+# root's dev-only crates (criterion, proptest, aead) remain out of every check but
+# `cargo audit`.
 all-features = false
 # If true, metadata will be collected with `--no-default-features`. The same
 # caveat with `all-features` applies
@@ -147,6 +155,11 @@ exceptions = [
     # Each entry is the crate and version constraint, and its specific allow
     # list
     #{ allow = ["Zlib"], crate = "adler32" },
+    # `libfuzzer-sys` is `(MIT OR Apache-2.0) AND NCSA`, reached only by the `fuzz/`
+    # workspace's targets. The AND requires NCSA as well as the OR, so it is named here
+    # -- per-crate rather than in the general list, which keeps a future NCSA crate in the
+    # shipped graph from being allowed silently.
+    { allow = ["NCSA"], crate = "libfuzzer-sys" },
 ]
 
 # Some crates don't have (easily) machine readable licensing information,

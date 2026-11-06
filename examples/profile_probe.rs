@@ -24,16 +24,37 @@ use xchacha20_blake3_siv::{
     decrypt, decrypt_in_place_detached, encrypt, encrypt_in_place_detached,
 };
 
+/// Parse an optional positional argument, exiting 2 with a usage message on a bad value.
+fn parse_arg(value: Option<&String>, name: &str, default: usize) -> usize {
+    let Some(text) = value else {
+        return default;
+    };
+    match text.parse() {
+        Ok(v) => v,
+        Err(_) => {
+            eprintln!("{name} must be a non-negative integer, got {text:?}");
+            std::process::exit(2);
+        }
+    }
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let size: usize = args.first().map(|s| s.parse().expect("size")).unwrap_or(64);
-    let iters: usize = args
-        .get(1)
-        .map(|s| s.parse().expect("iterations"))
-        .unwrap_or(1000);
+    // Reject a bad argument loudly rather than panicking with a `parse().expect` (exit 101)
+    // or OOM-aborting on an absurd size: this probe is driven by hand, so its usage errors
+    // should read as usage errors (exit 2).
+    let size = parse_arg(args.first(), "size", 64);
+    let iters = parse_arg(args.get(1), "iterations", 1000);
 
     if iters == 0 {
         eprintln!("iterations must be at least 1 (got 0: the mean would be 0/0)");
+        std::process::exit(2);
+    }
+    // The allocating API holds the plaintext, the ciphertext and the keystream at once;
+    // cap the size at a plausible probe so a mistyped argument does not abort on OOM.
+    const MAX_SIZE: usize = 1 << 30;
+    if size > MAX_SIZE {
+        eprintln!("size must be at most {MAX_SIZE} bytes (got {size})");
         std::process::exit(2);
     }
 

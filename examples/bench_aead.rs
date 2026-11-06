@@ -46,6 +46,16 @@ fn main() {
         // 预计算密文用于解密基准
         let (ct, tag) = encrypt(&key, &nonce, aad, &pt).unwrap();
 
+        // 计时前先校验一次往返: 一个"总是返回 Ok"的错误 decrypt 会让这个基准报出
+        // 虚假的吞吐提升（`benches/bench.rs` 与 `benches/compare.rs` 的每一支都先做
+        // 这个断言，只有本文件此前没有）。
+        let recovered = decrypt(&key, &nonce, aad, &ct, &tag).unwrap();
+        assert_eq!(
+            recovered.as_slice(),
+            pt.as_slice(),
+            "decrypt did not recover the plaintext, so the timing below is meaningless"
+        );
+
         let enc_secs = run(rounds, || encrypt(&key, &nonce, aad, &pt).unwrap());
 
         let dec_secs = run(rounds, || decrypt(&key, &nonce, aad, &ct, &tag).unwrap());

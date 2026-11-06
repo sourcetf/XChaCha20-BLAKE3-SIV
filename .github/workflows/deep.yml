@@ -736,6 +736,12 @@ jobs:
       - name: 4000 random vectors against the independent reference
         run: python3 tools/broad_differential.py 4000
 
+      # The same vectors through BLAKE3's `pure` backend: the README says the two backends
+      # are compared over identical vectors, and no caller passed the flag before this
+      # (measured), so the comparison it names was never run.
+      - name: 4000 random vectors through the pure backend
+        run: python3 tools/broad_differential.py 4000 --features pure
+
       # `--tests`: rustdoc builds a doctest as its own crate and does not put the
       # sanitizer runtime on that link line, so the crate's one *running* doctest
       # (`decrypt_bounded`'s, the only fence in `src/lib.rs` that is neither `no_run`,

@@ -981,7 +981,10 @@ mod tests {
     /// trailing zeros of the chunk count: a bug can live at 3072 bytes (three chunks) while
     /// 2048 (two) and 4096 (four) both pass. Enumerating every length to 4200 removes that
     /// whole class where boundaries are dense, and the chunk-count powers of two above it
-    /// (up to 200 chunks) cover the deepest merges the stack can perform.
+    /// (up to 200 chunks) exercise the merges at those boundaries. The crate's own
+    /// `CV_STACK_RESERVE` is sized for the full `u64` counter, so the *deepest* merges are
+    /// covered by `tests/differential_reference.rs`, not by this length sweep (measured:
+    /// shrinking `CV_STACK_RESERVE` to 8 fails the differential, not this test).
     #[test]
     fn blake3_keyed_xof_agrees_at_every_length() {
         const MAX: usize = 204_807; // 200 chunks and 7 bytes
@@ -1021,17 +1024,17 @@ mod tests {
     /// derived subkey and `k_in`/`k_out` — not constant-byte. That also reaches
     /// `hchacha20` whenever a composite test uses a non-constant key, so a permuted
     /// `hchacha20` word order does *not* pass every existing test. Permuting its key
-    /// words (`s[4 + i]` → `s[4 + (7 - i)]`) leaves the four other tests in this module
-    /// green — none of them feeds `hchacha20` distinct bytes — but under the same
-    /// mutation `cargo test --release --features ultra --lib` reports 55 passed /
-    /// 8 failed. Seven of the eight are composite tests (the three
-    /// `test_xchacha20_blake3_siv_kat_*` cases, `test_avalanche_single_bit_flip`,
+    /// words (`s[4 + i]` → `s[4 + (7 - i)]`) leaves the tests in this module that only
+    /// use constant-byte keys green — none of them feeds `hchacha20` distinct bytes — but
+    /// under the same mutation `cargo test --release --features ultra --lib` fails the
+    /// composite tests that do (the three `test_xchacha20_blake3_siv_kat_*` cases,
+    /// `test_avalanche_single_bit_flip`,
     /// `test_all_accelerated_paths_agree_on_a_boundary_corpus`,
-    /// `test_random_helpers_produce_usable_output`, `test_tag_binds_both_derived_keys`)
-    /// that see it as `AuthenticationFailed` from the `ultra` encrypt/decrypt
-    /// cross-check rather than as a named site;
-    /// `tests/ultra.rs::ultra_still_round_trips_rejects_a_forgery_and_generates_keys`
-    /// fails the same way. What this test adds is the unit-level witness of the unpacking:
+    /// `test_random_helpers_produce_usable_output`, `test_tag_binds_both_derived_keys`) as
+    /// `AuthenticationFailed` from the `ultra` encrypt/decrypt cross-check rather than as a
+    /// named site; `tests/ultra.rs::ultra_still_round_trips_rejects_a_forgery_and_generates_keys`
+    /// fails the same way. (An earlier revision pinned the exact pass/fail counts; they
+    /// drifted as tests were added, so the mutation's *effect* is what is stated.) What this test adds is the unit-level witness of the unpacking:
     /// the failure
     /// lands on the `hchacha20` comparison itself, with both values, so the word order
     /// is named where it lives instead of surfacing as "the witness disagrees". It runs
