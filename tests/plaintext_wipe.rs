@@ -65,6 +65,26 @@ unsafe impl GlobalAlloc for WatchAlloc {
     }
 
     unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
+        let len = WATCH_LEN.load(Ordering::SeqCst);
+        // Inspect a watched buffer *before* `System.realloc` frees or moves it: a resize
+        // that walks the plaintext-sized buffer out of the watch set (a `truncate` +
+        // `shrink_to_fit`) would otherwise release it without the residue check ever
+        // reading it -- the bypass the round-`e705a4a` audit named as a candidate.
+        if ARM_ALLOC.load(Ordering::SeqCst) && layout.size() >= len && len != 0 {
+            let n = WATCHED_COUNT.load(Ordering::SeqCst).min(MAX_WATCHED);
+            if WATCHED
+                .iter()
+                .take(n)
+                .any(|slot| slot.load(Ordering::SeqCst) == ptr as usize)
+            {
+                // SAFETY: the caller of `GlobalAlloc::realloc` guarantees `ptr` is live for
+                // `layout.size()` bytes, and `len <= layout.size()`.
+                let bytes = unsafe { std::slice::from_raw_parts(ptr, len) };
+                if bytes.contains(&0xA7) {
+                    SAW_RESIDUE.store(true, Ordering::SeqCst);
+                }
+            }
+        }
         // SAFETY: the caller of `GlobalAlloc::realloc` guarantees that `ptr` is currently
         // allocated with `layout`; the arguments are forwarded to the system allocator.
         let new = unsafe { System.realloc(ptr, layout, new_size) };

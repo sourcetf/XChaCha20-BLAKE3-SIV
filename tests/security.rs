@@ -1948,9 +1948,20 @@ fn else_branch_condition(body: &str, open: usize) -> Option<Vec<&str>> {
         }
     }
 
-    let head_start = body[..open]
+    // The `else` keyword must sit on the line above the `{`; when the `{` is on its own
+    // line (`if true { } else\n{`) the newline before it is not a statement boundary, so
+    // the plain scan lands on it and leaves `before` ending in `else` instead of `}` --
+    // and the whole chain is skipped (measured: `if true { } else\n{ wipe }` stayed
+    // green). Re-scan without `\n` when the text between the last newline and `{` is
+    // blank, mirroring `enclosing_block_heads`.
+    let head_start_newline = body[..open]
         .rfind(['\n', ';', '{', '}'])
         .map_or(0, |i| i + 1);
+    let head_start = if body[head_start_newline..open].trim().is_empty() {
+        body[..open].rfind([';', '{', '}']).map_or(0, |i| i + 1)
+    } else {
+        head_start_newline
+    };
     let before = body[..head_start].trim_end();
     if !before.ends_with('}') {
         return None;
@@ -3880,6 +3891,88 @@ fn macro_invocations(source: &str) -> Vec<String> {
         }
     }
     out
+}
+
+/// `src/lib.rs`, parsed. Every structural check below reads the AST rather than the text.
+fn parsed_lib() -> syn::File {
+    syn::parse_file(LIB).expect("src/lib.rs must parse as a Rust file")
+}
+
+/// Whether `func` is a call target named like one of the crate's wipe primitives.
+fn is_wipe_path(func: &syn::Expr) -> bool {
+    let syn::Expr::Path(p) = func else {
+        return false;
+    };
+    p.path.segments.last().is_some_and(|seg| {
+        matches!(
+            seg.ident.to_string().as_str(),
+            "zeroize_array" | "zeroize_slice" | "zeroize_raw" | "scrub_stack"
+        )
+    })
+}
+
+/// Whether `expr` contains a call to a wipe primitive anywhere inside it.
+fn contains_wipe_call(expr: &syn::Expr) -> bool {
+    struct V {
+        hit: bool,
+    }
+    impl<'ast> syn::visit::Visit<'ast> for V {
+        fn visit_expr_call(&mut self, c: &'ast syn::ExprCall) {
+            if is_wipe_path(&c.func) {
+                self.hit = true;
+            }
+            syn::visit::visit_expr_call(self, c);
+        }
+    }
+    let mut v = V { hit: false };
+    syn::visit::Visit::visit_expr(&mut v, expr);
+    v.hit
+}
+
+/// No counted wipe may sit inside a closure body -- of any kind.
+///
+/// This is the `syn`-based structural check that closes the class the string-scanning
+/// rules could not, after six consecutive audit rounds each found a new spelling they
+/// missed: `let`-bound (`let f = || wipe;`), assignment RHS (`_ = || wipe;`),
+/// braced/brace-less, `move`, parameterised (`_ = |x: u8| wipe;`), and nested in a block
+/// (`let _d = { || wipe };`). The parser cannot be fooled by a spelling: a wipe inside
+/// any `ExprClosure` -- stored, passed to an iterator adapter, or immediately called --
+/// is a shape this crate never writes (every wipe in the non-test source is a plain
+/// statement), and the guard will not vouch for a closure that may not run. A wipe that
+/// an author wants counted must be hoisted to a plain statement.
+#[test]
+fn no_counted_wipe_is_inside_a_closure() {
+    use syn::spanned::Spanned;
+
+    struct V {
+        lines: Vec<usize>,
+    }
+    impl<'ast> syn::visit::Visit<'ast> for V {
+        fn visit_expr_closure(&mut self, c: &'ast syn::ExprClosure) {
+            if contains_wipe_call(&c.body) {
+                self.lines.push(c.span().start().line);
+            }
+            syn::visit::visit_expr_closure(self, c);
+        }
+        // The test module is not the crate's code; its closures are not the subject.
+        fn visit_item_mod(&mut self, m: &'ast syn::ItemMod) {
+            if m.ident == "tests" {
+                return;
+            }
+            syn::visit::visit_item_mod(self, m);
+        }
+    }
+    let file = parsed_lib();
+    let mut v = V { lines: Vec::new() };
+    syn::visit::Visit::visit_file(&mut v, &file);
+    assert!(
+        v.lines.is_empty(),
+        "a counted wipe sits inside a closure body (closure begins at line(s) {:?}). This \
+         crate writes every wipe as a plain statement; a wipe in a closure runs only when \
+         that closure runs, which the guard will not vouch for and a stored closure never \
+         does. Hoist the wipe to a plain statement.",
+        v.lines
+    );
 }
 
 #[test]

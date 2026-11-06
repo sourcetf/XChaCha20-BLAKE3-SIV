@@ -84,8 +84,13 @@ old = (
     "    crate::zeroize_array(&mut block0);\n"
     "    crate::zeroize_array(&mut block1);\n"
 )
+# The braced *assignment* closure (a discard `_ = || { … };`), not a `let`-bound one:
+# the `let` form was already caught, and the assignment form is the shape a round-`e705a4a`
+# audit measured surviving fmt, clippy, `--test security` and `--all-features`. The
+# `syn`-based structural check in tests/security.rs is what closes it; this row is the
+# mutation that proves the check is load-bearing.
 new = (
-    "    let _dead = || {\n"
+    "    _ = || {\n"
     "        crate::zeroize_array(&mut subkey);\n"
     "        crate::zeroize_array(&mut subkey_nonce);\n"
     "        crate::zeroize_array(&mut block0);\n"
@@ -317,7 +322,7 @@ fi
 if [ "$want" = "all" ] || [ "$want" = "wipes" ]; then
   status=0
   check_one dead_wipe mutate_dead_wipe run_security \
-    "derive_material's four wipes moved into a closure nothing calls" || status=$?
+    "derive_material's four wipes moved into a discard-assignment closure nothing calls" || status=$?
   if [ "$status" -eq 3 ]; then skipped=$((skipped + 1)); elif [ "$status" -ne 0 ]; then rc=1; fi
 fi
 # The failure comes first. This used to exit 3 whenever anything was skipped, which

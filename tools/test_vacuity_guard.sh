@@ -106,8 +106,19 @@ fi
 # Every binary cargo ran must also have reported: a target that produced no summary line
 # at all was compiled and never executed. `Running` appears for every binary, so a count
 # mismatch is the witness.
-ran="$(grep -cE '^[[:space:]]+Running (unittests|tests/)' "$log" || true)"
+#
+# The `Running` counter must see a Windows-style target path too (`tests\timing.rs`):
+# matching only `tests/` read `ran=0` on that leg. `[\\/]` accepts both separators.
+running_re='^[[:space:]]+Running (unittests|tests[\\/])'
+ran="$(grep -cE "$running_re" "$log" || true)"
 reported="$(grep -cE '^test result:' "$log" || true)"
+# A log with no `Running` line at all means cargo ran nothing -- the most severe vacuous
+# form, and the one an empty/truncated log produces. `reported < ran` alone would be
+# satisfied by `0 < 0`, so this is asserted separately.
+if [ "${ran:-0}" -eq 0 ]; then
+  echo "::error::the log has no 'Running <bin>' line, so cargo ran no test binary at all (an empty or truncated log, or every target filtered out) -- this guard checked nothing"
+  bad=1
+fi
 if [ "${reported:-0}" -lt "${ran:-0}" ]; then
   echo "::error::cargo ran ${ran} test binaries but only ${reported} reported a result"
   bad=1
@@ -127,6 +138,16 @@ case "$control" in
     echo "::error::the zero-test parser did not detect a vacuous summary -- it cannot fail, so it proves nothing (output: $control)"
     bad=1 ;;
 esac
+
+# Positive control for the `Running` counter: it must see a Windows-style target path, or
+# the windows leg reads `ran=0` and this guard cannot fail there.
+winlog="$(mktemp)"
+printf '     Running tests\\timing.rs (target)\ntest result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out\n' > "$winlog"
+if [ "$(grep -cE "$running_re" "$winlog" || true)" -eq 0 ]; then
+  echo "::error::the Running counter does not count a Windows-style target path (it would read ran=0 on the windows leg)"
+  bad=1
+fi
+rm -f "$winlog"
 
 if [ "$bad" -ne 0 ]; then
   exit 1

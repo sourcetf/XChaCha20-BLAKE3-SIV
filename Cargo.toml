@@ -112,6 +112,16 @@ blake3 = { version = "1.8.7", path = "blake3", default-features = false, feature
 zeroize = { version = "1.5", default-features = false }
 
 [dev-dependencies]
+# `tests/security.rs` parses `src/lib.rs` with `syn` for the structural parts of the
+# deadening guard (is a counted wipe inside a closure body?) -- the string-scanning
+# approximation produced a new bypass in six consecutive audit rounds (bound/assigned,
+# braced/brace-less, `move`, parameterised, nested-in-a-block). Parsing is the fix the
+# audits kept recommending; it is a **dev**-dependency only, so the shipped crate and its
+# runtime dependency graph are unchanged.
+syn = { version = "2", features = ["full", "visit"] }
+# `syn`'s `Expr::span().start().line` needs proc-macro2's `span-locations`; without it the
+# guard can say a closure contains a wipe but not where. Dev-only, like `syn`.
+proc-macro2 = { version = "1", features = ["span-locations"] }
 # No default features: the defaults pull `rayon` and `plotters` (54 packages) into every
 # test build, and neither benchmark plots or uses rayon. `cargo_bench_support` is the one
 # piece the `harness = false` benchmarks need.

@@ -715,8 +715,10 @@ dependencies = [
  "criterion",
  "getrandom 0.4.3",
  "libc",
+ "proc-macro2",
  "proptest",
  "subtle",
+ "syn 2.0.119",
  "zeroize",
 ]
 
