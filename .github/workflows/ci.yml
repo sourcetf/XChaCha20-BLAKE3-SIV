@@ -478,9 +478,13 @@ jobs:
         shell: bash
         run: |
           set -o pipefail
-          LOG=win-test.log
+          LOG=win-test.raw
           cargo test --locked --release --features ultra -- --skip timing 2>&1 | tee "$LOG"
-          ran="$(grep -cE '^[[:space:]]*Running ' "$LOG" || true)"
+          # Strip ANSI escapes first: a CI log can carry them, and an ANSI-wrapped
+          # `Running` line does not match an anchored pattern (the same reason the Linux
+          # matrix normalises its log).
+          sed -E $'s/\x1b\\[[0-9;]*[A-Za-z]//g; s/\r$//' "$LOG" > win-test.log
+          ran="$(grep -cE '^[[:space:]]*Running ' win-test.log || true)"
           if [ "${ran:-0}" -eq 0 ]; then
             echo "::error::cargo ran no test binaries at all (every target was filtered out or compiled away)"
             exit 1
@@ -489,7 +493,7 @@ jobs:
             /^[[:space:]]*Running / { target=""; for (k=1;k<=NF;k++) if ($k ~ /\.rs$/) { target=$k; break } next }
             /^[[:space:]]*Doc-tests / { target="doc-tests"; next }
             /^test result:/ { if (target != "doc-tests" && $4 + $8 == 0) print target }
-          ' "$LOG")"
+          ' win-test.log)"
           if [ -n "$bad" ]; then
             echo "::error::these test binaries ran zero tests (passed+ignored == 0): $bad"
             exit 1
@@ -744,9 +748,11 @@ jobs:
       - name: build and test at the declared MSRV
         run: |
           set -o pipefail
-          LOG=msrv-test.log
-          cargo test --locked --release --all-features -- --skip timing 2>&1 | tee "$LOG"
-          ran="$(grep -cE '^[[:space:]]*Running ' "$LOG" || true)"
+          cargo test --locked --release --all-features -- --skip timing 2>&1 | tee msrv-test.raw
+          # Strip ANSI escapes first, as the Linux matrix does: an ANSI-wrapped `Running`
+          # line would not match the anchored pattern below.
+          sed -E $'s/\x1b\\[[0-9;]*[A-Za-z]//g; s/\r$//' msrv-test.raw > msrv-test.log
+          ran="$(grep -cE '^[[:space:]]*Running ' msrv-test.log || true)"
           if [ "${ran:-0}" -eq 0 ]; then
             echo "::error::cargo ran no test binaries at all (every target was filtered out or compiled away)"
             exit 1
@@ -755,7 +761,7 @@ jobs:
             /^[[:space:]]*Running / { target=""; for (k=1;k<=NF;k++) if ($k ~ /\.rs$/) { target=$k; break } next }
             /^[[:space:]]*Doc-tests / { target="doc-tests"; next }
             /^test result:/ { if (target != "doc-tests" && $4 + $8 == 0) print target }
-          ' "$LOG")"
+          ' msrv-test.log)"
           if [ -n "$bad" ]; then
             echo "::error::these test binaries ran zero tests (passed+ignored == 0): $bad"
             exit 1
