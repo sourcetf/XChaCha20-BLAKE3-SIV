@@ -345,110 +345,10 @@ jobs:
           # pattern while the plain `test result:` line does, so every summary looked
           # unattributable and every leg failed).
           sed -E $'s/\x1b\\[[0-9;]*[A-Za-z]//g; s/\r$//' "$log" > "$RUNNER_TEMP/cargo-test-clean.log"
-          # One definition, used by the real log and by the positive control below.
-          # A separate inline awk in the control can pass while the real parser stops
-          # matching, which is the failure this control exists to catch.
-          zero_scan() {
-            awk '
-              /^[[:space:]]*Running / {
-                target = ""
-                for (k = 1; k <= NF; k++) if ($k ~ /\.rs$/) { target = $k; break }
-                next
-              }
-              /^[[:space:]]*Doc-tests / { target = "doc-tests"; next }
-              /^test result:/ {
-                p = $4 + 0; f = $6 + 0; i = $8 + 0; x = $12 + 0
-                if (p == 0) {
-                  if (target == "") target = "<unattributed>"
-                  printf "%s\t%d\t%d\t%d\n", target, p, i, x
-                  n++
-                }
-              }
-              END { exit (n > 0) ? 0 : 1 }
-            ' "$1"
-          }
-          zero_scan "$RUNNER_TEMP/cargo-test-clean.log" > "$RUNNER_TEMP/zero-targets.txt" || true
-          if [ -s "$RUNNER_TEMP/zero-targets.txt" ]; then
-            bad=0
-            while IFS=$'\t' read -r target p i x; do
-              case "$target" in
-                # `doc-tests` is the rustdoc harness: in the feature configurations that
-                # compile out the one example that runs (and in every leg but the default,
-                # measured), it legitimately has nothing to run. A doctest cannot be
-                # "silently emptied" the way a test file can -- it *is* the source text.
-                doc-tests)
-                  echo "note: the doctest harness reported no runnable examples in this configuration" ;;
-                # `tests/timing.rs` is excluded from this step by `--skip timing`, and libtest
-                # reports that as `0 tests` rather than as `filtered` (measured), so the target
-                # is legitimately empty here. It has its own blocking presence check and its own
-                # advisory run in the `timing` job; the strict screens run in `verify.sh` 3c.
-                tests/timing.rs)
-                  echo "note: tests/timing.rs is skipped in this step by --skip timing and runs in the timing jobs" ;;
-                # `tests/ctgrind.rs` is all `#[ignore]`d outside the static valgrind build,
-                # so a zero-passed summary is legitimate here and the static configuration is
-                # the one that checks it. Require the five ignored tests to still be there:
-                # deleting the file's tests would otherwise also produce a zero-passed
-                # summary, which is exactly the vacuous case this guard exists for.
-                tests/ctgrind.rs)
-                  if [ "${i:-0}" -lt 5 ]; then
-                    echo "::error::tests/ctgrind.rs reported 0 passed but only $i ignored tests; the valgrind tests were removed or filtered out"
-                    bad=1
-                  else
-                    echo "note: tests/ctgrind.rs is valgrind-only; $i ignored tests are still present"
-                  fi ;;
-                # `tests/locked.rs` and `tests/ultra.rs` are whole-file `#![cfg(feature)]`
-                # gates. A zero-passed summary is legitimate only in a leg that does *not*
-                # enable the gating feature; in the leg that turns it on -- including through
-                # `ultra`, which implies `locked` -- zero passed is the regression this guard
-                # exists to catch, and `ignored` does not excuse it.
-                tests/locked.rs)
-                  case "$test_args" in
-                    *locked*|*ultra*|*all-features*)
-                      echo "::error::tests/locked.rs reported 0 passed (ignored $i, filtered $x) in a leg that enables locked ($test_args)"
-                      bad=1 ;;
-                    *) echo "note: tests/locked.rs is empty because this leg does not enable locked" ;;
-                  esac ;;
-                tests/ultra.rs)
-                  case "$test_args" in
-                    *ultra*|*all-features*)
-                      echo "::error::tests/ultra.rs reported 0 passed (ignored $i, filtered $x) in a leg that enables ultra ($test_args)"
-                      bad=1 ;;
-                    *) echo "note: tests/ultra.rs is empty because this leg does not enable ultra" ;;
-                  esac ;;
-                # `src/lib.rs` is the crate's unit-test target: reporting nothing there means
-                # the library lost every test, which is the vacuous case itself.
-                "<unattributed>") echo "::error::a summary line could not be attributed to a test target -- the log format changed, so this guard proved nothing" ; bad=1 ;;
-                *)
-                  echo "::error::$target reported 0 passed (ignored $i, filtered $x): every test was removed, gated out, or marked #[ignore]"
-                  bad=1 ;;
-              esac
-            done < "$RUNNER_TEMP/zero-targets.txt"
-            [ "$bad" -eq 0 ] || exit 1
-          fi
-          # Every binary cargo ran must also have reported: a target that produced no summary
-          # line at all was compiled and never executed.
-          ran="$(grep -cE '^[[:space:]]+Running (unittests|tests/)' "$RUNNER_TEMP/cargo-test-clean.log" || true)"
-          reported="$(grep -cE '^test result:' "$RUNNER_TEMP/cargo-test-clean.log" || true)"
-          if [ "${reported:-0}" -lt "${ran:-0}" ]; then
-            echo "::error::cargo ran ${ran} test binaries but only ${reported} reported a result"
-            exit 1
-          fi
-          echo "cargo test: ${ran} test binaries ran and reported (${reported} result lines, doc-tests included)"
-          # Positive control, in the same step: the guard must reject a summary that reports
-          # zero passed, including the all-ignored shape. Without this, it rots exactly the
-          # way it just did -- a pattern that stops matching is indistinguishable from a
-          # suite that is clean.
-          vacuous="$(mktemp)"
-          printf '     Running tests/vacuous.rs (target/debug/deps/vacuous)\ntest result: ok. 0 passed; 0 failed; 7 ignored; 0 measured; 0 filtered out\n' > "$vacuous"
-          control="$(zero_scan "$vacuous" || true)"
-          case "$control" in
-            *"tests/vacuous.rs"*)
-              echo "positive control: the real parser detects a 0-passed summary (even with ignored tests), so the guard can fail" ;;
-            *)
-              echo "::error::the zero-test parser did not detect a vacuous summary -- it cannot fail, so it proves nothing (output: $control)"
-              exit 1 ;;
-          esac
-          rm -f "$vacuous"
+          # The shared vacuity guard (tools/test_vacuity_guard.sh): the same definition
+          # the windows and msrv legs use, so the three cannot drift -- an earlier copy
+          # that took `test result:`'s last line (always doc-tests) checked nothing.
+          bash tools/test_vacuity_guard.sh "$RUNNER_TEMP/cargo-test-clean.log" "$test_args"
 
   windows:
     name: windows (MSVC, ultra; native asm)
@@ -468,36 +368,20 @@ jobs:
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
           shared-key: windows
-      # `shell: bash` + the per-target guard: the Linux test matrix and cross-exec both
-      # refuse a binary that ran zero tests (a change that gated the integration targets
-      # off would otherwise leave this release-gate leg green while the Windows-only asm
-      # backend is compiled but never executed). The guard attributes every `test result:`
-      # to its `Running <bin>` line; the version this replaced took the *last* `test
-      # result:` line, which is always doc-tests, so it never saw an integration target.
+      # `shell: bash` + the shared vacuity guard (`tools/test_vacuity_guard.sh`, the same
+      # one the Linux matrix and the msrv leg use): every test binary must have reported a
+      # non-vacuous result. A change that gated the integration targets off would otherwise
+      # leave this release-gate leg green while the Windows-only asm backend is compiled
+      # but never executed.
       - name: cargo test (ultra, release; the Windows asm backend is compiled here)
         shell: bash
         run: |
           set -o pipefail
-          LOG=win-test.raw
-          cargo test --locked --release --features ultra -- --skip timing 2>&1 | tee "$LOG"
-          # Strip ANSI escapes first: a CI log can carry them, and an ANSI-wrapped
-          # `Running` line does not match an anchored pattern (the same reason the Linux
-          # matrix normalises its log).
-          sed -E $'s/\x1b\\[[0-9;]*[A-Za-z]//g; s/\r$//' "$LOG" > win-test.log
-          ran="$(grep -cE '^[[:space:]]*Running ' win-test.log || true)"
-          if [ "${ran:-0}" -eq 0 ]; then
-            echo "::error::cargo ran no test binaries at all (every target was filtered out or compiled away)"
-            exit 1
-          fi
-          bad="$(awk '
-            /^[[:space:]]*Running / { target=""; for (k=1;k<=NF;k++) if ($k ~ /\.rs$/) { target=$k; break } next }
-            /^[[:space:]]*Doc-tests / { target="doc-tests"; next }
-            /^test result:/ { if (target != "doc-tests" && $4 + $8 == 0) print target }
-          ' win-test.log)"
-          if [ -n "$bad" ]; then
-            echo "::error::these test binaries ran zero tests (passed+ignored == 0): $bad"
-            exit 1
-          fi
+          cargo test --locked --release --features ultra -- --skip timing 2>&1 | tee win-test.raw
+          # Strip ANSI escapes first: cargo colours `Running`, and an ANSI-wrapped header
+          # does not match the guard's anchored patterns.
+          sed -E $'s/\x1b\\[[0-9;]*[A-Za-z]//g; s/\r$//' win-test.raw > win-test.log
+          bash tools/test_vacuity_guard.sh win-test.log "--features ultra"
       - name: cargo check (no default features)
         run: cargo check --locked --no-default-features --all-targets
 
@@ -742,30 +626,14 @@ jobs:
       # statistical timing screen is advisory by measurement (a hosted VM reports
       # t ~ 11 with no possible cause, against a threshold of 10), so it must not
       # gate a job whose subject is the minimum toolchain.
-      # The per-target guard, same as the windows leg: every test binary must have run at
-      # least one test. A `tail -1` of `test result:` is always doc-tests, so it cannot
-      # see an integration target compiled away at this toolchain.
+      # The shared vacuity guard, same as the Linux matrix and the windows leg: no test
+      # binary may report a vacuous result at this toolchain.
       - name: build and test at the declared MSRV
         run: |
           set -o pipefail
           cargo test --locked --release --all-features -- --skip timing 2>&1 | tee msrv-test.raw
-          # Strip ANSI escapes first, as the Linux matrix does: an ANSI-wrapped `Running`
-          # line would not match the anchored pattern below.
           sed -E $'s/\x1b\\[[0-9;]*[A-Za-z]//g; s/\r$//' msrv-test.raw > msrv-test.log
-          ran="$(grep -cE '^[[:space:]]*Running ' msrv-test.log || true)"
-          if [ "${ran:-0}" -eq 0 ]; then
-            echo "::error::cargo ran no test binaries at all (every target was filtered out or compiled away)"
-            exit 1
-          fi
-          bad="$(awk '
-            /^[[:space:]]*Running / { target=""; for (k=1;k<=NF;k++) if ($k ~ /\.rs$/) { target=$k; break } next }
-            /^[[:space:]]*Doc-tests / { target="doc-tests"; next }
-            /^test result:/ { if (target != "doc-tests" && $4 + $8 == 0) print target }
-          ' msrv-test.log)"
-          if [ -n "$bad" ]; then
-            echo "::error::these test binaries ran zero tests (passed+ignored == 0): $bad"
-            exit 1
-          fi
+          bash tools/test_vacuity_guard.sh msrv-test.log "--all-features"
 
       # Deliberately NOT running clippy here. An MSRV is a statement about the
       # language and library API surface, which is what building and testing
