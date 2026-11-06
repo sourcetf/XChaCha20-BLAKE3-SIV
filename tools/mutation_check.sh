@@ -35,6 +35,12 @@ copy_tree() {
   local dest="$1"
   mkdir -p "$dest"
   cp -r src tests tools blake3 Cargo.toml Cargo.lock build.rs benches "$dest/"
+  # The vendored fork can carry its own `target/` from a local
+  # `cargo test --manifest-path blake3/Cargo.toml` (463 MiB on this host); copying it into
+  # every row's tree is pure ballast and filled the /tmp tmpfs once four rows ran
+  # (measured: "No space left on device" mid-copy, which read as an unbuildable mutated
+  # tree). The rows rebuild what they need.
+  rm -rf "$dest/blake3/target"
 }
 
 # 1. Secret-dependent comparison in both decrypt paths. `ctgrind` must report it.
@@ -91,6 +97,34 @@ old = (
 # mutation that proves the check is load-bearing.
 new = (
     "    _ = || {\n"
+    "        crate::zeroize_array(&mut subkey);\n"
+    "        crate::zeroize_array(&mut subkey_nonce);\n"
+    "        crate::zeroize_array(&mut block0);\n"
+    "        crate::zeroize_array(&mut block1);\n"
+    "    };\n"
+)
+assert s.count(old) == 1, f"derive_material's wipe block moved (found {s.count(old)})"
+open(p, "w").write(s.replace(old, new))
+PY
+}
+
+# The parameterised-closure spelling: a closure with a parameter list, assigned and never
+# called. The `syn`-based guard in `tests/security.rs` rejects a wipe inside *any* closure
+# regardless of spelling; this row pins that the parameterised form is one of them.
+mutate_dead_wipe_param() {
+  local dir="$1"
+  python3 - "$dir" <<'PY'
+import sys
+p = sys.argv[1] + "/src/lib.rs"
+s = open(p).read()
+old = (
+    "    crate::zeroize_array(&mut subkey);\n"
+    "    crate::zeroize_array(&mut subkey_nonce);\n"
+    "    crate::zeroize_array(&mut block0);\n"
+    "    crate::zeroize_array(&mut block1);\n"
+)
+new = (
+    "    _ = |_x: u8| {\n"
     "        crate::zeroize_array(&mut subkey);\n"
     "        crate::zeroize_array(&mut subkey_nonce);\n"
     "        crate::zeroize_array(&mut block0);\n"
@@ -323,6 +357,10 @@ if [ "$want" = "all" ] || [ "$want" = "wipes" ]; then
   status=0
   check_one dead_wipe mutate_dead_wipe run_security \
     "derive_material's four wipes moved into a discard-assignment closure nothing calls" || status=$?
+  if [ "$status" -eq 3 ]; then skipped=$((skipped + 1)); elif [ "$status" -ne 0 ]; then rc=1; fi
+  status=0
+  check_one dead_wipe_param mutate_dead_wipe_param run_security \
+    "derive_material's four wipes moved into a parameterised closure nothing calls" || status=$?
   if [ "$status" -eq 3 ]; then skipped=$((skipped + 1)); elif [ "$status" -ne 0 ]; then rc=1; fi
 fi
 # The failure comes first. This used to exit 3 whenever anything was skipped, which

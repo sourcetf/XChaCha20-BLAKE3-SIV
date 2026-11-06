@@ -1861,8 +1861,8 @@ fn enclosing_block_attributes(body: &str, at: usize) -> Vec<(usize, &str)> {
 fn constant_false_enclosing_block(body: &str, at: usize) -> Option<String> {
     if let Some(head) = brace_less_closure_head(body, at) {
         return Some(format!(
-            "{head}  [a `let`-bound closure whose body is this statement, so it runs only \
-             if the closure is called]"
+            "{head}  [a binding or assignment whose right-hand side is a brace-less \
+             closure; this crate writes every wipe as a plain statement]"
         ));
     }
     for (open, head) in enclosing_block_heads(body, at) {
@@ -2045,17 +2045,16 @@ fn else_branch_condition(body: &str, open: usize) -> Option<Vec<&str>> {
 /// 'a'` over-rejection below is accepted as the conservative cost of rejecting the whole
 /// blanked-comparison class.
 fn deadening_head(body: &str, open: usize, head: &str) -> Option<&'static str> {
-    // A closure body runs when the closure runs, and it usually is not run at all. Only a
-    // *`let`-bound* closure is treated as dead, because the called forms are legitimate:
-    // `(|| { … })();` and `v.iter().for_each(|_| { … });` are reached, and an earlier version
-    // of this rule rejected them (measured: both went red), which would have forced the next
-    // author to delete a live wipe to get a green build. `let f = || { … };` with a later
-    // `f();` is not covered by that argument -- it is not a shape this crate writes, and the
-    // alternative (calling it reachable) is the shape the guards exist for.
+    // A string-level backstop for the closure shape. The authoritative closure guard is
+    // `no_counted_wipe_is_inside_a_closure` (below), which parses `src/lib.rs` and rejects
+    // a wipe inside *any* `ExprClosure`; the crate's convention is that every wipe is a
+    // plain statement. This branch is a subset kept for a message that names the enclosing
+    // block, and it fires on a `let`-bound closure head.
     if head.starts_with("let ") && head.contains('|') {
         return Some(
-            "the enclosing block is a closure body bound with `let`, which only runs if it is \
-             called",
+            "the enclosing block is a closure body bound with `let`; this crate writes every \
+             wipe as a plain statement, so hoist it out (see \
+             `no_counted_wipe_is_inside_a_closure`)",
         );
     }
     if let Some(cond) = if_condition_of(head) {
@@ -2495,16 +2494,15 @@ fn empty_range(iter: &str) -> bool {
     }
 }
 
-/// A `let`-bound closure whose body is an *expression* rather than a braced block:
-/// `let _dead = || crate::zeroize_array(&mut enc_key);`.
+/// A binding or assignment whose RHS is a brace-less closure whose body is this statement:
+/// `let _dead = || crate::zeroize_array(&mut enc_key);`, `_ = || wipe;`.
 ///
 /// There is no `{` for [`enclosing_block_heads`] to find, and the statement still sits at
 /// brace depth 1, so the wipe reads as a top-level statement of the function while never
 /// running. Measured on this tree: the whole six-configuration matrix, `fmt` and `clippy`
-/// stayed green with `encrypt`'s success-path `enc_key` wipe moved here, and the write-up
-/// that found it is the reason the previous version's docs no longer claim the closure
-/// shape is covered. The statement head -- the text between the previous delimiter and the
-/// wipe -- is where the shape is visible.
+/// stayed green with `encrypt`'s success-path `enc_key` wipe moved here. The authoritative
+/// closure guard is now `no_counted_wipe_is_inside_a_closure` (a `syn` walk); this string
+/// rule is a subset kept for a message that quotes the statement head.
 fn brace_less_closure_head(body: &str, at: usize) -> Option<String> {
     let head_start = body[..at].rfind(['\n', ';', '{', '}']).map_or(0, |i| i + 1);
     let head = body[head_start..at].trim();
@@ -3935,11 +3933,15 @@ fn contains_wipe_call(expr: &syn::Expr) -> bool {
 /// rules could not, after six consecutive audit rounds each found a new spelling they
 /// missed: `let`-bound (`let f = || wipe;`), assignment RHS (`_ = || wipe;`),
 /// braced/brace-less, `move`, parameterised (`_ = |x: u8| wipe;`), and nested in a block
-/// (`let _d = { || wipe };`). The parser cannot be fooled by a spelling: a wipe inside
-/// any `ExprClosure` -- stored, passed to an iterator adapter, or immediately called --
-/// is a shape this crate never writes (every wipe in the non-test source is a plain
-/// statement), and the guard will not vouch for a closure that may not run. A wipe that
-/// an author wants counted must be hoisted to a plain statement.
+/// (`let _d = { || wipe };`). The parser cannot be fooled by a spelling.
+///
+/// It is a *convention* check, not a reachability one: the crate writes every wipe as a
+/// plain statement in a function body, and requiring that lets the guard stop reasoning
+/// about whether a closure runs. A stored closure never runs it; a `for_each` may run it
+/// zero times; an immediately-invoked closure does run it -- but a wipe hidden in a
+/// closure is the shape every bypass used, and "is this wipe a plain statement?" is the
+/// question the other guards are built around. A wipe an author wants counted is hoisted
+/// to a statement; the syn rule then holds for all of them at once.
 #[test]
 fn no_counted_wipe_is_inside_a_closure() {
     use syn::spanned::Spanned;
@@ -3968,9 +3970,11 @@ fn no_counted_wipe_is_inside_a_closure() {
     assert!(
         v.lines.is_empty(),
         "a counted wipe sits inside a closure body (closure begins at line(s) {:?}). This \
-         crate writes every wipe as a plain statement; a wipe in a closure runs only when \
-         that closure runs, which the guard will not vouch for and a stored closure never \
-         does. Hoist the wipe to a plain statement.",
+         crate's convention is that every wipe is a plain statement in a function body; a \
+         wipe inside a closure -- stored, `move`, parameterised, passed to an iterator \
+         adapter, or even immediately invoked -- is not written that way here, and the \
+         guard requires the convention so it never has to reason about whether a closure \
+         runs. Hoist the wipe to a plain statement.",
         v.lines
     );
 }
