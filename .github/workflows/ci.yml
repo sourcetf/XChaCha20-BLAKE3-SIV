@@ -971,7 +971,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
         with:
           toolchain: stable
-      - uses: taiki-e/install-action@1e29709c0ec63babbe8f266397a465f29a825f91 # v2
+      - uses: taiki-e/install-action@682ce6c3c696a4cd5168a05f98e51aa02b877941 # v2
         with:
           tool: cargo-audit@0.22.2
       - name: audit the dependency tree
@@ -986,7 +986,7 @@ jobs:
         # outside both graphs above. This scan is what found RUSTSEC-2026-0385
         # (`ctutils` < 0.4.4, non-constant-time mask/u128 comparison).
         run: cargo audit --deny warnings --file blake3/Cargo.lock
-      - uses: taiki-e/install-action@1e29709c0ec63babbe8f266397a465f29a825f91 # v2
+      - uses: taiki-e/install-action@682ce6c3c696a4cd5168a05f98e51aa02b877941 # v2
         with:
           tool: cargo-deny@0.20.2
       - name: cargo deny check
