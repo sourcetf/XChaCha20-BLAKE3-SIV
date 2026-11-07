@@ -1,11 +1,12 @@
-# Audit response — four third-party reviews of revision `8ae80ce`, plus the §5 line-by-line report against `92c85ad` and the §6 dependency report against `01348ab`
+# Audit response — four third-party reviews of revision `8ae80ce`, plus the §5 line-by-line report against `92c85ad`, the §6 dependency report against `01348ab`, and the §7 incremental pass over `7ce256e4`
 
 Four reports were produced against revision `8ae80ce` (construction `v0.3`), and this document
 records what was done with each finding: what was **fixed** (with the commit and the evidence),
 and what was **not changed**, with the reason. It is written to be checkable — every disposition
 names a file, a test, a command, or a commit, and "responded" never means "ignored". §5 applies the
-same treatment to the fifth report, the independent line-by-line pass against `92c85ad`, and §6 to
-the sixth, the dependency line-by-line report against `01348ab`.
+same treatment to the fifth report, the independent line-by-line pass against `92c85ad`, §6 to the
+sixth, the dependency line-by-line report against `01348ab`, and §7 to the seventh, the incremental
+pass over `7ce256e4`.
 
 | # | Report | Pages | Findings | Disposition |
 | --- | --- | --- | --- | --- |
@@ -542,3 +543,52 @@ both directions). The full record of the fixes, with the measurements, is in `CH
 `## Unreleased` entry for this round. What is *not* claimed here: the report's own line-by-line
 reading of the 116 registry packages was not repeated — this section verifies its *findings*, its
 verdicts on the upstream issues, and its supply-chain facts, not its per-file coverage claims.
+
+---
+
+## 7. The incremental pass over `7ce256e4` (the seventh review)
+
+This one audits the five commits from `01348abe` to `7ce256e4` as one increment. It reports no
+high or medium finding, and all four of the low/observation items are in the *previous* round's
+own new artifacts — a guard it added last round, and the changelog entry describing it. Its
+re-verification of that round's shipped fixes reproduces clean here: `deep.yml`'s new
+`audit`/`deny` steps really do cover the three graphs (and on the baseline the fuzz and blake3
+graphs really did fail, exit 6 and exit 2), the zero-block `xof_many` guard matches upstream
+`master` and goes red when `jb 4f` is deleted, and the bounded `EINTR` retry's control-flow
+inventory matches the code (one `loop`, no new `if`).
+
+### 7.1 Adopted and fixed (4 of the 4)
+
+| Item | Substance | What was done |
+| --- | --- | --- |
+| F-01 | `the_constant_time_selection_api_is_absent_and_choice_constants_are_literal` matched the *text* `Choice::from(`, and the report measured three spellings that walked past it: `use subtle::Choice as C; C::from(2)`, `<subtle::Choice as From<u8>>::from(2)`, `Choice :: from(2)`. Each removed the site from the count while the assertion stayed green — the class the `syn` closure guard closed for wipes, in a file that already reads the AST elsewhere | Rewritten as a `syn` walk: no identifier in the non-test sources may be `conditional_select`/`ConditionallySelectable`/`CtOption`; every call whose path (or whose `qself` type) names `Choice` must take a literal `0`/`1`; `use … Choice as <other>` and `type X = …Choice…` are rejected. Six injections now fail — the report's three, the two the text version already caught (`Choice::from(u8::from(true))`, a `#[cfg(any())]`-gated `use subtle::ConditionallySelectable as _;`), and `type _C = subtle::Choice;`. Two residuals are documented rather than claimed (`syn` does not resolve names): an alias of an alias, and a conversion whose type is inferred at the call |
+| F-02 | The guard's failure message called the second literal-`1` construction "the witness's `ultra`-off operand", but `src/witness.rs` has no `Choice::from` at all (`grep -c` = 0) | The message now names the two real sites (`src/lib.rs:3550`, `:3834`), and the pinned count is per file (2 and 0) |
+| F-03 | This document's §6/`CHANGELOG.md` said the six stale copies of `find_cfg_test_attribute` "call the robust scanner". They were **seven byte-identical copies with no shared function** — the drift that produced the six stale ones was still one edit away, and nothing enforced the copies staying identical | The function moved to `tests/common/mod.rs` (with the history of why it is shared), and the seven targets call `crate::common::find_cfg_test_attribute`. The `CHANGELOG.md` entry was corrected to say what happened |
+| Obs-04 | Both the macro guard and the `Choice` guard scanned `src/witness.rs` with `strip_comments` alone, so a wipe or a `Choice` inside the witness's own `mod tests` would have been rejected — stricter than `src/lib.rs`, which uses the test-module cut (over-strict, not a hole) | Both now use `non_test_source_of`, the same cut; `src/proofs.rs` has no test module and stays whole, which the comment now states |
+
+### 7.2 Confirmed by this round, nothing to change
+
+The report's §3 (the three-graph supply-chain work), §4 (the zero-block `xof_many` guard, its
+upstream comparison and its delete-and-go-red control), §4.4 (the `storeu` declaration widths are
+documentation only — an array parameter decays), §5 (the `EINTR` bound's semantics, placement in
+the exit test rather than after it, and the inventory change), and §6.3/§7 (the remaining test,
+tool and document claims) all re-derive as stated. Its three negative controls for the guard
+match the ones this round re-ran, and its §6.1 reading of the guard's strengths — the three API
+*names* cannot be spelled around, only the argument rule could — is the reason the fix went to
+the AST rather than to a whitespace-normalising string scan.
+
+### 7.3 What this round does not claim
+
+The report's own three residuals are ours too: BLAKE3's issue tracker was unreadable through the
+proxy for both of us (the vendored-tree diff against upstream `master` is the substitute, and the
+stronger one — it reads the code we ship); yank status is outside `cargo audit --no-fetch`; and
+`deep.yml`'s execution on a GitHub runner is not reproducible locally, so what is verified here is
+that the same three commands are green on this tree and were red on the baseline, plus the CI run
+for the commit that carries them.
+
+### 7.4 The state this section describes
+
+Everything above is in the tree at the commit that carries this section: the `Choice` guard reads
+the AST, `tests/common/mod.rs` holds the one scanner, both guards cut the witness's test module,
+and `CHANGELOG.md`'s entry for the round describes the merge accurately. No wire-format or
+construction change accompanies any of it.

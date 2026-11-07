@@ -21,6 +21,8 @@
 //! constant-time behaviour; `tools/ctgrind.sh` is the mechanical check. See
 //! `tests/README.md`.
 
+mod common;
+
 use proptest::prelude::*;
 use xchacha20_blake3_siv::{
     decrypt, decrypt_bounded, decrypt_in_place_detached, encrypt, encrypt_in_place_detached, Error,
@@ -889,7 +891,7 @@ fn non_test_source_of(text: &str) -> String {
     // exactly the planting surface: its text can stand in for code a consumer's build
     // never compiles.
     let out = blank_cfg_test_items(&out);
-    match find_cfg_test_attribute(&out, 0) {
+    match crate::common::find_cfg_test_attribute(&out, 0) {
         None => {}
         Some((at, _, false)) => panic!(
             "a `#[cfg(test)]` at byte {at} of the cut source survived the blanking pass; \
@@ -902,84 +904,6 @@ fn non_test_source_of(text: &str) -> String {
         ),
     }
     out
-}
-
-/// The next `#[cfg(test)]` (or `#![cfg(test)]`) at or after `from`, as
-/// `(index of the `#`, index just past the `]`, inner?)`. Whitespace is allowed between
-/// the tokens, because `#[ cfg ( test ) ]` is the same attribute.
-fn find_cfg_test_attribute(source: &str, from: usize) -> Option<(usize, usize, bool)> {
-    let b = source.as_bytes();
-    let mut i = from;
-    while i < b.len() {
-        if b[i] == b'#' {
-            let mut j = i + 1;
-            // `# [cfg(test)]` is the same attribute as `#[cfg(test)]`; rustc accepts
-            // whitespace between every token, and a scanner that requires adjacency is
-            // one space away from being evaded.
-            while j < b.len() && b[j].is_ascii_whitespace() {
-                j += 1;
-            }
-            let inner = b.get(j) == Some(&b'!');
-            if inner {
-                j += 1;
-                while j < b.len() && b[j].is_ascii_whitespace() {
-                    j += 1;
-                }
-            }
-            if b.get(j) == Some(&b'[') {
-                j += 1;
-                while j < b.len() && b[j].is_ascii_whitespace() {
-                    j += 1;
-                }
-                if b[j..].starts_with(b"cfg") {
-                    j += 3;
-                    while j < b.len() && b[j].is_ascii_whitespace() {
-                        j += 1;
-                    }
-                    if b.get(j) == Some(&b'(') {
-                        j += 1;
-                        while j < b.len() && b[j].is_ascii_whitespace() {
-                            j += 1;
-                        }
-                        // `r#test` is the same atom as `test` (raw identifiers are
-                        // accepted in cfg predicates), and `#[cfg(test,)]` is the same
-                        // predicate with a trailing comma. Both were measured to evade
-                        // the earlier scanner.
-                        let atom = if b[j..].starts_with(b"r#test") {
-                            6
-                        } else if b[j..].starts_with(b"test") {
-                            4
-                        } else {
-                            0
-                        };
-                        if atom != 0 {
-                            let mut k = j + atom;
-                            while k < b.len() && b[k].is_ascii_whitespace() {
-                                k += 1;
-                            }
-                            if b.get(k) == Some(&b',') {
-                                k += 1;
-                                while k < b.len() && b[k].is_ascii_whitespace() {
-                                    k += 1;
-                                }
-                            }
-                            if b.get(k) == Some(&b')') {
-                                k += 1;
-                                while k < b.len() && b[k].is_ascii_whitespace() {
-                                    k += 1;
-                                }
-                                if b.get(k) == Some(&b']') {
-                                    return Some((i, k + 1, inner));
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        i += 1;
-    }
-    None
 }
 
 /// `source` with every `#[cfg(test)]`-attributed **item** blanked to spaces (newlines
@@ -999,7 +923,7 @@ fn find_cfg_test_attribute(source: &str, from: usize) -> Option<(usize, usize, b
 fn blank_cfg_test_items(source: &str) -> String {
     let mut out = source.as_bytes().to_vec();
     let mut from = 0usize;
-    while let Some((start, close, inner)) = find_cfg_test_attribute(source, from) {
+    while let Some((start, close, inner)) = crate::common::find_cfg_test_attribute(source, from) {
         if inner {
             // An inner attribute gates its enclosing block, so there is no item span to
             // blank; the caller rejects the source rather than cutting the wrong thing.
@@ -1621,7 +1545,7 @@ fn cfg_scanners_recognise_whitespace_and_trailing_comma_spellings() {
         "# ! [cfg(r#test)] fn t() {}",
     ] {
         assert!(
-            find_cfg_test_attribute(attribute, 0).is_some(),
+            crate::common::find_cfg_test_attribute(attribute, 0).is_some(),
             "the test-item blanker must see {attribute}"
         );
     }
@@ -3923,6 +3847,118 @@ fn is_wipe_method(m: &syn::ExprMethodCall) -> bool {
     )
 }
 
+/// Whether a `use` tree binds `Choice` under a different name (`use subtle::Choice as C;`),
+/// which would let `C::from(2)` reach the guard's blind side. A glob, or `Choice` imported
+/// under its own name, is fine: the call still says `Choice`.
+fn use_tree_renames_choice(tree: &syn::UseTree) -> bool {
+    match tree {
+        syn::UseTree::Path(p) => use_tree_renames_choice(&p.tree),
+        syn::UseTree::Group(g) => g.items.iter().any(use_tree_renames_choice),
+        syn::UseTree::Rename(r) => r.ident == "Choice",
+        syn::UseTree::Name(_) | syn::UseTree::Glob(_) => false,
+    }
+}
+
+/// Whether a type names `Choice` in its path (`Choice`, `subtle::Choice`).
+fn type_names_choice(ty: &syn::Type) -> bool {
+    match ty {
+        syn::Type::Path(tp) => tp.path.segments.iter().any(|s| s.ident == "Choice"),
+        _ => false,
+    }
+}
+
+/// Whether a call target is `<something naming Choice>::from`: the plain path
+/// (`subtle::Choice::from`), the same path written with whitespace around `::` (the parser
+/// normalises it away), or the fully qualified form `<subtle::Choice as From<u8>>::from`,
+/// whose type lives in the expression path's `qself` rather than in a segment.
+fn path_is_choice_from(func: &syn::Expr) -> bool {
+    let syn::Expr::Path(p) = func else {
+        return false;
+    };
+    if !p.path.segments.last().is_some_and(|s| s.ident == "from") {
+        return false;
+    }
+    p.path.segments.iter().any(|s| s.ident == "Choice")
+        || p.qself.as_ref().is_some_and(|q| type_names_choice(&q.ty))
+}
+
+/// What the `Choice` guard finds in one source.
+struct ChoiceFindings {
+    /// The banned identifier names (`conditional_select`, `ConditionallySelectable`,
+    /// `CtOption`) with the lines they appear on.
+    banned: Vec<(String, usize)>,
+    /// The renamings that would put a `Choice` call out of the guard's sight, with their lines.
+    hidden: Vec<(String, usize)>,
+    /// Every `Choice`-naming `from` call as `(line, argument-is-a-literal-0/1?)`.
+    froms: Vec<(usize, bool)>,
+}
+
+impl<'ast> syn::visit::Visit<'ast> for ChoiceFindings {
+    fn visit_ident(&mut self, i: &'ast proc_macro2::Ident) {
+        // `Ident::span` is inherent; the `Spanned` trait is what the item/expression
+        // methods below need, so this one does not import it.
+        let name = i.to_string();
+        if matches!(
+            name.as_str(),
+            "conditional_select" | "ConditionallySelectable" | "CtOption"
+        ) {
+            self.banned.push((name, i.span().start().line));
+        }
+        syn::visit::visit_ident(self, i);
+    }
+    fn visit_item_use(&mut self, u: &'ast syn::ItemUse) {
+        use syn::spanned::Spanned;
+
+        if use_tree_renames_choice(&u.tree) {
+            self.hidden
+                .push(("use ... Choice as ...".to_string(), u.span().start().line));
+        }
+        syn::visit::visit_item_use(self, u);
+    }
+    fn visit_item_type(&mut self, t: &'ast syn::ItemType) {
+        use syn::spanned::Spanned;
+
+        if type_names_choice(&t.ty) {
+            self.hidden.push((
+                format!("type {} = ... Choice ...", t.ident),
+                t.span().start().line,
+            ));
+        }
+        syn::visit::visit_item_type(self, t);
+    }
+    fn visit_expr_call(&mut self, c: &'ast syn::ExprCall) {
+        use syn::spanned::Spanned;
+
+        if path_is_choice_from(&c.func) {
+            let literal = matches!(
+                c.args.first(),
+                Some(syn::Expr::Lit(syn::ExprLit {
+                    lit: syn::Lit::Int(i),
+                    ..
+                })) if matches!(i.base10_digits(), "0" | "1")
+            );
+            self.froms.push((c.span().start().line, literal));
+        }
+        syn::visit::visit_expr_call(self, c);
+    }
+}
+
+/// Run the rules over one source.
+///
+/// Separate from the test so they can be pointed at *synthetic* sources: a guard whose only
+/// input is the crate itself cannot show that it would notice anything, and this one's
+/// predecessor was measured to miss three spellings of the same construction.
+fn choice_guard_findings(src: &str) -> ChoiceFindings {
+    let file = syn::parse_file(src).expect("the scanned source must parse as a Rust file");
+    let mut found = ChoiceFindings {
+        banned: Vec::new(),
+        hidden: Vec::new(),
+        froms: Vec::new(),
+    };
+    syn::visit::Visit::visit_file(&mut found, &file);
+    found
+}
+
 /// Whether `expr` contains a call to a wipe primitive anywhere inside it.
 fn contains_wipe_call(expr: &syn::Expr) -> bool {
     struct V {
@@ -4067,7 +4103,11 @@ fn no_wipe_is_hidden_in_an_unexpanded_macro() {
         ("src/lib.rs", non_test_source()),
         (
             "src/witness.rs",
-            strip_comments(include_str!("../src/witness.rs")),
+            // The same cut as `src/lib.rs`: a wipe inside the witness's own `mod tests` is
+            // test code, and scanning it made this guard stricter for `src/witness.rs` than
+            // for `src/lib.rs` (a dependency report measured the asymmetry). `src/proofs.rs`
+            // has no test module -- it is the `#[cfg(kani)]` file -- so it is scanned whole.
+            non_test_source_of(include_str!("../src/witness.rs")),
         ),
         (
             "src/proofs.rs",
@@ -4295,39 +4335,132 @@ fn no_local_method_can_shadow_the_constant_time_comparison() {
 /// dependency-report item that *is* in the shipped closure, which is what makes that
 /// construction worth holding: a future `Choice::from(flag as u8)` or a `conditional_select`
 /// call would move a gate onto an operand nothing checks.
+///
+/// Structural, not textual. The first revision of this guard counted the substring
+/// `Choice::from(` and sliced its argument out of the text, and a dependency report walked
+/// past it three ways: `use subtle::Choice as C; C::from(2)`, the fully qualified
+/// `<subtle::Choice as From<u8>>::from(2)`, and `Choice :: from(2)` -- every spelling that
+/// stops those thirteen characters being adjacent made the site disappear from the count.
+/// The AST cannot be fooled by spelling, so the rules are now: no identifier anywhere in
+/// the non-test sources may be `conditional_select`, `ConditionallySelectable` or
+/// `CtOption`; every call whose path (or whose qualified type) *names* `Choice` must take a
+/// literal `0`/`1`; and no `use ... Choice as <other>` or `type <X> = ...Choice...` may
+/// rename it out of sight.
+///
+/// `syn` does not resolve names, so two residuals are documented rather than claimed
+/// closed: an alias of an alias (`type R = subtle::Choice; type C = R;`) and a conversion
+/// whose type is inferred at the call (`let z: Choice = From::from(2);`). Both are
+/// deliberate obfuscation; the direct spellings an author actually reaches for are
+/// covered, and each of the three measured bypasses is a case in `tests/security.rs`'s own
+/// history now.
 #[test]
 fn the_constant_time_selection_api_is_absent_and_choice_constants_are_literal() {
     let lib = non_test_source();
-    let witness = strip_comments(include_str!("../src/witness.rs"));
+    let witness = non_test_source_of(include_str!("../src/witness.rs"));
     for (name, src, expected) in [
-        ("src/lib.rs", lib.as_str(), &["1", "1"][..]),
-        ("src/witness.rs", witness.as_str(), &[][..]),
+        ("src/lib.rs", lib.as_str(), 2usize),
+        ("src/witness.rs", witness.as_str(), 0usize),
     ] {
-        for shape in ["conditional_select", "ConditionallySelectable", "CtOption"] {
-            assert_eq!(
-                src.matches(shape).count(),
-                0,
-                "`{name}` names `{shape}`: its operand is a `subtle::Choice`, whose 0/1 \
-                 invariant is only a `debug_assert!`, so a release build can select neither \
-                 operand -- or, through `Ordering`, construct an invalid enum discriminant \
-                 (upstream's open issue). This crate compares with `ct_eq` and folds the \
-                 result; it must not select."
+        let ChoiceFindings {
+            banned,
+            hidden,
+            froms,
+        } = choice_guard_findings(src);
+        assert!(
+            banned.is_empty() && hidden.is_empty(),
+            "`{name}` reaches the constant-time *selection* API the `subtle` 0/1 invariant \
+             cannot protect (idents {banned:?}, renamings {hidden:?}). `Choice`'s invariant \
+             is a `debug_assert!`, so a release build accepts any `u8` and the selection \
+             returns neither operand -- or, through `Ordering`, an invalid enum discriminant \
+             (upstream's open issue). This crate compares with `ct_eq` and folds the result; \
+             it must not select, and it must not rename `Choice` out of this guard's sight.",
+        );
+        assert_eq!(
+            froms.len(),
+            expected,
+            "`{name}` has {} `Choice`-naming `from` call(s) at line(s) {:?}, expected \
+             {expected}: every constant `Choice` in this crate is `Choice::from(1)` \
+             (`src/lib.rs:3550`, `src/lib.rs:3834`, the `dual-mac`-off gate operand and the \
+             witness's `ultra`-off operand), and this count is what makes a *new* site a \
+             deliberate change -- the guard's other rules already reject a non-literal \
+             argument at any site it can see.",
+            froms.len(),
+            froms.iter().map(|(l, _)| *l).collect::<Vec<_>>()
+        );
+        for (line, literal) in &froms {
+            assert!(
+                *literal,
+                "`{name}:{line}` calls `Choice::from` with something other than a literal \
+                 `0`/`1`. The release build does not check that argument, and a computed one \
+                 is exactly how `subtle`'s 0/1 invariant stops holding."
             );
         }
-        let mut args: Vec<&str> = Vec::new();
-        for (at, _) in src.match_indices("Choice::from(") {
-            let rest = &src[at + "Choice::from(".len()..];
-            let arg = rest.split([',', ')']).next().unwrap_or("").trim();
-            args.push(arg);
-        }
-        assert_eq!(
-            args, expected,
-            "`{name}`'s `Choice::from` arguments are `{args:?}`, expected `{expected:?}`. \
-             Every constant `Choice` in this crate is the literal `1` (the `dual-mac`-off \
-             gate operand and the witness's `ultra`-off operand); a computed argument is a \
-             `u8` the release build does not check, which is exactly how `subtle`'s 0/1 \
-             invariant stops holding. A legitimate new site belongs in this list *and* in \
-             the note beside it -- not in a literal the guard cannot see."
+    }
+}
+
+/// Every spelling a dependency report measured against this guard, pointed at the AST rules.
+///
+/// The guard's predecessor matched text, and the report walked past it with an alias import,
+/// a qualified conversion and whitespace around `::` -- each leaving the whole suite green.
+/// A guard whose only input is the crate cannot show that it would notice anything, so the
+/// six shapes are asserted here: the clean one must stay clean, and the other five (the
+/// report's three, plus the computed argument and the selection API the text version already
+/// caught) must each be **visible**. A refactor that loses sensitivity fails in this suite
+/// rather than in the next report.
+#[test]
+fn the_choice_guard_sees_every_spelling_measured_against_it() {
+    let ChoiceFindings {
+        banned,
+        hidden,
+        froms,
+    } = choice_guard_findings("fn f() -> u8 { let c: Choice = Choice::from(1); c.unwrap_u8() }");
+    assert!(
+        banned.is_empty() && hidden.is_empty() && froms == vec![(1, true)],
+        "the shape the guard allows -- a literal `1` through a path naming `Choice` -- must \
+         produce exactly one hit and nothing else: {banned:?} {hidden:?} {froms:?}"
+    );
+
+    for (what, src) in [
+        (
+            "an alias import",
+            "use subtle::Choice as C;\nfn f() -> u8 { let z: C = C::from(2); z.unwrap_u8() }",
+        ),
+        (
+            "a qualified conversion",
+            "fn f() -> u8 { let z: subtle::Choice = <subtle::Choice as From<u8>>::from(2); \
+             z.unwrap_u8() }",
+        ),
+        (
+            "whitespace around `::`",
+            "fn f() -> u8 { let z: subtle::Choice = subtle::Choice :: from(2); z.unwrap_u8() }",
+        ),
+        (
+            "a type alias",
+            "type C = subtle::Choice;\nfn f() -> u8 { let z: C = C::from(2); z.unwrap_u8() }",
+        ),
+        (
+            "an argument the release build does not check",
+            "fn f() -> u8 { let z: Choice = Choice::from(u8::from(true)); z.unwrap_u8() }",
+        ),
+        (
+            "the selection API",
+            "use subtle::ConditionallySelectable as _;\n\
+             fn f(c: Choice, a: u8, b: u8) -> u8 { a.conditional_select(b, c) }",
+        ),
+    ] {
+        let ChoiceFindings {
+            banned,
+            hidden,
+            froms,
+        } = choice_guard_findings(src);
+        let caught =
+            !banned.is_empty() || !hidden.is_empty() || froms.iter().any(|(_, literal)| !literal);
+        assert!(
+            caught,
+            "{what} was invisible to the AST rules: idents {banned:?}, renamings {hidden:?}, \
+             `Choice`-naming `from` calls {froms:?}. Every one of these was either a measured \
+             bypass of the text version or one of its negative controls; if a refactor loses \
+             one, the guard is back to being satisfiable by a spelling."
         );
     }
 }

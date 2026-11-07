@@ -57,6 +57,8 @@
 //! * Code behind `#[cfg]` is scanned whatever the host compiles, deliberately: the
 //!   aarch64 lane offsets are pinned on an x86_64 host too.
 
+mod common;
+
 use xchacha20_blake3_siv::MAX_MSG_SIZE;
 
 /// The ChaCha20 block size, restated here on purpose: this is the *format's*
@@ -665,7 +667,7 @@ fn non_test_source_of(text: &str) -> String {
     // exactly the planting surface: a counted call inside one would enter this census as
     // production code.
     let out = blank_cfg_test_items(&out);
-    match find_cfg_test_attribute(&out, 0) {
+    match crate::common::find_cfg_test_attribute(&out, 0) {
         None => {}
         Some((at, _, false)) => panic!(
             "a `#[cfg(test)]` at byte {at} of the cut source survived the blanking pass; \
@@ -678,84 +680,6 @@ fn non_test_source_of(text: &str) -> String {
         ),
     }
     out
-}
-
-/// The next `#[cfg(test)]` (or `#![cfg(test)]`) at or after `from`, as
-/// `(index of the `#`, index just past the `]`, inner?)`. Whitespace is allowed between
-/// the tokens, because `#[ cfg ( test ) ]` is the same attribute.
-fn find_cfg_test_attribute(source: &str, from: usize) -> Option<(usize, usize, bool)> {
-    let b = source.as_bytes();
-    let mut i = from;
-    while i < b.len() {
-        if b[i] == b'#' {
-            let mut j = i + 1;
-            // `# [cfg(test)]` is the same attribute as `#[cfg(test)]`; rustc accepts
-            // whitespace between every token, and a scanner that requires adjacency is
-            // one space away from being evaded.
-            while j < b.len() && b[j].is_ascii_whitespace() {
-                j += 1;
-            }
-            let inner = b.get(j) == Some(&b'!');
-            if inner {
-                j += 1;
-                while j < b.len() && b[j].is_ascii_whitespace() {
-                    j += 1;
-                }
-            }
-            if b.get(j) == Some(&b'[') {
-                j += 1;
-                while j < b.len() && b[j].is_ascii_whitespace() {
-                    j += 1;
-                }
-                if b[j..].starts_with(b"cfg") {
-                    j += 3;
-                    while j < b.len() && b[j].is_ascii_whitespace() {
-                        j += 1;
-                    }
-                    if b.get(j) == Some(&b'(') {
-                        j += 1;
-                        while j < b.len() && b[j].is_ascii_whitespace() {
-                            j += 1;
-                        }
-                        // `r#test` is the same atom as `test` (raw identifiers are
-                        // accepted in cfg predicates), and `#[cfg(test,)]` is the same
-                        // predicate with a trailing comma. Both were measured to evade
-                        // the earlier scanner.
-                        let atom = if b[j..].starts_with(b"r#test") {
-                            6
-                        } else if b[j..].starts_with(b"test") {
-                            4
-                        } else {
-                            0
-                        };
-                        if atom != 0 {
-                            let mut k = j + atom;
-                            while k < b.len() && b[k].is_ascii_whitespace() {
-                                k += 1;
-                            }
-                            if b.get(k) == Some(&b',') {
-                                k += 1;
-                                while k < b.len() && b[k].is_ascii_whitespace() {
-                                    k += 1;
-                                }
-                            }
-                            if b.get(k) == Some(&b')') {
-                                k += 1;
-                                while k < b.len() && b[k].is_ascii_whitespace() {
-                                    k += 1;
-                                }
-                                if b.get(k) == Some(&b']') {
-                                    return Some((i, k + 1, inner));
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        i += 1;
-    }
-    None
 }
 
 /// `source` with every `#[cfg(test)]`-attributed **item** blanked to spaces (newlines
@@ -772,7 +696,7 @@ fn find_cfg_test_attribute(source: &str, from: usize) -> Option<(usize, usize, b
 fn blank_cfg_test_items(source: &str) -> String {
     let mut out = source.as_bytes().to_vec();
     let mut from = 0usize;
-    while let Some((start, close, inner)) = find_cfg_test_attribute(source, from) {
+    while let Some((start, close, inner)) = crate::common::find_cfg_test_attribute(source, from) {
         if inner {
             // An inner attribute gates its enclosing block, so there is no item span to
             // blank; the caller rejects the source rather than cutting the wrong thing.

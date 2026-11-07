@@ -223,13 +223,16 @@ advisory in all three lockfiles.
   `#[ … ]` groups, whitespace-stripped, and required to be exactly `#[test]`. Reproduced by
   inserting that multi-line attribute (the guard failed) and re-run on the clean file (it
   passed).
-- **The six copies of `find_cfg_test_attribute` are one function again.** `tests/locked.rs`,
-  `counter_range.rs`, `decision_scope.rs`, `construction_inventory.rs`, `variable_latency.rs`
-  and `ultra.rs` each carried a byte-identical, *older* copy that missed the whitespace and
-  `r#` cases `tests/security.rs` already handled, so a decoy attribute could satisfy the
-  local copy while the real one was ignored. All six now call the robust scanner (a
-  `#[cfg(test,)]` decoy next to a `MADV_DODUMP` edit was confirmed caught by the fixed
-  `locked` copy).
+- **The six stale copies of `find_cfg_test_attribute` were replaced by the robust one.**
+  `tests/locked.rs`, `counter_range.rs`, `decision_scope.rs`, `construction_inventory.rs`,
+  `variable_latency.rs` and `ultra.rs` each carried a byte-identical, *older* copy that missed
+  the whitespace and `r#` cases `tests/security.rs` already handled, so a decoy attribute could
+  satisfy the local copy while the real one was ignored; the robust text replaced all six (a
+  `#[cfg(test,)]` decoy next to a `MADV_DODUMP` edit was confirmed caught by the fixed `locked`
+  copy). The description here first said the copies "call the robust scanner", which was wrong
+  — they were seven byte-identical copies with no shared function, i.e. the same drift that
+  created the six stale ones. A dependency report measured the seven files and said so; the
+  function now lives once, in `tests/common/mod.rs`, and all seven targets call it.
 - **The vendored AVX-512 `xof_many` wrote a full block for a zero-block request.**
   `c/blake3_avx512_x86-64_unix.S`'s single-block tail is reached for `num_outputs == 0` as
   well as `1` (`cmp r10,0x1; ja 2f` falls through for both), so a caller passing an empty
@@ -373,6 +376,53 @@ on the clean tree and fails under both injections; `cargo deny --offline check` 
 and `blake3/`; `cargo audit --no-fetch` 0 advisories in all three locks; fmt and clippy
 `-D warnings` clean; the three workflow files parse and their `deny`/`audit` steps name all three
 graphs.
+
+### The `7ce256e4` pass: the new `Choice` guard made structural, and seven copies made one
+
+No wire-format bytes changed. That report audits the five commits from `01348abe` to
+`7ce256e4`: no finding above "low", and all four of them in the previous round's own new
+artifacts. Its re-verification of the round's fixes — the `deep.yml` three-graph supply-chain
+work, the zero-block `xof_many` guard, the bounded `EINTR` retry — reproduces clean here, and
+its three negative controls for the `Choice` guard matched the ones this round ran.
+
+- **The `Choice` guard was text matching, and three spellings walked past it** (F-01). It
+  counted the substring `Choice::from(` and sliced the argument out of the text, so
+  `use subtle::Choice as C; C::from(2)`, `<subtle::Choice as From<u8>>::from(2)` and
+  `Choice :: from(2)` each removed the site from the count while the assertion stayed green —
+  the same class the `syn` closure guard closed for wipes, and the same fix. The guard now
+  reads the AST: no identifier in the non-test sources may be `conditional_select`,
+  `ConditionallySelectable` or `CtOption`; every call whose path, or whose qualified type,
+  *names* `Choice` must take a literal `0`/`1`; and a `use … Choice as <other>` or
+  `type X = …Choice…` is rejected, because that is how a call stops naming `Choice`. `syn`
+  does not resolve names, so two residuals are documented rather than claimed closed (an alias
+  of an alias, and a conversion whose type is inferred at the call). All three of the report's
+  bypasses are caught now, re-measured, along with the two spellings the text version already
+  caught. The five hostile shapes are also *inside* the suite now:
+  `the_choice_guard_sees_every_spelling_measured_against_it` points the rules at synthetic
+  sources (the clean shape must produce exactly one hit, each hostile one must be visible), so a
+  refactor that loses sensitivity fails here instead of in the next report -- verified by
+  deleting the alias rule and watching it go red.
+- **The guard's failure message named a site that does not exist** (F-02): it called the
+  second literal-`1` construction "the witness's `ultra`-off operand", but `src/witness.rs` has
+  no `Choice::from` at all. Both are in `src/lib.rs` (`:3550`, `:3834`); the message now names
+  them, and the count it pins is per file (2 and 0).
+- **`tests/common/mod.rs` now exists** (F-03). This file's previous entry said the six copies
+  "call the robust scanner"; they were seven byte-identical copies with no shared function —
+  the drift that produced the six stale ones was still one edit away, and nothing enforced the
+  copies staying identical. The function moved to `tests/common/mod.rs` (with the history of
+  why it is shared) and the seven targets call `crate::common::find_cfg_test_attribute`.
+- **`src/witness.rs` is scanned as non-test source in both guards** (Obs-04, over-strict): the
+  macro guard and the `Choice` guard used `strip_comments` alone there, so a wipe or a
+  `Choice` inside the witness's own `mod tests` would have been rejected, unlike the same
+  shapes in `src/lib.rs`, which uses the test-module cut. Both now use `non_test_source_of`,
+  the same cut; `src/proofs.rs` has no test module and stays whole.
+
+Verification: `verify.sh --tools --deny` "all requested checks passed"; the `Choice` guard
+passes on the clean tree and fails under all five injections (the report's three plus the two
+the text version caught), and its self-control test fails when the alias rule is removed;
+`tests/security.rs` is 29 tests; `tests/common/mod.rs` is used by all seven targets and each of
+them passes with its own feature set (`locked` 13, `ultra` 8, the rest 3-28); fmt and clippy
+`-D warnings` clean.
 
 ### AUDIT-REPORT-3 follow-up (`2cf40cc`)
 
