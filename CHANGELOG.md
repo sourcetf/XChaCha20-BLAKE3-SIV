@@ -306,6 +306,74 @@ and `blake3/`; stack_residue PASS; `cargo llvm-cov --all-features --release
 plus doctests with the new guard test; `make test` and `make test_asm` green in `blake3/c`
 under ASan/UBSan; no `unused_mut` warning left in the cross-target stage.
 
+### The dependency line-by-line report against `01348ab`: two uncovered graphs in `deep.yml`, and a guard on the one shipped-closure item
+
+No wire-format bytes changed. The report audits the dependency graphs — all 120 `(crate, version)`
+entries of the three lockfiles, read line by line or by a declared method — and its supply-chain
+facts and coverage limits are honest. Four independent passes re-derived its findings from the
+installed sources, reproduced the behavioural ones in offline scratch crates, and re-ran its
+commands; the dispositions are in `AUDIT-RESPONSE.md` §6. Two items were actionable.
+
+- **`deep.yml`'s `deny` and `audit` jobs covered only the root graph** (F-07/F-08/F-09). Those
+  findings are exactly true at the audited commit: `cargo deny check` inside `blake3/` failed `bans`
+  (the `reference_impl` path dev-dependency had no version) and inside `fuzz/` failed `bans` **and**
+  `licenses` (the fuzz crate unlicensed; `libfuzzer-sys`'s `(MIT OR Apache-2.0) AND NCSA` not
+  allowed). `ci.yml` and `verify.sh --deny` were fixed for this in `8ba999e`; **`deep.yml` was not**,
+  and its run is the one the release job polls, so the two graphs' policy failures had nowhere left
+  to surface. Both jobs now cover all three graphs (`deep.yml:375-405`), mirroring `ci.yml`; all
+  three answer `advisories ok, bans ok, licenses ok, sources ok`.
+- **`subtle` is the report's only item in the shipped closure, so its premise is now guarded**
+  (F-03). `Choice`'s 0/1 invariant is a `debug_assert!`: in a release build `Choice::from(x)` accepts
+  any `u8`, `conditional_select` then returns neither operand (measured
+  `u8::conditional_select(1, 2, Choice::from(2)) == 3`), and upstream's open soundness issue is that
+  path into `Ordering::conditional_select`, where the result is an invalid enum discriminant. This
+  crate is correct — two `Choice::from` sites, both the literal `1`, every other `Choice` from
+  `ct_eq` — but that is what a guard is for:
+  `tests/security.rs::the_constant_time_selection_api_is_absent_and_choice_constants_are_literal`
+  rejects any mention of `conditional_select`/`ConditionallySelectable`/`CtOption` in the crate's own
+  non-test sources and pins every `Choice::from` argument to the literal `1`. Negative-controlled
+  both ways (`Choice::from(u8::from(true))` fails with the arguments printed; a `#[cfg(any())]`-gated
+  `use subtle::ConditionallySelectable as _;` fails naming the API).
+- **Verified as non-issues, with the report's verdicts re-derived** (details and evidence in
+  `AUDIT-RESPONSE.md` §6.2): F-01 `cipher 0.4.4`'s block-count defect (reproduced; the AEAD path
+  goes through `check_remaining` and never the partial path), F-02 `cpufeatures 0.2.17`'s `"avx"`
+  gate, F-05 `chacha20`'s unwiped `XChaChaCore::new` subkey, F-06 `generic-array`'s hex panic
+  surface, F-10 `zerocopy`'s FIXME, F-12 `zeroize`'s padding, F-13 `arrayvec`'s spare capacity (its
+  two printed statements resolve to one), F-14 `block-buffer`'s stale `Clone` SAFETY comment, and the
+  two W7 anchors. All are dev-only, unused, or unreachable in the shipped closure.
+- **Five statements of the report did not survive re-derivation** (`AUDIT-RESPONSE.md` §6.3):
+  F-04's mechanism (an optional dependency creates an *implicit* feature of the same name, so
+  `poly1305 0.8.0`'s `zeroize` `Drop` *can* be compiled — measured; the conclusion holds, and the
+  correction sharpens it, because that `Drop` is the union-transmute construction upstream removed in
+  0.9.1 and enabling the feature is the harmful direction); F-10's line number (`zerocopy/src/lib.rs`
+  `:3645`/`:3651`, not `:461`); §5.5's "the only drift is three build-only crates" (true for the
+  runtime closure, false for the locks — six dev-only crates also differ, and the root lock's `libc`
+  arrives through the dev chain); F-12's sub-assertions (`Option`/`DefaultIsZeroes` write whole
+  objects too, and 1.9.1 ships `optimization_barrier`; its open boundary — the fork's padding layout
+  — is now closed: 4-7 trailing bytes on the four key-bearing types, no secret-holding field is
+  padding, measured with `-Zprint-type-sizes`); and F-13's hedged pair of statements.
+- **`cpufeatures` #1510 is settled** rather than left "undeterminable": no feature this tree asks for
+  can be mis-detected. `sse2`/`sse4.1` read leaf 1 only; `avx2` needs the `ymm` `XCR0` gate, which
+  `__xgetbv!` guards behind `CPUID.1:ECX` bits 26|27 plus leaf-1 ECX bit 28; `avx512f`/`avx512vl`
+  need the `zmm` `XCR0` bits — all of which exist only on CPUs that also have leaf 7. An
+  unconditional `cpuid(7)` is architecturally defined, not UB, and this crate's own AVX2 detection
+  (`src/lib.rs:4399-4490`) checks the maximum basic leaf itself.
+- **No new fork.** Each candidate fails for a reason the `blake3/` fork's own history makes explicit:
+  that fork exists because *shipped* code needed patches. `cipher` is benchmark-only and unreachable;
+  `poly1305`/`chacha20` are dev-only (and for `poly1305`, enabling the feature is the harmful
+  direction); `subtle` has no defect in this crate's use, and vendoring a constant-time primitive
+  library to add a release-mode assertion would trade reviewed upstream code for ours on the axis
+  where upstream review is worth most — the guard pins our side instead; and `cpufeatures`/`libc`/
+  `constant_time_eq`/`zeroize` are proven unreachable or non-instantiable, so a fork would have
+  nothing to fix.
+
+Verification: `verify.sh --tools --deny` "all requested checks passed" (its deny stage prints
+`advisories ok, bans ok, licenses ok, sources ok` three times, once per graph); the new guard passes
+on the clean tree and fails under both injections; `cargo deny --offline check` green in `.`, `fuzz/`
+and `blake3/`; `cargo audit --no-fetch` 0 advisories in all three locks; fmt and clippy
+`-D warnings` clean; the three workflow files parse and their `deny`/`audit` steps name all three
+graphs.
+
 ### AUDIT-REPORT-3 follow-up (`2cf40cc`)
 
 No code or wire-format bytes changed; the production behaviour is identical.

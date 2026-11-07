@@ -57,12 +57,15 @@ targets = [
 # dev dependencies included (deep.yml, `audit` job).
 #
 # Coverage across the tree's *three* workspaces: the root graph is checked here, and
-# `verify.sh` and `ci.yml` also run `cargo deny check` inside `fuzz/` and the vendored
-# `blake3/` (both are excluded from the root workspace, so a bare root run did not see
-# their licences, bans or sources -- fuzz pulls `libfuzzer-sys`'s NCSA, allowed per-crate
-# in the `exceptions` list below). Each of those graphs is still *its own* graph: the
-# root's dev-only crates (criterion, proptest, aead) remain out of every check but
-# `cargo audit`.
+# `verify.sh`, `ci.yml` and `deep.yml` also run `cargo deny check` inside `fuzz/` and the
+# vendored `blake3/` (both are excluded from the root workspace, so a bare root run did not
+# see their licences, bans or sources -- fuzz pulls `libfuzzer-sys`'s NCSA, allowed per-crate
+# in the `exceptions` list below). `deep.yml` was the last of the three to be aligned: its run
+# is the one the release job polls, and it still checked the root graph alone until a
+# dependency report against `01348ab` located that gap (the report found the two failing
+# graphs; the workflow it had *not* reached was that one). Each of those graphs is still
+# *its own* graph: the root's dev-only crates (criterion, proptest, aead) remain out of
+# every check but `cargo audit`.
 all-features = false
 # If true, metadata will be collected with `--no-default-features`. The same
 # caveat with `all-features` applies

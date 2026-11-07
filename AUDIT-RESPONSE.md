@@ -1,10 +1,11 @@
-# Audit response — four third-party reviews of revision `8ae80ce`, plus the §5 line-by-line report against `92c85ad`
+# Audit response — four third-party reviews of revision `8ae80ce`, plus the §5 line-by-line report against `92c85ad` and the §6 dependency report against `01348ab`
 
 Four reports were produced against revision `8ae80ce` (construction `v0.3`), and this document
 records what was done with each finding: what was **fixed** (with the commit and the evidence),
 and what was **not changed**, with the reason. It is written to be checkable — every disposition
 names a file, a test, a command, or a commit, and "responded" never means "ignored". §5 applies the
-same treatment to the fifth report, the independent line-by-line pass against `92c85ad`.
+same treatment to the fifth report, the independent line-by-line pass against `92c85ad`, and §6 to
+the sixth, the dependency line-by-line report against `01348ab`.
 
 | # | Report | Pages | Findings | Disposition |
 | --- | --- | --- | --- | --- |
@@ -454,3 +455,90 @@ commit. What is *not* claimed: the 4000-vector wide differential, the Miri Tree-
 fuzz soak and the cross-execution matrix were not re-run here — they are the scheduled job's, and its
 dispatched run was still in the instruction-level sweep when this was written (ten of eleven jobs
 green, including the ASan step whose failure started this stretch).
+
+---
+
+## 6. The dependency line-by-line report against `01348ab` (the sixth review)
+
+This report audits **the dependency graphs**, not the construction: every one of the 120
+`(crate, version)` entries of the three lockfiles (root 85, `blake3/` 65, `fuzz/` 19, deduplicated),
+read line by line or by a declared method (structure check / generative provenance), with the
+non-covered parts listed explicitly rather than upgraded. Its own supply-chain facts and the
+per-item coverage claims are honest about their limits; what follows is the disposition.
+
+Nothing here was taken on the report's word. Four independent passes re-derived the findings from
+the installed sources under `~/.cargo/registry/src/`, reproduced the behavioural ones in offline
+scratch crates, and re-ran the supply-chain commands; two of the report's statements did not survive
+that (§6.3), one of its open questions was settled with a proof (§6.4), and one gap it named was
+still open in a place it did not look (§6.1).
+
+### 6.1 Adopted (2)
+
+| Item | Substance | What was done |
+| --- | --- | --- |
+| Report F-07/F-08/F-09, one workflow short | The report found that `blake3/`'s and `fuzz/`'s `cargo deny check` runs fail (`bans`: the `reference_impl` path dev-dependency without a version; `bans` + `licenses`: the fuzz crate unlicensed and `libfuzzer-sys`'s `(MIT OR Apache-2.0) AND NCSA` not allowed) and that CI ran deny only at the root, so neither was ever exposed. Both claims are **exactly true at `01348ab`** (reproduced: `blake3/` exit 2 on `bans FAILED`, `fuzz/` exit 6 on `bans`+`licenses`). `ci.yml` and `verify.sh --deny` were fixed by `8ba999e`; **`deep.yml` was not**, and that is the workflow the release job polls — its `deny` job ran `cargo deny check` at the root only, and its `audit` job audited the root lock only | `deep.yml`'s `deny` job now runs the check in `.`, `fuzz/` and `blake3/` (`deny.toml` is found by walking up; cargo-deny has no `--manifest-path`), and its `audit` job scans the fuzz and blake3 locks with `--file`, mirroring `ci.yml:977-1000`. Today all three graphs answer `advisories ok, bans ok, licenses ok, sources ok` (measured with `cargo deny --offline check` in each directory); the only two warnings are `license-exception-not-encountered` / `unmatched license allowance`, which are inherent to sharing one `deny.toml` across three graphs |
+| Report F-03 (the one shipped-closure item) | `subtle::Choice`'s 0/1 invariant is a `debug_assert!`, so a release build accepts any `u8` in `Choice::from(x)`; `conditional_select` then returns neither operand (measured `u8::conditional_select(1, 2, Choice::from(2)) == 3`) and upstream's open soundness issue is that path into `Ordering::conditional_select`, where the result is an invalid enum discriminant. This crate is correct today (two `Choice::from` sites, both the literal `1`; every other `Choice` comes from `ct_eq`), but `subtle` is the **only** report item in the shipped closure, and "correct by construction" is what a guard is for | `tests/security.rs::the_constant_time_selection_api_is_absent_and_choice_constants_are_literal`: the crate's own non-test sources (`src/lib.rs`, `src/witness.rs`, comments stripped) may not name `conditional_select`, `ConditionallySelectable` or `CtOption`, and every `Choice::from` argument must be the literal `1` (`["1", "1"]` for `src/lib.rs`, `[]` for `src/witness.rs`). Both directions measured: `Choice::from(u8::from(true))` fails with the argument list printed, and a `#[cfg(any())]`-gated `use subtle::ConditionallySelectable as _;` fails naming the API; the clean tree passes |
+
+### 6.2 Verified as non-issues (the report's own verdicts, re-derived)
+
+| Item | Report's verdict | Re-derived evidence | Actionable? |
+| --- | --- | --- | --- |
+| F-01 `cipher 0.4.4` `try_apply_keystream_partial` counts `len % bs` instead of `ceil(len / bs)` | Upstream defect, unreachable here | Reproduced (`len=64/rem=0`, `len=128/rem=0`, `len=129/rem=2` all `Ok` where `Err` is correct); this crate's AEAD goes `chacha20poly1305` → `StreamCipher::apply_keystream` → `stream_wrapper.rs:79-106 check_remaining`, never through the partial path; `cipher` is dev-only and not in the release closure | No — a fork of a benchmark-only crate would buy nothing |
+| F-02 `cpufeatures 0.2.17` gates `"avx"` on XCR0 bit 1 instead of bits 1+2 (fixed in 0.3.1) | Upstream blemish, dev-only, never queried | Both installed sources read (`0.2.17/src/x86.rs:123` vs `0.3.1/src/x86.rs:116`); nothing in the graph asks for `"avx"` — the requested set is `sse2`, `sse4.1`, `avx2`, `avx512f`, `avx512vl` | No |
+| F-04 `poly1305 0.8.0`'s `zeroize` `Drop` is not compiled | Correct conclusion, **wrong mechanism** — see §6.3 | The feature is not enabled on the only path that pulls poly1305 (`chacha20poly1305 0.10.1` takes poly1305 with default features); poly1305 is dev-only, absent from `-e normal` | No — and per §6.3, enabling it would be worse than leaving it off |
+| F-05 `chacha20 0.9.1` `XChaChaCore::new`'s derived `subkey` local is not wiped | Correct, dev-only | Read at `chacha20-0.9.1/src/xchacha.rs:53-60`; reachable only from `benches/compare.rs` and `tools/stack_residue.sh`; the `zeroize` feature *is* on for chacha20 here, but it wipes `ChaChaCore::state`, not that local. The vendored `0.10.2` has the same shape, so an upgrade does not fix it | No — dev paths only, and it is upstream's local to wipe |
+| F-06 `generic-array 0.14.7`'s `LowerHex`/`UpperHex` panic when `precision > 2*len` | Panic surface, unused | `src/hex.rs:33,46,52` read; this tree never names `GenericArray` and never formats with a precision (`{:.1}`/`{:.2}` appear only on `f64` in `tests/timing.rs`) | No |
+| F-10 `zerocopy 0.8.57` has a FIXME about a missing SAFETY comment | Correct in substance, **wrong line** — see §6.3 | Dev-only through `half`/`ppv-lite86` safe APIs; the function the FIXME is on (`new_box_zeroed`) is not called | No |
+| F-12 `zeroize 1.9.1` writes no field padding and has no fence | Correct where it matters; two sub-assertions imprecise — see §6.3 | Enumerated every wipe in `src/`, the fork and the runtime closure; no type with a secret-holding field has padding, and the crate's own secrets are wiped with its own whole-object volatile writes (`src/lib.rs`'s `zeroize_array`/`zeroize_slice`/`zeroize_raw`, with the trailing `compiler_fence`) | No |
+| F-13 `arrayvec`'s `Zeroize` spare-capacity coverage | Correct (after first hedging) | `arrayvec-0.7.8/src/arrayvec.rs:887-911`: `iter_mut().zeroize(); clear(); self.xs.zeroize();` — the whole `[MaybeUninit<Z>; CAP]` backing array, spare capacity included; the fork's `Hasher::zeroize` does call `cv_stack.zeroize()` | No |
+| F-14 `block-buffer 0.12.1`'s `Clone` SAFETY comment claims no `Drop` while `Drop` is implemented unconditionally | Correct, stale comment | `src/lib.rs:109-116` (`ptr::read`) vs `:433-439`; the only drop behaviour is an idempotent zeroize, so the bit-copy is not UB; compiled only in the fork's own test build, never in the root closure | No — upstream's comment |
+| W7 anchors `anstyle 1.0.14` (`from_utf8_unchecked`) and `either 1.18.0` (`Pin` projection) | Both SAFETY arguments hold | Read both: anstyle's writes are valid UTF-8 into a private 19-byte buffer; `Either` has no `Drop`, no manual `Unpin`, no unpinned `&mut` field exposed | No |
+
+### 6.3 Where the report is wrong
+
+1. **F-04's mechanism** — "an optional dependency referenced by no feature, so the `Drop` wiping code is never compiled". An optional dependency creates an *implicit* feature of the same name when the manifest does not use `dep:` syntax, and `poly1305 0.8.0`'s manifest does not. Measured: a scratch crate with `poly1305 = { version = "=0.8.0", features = ["zeroize"] }` compiles and pulls `zeroize 1.9.1`. The conclusion (this tree does not enable it) stands, and the correction sharpens the disposition: `poly1305 0.8.0`'s `Drop` (`src/backend/autodetect.rs:97-105`: `&mut *(self as *mut State as *mut [u8; SIZE])` then `zeroize()`) is the reference-to-bytes transmute of a union-containing state that the upstream issue describes, and **0.9.1 removed it** — verified by extracting `poly1305-0.9.1.crate` from the local registry cache, whose `autodetect.rs` contains no `zeroize` and no `Drop` impl at all. So **turning the feature on is the harmful direction**. The report's phrasing invites the opposite action.
+2. **F-10's line number** — the `FIXME(#429)` about a missing `SAFETY` comment is at `zerocopy-0.8.57/src/lib.rs:3645` and `:3651` (and `impls.rs:157`, `:209`), not `src/lib.rs:461`, which is a doc comment on a derive. The substance (comment only, no wrong safety argument) is right.
+3. **§5.5's "the only drift is three build-only crates"** — true for the runtime closure and false as a statement about the locks. The locks also differ in dev-only versions (`chacha20 0.9.1`/`0.10.2`, `cipher 0.4.4`/`0.5.2`, `crypto-common 0.1.7`/`0.2.2`, `inout 0.1.4`/`0.2.5`, `rand 0.9.5`/`0.10.3`, `rand_core 0.9.5`/`0.10.1`), and the root lock's `libc 0.2.191` arrives through the dev chain rather than the build graph. The claim that matters — every normal-dependency version and checksum is identical across the locks — was re-derived and holds.
+4. **F-12's sub-assertions** — "only `zeroize_flat_type` and `[MaybeUninit<Z>]` cover whole objects" is incomplete (`Option<Z>`, `DefaultIsZeroes` and the tuple/array impls write whole objects too), and "no `fence`" describes the impls, not the crate: 1.9.1 ships `optimization_barrier` and `zeroize_stack`. The operand the report cared about — the fork's field-wise wipes — was re-checked and its open boundary closed: the four fork types that hold key material have trailing padding (`ChunkState` 4, `Output` 5, `Hasher` 4, `OutputReader` 7 bytes, measured with `-Zprint-type-sizes`), the key field itself is a padding-free `[u32; 8]`, and nothing memcpy's a whole struct through a zeroizing path, so the unwritten bytes hold no secret.
+5. **F-13's hedging** — the report prints two statements for `arrayvec`'s `Zeroize` coverage and declines to rule. There is one: `self.xs.zeroize()` is the line immediately after `self.iter_mut().zeroize()`, and no ledger in the report concluded otherwise. Recorded here as a single fact.
+
+### 6.4 Upstream issues: confirmed, and one settled
+
+| Issue | The report's judgement | What this round adds |
+| --- | --- | --- |
+| `subtle` #155 (`Choice::from` + `Ordering::conditional_select`, OPEN) | Unreachable here | Confirmed at source level *and* now guarded (§6.1): two literal-`1` construction sites, no selection API named anywhere in the crate's own sources, no non-0/1 `Choice` constructible from `ct_eq` |
+| `libc` #5187 (manual `PartialEq`/`Hash` reading uninitialized union memory, OPEN) | Unreachable here | **Stronger than the report states**: every such impl is behind `#[cfg(feature = "extra_traits")]`, which this tree never enables (42 gates; `libc/Cargo.toml`'s `extra_traits` is off in all three locks), so those impls do not even compile here. This crate's own libc use is `mprotect`/`PROT_*` in tests and examples |
+| `constant_time_eq` #12 (`black_box` fallback is not recommended for security, OPEN) | Target-related, low | Quantified: the fallback is gated on `not(inline_asm_is_stable)`/miri, and `build.rs` sets `inline_asm_is_stable` for x86/x86_64/aarch64 (among others), so x86_64-linux and aarch64-linux take `sse2.rs`/`neon.rs` assembly. `--no-default-features` changes `no_std`, not the backend. Only targets this crate does not ship (wasm, and architectures outside the build script's list) reach it |
+| `poly1305` #342 (unsound `Drop` over a union, CLOSED in 0.9.1) | Not triggered (feature off) | Confirmed, plus §6.3.1: the feature *can* be turned on, and must not be |
+| `zeroize` #653 (`Option<T>` wipe, OPEN, disputed) | Theoretically present | **Not instantiable here**: all five `impl Zeroize` in the fork destructure fields (none has an `Option`), the derive is not enabled in any lock, and this crate's own secrets use its own helpers. The generic `Option<Z>` impl has no call site to monomorphize |
+| `cpufeatures` #1510 (CPUID leaf 7 read without checking the maximum basic leaf) | "Cannot determine whether it remains" | **Settled: it cannot mis-detect any feature this tree asks for.** `sse2`/`sse4.1` read leaf 1 only. `avx2` requires the `ymm` XCR0 gate, which `__xgetbv!` guards behind `CPUID.1:ECX` bits 26|27 (XSAVE + OSXSAVE) *and* leaf-1 ECX bit 28 — features that only exist on CPUs that also have leaf 7. `avx512f`/`avx512vl` require the `zmm` XCR0 bits, which likewise need XSAVE. An unconditional `cpuid(7)` on a CPU without that leaf is architecturally defined (it returns the highest basic leaf), not UB. This crate's own AVX2 detection (`src/lib.rs:4399-4490`) checks the maximum basic leaf itself, so it is stricter than the dependency |
+
+Also re-derived: the three lockfiles scan clean with `cargo audit --no-fetch` (0 advisories each), there is no `[patch]`/`[replace]`/`[source]` override anywhere, `fuzz/` builds the local path fork (`fuzz/Cargo.toml:22-24`, and the `blake3` entries in all three locks carry no `source`), and **116/116** cached `.crate` archives match their lock checksums (root: 83/83). One claim could not be re-derived offline: "103 pinned versions are not yanked", because yank status needs the crates.io index, which `cargo audit --no-fetch` does not consult.
+
+### 6.5 What was not done: no new fork
+
+Every candidate for a local patch was rejected on evidence, and the contrast with `blake3/` is the
+reason. That fork exists because **shipped** code needed patches — the AVX2/AVX-512 2/4-wide tail
+over-read, the multi-block `xof_many` ABI, the short-output write, and (this round) the zero-block
+write. None of this report's items reach shipped code:
+
+* `cipher 0.4.4` (F-01) is a benchmark-only crate, is not reachable even in the dev graph, and 0.5.2
+  already carries the fix;
+* `poly1305 0.8.0` (F-04) and `chacha20 0.9.1` (F-05) are dev-only, and for poly1305 the correct
+  action is to keep the feature off rather than to vendor the crate — enabling it would activate the
+  construction upstream removed;
+* `subtle 2.6.1` (F-03) is in the shipped closure but has no defect in this crate's use, and forking
+  a constant-time primitive library to add a release build assertion would replace reviewed upstream
+  code with ours on the one axis (constant-time correctness) where upstream review is worth most;
+  the guard in §6.1 pins this crate's side of the contract instead;
+* `cpufeatures` #1510, `libc` #5187, `constant_time_eq` #12 and `zeroize` #653 are proven
+  unreachable or non-instantiable for this tree, so a fork would have nothing to fix.
+
+### 6.6 The state this section describes
+
+Everything above is in the tree at the commit that carries this section: `deep.yml`'s `deny`/`audit`
+jobs cover all three graphs, and `tests/security.rs` has the `subtle` guard (negative-controlled in
+both directions). The full record of the fixes, with the measurements, is in `CHANGELOG.md`'s
+`## Unreleased` entry for this round. What is *not* claimed here: the report's own line-by-line
+reading of the 116 registry packages was not repeated — this section verifies its *findings*, its
+verdicts on the upstream issues, and its supply-chain facts, not its per-file coverage claims.

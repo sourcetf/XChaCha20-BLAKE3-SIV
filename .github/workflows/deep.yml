@@ -374,6 +374,17 @@ jobs:
           tool: cargo-audit@0.22.2
       - name: audit the dependency tree
         run: cargo audit --deny warnings
+      - name: audit the fuzz workspace
+        # The root workspace excludes `fuzz/`, so the fuzz-only lock (libfuzzer-sys,
+        # arbitrary, jobserver, cc) is not in the graph the step above scans -- the same
+        # gap `ci.yml` closes for its own audit and deny runs, and the one a dependency
+        # report against `01348ab` found to be policy-uncovered here.
+        run: cargo audit --deny warnings --file fuzz/Cargo.lock
+      - name: audit the vendored blake3 fork
+        # The root workspace also excludes `blake3/`, so its lock -- and the
+        # `digest`/`traits-preview` chain (`ctutils`) plus the fork's dev deps -- is outside
+        # both graphs above.
+        run: cargo audit --deny warnings --file blake3/Cargo.lock
 
   deny:
     name: cargo-deny
@@ -399,8 +410,20 @@ jobs:
       # github.com is reachable from a runner, so the advisory database fetches
       # normally here — unlike on the development machine, where it had to be
       # fetched through the GitHub API and placed where cargo-deny looks.
+      #
+      # All three graphs, like `ci.yml` and `verify.sh --deny`: the root lock excludes
+      # `fuzz/` and the vendored `blake3/`, so a bare `cargo deny check` here covered only
+      # the root graph's licences, bans and sources -- and this is the job the release
+      # gate polls, so the two graphs' policy failures had nowhere else to surface. A
+      # dependency report against `01348ab` found exactly that pair of uncovered failures;
+      # `ci.yml` was fixed then, this workflow was not. cargo-deny has no
+      # `--manifest-path`: running it inside each directory picks up that graph and the
+      # root `deny.toml` (found by walking up).
       - name: cargo deny check
-        run: cargo deny check
+        run: |
+          cargo deny check
+          ( cd fuzz && cargo deny check )
+          ( cd blake3 && cargo deny check )
 
   # The checks above can be silently vacuous, and one of them was: the ctgrind
   # negative control was compiled into a branchless `setcc` that memcheck does not

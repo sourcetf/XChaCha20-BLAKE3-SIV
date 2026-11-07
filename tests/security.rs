@@ -4286,6 +4286,52 @@ fn no_local_method_can_shadow_the_constant_time_comparison() {
     }
 }
 
+/// `subtle::Choice`'s 0/1 invariant is a `debug_assert!`, so a release build accepts any
+/// `u8` in `Choice::from(x)` and `conditional_select` then returns neither operand (the
+/// dependency report measured `u8::conditional_select(1, 2, Choice::from(2)) == 3`);
+/// upstream's open soundness issue puts the same hazard on `Ordering::conditional_select`,
+/// where the result is an invalid enum discriminant. This crate compares with `ct_eq` and
+/// folds the result, so it is correct by construction today -- and `subtle` is the one
+/// dependency-report item that *is* in the shipped closure, which is what makes that
+/// construction worth holding: a future `Choice::from(flag as u8)` or a `conditional_select`
+/// call would move a gate onto an operand nothing checks.
+#[test]
+fn the_constant_time_selection_api_is_absent_and_choice_constants_are_literal() {
+    let lib = non_test_source();
+    let witness = strip_comments(include_str!("../src/witness.rs"));
+    for (name, src, expected) in [
+        ("src/lib.rs", lib.as_str(), &["1", "1"][..]),
+        ("src/witness.rs", witness.as_str(), &[][..]),
+    ] {
+        for shape in ["conditional_select", "ConditionallySelectable", "CtOption"] {
+            assert_eq!(
+                src.matches(shape).count(),
+                0,
+                "`{name}` names `{shape}`: its operand is a `subtle::Choice`, whose 0/1 \
+                 invariant is only a `debug_assert!`, so a release build can select neither \
+                 operand -- or, through `Ordering`, construct an invalid enum discriminant \
+                 (upstream's open issue). This crate compares with `ct_eq` and folds the \
+                 result; it must not select."
+            );
+        }
+        let mut args: Vec<&str> = Vec::new();
+        for (at, _) in src.match_indices("Choice::from(") {
+            let rest = &src[at + "Choice::from(".len()..];
+            let arg = rest.split([',', ')']).next().unwrap_or("").trim();
+            args.push(arg);
+        }
+        assert_eq!(
+            args, expected,
+            "`{name}`'s `Choice::from` arguments are `{args:?}`, expected `{expected:?}`. \
+             Every constant `Choice` in this crate is the literal `1` (the `dual-mac`-off \
+             gate operand and the witness's `ultra`-off operand); a computed argument is a \
+             `u8` the release build does not check, which is exactly how `subtle`'s 0/1 \
+             invariant stops holding. A legitimate new site belongs in this list *and* in \
+             the note beside it -- not in a literal the guard cannot see."
+        );
+    }
+}
+
 /// A source file under `src/` that this scanner does not know about can hold a
 /// wipe-bearing function with no witness at all. The list is literal; adding a file must
 /// be a deliberate change to the scanner, not a silent gap.
