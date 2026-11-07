@@ -220,14 +220,16 @@ const DIVISION_METHODS: &[&str] = &[
 /// `if` 50 -> 51 when `chacha20_apply` began checking that a `Separate` input is the same
 /// length as its output buffer -- the precondition `xor_or_copy` slices on. That branch
 /// tests an enum variant and a length, not secret content.
-/// `if` 51 -> 53 when `page_size` and `locked_bytes` began bounding their `EINTR` retries:
-/// each new branch compares a retry counter against a constant, so it turns on whether a
-/// syscall made progress, never on the content of a key, nonce, AAD or message.
+/// `loop` 2 -> 3 when `locked_bytes` gained the bounded `EINTR` retry: the read-to-EOF
+/// loop now wraps a small retry loop, whose exit test compares a retry counter against a
+/// constant, so it turns on whether a syscall made progress, never on the content of a
+/// key, nonce, AAD or message. `page_size`'s bound is a term of its own exit test, so it
+/// adds no `if` there either -- the count is unchanged.
 const CONTROL_FLOW: &[(&str, usize)] = &[
-    ("if", 53),
+    ("if", 51),
     ("while", 14),
     ("for", 25),
-    ("loop", 2),
+    ("loop", 3),
     ("match", 9),
 ];
 
