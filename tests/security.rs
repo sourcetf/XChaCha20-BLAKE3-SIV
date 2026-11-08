@@ -1245,6 +1245,79 @@ fn raw_string_prefix(b: &[u8]) -> Option<(usize, u8)> {
 /// evaluate to a definite value, and a predicate that is definite is not a configuration
 /// gate — it compiles its scope in or out everywhere. Whitespace is normalised away first,
 /// because `#[ cfg ( any ( ) ) ]` is the same attribute written to evade a byte scan.
+/// Three-valued evaluation of a `cfg` predicate in `pred`'s **whitespace-free** form, plus a
+/// direct polarity conflict at every conjunction/disjunction node.
+///
+/// Kleene logic answers most predicates exactly at linear cost: an operand that cannot change
+/// the result absorbs the node (`all(false, unknown)` is false, `any(true, unknown)` is true,
+/// `all()` is true, `any()` is false). On top of that, a node holding both `X` and `not(X)`
+/// among its direct operands is constant by inspection -- `all(X, not(X))` is false and
+/// `any(X, not(X))` is true, whatever the atom is -- which is how a predicate of any length is
+/// decided without enumerating it. `None` means "not decided here", and the caller falls back
+/// to the enumeration and then to the literal folding.
+///
+/// This is not a SAT solver: a tautology that needs reasoning *across* atoms
+/// (`all(any(a, b), any(not(a), not(b)))`-shaped) is left undecided, and a predicate with more
+/// atoms than the enumeration bound and no polarity conflict is then reported as undecidable
+/// rather than passed.
+fn cfg_three_valued(normalized: &str) -> Option<bool> {
+    let p = normalized.trim().trim_end_matches(',');
+    let mut parsed = None;
+    for name in ["all", "any", "not"] {
+        if let Some(inner) = p
+            .strip_prefix(name)
+            .and_then(|s| s.strip_prefix('('))
+            .and_then(|s| s.strip_suffix(')'))
+        {
+            parsed = Some((name, inner));
+            break;
+        }
+    }
+    let (name, inner) = parsed?;
+    if name == "not" {
+        return cfg_three_valued(inner).map(|value| !value);
+    }
+    let args = split_cfg_args(inner);
+    if args.is_empty() {
+        return Some(name == "all");
+    }
+    let mut positive: Vec<&str> = Vec::new();
+    let mut negative: Vec<&str> = Vec::new();
+    let mut unknown = false;
+    for arg in &args {
+        let arg = arg.trim();
+        let (atom, flipped) = match arg.strip_prefix("not(").and_then(|s| s.strip_suffix(')')) {
+            Some(inner) => (inner.trim(), true),
+            None => (arg, false),
+        };
+        if flipped {
+            negative.push(atom);
+        } else {
+            positive.push(atom);
+        }
+        match cfg_three_valued(arg) {
+            // A decided operand decides the node when it is the absorbing value.
+            Some(false) if name == "all" => return Some(false),
+            Some(true) if name == "any" => return Some(true),
+            Some(_) => {}
+            None => unknown = true,
+        }
+    }
+    if positive.iter().any(|atom| negative.contains(atom)) {
+        return Some(name == "any");
+    }
+    if unknown {
+        None
+    } else {
+        Some(name == "all")
+    }
+}
+
+/// The number of distinct atoms [`constant_cfg_value`] enumerates. Past it the three-valued
+/// pass is still tried (it decides a contradiction of any length) and the caller reports the
+/// predicate as undecidable rather than passing it.
+const CFG_ATOM_ENUMERATION_LIMIT: usize = 16;
+
 fn constant_cfg_value(pred: &str) -> Option<bool> {
     // A predicate that names a configuration atom *twice* can still be definite:
     // `all(feature = "x", not(feature = "x"))` is false under every assignment of
@@ -1267,13 +1340,37 @@ fn constant_cfg_value(pred: &str) -> Option<bool> {
     // "decided" false. A predicate naming a blanked literal is therefore left to the
     // literal rules (no enumeration) -- conservative -- and the callers that want this
     // class detected pass the literal-intact cut.
-    let atoms = cfg_atoms(pred);
-    if !atoms.is_empty() && atoms.len() <= 12 && !atoms.iter().any(|a| a.contains("\"\"")) {
+    //
+    // The atom *identity* is whitespace-insensitive, so both the atom list and the
+    // evaluation are computed from a whitespace-free copy: `feature="x"` and
+    // `feature = "x"` are one atom to rustc, and comparing the raw text made them two --
+    // a dependency report measured `all(feature="x", not(feature = "x"))` walking past the
+    // first version of this enumeration for exactly that reason.
+    let normalized: String = pred.chars().filter(|c| !c.is_whitespace()).collect();
+    // A formula whose constancy does not need its atoms enumerated is decided first, at any
+    // length: `all(p0 … p16, not(p0))` is false by inspection, and it was measured deadening
+    // `check_lengths(...)?` in every consumer build while this guard stayed silent (the
+    // enumeration below used to stop at sixteen atoms).
+    if let Some(value) = cfg_three_valued(&normalized) {
+        return Some(value);
+    }
+    let atoms = cfg_atoms(&normalized);
+    // Sixteen atoms is 65 536 evaluations of a predicate whose nodes number in the tens --
+    // microseconds, and far past anything a hand-written gate uses. Beyond it the answer is
+    // the literal folding's (usually `None`, i.e. not reported): a *conservative* boundary,
+    // stated rather than implied. A predicate that names a **blanked** literal is also left
+    // to the folding: `strip_comments` erases literal contents, so `feature = ""` may stand
+    // for any feature name and folding two of them into one atom could call a real gate
+    // constant. Callers that need the names pass the literal-intact cut.
+    if !atoms.is_empty()
+        && atoms.len() <= CFG_ATOM_ENUMERATION_LIMIT
+        && !atoms.iter().any(|a| a.contains("\"\""))
+    {
         let mut seen_true = false;
         let mut seen_false = false;
         let mut malformed = false;
         for mask in 0u32..(1u32 << atoms.len()) {
-            match eval_cfg_under(pred, &atoms, mask) {
+            match eval_cfg_under(&normalized, &atoms, mask) {
                 Some(true) => seen_true = true,
                 Some(false) => seen_false = true,
                 None => {
@@ -1290,6 +1387,31 @@ fn constant_cfg_value(pred: &str) -> Option<bool> {
         }
     }
     constant_cfg_value_literal(pred)
+}
+
+/// The finding for a `cfg` predicate, or `None` when it is a configuration.
+///
+/// [`constant_cfg_value`] answers "is this formula constant" for predicates it can decide; a
+/// predicate it *cannot* decide -- more distinct atoms than the enumeration bound and no
+/// polarity conflict the three-valued pass can see -- is reported rather than passed. Fail
+/// closed, because "cannot decide" is exactly where a constant gate hides: the 17-atom
+/// `all(p0 ... p16, not(p0))` that walked past the sixteen-atom enumeration was measured
+/// deadening `check_lengths(...)?` in every consumer build with the whole suite green.
+fn constant_cfg_finding(pred: &str) -> Option<String> {
+    if let Some(value) = constant_cfg_value(pred) {
+        return Some(format!("its predicate is constant ({value})"));
+    }
+    let normalized: String = pred.chars().filter(|c| !c.is_whitespace()).collect();
+    let atoms = cfg_atoms(&normalized);
+    if atoms.len() > CFG_ATOM_ENUMERATION_LIMIT && !atoms.iter().any(|a| a.contains("\"\"")) {
+        return Some(format!(
+            "its predicate names {} distinct atoms, more than the {CFG_ATOM_ENUMERATION_LIMIT} \
+             this guard decides, so it cannot be shown to be a configuration rather than a \
+             constant gate",
+            atoms.len()
+        ));
+    }
+    None
 }
 
 /// The literal folding: combinators over constants, and the three predicates this crate
@@ -1419,14 +1541,22 @@ fn eval_cfg_under(pred: &str, atoms: &[String], mask: u32) -> Option<bool> {
 /// [`constant_cfg_value`] see an unknown atom and return `None`, which was a measured
 /// bypass of the constant-gate check.
 fn split_cfg_args(inner: &str) -> Vec<&str> {
+    let b = inner.as_bytes();
     let mut out = Vec::new();
     let mut depth = 0usize;
     let mut start = 0usize;
-    for (i, c) in inner.char_indices() {
-        match c {
-            '(' => depth += 1,
-            ')' => depth = depth.saturating_sub(1),
-            ',' if depth == 0 => {
+    let mut i = 0usize;
+    while i < b.len() {
+        // Separators inside a string literal are data (`feature = "a,b"` is one argument),
+        // so the walk skips whole literals rather than counting their punctuation.
+        if b[i] == b'"' || b[i] == b'\'' {
+            i = end_of_string_literal(b, i);
+            continue;
+        }
+        match b[i] {
+            b'(' => depth += 1,
+            b')' => depth = depth.saturating_sub(1),
+            b',' if depth == 0 => {
                 let arg = &inner[start..i];
                 if !arg.trim().is_empty() {
                     out.push(arg);
@@ -1435,6 +1565,7 @@ fn split_cfg_args(inner: &str) -> Vec<&str> {
             }
             _ => {}
         }
+        i += 1;
     }
     let last = &inner[start..];
     if !last.trim().is_empty() {
@@ -1517,21 +1648,45 @@ fn find_cfg_attribute(source: &str, from: usize) -> Option<(usize, usize, CfgAtt
 
 /// The predicate of the attribute that opens at `open` (the `(` after `cfg`), bracket
 /// matched, and where it closes.
+/// The index just past the string literal starting at `at` (`b[at]` is the opening quote).
+///
+/// Both quote forms, escapes included; an unterminated literal ends at the end of the
+/// input, which leaves the caller's walk conservative (it stops rather than guesses).
+fn end_of_string_literal(b: &[u8], at: usize) -> usize {
+    let quote = b[at];
+    let mut i = at + 1;
+    while i < b.len() && b[i] != quote {
+        i += if b[i] == b'\\' { 2 } else { 1 };
+    }
+    i.saturating_add(1)
+}
+
 fn cfg_predicate_at(source: &str, open: usize) -> (String, usize) {
+    let b = source.as_bytes();
     let mut depth = 0usize;
     let mut close = None;
-    for (n, c) in source[open..].char_indices() {
-        match c {
-            '(' => depth += 1,
-            ')' => {
+    let mut at = open;
+    while at < b.len() {
+        if b[at] == b'"' || b[at] == b'\'' {
+            // A literal's contents are not structure: a `)` or `#[cfg(` inside one must not
+            // close the attribute or open a nested one. Without this, a `#[cfg(…)]` written
+            // inside a string made the scan report an "unbalanced `cfg(`" panic (fail-closed,
+            // but a panic on legal source).
+            at = end_of_string_literal(b, at);
+            continue;
+        }
+        match b[at] {
+            b'(' => depth += 1,
+            b')' => {
                 depth -= 1;
                 if depth == 0 {
-                    close = Some(open + n);
+                    close = Some(at);
                     break;
                 }
             }
             _ => {}
         }
+        at += 1;
     }
     let close = close.expect("unbalanced `cfg(` in the source");
     (source[open + 1..close].to_string(), close)
@@ -1761,16 +1916,14 @@ fn cfg_scanners_recognise_whitespace_and_trailing_comma_spellings() {
 /// configuration where `x` is on. Nested `cfg_attr`s are walked.
 fn attribute_finding_for(kind: CfgAttribute, args: &str) -> Option<String> {
     match kind {
-        CfgAttribute::Cfg => {
-            constant_cfg_value(args).map(|value| format!("its predicate is constant ({value})"))
-        }
+        CfgAttribute::Cfg => constant_cfg_finding(args),
         CfgAttribute::CfgAttr => {
             let parts = split_cfg_args(args);
             let (condition, attributes) = parts.split_first()?;
-            if let Some(value) = constant_cfg_value(condition) {
+            if let Some(finding) = constant_cfg_finding(condition) {
                 return Some(format!(
-                    "its condition `{condition}` is constant ({value}), so the attributes \
-                     it lists always apply or never do"
+                    "its condition `{condition}` {finding}, so the attributes it lists always \
+                     apply or never do"
                 ));
             }
             for attribute in attributes {
@@ -4031,7 +4184,8 @@ fn is_wipe_path(func: &syn::Expr) -> bool {
 }
 
 /// Whether a method call is a wipe: `.zeroize()` on the BLAKE3 `Hasher`/`XofReader` at the
-/// keyed seam (`src/lib.rs:2197-2198`, `:2809-2810`) is the *only* clearing of the MAC key
+/// keyed seam (`src/lib.rs:2267-2268` in `blake3_keyed`, `:2879-2880` in `blake3_keyed_multi`)
+/// is the *only* clearing of the MAC key
 /// state, and a method call is not an `ExprCall`, so the path test above never saw it.
 fn is_wipe_method(m: &syn::ExprMethodCall) -> bool {
     matches!(
@@ -4086,6 +4240,34 @@ struct ChoiceFindings {
     froms: Vec<(usize, bool)>,
 }
 
+impl ChoiceFindings {
+    /// The banned identifiers in a `macro_rules!` body.
+    ///
+    /// A macro's body is a token stream, not an expression tree, so the `syn` walk above does
+    /// not descend into it: measured, a macro expanding to
+    /// `u8::conditional_select(a, b, c)` (with its `use ... as _` inside the same body) left
+    /// this guard's three rules and `froms` exactly as they were. The tokens are matched as
+    /// text, which for a *ban* is strictly stronger than resolving names -- an alias cannot
+    /// hide the token `conditional_select`, only a different call could, and that is what the
+    /// AST rules above are for.
+    fn scan_macro_tokens(&mut self, tokens: &proc_macro2::TokenStream) {
+        use syn::spanned::Spanned;
+
+        let text = tokens.to_string();
+        let line = tokens.span().start().line;
+        for banned in ["conditional_select", "ConditionallySelectable", "CtOption"] {
+            if contains_identifier(&text, banned) {
+                self.banned
+                    .push((format!("{banned} (in a macro body)"), line));
+            }
+        }
+        if contains_identifier(&text, "Choice") {
+            self.hidden
+                .push(("Choice named inside a macro body".to_string(), line));
+        }
+    }
+}
+
 impl<'ast> syn::visit::Visit<'ast> for ChoiceFindings {
     fn visit_ident(&mut self, i: &'ast proc_macro2::Ident) {
         // `Ident::span` is inherent; the `Spanned` trait is what the item/expression
@@ -4107,6 +4289,12 @@ impl<'ast> syn::visit::Visit<'ast> for ChoiceFindings {
                 .push(("use ... Choice as ...".to_string(), u.span().start().line));
         }
         syn::visit::visit_item_use(self, u);
+    }
+    // One override, not two: an `item macro!` is visited through its inner `syn::Macro` as
+    // well, and reporting both put every hit in the message twice.
+    fn visit_macro(&mut self, m: &'ast syn::Macro) {
+        self.scan_macro_tokens(&m.tokens);
+        syn::visit::visit_macro(self, m);
     }
     fn visit_item_type(&mut self, t: &'ast syn::ItemType) {
         use syn::spanned::Spanned;
@@ -4150,6 +4338,114 @@ fn choice_guard_findings(src: &str) -> ChoiceFindings {
     };
     syn::visit::Visit::visit_file(&mut found, &file);
     found
+}
+
+/// The seven copies of `strip_comments` are one implementation, or a *declared* variant.
+///
+/// This file's scanner is the canonical one (it takes a `blank_literals` flag, so the `cfg`
+/// scan can read literals and the counts can ignore them). The other six targets carry
+/// their own copy — `decision_scope.rs`'s adds `Mode::Cfg` tracking of `#[cfg(…)]`
+/// payloads because its counts match on them — and until this guard existed nothing kept
+/// them in step: five of the six had silently lost the two newline pushes that keep a
+/// literal's newlines in the output, so every failure message those scans print named a
+/// source line *earlier* than the code it described (measured: `src/lib.rs:3239` for a call
+/// at `3253`). Behaviour is the thing being pinned, and behaviour here is text: the five
+/// copies must be identical, `decision_scope`'s must carry the same line-preserving arm,
+/// and all six must keep the pushes. A future edit to one copy fails this test rather than
+/// half of the diagnostics.
+#[test]
+fn the_strip_comments_copies_are_one_implementation_or_a_declared_variant() {
+    // The one declared variant, with why: `decision_scope.rs` matches on `#[cfg(…)]`
+    // predicate text, so its scanner copies attribute payloads through instead of blanking
+    // them (see that file's `Mode::Cfg` doc).
+    const DECLARED_VARIANT: &str = "decision_scope.rs";
+    let copies = [
+        ("locked.rs", include_str!("locked.rs")),
+        ("counter_range.rs", include_str!("counter_range.rs")),
+        (DECLARED_VARIANT, include_str!("decision_scope.rs")),
+        (
+            "construction_inventory.rs",
+            include_str!("construction_inventory.rs"),
+        ),
+        ("variable_latency.rs", include_str!("variable_latency.rs")),
+        ("ultra.rs", include_str!("ultra.rs")),
+    ];
+    let canonical = include_str!("security.rs");
+    // Line-based: the function starts at `fn <name>(` and ends at the first line whose
+    // closing brace sits in column 0 (rustfmt indents every brace inside a top-level
+    // function), so braces inside char literals and doc comments cannot confuse this.
+    let body_of = |text: &str, name: &str| -> String {
+        let mut lines = text
+            .lines()
+            .skip_while(|l| !l.starts_with(&format!("fn {name}(")));
+        assert!(
+            lines.clone().next().is_some(),
+            "`{name}` is gone from the file"
+        );
+        let body: Vec<&str> = lines.by_ref().take_while(|l| !l.starts_with('}')).collect();
+        body.join("\n")
+            .lines()
+            .filter(|l| !l.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n")
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+    };
+    let preserve = "if b.get(i + 1) == Some(&b'\\n') { out.push('\\n'); }"
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    let mut identical: Vec<(&str, String)> = Vec::new();
+    for (name, text) in copies {
+        let body = body_of(text, "strip_comments");
+        assert!(
+            body.contains(&preserve),
+            "{name}'s `strip_comments` does not keep an escaped newline in its output, so \
+             every source line its scans report is wrong from that point on (and its own \
+             doc says the opposite). Copy the canonical arm from this file."
+        );
+        if name != DECLARED_VARIANT {
+            identical.push((name, body));
+        }
+    }
+    for window in identical.windows(2) {
+        assert_eq!(
+            window[0].1, window[1].1,
+            "`{}` and `{}` have drifted apart: these copies must stay one implementation \
+             (a divergence in the middle of the list is the drift this test exists for)",
+            window[0].0, window[1].0
+        );
+    }
+    // The canonical copy is the reference; assert it keeps the arm too, so a fix applied
+    // only there cannot silently be the odd one out.
+    assert!(
+        body_of(canonical, "strip_comments_impl").contains(&preserve),
+        "this file's canonical `strip_comments_impl` lost the escaped-newline arm"
+    );
+}
+
+/// Whether `text` contains `name` as a whole Rust identifier (not as a substring of a longer
+/// one: `my_conditional_select` is not `conditional_select`).
+fn contains_identifier(text: &str, name: &str) -> bool {
+    let mut from = 0usize;
+    while let Some(at) = text[from..].find(name) {
+        let start = from + at;
+        let end = start + name.len();
+        let before_ok = text[..start]
+            .chars()
+            .next_back()
+            .is_none_or(|c| !(c.is_alphanumeric() || c == '_'));
+        let after_ok = text[end..]
+            .chars()
+            .next()
+            .is_none_or(|c| !(c.is_alphanumeric() || c == '_'));
+        if before_ok && after_ok {
+            return true;
+        }
+        from = end;
+    }
+    false
 }
 
 /// Whether `expr` contains a call to a wipe primitive anywhere inside it.
@@ -4573,10 +4869,10 @@ fn the_constant_time_selection_api_is_absent_and_choice_constants_are_literal() 
             expected,
             "`{name}` has {} `Choice`-naming `from` call(s) at line(s) {:?}, expected \
              {expected}: every constant `Choice` in this crate is `Choice::from(1)` \
-             (`src/lib.rs:3550`, `src/lib.rs:3834`, the `dual-mac`-off gate operand and the \
-             witness's `ultra`-off operand), and this count is what makes a *new* site a \
-             deliberate change -- the guard's other rules already reject a non-literal \
-             argument at any site it can see.",
+             (`src/lib.rs:3598` in `decrypt`, `src/lib.rs:3882` in `decrypt_in_place_detached`, the two \
+             `ultra`-off witness-gate operands), and this count is what makes a *new* \
+             site a deliberate change -- the guard's other rules already reject a \
+             non-literal argument at any site it can see.",
             froms.len(),
             froms.iter().map(|(l, _)| *l).collect::<Vec<_>>()
         );
@@ -4640,6 +4936,18 @@ fn the_choice_guard_sees_every_spelling_measured_against_it() {
             "use subtle::ConditionallySelectable as _;\n\
              fn f(c: Choice, a: u8, b: u8) -> u8 { a.conditional_select(b, c) }",
         ),
+        // A macro body is a token stream, not an expression tree, so `syn`'s default walk
+        // never descends into it. Measured: this exact shape -- the `use ... as _` and the
+        // `conditional_select` call both inside the body -- left the AST rules and `froms`
+        // exactly as they were, with a reachable selection API in the crate.
+        (
+            "a macro body",
+            "macro_rules! _sel { ($a:expr, $b:expr, $c:expr) => {{\n\
+                 use subtle::ConditionallySelectable as _;\n\
+                 u8::conditional_select(&$a, &$b, $c)\n\
+             }}; }\n\
+             pub fn f(a: u8, b: u8, c: Choice) -> u8 { _sel!(a, b, c) }",
+        ),
     ] {
         let ChoiceFindings {
             banned,
@@ -4680,6 +4988,9 @@ fn the_constant_cfg_scan_fires_on_constant_predicates_and_only_those() {
         "#[cfg(not(any()))]",
         "#[cfg(test)]",
         "#[cfg(all(feature = \"x\", not(feature = \"x\")))]",
+        // The same predicate with the two occurrences spelled differently: rustc sees one
+        // atom, and the first version of this enumeration saw two (measured by a report).
+        "#[cfg(all(feature=\"x\", not(feature = \"x\")))]",
         "#[cfg(not(any(unix, not(unix))))]",
     ] {
         assert!(
@@ -4699,6 +5010,61 @@ fn the_constant_cfg_scan_fires_on_constant_predicates_and_only_those() {
     ] {
         assert!(!finding(gate), "`{gate}` is a real gate and must not be reported");
     }
+
+    // A predicate over more atoms than the enumeration bound is still decided when it
+    // contradicts itself: seventeen distinct atoms, jointly unsatisfiable
+    // (`all(p0 ... p16, not(p0))` is false under every assignment). This walked past the
+    // enumeration for as long as the bound was the only decision procedure -- measured
+    // deadening `check_lengths(...)?` in every consumer build with the whole suite green --
+    // so the boundary is asserted rather than implied: it must be *reported* now.
+    let mut pred = String::from("all(");
+    for i in 0..17 {
+        pred.push_str(&format!("feature = \"p{i}\", "));
+    }
+    pred.push_str("not(feature = \"p0\"))");
+    assert_eq!(
+        cfg_atoms(&pred).len(),
+        17,
+        "the boundary control must actually exceed the sixteen-atom bound"
+    );
+    assert_eq!(
+        constant_cfg_value(&pred),
+        Some(false),
+        "seventeen atoms is past the enumeration bound, so this predicate has to be decided by \
+         the three-valued pass; if it is `None` again, that pass was removed and a constant \
+         gate of arbitrary length is invisible to this guard once more"
+    );
+    assert!(
+        finding(&format!("#[cfg({pred})]")),
+        "the seventeen-atom contradiction must be reported"
+    );
+
+    // Past the bound *and* free of any contradiction the three-valued pass can see, the
+    // predicate is undecidable here -- and undecidable is reported, not passed, because
+    // that is where a constant gate hides. `all(p0 ... p16)` alone is a real gate, so this
+    // control is deliberately one atom more than the guard can enumerate.
+    let mut wide = String::from("all(");
+    for i in 0..17 {
+        wide.push_str(&format!("feature = \"p{i}\", "));
+    }
+    wide.pop();
+    wide.pop();
+    wide.push(')');
+    assert_eq!(
+        wide.matches("feature = ").count(),
+        17,
+        "the undecidable control needs seventeen distinct atoms"
+    );
+    assert_eq!(
+        constant_cfg_value(&wide),
+        None,
+        "a satisfiable 17-atom predicate is a real gate and must not be reported as constant"
+    );
+    assert!(
+        finding(&format!("#[cfg({wide})]")),
+        "a predicate this guard cannot decide must be reported as undecidable rather than \
+         passed: fail-closed is the whole point of the bound being a bound"
+    );
 
     // An attribute *inside a string literal* is not an attribute: the guard's line filter
     // (against the blanked cut) drops it.
@@ -4760,4 +5126,800 @@ fn arm_guard_condition(head: &str) -> Option<&str> {
     let arm = head.split_once("=>").map(|(a, _)| a)?.trim();
     let guard = arm.split_once("if ").map(|(_, g)| g)?;
     Some(guard.trim())
+}
+
+// ---------------------------------------------------------------------------
+// Expression-position wipes
+//
+// Every other wipe guard in this file reads *statements*: a count of the call text, the
+// `crate::` qualifier requirement, `preceding_attributes`, `enclosing_block_attributes`,
+// `constant_false_enclosing_block` and `no_counted_wipe_is_inside_a_closure`. All of them
+// keep their verdict when the wipe is moved into an expression that need not run, because
+// none of them is a statement: measured on this tree, replacing `derive_material`'s
+//     crate::zeroize_array(&mut subkey);
+// with
+//     let dead = core::hint::black_box(false);
+//     let _ = dead && { crate::zeroize_array(&mut subkey); true };
+// left `cargo test --all-features` (every target, 74 lib tests included) and
+// `cargo clippy --all-features --all-targets -- -D warnings` green, while the wipe never
+// executed. The same holds for a plain `false` (no `black_box`), for `||`, for a closure
+// that is stored and maybe called, and for a `?`-guarded argument. A short-circuit operand
+// is not a block with a condition that can be folded, so `constant_false_enclosing_block`
+// cannot see it either.
+//
+// The property is structural, so the check is too: a counted wipe must be a statement of a
+// function body, or a statement of an `if`/`match`/`loop`/`unsafe`/`async`/`try` block
+// reached from one. Anywhere else -- an operand of `&&`/`||`, a closure body, a call
+// argument, an assignment or `return` value, a `let` initialiser that is not itself a
+// branch -- it is an expression, and the guards above keep reading text that may never run.
+
+/// The wipe primitives whose calls this file counts.
+const WIPE_CALLS: [&str; 3] = ["zeroize_array", "zeroize_slice", "zeroize_raw"];
+
+/// Whether `expr` is a call to one of [`WIPE_CALLS`] (`crate::zeroize_array(…)`).
+fn is_wipe_call(expr: &syn::Expr) -> bool {
+    let syn::Expr::Call(call) = expr else {
+        return false;
+    };
+    let syn::Expr::Path(path) = &*call.func else {
+        return false;
+    };
+    let name = path
+        .path
+        .segments
+        .last()
+        .map(|segment| segment.ident.to_string())
+        .unwrap_or_default();
+    WIPE_CALLS.contains(&name.as_str())
+}
+
+/// Every wipe call anywhere inside `expr`, with the line the callee's path starts on.
+struct WipeCallFinder(Vec<(usize, String)>);
+
+impl<'ast> syn::visit::Visit<'ast> for WipeCallFinder {
+    fn visit_expr_call(&mut self, call: &'ast syn::ExprCall) {
+        if let syn::Expr::Path(path) = &*call.func {
+            let last = path.path.segments.last();
+            let name = last
+                .map(|segment| segment.ident.to_string())
+                .unwrap_or_default();
+            if WIPE_CALLS.contains(&name.as_str()) {
+                let line = last
+                    .map(|segment| segment.ident.span().start().line)
+                    .unwrap_or(0);
+                self.0.push((line, name));
+            }
+        }
+        syn::visit::visit_expr_call(self, call);
+    }
+}
+
+/// Every wipe call anywhere inside `expr` -- used on the sub-expressions that are *not*
+/// statement-shaped, where any hit is a finding.
+fn wipe_calls_within(expr: &syn::Expr) -> Vec<(usize, String)> {
+    let mut finder = WipeCallFinder(Vec::new());
+    syn::visit::Visit::visit_expr(&mut finder, expr);
+    finder.0
+}
+
+/// [`wipe_calls_within`] tagged as an expression operand, which is what a hit there is.
+fn operand_wipes(expr: &syn::Expr) -> Vec<(usize, String, &'static str)> {
+    wipe_calls_within(expr)
+        .into_iter()
+        .map(|(line, name)| (line, name, "an expression operand"))
+        .collect()
+}
+
+/// The wipe calls in `src`'s item tree that are not in statement position, as
+/// `(line, name, why)`. `why` distinguishes an expression operand from a definition nested
+/// inside a function body: both leave the crate's site tables satisfied while the wipe leaves
+/// the enclosing function's flow.
+fn expression_position_wipes(source: &str) -> Vec<(usize, String, &'static str)> {
+    let file = syn::parse_file(source).expect("the scanned source must parse as a Rust file");
+    let mut found = Vec::new();
+    scan_items_for_expression_wipes(&file.items, &mut found);
+    found
+}
+
+/// The wipes a statement *item* defines. A `fn` (or `impl`/`trait`) declared inside a function
+/// body is not part of that body's statement flow: deleting `derive_material`'s
+/// `crate::zeroize_array(&mut subkey);` and leaving
+/// `fn _never_called() { let mut subkey = [0u8; 32]; crate::zeroize_array(&mut subkey); }`
+/// behind keeps every count in this file at the same number -- measured green across the whole
+/// suite -- while the derived subkey is never cleared.
+fn nested_item_wipe_calls(item: &syn::Item) -> Vec<(usize, String)> {
+    let mut finder = WipeCallFinder(Vec::new());
+    syn::visit::Visit::visit_item(&mut finder, item);
+    finder.0
+}
+
+fn scan_items_for_expression_wipes(
+    items: &[syn::Item],
+    out: &mut Vec<(usize, String, &'static str)>,
+) {
+    for item in items {
+        match item {
+            syn::Item::Fn(function) => scan_block_for_expression_wipes(&function.block, out),
+            syn::Item::Impl(block) => {
+                for item in &block.items {
+                    if let syn::ImplItem::Fn(function) = item {
+                        scan_block_for_expression_wipes(&function.block, out);
+                    }
+                }
+            }
+            syn::Item::Trait(block) => {
+                for item in &block.items {
+                    if let syn::TraitItem::Fn(function) = item {
+                        if let Some(body) = &function.default {
+                            scan_block_for_expression_wipes(body, out);
+                        }
+                    }
+                }
+            }
+            syn::Item::Mod(module) => {
+                if let Some((_, items)) = &module.content {
+                    scan_items_for_expression_wipes(items, out);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Walk the statements of `block`. Only the statement-shaped constructs -- blocks and the
+/// bodies of `if`/`match`/`loop` -- are descended into; every other expression is an
+/// operand, and a wipe inside it is reported.
+fn scan_block_for_expression_wipes(
+    block: &syn::Block,
+    out: &mut Vec<(usize, String, &'static str)>,
+) {
+    for statement in &block.stmts {
+        match statement {
+            syn::Stmt::Local(local) => {
+                if let Some(init) = &local.init {
+                    scan_expr_for_expression_wipes(&init.expr, out);
+                }
+            }
+            syn::Stmt::Expr(expr, _) => scan_expr_for_expression_wipes(expr, out),
+            // A `macro_rules!` body is `no_wipe_is_hidden_in_an_unexpanded_macro`'s
+            // subject rather than an ordinary statement this walk should call reachable.
+            syn::Stmt::Macro(_) => {}
+            // A definition nested inside the body is *not* part of this function's flow.
+            syn::Stmt::Item(item) => {
+                for (line, name) in nested_item_wipe_calls(item) {
+                    out.push((line, name, "defined inside a nested item"));
+                }
+            }
+        }
+    }
+}
+
+fn scan_expr_for_expression_wipes(expr: &syn::Expr, out: &mut Vec<(usize, String, &'static str)>) {
+    match expr {
+        syn::Expr::Block(block) => scan_block_for_expression_wipes(&block.block, out),
+        syn::Expr::Unsafe(block) => scan_block_for_expression_wipes(&block.block, out),
+        syn::Expr::TryBlock(block) => scan_block_for_expression_wipes(&block.block, out),
+        syn::Expr::Async(block) => scan_block_for_expression_wipes(&block.block, out),
+        syn::Expr::Const(block) => scan_block_for_expression_wipes(&block.block, out),
+        syn::Expr::If(if_expr) => {
+            // A condition is an operand: `if crate::zeroize_slice(&mut x).is_some() { … }`
+            // wipes only on the path that takes it.
+            out.extend(operand_wipes(&if_expr.cond));
+            scan_block_for_expression_wipes(&if_expr.then_branch, out);
+            if let Some((_, otherwise)) = &if_expr.else_branch {
+                scan_expr_for_expression_wipes(otherwise, out);
+            }
+        }
+        syn::Expr::Match(match_expr) => {
+            out.extend(operand_wipes(&match_expr.expr));
+            for arm in &match_expr.arms {
+                if let Some((_, guard)) = &arm.guard {
+                    out.extend(operand_wipes(guard));
+                }
+                scan_expr_for_expression_wipes(&arm.body, out);
+            }
+        }
+        syn::Expr::Loop(loop_expr) => scan_block_for_expression_wipes(&loop_expr.body, out),
+        syn::Expr::While(while_expr) => {
+            out.extend(operand_wipes(&while_expr.cond));
+            scan_block_for_expression_wipes(&while_expr.body, out);
+        }
+        syn::Expr::ForLoop(for_expr) => {
+            out.extend(operand_wipes(&for_expr.expr));
+            scan_block_for_expression_wipes(&for_expr.body, out);
+        }
+        // The shape every counted wipe must have.
+        expr if is_wipe_call(expr) => {}
+        // Everything else puts the call in expression position.
+        operand => out.extend(operand_wipes(operand)),
+    }
+}
+
+/// Every counted wipe is a statement, not an operand of a larger expression.
+#[test]
+fn every_counted_wipe_is_a_statement_not_an_expression_operand() {
+    let source = non_test_source();
+    let found = expression_position_wipes(&source);
+    assert!(
+        found.is_empty(),
+        "wipe call(s) outside the enclosing function's statement flow: {found:?} (the third \
+         field says which hole was used). An expression operand is not a statement: \
+         `flag && {{ wipe; true }}` skips the wipe whenever `flag` is false, a closure body \
+         runs only if the closure is called, and a `?`-propagated value is skipped on the \
+         error path. A definition nested inside a body is not in that body's flow at all: a \
+         wipe moved into `fn _never_called()` keeps every count in this file at the same \
+         number while the region is never cleared (both shapes were measured leaving the \
+         whole suite green). Write each wipe as a statement of the function body, or of an \
+         `if`/`match`/`loop`/`unsafe` block, so the guards that read statements keep reading \
+         a step that runs."
+    );
+}
+
+/// The shapes the statement-position guard must and must not report, pointed at synthetic
+/// sources: a guard whose only input is the crate cannot show that it would notice anything,
+/// and this guard's predecessor (every text rule above) was measured missing all of them.
+#[test]
+fn the_statement_position_guard_sees_every_expression_operand_shape() {
+    // Each of these puts the wipe somewhere it need not run.
+    for (name, body) in [
+        (
+            "a short-circuit `&&` with a constant-false left operand",
+            "fn f() { let dead = false; let _ = dead && { crate::zeroize_array(&mut x); true }; }",
+        ),
+        (
+            "a short-circuit `||` where the wipe is the left operand",
+            "fn f() { let _ = crate::zeroize_array(&mut x) == () || true; }",
+        ),
+        (
+            "a closure that is stored and maybe called",
+            "fn f() { let g = || { crate::zeroize_array(&mut x); }; g(); }",
+        ),
+        (
+            "a wipe as a call argument",
+            "fn f() { core::mem::drop({ crate::zeroize_slice(&mut x); 0 }); }",
+        ),
+        (
+            "a wipe whose value is propagated with `?`",
+            "fn f() -> Option<()> { let y = crate::zeroize_slice(&mut x)?; Some(()) }",
+        ),
+        (
+            "a wipe in an `if` condition",
+            "fn f() { if crate::zeroize_slice(&mut x).is_some() { } }",
+        ),
+        (
+            "a wipe in a `fn` nested inside the body",
+            "fn f() { fn _never_called() { crate::zeroize_array(&mut x); } }",
+        ),
+    ] {
+        let found = expression_position_wipes(&format!("{body}\nmod tests {{ }}"));
+        assert!(
+            found.len() == 1,
+            "the guard missed the shape: {name} (found {found:?})"
+        );
+    }
+    // ...and each of these is a statement, which must stay clean, or the guard would push
+    // a real wipe out of the shape the other guards read.
+    for (name, body) in [
+        (
+            "a direct statement",
+            "fn f() { crate::zeroize_array(&mut x); }",
+        ),
+        (
+            "a block tail expression",
+            "fn f() { let y = 1; crate::zeroize_slice(&mut x) }",
+        ),
+        (
+            "an `if` branch statement",
+            "fn f(c: bool) { if c { crate::zeroize_array(&mut x); } }",
+        ),
+        (
+            "a `match` arm statement",
+            "fn f(c: bool) { match c { true => { crate::zeroize_array(&mut x); } false => {} } }",
+        ),
+        (
+            "a `loop` body statement",
+            "fn f() { loop { crate::zeroize_array(&mut x); break; } }",
+        ),
+        (
+            "an `unsafe` block statement",
+            "fn f() { unsafe { crate::zeroize_raw(x.as_mut_ptr(), 1); } }",
+        ),
+        (
+            "an `if` in a `let` initialiser",
+            "fn f(c: bool) { let y = if c { crate::zeroize_array(&mut x); 1 } else { 2 }; }",
+        ),
+        // The initialiser is evaluated exactly as a statement would be; what this guard
+        // rejects is an operand whose *evaluation* a construct can skip (`&&`, a closure
+        // body, `?`), not the `let` itself.
+        (
+            "a `let` whose initialiser is the call itself",
+            "fn f() { let _ = crate::zeroize_raw(x.as_mut_ptr(), 1); }",
+        ),
+    ] {
+        let found = expression_position_wipes(&format!("{body}\nmod tests {{ }}"));
+        assert!(
+            found.is_empty(),
+            "the guard reported the clean shape: {name} (found {found:?})"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Constant-time equality, and volatile wiping
+//
+// Two properties the crate's own documentation states, and which nothing else in this suite
+// measures.
+//
+// Equality: `Plaintext`, `Key` and `locked::LockedKey` hand-write `PartialEq` so that a
+// natural `==` on decrypted bytes cannot fall back to the short-circuiting slice comparison
+// (the doc on `Plaintext`'s impls says exactly that, and says every implementation routes
+// through `subtle::ConstantTimeEq`). Measured: rewriting one `bool::from(…ct_eq…)` body as
+// `self.0.as_slice() == other` left `tests/` (security, decision_scope, variable_latency,
+// plaintext_wipe) and `--lib` green -- `test_plaintext_eq_semantics` asserts the *answer*,
+// which both spellings give, and no timing screen in this repository is sharp enough to see
+// a few nanoseconds. The `LockedKey` impls are worse: they are behind `--features locked`,
+// so the default build never type-checks them at all.
+//
+// Volatility: every wipe in the crate is `write_volatile`, which is what stops the optimizer
+// from deleting a dead store -- the reason `zeroize_*` exists rather than `fill(0)`. Measured:
+// changing `zeroize_raw`'s leading-loop store to `core::ptr::write(ptr.add(i), 0)` left
+// `tests/` and `--lib` green. Kani proves "the bytes are zero afterwards", which a plain
+// store also satisfies, and the allocator-observing tests only fail if this build's optimizer
+// happens to elide the store.
+//
+// Both are source-shape properties, so both are checked as source: no build of the crate can
+// see the `locked` impls or the `neon` wipe on an x86 host either.
+
+/// Every `impl` block in `items`, including those nested in modules. The `locked` module's
+/// impls are only compiled with that feature, so a default build never type-checks them.
+fn collect_impls<'a>(items: &'a [syn::Item], out: &mut Vec<&'a syn::ItemImpl>) {
+    for item in items {
+        match item {
+            syn::Item::Impl(block) => out.push(block),
+            syn::Item::Mod(module) => {
+                if let Some((_, items)) = &module.content {
+                    collect_impls(items, out);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// The last segment's name of a path type (`[u8; N]`/`Vec<u8>`-style `self_ty`s have none).
+fn type_last_name(ty: &syn::Type) -> String {
+    match ty {
+        syn::Type::Path(path) => path
+            .path
+            .segments
+            .last()
+            .map(|segment| segment.ident.to_string())
+            .unwrap_or_default(),
+        _ => String::new(),
+    }
+}
+
+/// What an `eq`/`ne` body does: how often it calls `ct_eq`, and whether it uses `==`/`!=`.
+#[derive(Default)]
+struct EqBodyScan {
+    ct_eq_calls: usize,
+    comparison_operators: usize,
+}
+
+impl<'ast> syn::visit::Visit<'ast> for EqBodyScan {
+    fn visit_expr_method_call(&mut self, call: &'ast syn::ExprMethodCall) {
+        if call.method == "ct_eq" {
+            self.ct_eq_calls += 1;
+        }
+        syn::visit::visit_expr_method_call(self, call);
+    }
+
+    fn visit_expr_call(&mut self, call: &'ast syn::ExprCall) {
+        if let syn::Expr::Path(path) = &*call.func {
+            let name = path
+                .path
+                .segments
+                .last()
+                .map(|segment| segment.ident.to_string())
+                .unwrap_or_default();
+            if name == "ct_eq" {
+                self.ct_eq_calls += 1;
+            }
+        }
+        syn::visit::visit_expr_call(self, call);
+    }
+
+    fn visit_expr_binary(&mut self, binary: &'ast syn::ExprBinary) {
+        if matches!(binary.op, syn::BinOp::Eq(_) | syn::BinOp::Ne(_)) {
+            self.comparison_operators += 1;
+        }
+        syn::visit::visit_expr_binary(self, binary);
+    }
+}
+
+/// `(hand-written `PartialEq` impls seen, those whose `eq`/`ne` is not a `ct_eq` comparison)`,
+/// the second as `(line, "Type::eq")`.
+fn partial_eq_impls_without_ct_eq(source: &str) -> (usize, Vec<(usize, String)>) {
+    let file = syn::parse_file(source).expect("the scanned source must parse as a Rust file");
+    let mut impls = Vec::new();
+    collect_impls(&file.items, &mut impls);
+    let mut seen = 0usize;
+    let mut bad = Vec::new();
+    for block in impls {
+        let is_partial_eq = block
+            .trait_
+            .as_ref()
+            .and_then(|(_, path, _)| path.segments.last())
+            .is_some_and(|segment| segment.ident == "PartialEq");
+        if !is_partial_eq {
+            continue;
+        }
+        seen += 1;
+        let type_name = type_last_name(&block.self_ty);
+        for item in &block.items {
+            let syn::ImplItem::Fn(function) = item else {
+                continue;
+            };
+            let name = function.sig.ident.to_string();
+            if name != "eq" && name != "ne" {
+                continue;
+            }
+            let mut scan = EqBodyScan::default();
+            syn::visit::Visit::visit_block(&mut scan, &function.block);
+            if scan.ct_eq_calls == 0 || scan.comparison_operators != 0 {
+                bad.push((
+                    function.sig.ident.span().start().line,
+                    format!("{type_name}::{name}"),
+                ));
+            }
+        }
+    }
+    (seen, bad)
+}
+
+/// The wipe primitives whose stores must all be volatile.
+const WIPE_FUNCTIONS: [&str; 8] = [
+    "wipe",
+    "wipe_words",
+    "zeroize_array",
+    "zeroize_neon",
+    "zeroize_raw",
+    "zeroize_slice",
+    "zeroize_xmm",
+    "zeroize_ymm",
+];
+
+/// Store-shaped calls that are **not** volatile. A wipe that uses one of these can be
+/// removed by the optimizer when the value is dead afterwards, which is the whole reason
+/// [`zeroize_raw`] writes through `write_volatile` rather than `fill`.
+const NON_VOLATILE_STORES: [&str; 15] = [
+    "_mm_store_si128",
+    "_mm_store_si256",
+    "_mm_storeu_si128",
+    "_mm_storeu_si256",
+    "copy_from_slice",
+    "copy_nonoverlapping",
+    "fill",
+    "store_si128",
+    "store_si256",
+    "storeu_si128",
+    "storeu_si256",
+    "vst1q_u32",
+    "write",
+    "write_bytes",
+    "write_unaligned",
+];
+
+/// The calls made by one function body, as `(line, callee name)`.
+#[derive(Default)]
+struct CallScan(Vec<(usize, String)>);
+
+impl<'ast> syn::visit::Visit<'ast> for CallScan {
+    fn visit_expr_call(&mut self, call: &'ast syn::ExprCall) {
+        if let syn::Expr::Path(path) = &*call.func {
+            if let Some(last) = path.path.segments.last() {
+                self.0
+                    .push((last.ident.span().start().line, last.ident.to_string()));
+            }
+        }
+        syn::visit::visit_expr_call(self, call);
+    }
+
+    fn visit_expr_method_call(&mut self, call: &'ast syn::ExprMethodCall) {
+        self.0
+            .push((call.method.span().start().line, call.method.to_string()));
+        syn::visit::visit_expr_method_call(self, call);
+    }
+}
+
+/// What the wipe primitives in one source file do, as
+/// `(names found, non-volatile stores, volatile stores per function)`.
+#[derive(Default)]
+struct WipeStoreScan {
+    /// Every `WIPE_FUNCTIONS` definition seen, in source order.
+    found: Vec<String>,
+    /// `(line, function, non-volatile store)` for each store that is not volatile.
+    offending: Vec<(usize, String, String)>,
+    /// `write_volatile` calls per function name.
+    volatile: std::collections::BTreeMap<String, usize>,
+}
+
+fn wipe_store_findings(source: &str) -> WipeStoreScan {
+    let file = syn::parse_file(source).expect("the scanned source must parse as a Rust file");
+    let mut scan = WipeStoreScan::default();
+    scan_wipe_functions(&file.items, &mut scan);
+    scan
+}
+
+fn scan_wipe_functions(items: &[syn::Item], out: &mut WipeStoreScan) {
+    for item in items {
+        match item {
+            syn::Item::Fn(function) => note_wipe_function(function, out),
+            syn::Item::Mod(module) => {
+                if let Some((_, items)) = &module.content {
+                    scan_wipe_functions(items, out);
+                }
+            }
+            syn::Item::Impl(block) => {
+                for item in &block.items {
+                    if let syn::ImplItem::Fn(function) = item {
+                        note_wipe_body(&function.sig.ident.to_string(), &function.block, out);
+                    }
+                }
+            }
+            syn::Item::Trait(block) => {
+                for item in &block.items {
+                    if let syn::TraitItem::Fn(function) = item {
+                        if let Some(body) = &function.default {
+                            note_wipe_body(&function.sig.ident.to_string(), body, out);
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+fn note_wipe_function(function: &syn::ItemFn, out: &mut WipeStoreScan) {
+    note_wipe_body(&function.sig.ident.to_string(), &function.block, out);
+}
+
+fn note_wipe_body(name: &str, block: &syn::Block, out: &mut WipeStoreScan) {
+    if !WIPE_FUNCTIONS.contains(&name) {
+        return;
+    }
+    out.found.push(name.to_string());
+    let mut calls = CallScan::default();
+    syn::visit::Visit::visit_block(&mut calls, block);
+    for (line, callee) in calls.0 {
+        if callee == "write_volatile" {
+            *out.volatile.entry(name.to_string()).or_default() += 1;
+        } else if NON_VOLATILE_STORES.contains(&callee.as_str()) {
+            out.offending.push((line, name.to_string(), callee));
+        }
+    }
+}
+
+/// Every hand-written `PartialEq` in the crate compares in constant time.
+#[test]
+fn every_hand_written_partial_eq_compares_in_constant_time() {
+    let mut source = non_test_source();
+    source.push_str(&non_test_source_of(include_str!("../src/witness.rs")));
+    let (seen, bad) = partial_eq_impls_without_ct_eq(&source);
+    // 7 for `Plaintext` (slice, `&[u8]`, array, `&array`, `Vec`, `Plaintext`, `&Plaintext`),
+    // 2 each for `Key` and `LockedKey`. The count is pinned so that deleting an impl -- and
+    // with it this guard's subject -- is a deliberate change rather than a silent one.
+    assert_eq!(
+        seen, 11,
+        "expected 11 hand-written `PartialEq` impls (7 `Plaintext`, 2 `Key`, 2 `LockedKey`), \
+         found {seen}. Each one exists so that `==` on secret bytes cannot fall back to the \
+         short-circuiting slice comparison; if one was removed, the documentation on \
+         `Plaintext`'s impls is now wrong, and if one was added this guard must cover it."
+    );
+    assert!(
+        bad.is_empty(),
+        "these `PartialEq` implementations do not compare in constant time: {bad:?}. A \
+         short-circuiting `==` on decrypted bytes leaks the matching prefix length, which is \
+         exactly what the doc above `Plaintext`'s impls promises cannot happen. Measured: \
+         rewriting one body as `self.0.as_slice() == other` left `tests/` and `--lib` green \
+         (the equality *answer* is the same), so nothing else in this suite would notice. \
+         Route every comparison through `subtle::ConstantTimeEq::ct_eq`."
+    );
+}
+
+/// Every store in a wipe primitive is volatile.
+#[test]
+fn every_wipe_store_is_volatile() {
+    let mut scan = wipe_store_findings(&non_test_source());
+    let witness = wipe_store_findings(&non_test_source_of(include_str!("../src/witness.rs")));
+    scan.found.extend(witness.found.iter().cloned());
+    scan.offending.extend(witness.offending.iter().cloned());
+    for (name, count) in &witness.volatile {
+        *scan.volatile.entry(name.clone()).or_default() += count;
+    }
+    // `wipe` and `wipe_words` appear twice each in `src/witness.rs`: the real one and the
+    // Kani-only no-op, which must stay visible to this scan. If a wipe primitive is renamed
+    // it disappears from the list and stops being checked, so the list is pinned.
+    assert_eq!(
+        scan.found.len(),
+        10,
+        "expected 10 wipe-primitive definitions (6 in `src/lib.rs`, `wipe` and `wipe_words` \
+         twice each in `src/witness.rs`), found {:?}. A renamed or deleted wipe primitive is \
+         no longer scanned by this guard.",
+        scan.found
+    );
+    assert!(
+        scan.offending.is_empty(),
+        "wipe primitive(s) write through a non-volatile store: {:?}. `write_volatile` is what \
+         keeps the optimizer from deleting a dead store, which is the entire reason these \
+         functions exist instead of `fill(0)`; Kani proves only that the bytes are zero \
+         afterwards, which a plain store satisfies too. Measured: changing `zeroize_raw`'s \
+         leading-loop store to `core::ptr::write(ptr.add(i), 0)` left `tests/` and `--lib` \
+         green.",
+        scan.offending
+    );
+    for name in [
+        "wipe",
+        "wipe_words",
+        "zeroize_neon",
+        "zeroize_raw",
+        "zeroize_xmm",
+        "zeroize_ymm",
+    ] {
+        assert!(
+            scan.volatile.get(name).copied().unwrap_or(0) > 0,
+            "`{name}` performs no `write_volatile` store at all: the wipe it names has no \
+             volatile store left to observe (the volatile counts are {:?}).",
+            scan.volatile
+        );
+    }
+}
+
+/// The shapes the two guards above must and must not report, pointed at synthetic sources.
+#[test]
+fn the_equality_and_wiping_guards_see_the_defects_built_for_them() {
+    let wrap = |body: &str| format!("{body}\nmod tests {{ }}");
+    // `PartialEq` impls that must be reportable ...
+    for (name, body) in [
+        (
+            "a short-circuiting slice comparison",
+            "impl PartialEq<[u8]> for Plaintext { fn eq(&self, o: &[u8]) -> bool { self.0.as_slice() == o } }",
+        ),
+        (
+            "a `ne` that inverts a slice comparison",
+            "impl PartialEq for Plaintext { fn eq(&self, o: &Plaintext) -> bool { bool::from(self.0.ct_eq(&o.0)) } fn ne(&self, o: &Plaintext) -> bool { self.0.as_slice() != o.0.as_slice() } }",
+        ),
+        (
+            "an `eq` that calls neither `ct_eq` nor a comparison",
+            "impl PartialEq<[u8]> for Plaintext { fn eq(&self, _o: &[u8]) -> bool { true } }",
+        ),
+    ] {
+        let (seen, bad) = partial_eq_impls_without_ct_eq(&wrap(body));
+        assert_eq!(seen, 1, "the impl was not recognised: {name}");
+        assert_eq!(bad.len(), 1, "the guard missed the shape: {name} ({bad:?})");
+    }
+    for (name, body) in [
+        (
+            "a `ct_eq` on a slice",
+            "impl PartialEq<[u8]> for Plaintext { fn eq(&self, o: &[u8]) -> bool { bool::from(self.0.as_slice().ct_eq(o)) } }",
+        ),
+        (
+            "a fully qualified `ct_eq` call",
+            "impl PartialEq for Key { fn eq(&self, o: &Key) -> bool { bool::from(subtle::ConstantTimeEq::ct_eq(&self.0, &o.0)) } }",
+        ),
+    ] {
+        let (seen, bad) = partial_eq_impls_without_ct_eq(&wrap(body));
+        assert_eq!(seen, 1, "the impl was not recognised: {name}");
+        assert!(bad.is_empty(), "the guard reported a clean shape: {name} ({bad:?})");
+    }
+    // ... and wipe primitives that must be.
+    for (name, body) in [
+        (
+            "a path-form plain store",
+            "fn zeroize_raw(p: *mut u8) { unsafe { core::ptr::write(p, 0) }; }",
+        ),
+        (
+            "a method-form plain store",
+            "unsafe fn zeroize_raw(p: *mut u8) { unsafe { p.write(0) }; }",
+        ),
+        (
+            "a zeroing `fill`",
+            "fn zeroize_slice(s: &mut [u8]) { s.fill(0); }",
+        ),
+        (
+            "a zeroed vector store",
+            "unsafe fn zeroize_xmm(v: &mut [__m128i]) { unsafe { _mm_storeu_si128(v.as_mut_ptr(), zero) }; }",
+        ),
+    ] {
+        let scan = wipe_store_findings(body);
+        assert_eq!(
+            scan.offending.len(),
+            1,
+            "the wipe-store guard missed the shape: {name} ({:?})",
+            scan.offending
+        );
+    }
+    let clean = wipe_store_findings(
+        "unsafe fn zeroize_raw(p: *mut u8) { unsafe { core::ptr::write_volatile(p, 0) }; }",
+    );
+    assert!(
+        clean.offending.is_empty(),
+        "the guard reported the clean wipe"
+    );
+    assert_eq!(clean.volatile.get("zeroize_raw"), Some(&1));
+}
+
+/// Every `scrub_stack` call site must survive — asserted here as well as in
+/// `tests/ultra.rs`, because `ultra.rs` only compiles with `--features ultra` and
+/// `scrub_stack` runs in *every* build. Measured: deleting `decrypt`'s
+/// `crate::scrub_stack();` leaves this file's suite green by itself, and only the
+/// feature-gated copy in `ultra.rs` goes red; the default `cargo test` — the one a
+/// contributor runs — sees nothing. `scrub_stack` is best-effort with no behavioural
+/// signature, so an existence count is its only witness.
+#[test]
+fn scrub_stack_survives_at_every_entry_point_in_every_build() {
+    // Comments stripped, so replacing a real call with `// scrub_stack(); (planted)` reads
+    // as a *missing* call site.
+    let body = non_test_source();
+
+    /// The body of `needle`, brace-matched.
+    fn body_of<'a>(src: &'a str, needle: &str) -> &'a str {
+        let start = src.find(needle).unwrap_or_else(|| panic!("no {needle}"));
+        assert_eq!(
+            src.matches(needle).count(),
+            1,
+            "{needle} must appear exactly once in the non-test source"
+        );
+        let after = &src[start..];
+        let open = after.find('{').expect("body");
+        let mut depth = 0usize;
+        for (n, c) in after[open..].char_indices() {
+            match c {
+                '{' => depth += 1,
+                '}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return &after[..=open + n];
+                    }
+                }
+                _ => {}
+            }
+        }
+        panic!("unbalanced braces in {needle}");
+    }
+
+    // Per function, not a whole-file total: a total is unbound to position, so a call
+    // moved into a helper nobody calls would keep it at eight.
+    let mut total = 0;
+    for (name, expected) in [
+        ("pub fn encrypt(", 3),
+        ("pub fn encrypt_in_place_detached(", 1),
+        ("pub fn decrypt(", 1),
+        ("pub fn decrypt_in_place_detached(", 1),
+        ("pub fn new(key: &[u8; crate::KEY_LEN])", 1),
+        ("fn check_integrity(&self, bytes: &[u8; crate::KEY_LEN])", 1),
+    ] {
+        let function = body_of(&body, name);
+        let found = function.matches("crate::scrub_stack();").count();
+        assert_eq!(
+            found, expected,
+            "{name} must contain {expected} `crate::scrub_stack();` call sites, found \
+             {found}: a dropped one leaves key material in the region it exists to clear, \
+             and nothing else in the default build notices"
+        );
+        assert_eq!(
+            function.matches("scrub_stack();").count(),
+            found,
+            "{name} must not contain an unqualified `scrub_stack();`: the absolute path is \
+             what keeps a local import from shadowing the wipe"
+        );
+        assert!(
+            !function.contains("black_box(false)") && !function.contains("if false"),
+            "{name}'s scrub calls must not be nested in a constant-false block: the text \
+             would still count while the region is never overwritten"
+        );
+        total += found;
+    }
+    assert_eq!(total, 8, "all eight scrub_stack call sites must remain");
 }

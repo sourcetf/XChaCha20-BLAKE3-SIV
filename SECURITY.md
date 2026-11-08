@@ -33,8 +33,9 @@ Anything that breaks the properties claimed in `README.md`:
   branches on an integrity tag of the stored key and panics when it differs
   (`check_integrity`, `src/lib.rs`), and `tests/ctgrind.rs` drives only the AEAD entry
   points with no `LockedKey` in sight. The crate header names that branch, alongside
-  the decision and the witness fold, as one of the three secret-dependent branches it
-  tolerates, and documents why it reveals no key bit under no-fault operation;
+  the decision and the `witness` module's `Choice`/`Result` handling, as one of the
+  three secret-dependent branches it tolerates, and documents why it reveals no key bit
+  under no-fault operation;
 - a reachable panic from attacker-controlled input. Allocation is a caller policy:
   `decrypt_bounded` bounds the ciphertext, not the AAD, and capacity planning is
   explicitly out of scope (see below);

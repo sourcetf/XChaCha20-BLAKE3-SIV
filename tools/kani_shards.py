@@ -33,6 +33,17 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 PROOFS = os.path.join(ROOT, "src", "proofs.rs")
 
+# The single number `tools/check_kani_cfg.sh` gates on. This tool is what produces
+# that count, so a parser that quietly drops a harness would agree with itself and
+# come in under this number; reading it here is what turns that into a refusal.
+CHECK_KANI_CFG = os.path.join(HERE, "check_kani_cfg.sh")
+COMMITTED_RE = re.compile(r"^\s*COMMITTED_HARNESSES=(\d+)\s*$", re.MULTILINE)
+
+#: A char literal: `'x'`, `'\n'`, `'\''`, `'\u{1F600}'`. A bare lifetime (`'a`) has no
+#: closing quote, so requiring one keeps a lifetime from being read as the start of a
+#: literal and swallowing the code after it up to the next apostrophe.
+CHAR_LIT = re.compile(r"'(?:\\.|\\u\{[0-9A-Fa-f_]+\}|[^'\\\n])'")
+
 # Ordered: the first prefix that matches decides the shard.  Prefixes are
 # deliberately broad so a new harness lands with the work it belongs to instead
 # of failing the "no shard matched" check.  That check is the point: a harness
@@ -88,12 +99,50 @@ def is_cfg_attr(attr):
     return re.search(r"#\s*!?\s*\[\s*cfg\s*\(|cfg_attr\s*\(", attr) is not None
 
 
+def _blank_literal(text):
+    """Return `text` with every non-newline character replaced by a space.
+
+    Used for string and char literals, so their contents stop being source while the
+    line count (and the line-number cross-checks) survive.
+    """
+    return "".join("\n" if c == "\n" else " " for c in text)
+
+
+def _string_end(text, start):
+    """Index just past the string literal opening at `start` (a `\"`).
+
+    Escapes are respected so `\\\"` does not close the string. A raw newline ends the
+    scan: Rust's ordinary string literals cannot contain one, so hitting it means the
+    quote was not a literal opener, and running on would blank the harnesses below.
+    """
+    i = start + 1
+    while i < len(text):
+        c = text[i]
+        if c == "\\":
+            i += 2
+            continue
+        if c == '"':
+            return i + 1
+        if c == "\n":
+            break
+        i += 1
+    return i
+
+
 def strip_block_comments(text):
     """Blank `/* ... */` spans, nested, keeping every newline.
 
     A harness inside a block comment does not exist. The line scan that follows must
     not count it, and blanking rather than deleting keeps the line numbers used by
     `tools/check_kani_cfg.sh`'s cross-check intact.
+
+    String and char literals are blanked the same way, and `//` line comments are
+    stepped over first: `/*`, `//` or a `#[cfg(...)]`/`#[kani::proof]` token inside any
+    of them is text, not source, so `let s = "/*";` cannot open a block comment that a
+    later real `*/` closes (blanking the harnesses in between) and a string that spells
+    a cfg attribute cannot trip the cfg guard or add to the proof count. `//` is
+    consumed before the quote scan so a quote inside a line comment is not taken for a
+    literal opener.
     """
     out = []
     depth = 0
@@ -118,9 +167,27 @@ def strip_block_comments(text):
             depth = 1
             out.append("  ")
             i += 2
+        elif text.startswith("//", i):
+            end = text.find("\n", i)
+            if end < 0:
+                out.append(text[i:])
+                break
+            out.append(text[i : end + 1])
+            i = end + 1
+        elif text[i] == '"':
+            end = _string_end(text, i)
+            out.append(_blank_literal(text[i:end]))
+            i = end
         else:
-            out.append(text[i])
-            i += 1
+            m = CHAR_LIT.match(text, i)
+            if m is not None:
+                # Char literals only: a bare lifetime (`'a`) is left alone, since
+                # `CHAR_LIT` requires the closing quote.
+                out.append(_blank_literal(text[i : m.end()]))
+                i = m.end()
+            else:
+                out.append(text[i])
+                i += 1
     if depth:
         raise SystemExit("error: unterminated block comment in src/proofs.rs")
     return "".join(out)
@@ -427,6 +494,58 @@ def harnesses():
     return names
 
 
+def committed_harness_count():
+    """The count `tools/check_kani_cfg.sh` gates on, read from that file.
+
+    One source of truth: the count the gates are written against lives in
+    `check_kani_cfg.sh`, and this tool compares against it instead of repeating it.
+    Raises `SystemExit(3)` when the file or its `COMMITTED_HARNESSES` line is missing:
+    a renamed or moved gate must be a loud failure, not a silently disabled check.
+    """
+    try:
+        with open(CHECK_KANI_CFG, encoding="utf-8") as fh:
+            text = fh.read()
+    except OSError as exc:
+        print(
+            f"could not run: cannot read the committed harness count from "
+            f"{CHECK_KANI_CFG}: {exc} (pass --no-committed-check to skip this "
+            "cross-check deliberately)",
+            file=sys.stderr,
+        )
+        sys.exit(3)
+    m = COMMITTED_RE.search(text)
+    if m is None:
+        print(
+            f"could not run: no COMMITTED_HARNESSES=<n> line in {CHECK_KANI_CFG} "
+            "(pass --no-committed-check to skip this cross-check deliberately)",
+            file=sys.stderr,
+        )
+        sys.exit(3)
+    return int(m.group(1))
+
+
+def check_committed(names):
+    """Refuse (exit 3) when the parsed count disagrees with the committed number.
+
+    The count floor in `tools/check_kani_cfg.sh` is `-ne COMMITTED_HARNESSES`, but this
+    tool is what produces the count: a parser that silently drops a harness would still
+    return a number, and every downstream check would agree with it. Comparing here
+    against the one number the gate names is what makes an under-count loud. An absent
+    or unreadable gate is refused by `committed_harness_count`; only the explicit
+    `--no-committed-check` flag skips the comparison.
+    """
+    committed = committed_harness_count()
+    if len(names) != committed:
+        print(
+            f"could not run: parsed {len(names)} harness(es) in src/proofs.rs but "
+            f"tools/check_kani_cfg.sh commits {committed}; the parser is not seeing the "
+            "harness set the gates are written against",
+            file=sys.stderr,
+        )
+        sys.exit(3)
+    return names
+
+
 def assign(names):
     """Group harness names into shards, preserving discovery order."""
     buckets = {name: [] for name, _, _ in SHARDS}
@@ -451,9 +570,18 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--plan", action="store_true", help="emit the JSON matrix")
     ap.add_argument("--count", action="store_true", help="emit the harness count")
+    ap.add_argument(
+        "--no-committed-check",
+        action="store_true",
+        help="skip the cross-check against check_kani_cfg.sh's COMMITTED_HARNESSES; "
+        "only for callers that run this parser without that gate file present (the "
+        "sandbox parser controls)",
+    )
     args = ap.parse_args()
 
     names = harnesses()
+    if not args.no_committed_check:
+        check_committed(names)
 
     if args.count:
         print(len(names))

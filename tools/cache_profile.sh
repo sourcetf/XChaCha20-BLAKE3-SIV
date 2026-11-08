@@ -91,6 +91,11 @@ FEATURES="${XSIV_FEATURES:-}"
 # This used to be a hard-coded `$HOME` path, which on a runner meant "not found" and
 # -- while that answered exit 0 -- this entire differential (and the self-test inside
 # it) silently did not run there. It is now searched for, and not finding it is exit 3.
+# `setarch --addr-no-randomize` is what makes the counts comparable; see `profile`. The
+# probe is deferred to `profile` and reported as exit 3 from there: doing it here fired
+# for the self-test's inner run too, whose point is to observe the *planted* leak.
+SETARCH="${SETARCH:-setarch}"
+
 VALGRIND="${VALGRIND:-}"
 if [ -z "$VALGRIND" ]; then
   for c in "$HOME/valgrind/usr/bin/valgrind" "$(command -v valgrind 2>/dev/null || true)"; do
@@ -127,7 +132,7 @@ PY
 # Hard-coding `./target` profiled a stale binary while building into $CARGO_TARGET_DIR,
 # and -- because a stale binary still produces identical counters -- could PASS.
 TARGET_DIR="${CARGO_TARGET_DIR:-target}"
-cargo build --release --quiet --example xsiv_stdin ${FEATURES:+--features "$FEATURES"}
+cargo build --locked --release --quiet --example xsiv_stdin ${FEATURES:+--features "$FEATURES"}
 
 # Which configuration the verdicts below are about. Printed in every mode, so a log that
 # says PASS says what it passed *for*.
@@ -339,7 +344,13 @@ PY
   # target directory leaves a leaky example binary there for the next invocation to
   # profile. Measured: pristine PASS, pristine again PASS, self-test OK, then pristine
   # FAIL on unchanged source -- the same shape as the defect `tools/ctgrind.sh` had.
-  if ( cd "$work" && CARGO_TARGET_DIR="$work/target" exec "$work/tools/cache_profile.sh" $mode "$count" ) > "$work/selftest.log" 2>&1; then
+  # `SETARCH` is pointed at `true` for the inner run. The planted leak is in the crate's
+  # *own* code, so it is visible with or without a pinned layout -- while the loader's
+  # random-byte table read (see `profile`) is not, and it still fires in a fresh copy
+  # whose binary and stack layout have never been warmed. Measured with the real
+  # `setarch`: the inner run's verdict was the loader's `D1mr`/`DLmr` difference, not the
+  # planted table, and this self-test would then have passed for the wrong reason.
+  if ( cd "$work" && CARGO_TARGET_DIR="$work/target" SETARCH=true exec "$work/tools/cache_profile.sh" $mode "$count" ) > "$work/selftest.log" 2>&1; then
     echo "FAIL: the planted leak left the profile identical, so $mode_name cannot detect" >&2
     echo "      that class and its PASS elsewhere means correspondingly less." >&2
     tail -20 "$work/selftest.log" >&2
@@ -399,8 +410,30 @@ profile() {  # args..., then in-file and out-file are last two
   # died. The same hole the trace mode had (see there), closed here too: refuse to report
   # a verdict from a run that did not complete.
   local rc=0
-  "$VALGRIND" --tool=cachegrind --cache-sim=yes --branch-sim=yes \
-    --cachegrind-out-file="$out" "$TARGET_DIR/release/examples/xsiv_stdin" \
+  # ASLR off, for the same reason the trace mode needs it: glibc's loader reads one
+  # byte past the initial stack's string terminator when the layout puts the terminator
+  # against the AT_RANDOM block, and indexes a 256-byte class table with that *random*
+  # byte. That is a data-cache miss whose address depends on the run, thousands of
+  # instructions before the example executes one -- measured here as a `D1mr`/`DLmr`
+  # difference between the two key sides (3019 vs 3004 misses) with the crate's own
+  # profiles identical, which failed this tool on unchanged source. `setarch
+  # --addr-no-randomize` pins the layout; if the host cannot do that, the run is
+  # "could not conclude" (exit 3) rather than a leak verdict.
+  local launcher=()
+  case "$SETARCH" in
+    true | "") ;;
+    *)
+      if ! "$SETARCH" --addr-no-randomize true >/dev/null 2>&1; then
+        echo "SKIPPED: \`setarch --addr-no-randomize\` cannot run here, so the loader's" >&2
+        echo "         random-byte table read would show up as a key-dependent cache miss." >&2
+        exit 3
+      fi
+      launcher=("$SETARCH" --addr-no-randomize)
+      ;;
+  esac
+  ${launcher[@]+"${launcher[@]}"} "$VALGRIND" --tool=cachegrind --cache-sim=yes \
+    --branch-sim=yes --cachegrind-out-file="$out" \
+    "$TARGET_DIR/release/examples/xsiv_stdin" \
     ${extra[@]+"${extra[@]}"} < "$in" > /dev/null 2>&1 || rc=$?
   if [ "$rc" -ne 0 ]; then
     echo "SKIPPED: a cachegrind run exited $rc (valgrind forwards the client's status)," >&2

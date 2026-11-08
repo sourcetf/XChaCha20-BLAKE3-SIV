@@ -236,6 +236,19 @@ jobs:
           - profile: release, no default features with dual-mac
             args: --release --no-default-features --features dual-mac
             cache: release-none-dualmac
+          # `pure` with the defaults *off*: `pure` only swaps BLAKE3's backend, but
+          # combined with `--no-default-features` it is the opt-out build on BLAKE3's
+          # portable Rust kernels, and no other row compiles that pair. It is the
+          # configuration a `no_std` caller without a target C compiler reaches.
+          - profile: release, no default features with pure
+            args: --release --no-default-features --features pure
+            cache: release-none-pure
+          # `locked` with the defaults *off*: `locked` is an independent module, and
+          # `--features locked` alone still has `hardened` on, so this is the only row
+          # that compiles the module against the single-gate decision.
+          - profile: release, no default features with locked
+            args: --release --no-default-features --features locked
+            cache: release-none-locked
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
@@ -291,7 +304,7 @@ jobs:
               "security", "threads", "timing", "ultra", "variable_latency",
           }
           meta = json.loads(
-              subprocess.check_output(["cargo", "metadata", "--no-deps", "--format-version", "1"])
+              subprocess.check_output(["cargo", "metadata", "--locked", "--no-deps", "--format-version", "1"])
           )
           packages = meta["packages"]
           tests = {
@@ -452,6 +465,22 @@ jobs:
           shared-key: no-std
       - name: cargo check
         run: cargo check --locked --no-default-features --lib --target thumbv7em-none-eabihf
+      # The *default-features* form of the same target, which the check above does not
+      # cover: it compiles the `hardened` decision for a target that has no std at all.
+      # It is a `build` rather than a `check`, so the target's rlib is actually linked.
+      # `Cargo.toml`'s note beside the `blake3` dependency used to say this form had no
+      # runner outside the author's machine; this step and verify.sh's cross-compilation
+      # stage are that runner now. (`ultra`/`rng` cannot build here -- `getrandom` has no
+      # bare-metal backend -- and `locked` uses `prctl`, so the default set and `pure`
+      # are the configurations to build.)
+      - name: cargo build (default features)
+        run: cargo build --locked --target thumbv7em-none-eabihf
+      # The same build with BLAKE3's portable Rust backends forced on -- the
+      # configuration a bare-metal `no_std` caller reaches when no target C compiler is
+      # available. `ultra`/`locked` are deliberately absent: `ultra` pulls `rng`/
+      # `getrandom`, and `locked` uses `prctl`, neither of which exists on bare metal.
+      - name: cargo build (pure backend)
+        run: cargo build --locked --target thumbv7em-none-eabihf --features pure
 
   timing-instrument:
     name: timing instrument (blocking)
@@ -995,9 +1024,9 @@ jobs:
         # sources. cargo-deny has no `--manifest-path`; running it inside each directory
         # picks up that graph and the root `deny.toml` (found by walking up).
         run: |
-          cargo deny check
-          ( cd fuzz && cargo deny check )
-          ( cd blake3 && cargo deny check )
+          cargo deny --locked check
+          ( cd fuzz && cargo deny --locked check )
+          ( cd blake3 && cargo deny --locked check )
 
   release:
     name: tag the commit and publish a release

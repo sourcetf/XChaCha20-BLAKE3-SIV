@@ -249,8 +249,10 @@ if [ "$PROVISION" -eq 1 ]; then
   else
     # musl is what gets built and *executed* under qemu (aarch64 for the NEON
     # kernel, i686 for the 32-bit paths); gnu is type-checked only.  All are
-    # attempted so `verify.sh` can use whichever is available.
-    for t in aarch64-unknown-linux-musl i686-unknown-linux-musl powerpc64-unknown-linux-musl aarch64-unknown-linux-gnu; do
+    # attempted so `verify.sh` can use whichever is available. `thumbv7em-none-eabihf`
+    # is the bare-metal `no_std` target verify.sh stage 4 now builds with default
+    # features; without it here, a `--deep`/`--all` run fails on that stage's skip.
+    for t in aarch64-unknown-linux-musl i686-unknown-linux-musl powerpc64-unknown-linux-musl aarch64-unknown-linux-gnu thumbv7em-none-eabihf; do
       if ensure_target "$t"; then
         ok "target $t"
       else

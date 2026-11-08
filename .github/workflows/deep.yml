@@ -102,7 +102,7 @@ jobs:
           set -euo pipefail
           work="${RUNNER_TEMP:-${TMPDIR:-/tmp}}"
           MIRIFLAGS="-Zmiri-disable-isolation -Zmiri-strict-provenance" \
-            cargo +nightly miri test --release --features pure --lib -- \
+            cargo +nightly miri test --locked --release --features pure --lib -- \
               test_zeroize_covers_unaligned_prefix \
               test_x86_simd_kernels_match_scalar \
               test_simd_xor_matches_scalar_and_raw \
@@ -125,7 +125,7 @@ jobs:
           set -euo pipefail
           work="${RUNNER_TEMP:-${TMPDIR:-/tmp}}"
           MIRIFLAGS="-Zmiri-disable-isolation -Zmiri-strict-provenance -Zmiri-tree-borrows" \
-            cargo +nightly miri test --release --features pure --lib -- \
+            cargo +nightly miri test --locked --release --features pure --lib -- \
               test_zeroize_covers_unaligned_prefix \
               test_x86_simd_kernels_match_scalar \
               test_simd_xor_matches_scalar_and_raw \
@@ -151,7 +151,7 @@ jobs:
           work="${RUNNER_TEMP:-${TMPDIR:-/tmp}}"
           MIRIFLAGS="-Zmiri-disable-isolation -Zmiri-strict-provenance" \
             RUSTFLAGS="-C target-feature=+avx2" \
-            cargo +nightly miri test --release --features pure --lib -- \
+            cargo +nightly miri test --locked --release --features pure --lib -- \
               test_x86_simd_kernels_match_scalar \
               test_simd_xor_matches_scalar_and_raw \
               test_simd_matches_scalar_all_lengths 2>&1 | tee "$work/miri-avx2.log"
@@ -173,7 +173,7 @@ jobs:
           work="${RUNNER_TEMP:-${TMPDIR:-/tmp}}"
           cargo +nightly miri setup --target aarch64-unknown-linux-gnu >/dev/null
           MIRIFLAGS="-Zmiri-disable-isolation -Zmiri-strict-provenance" \
-            cargo +nightly miri test --release --features pure --target aarch64-unknown-linux-gnu --lib -- \
+            cargo +nightly miri test --locked --release --features pure --target aarch64-unknown-linux-gnu --lib -- \
               test_aarch64_neon_kernel_matches_scalar \
               test_simd_xor_matches_scalar_and_raw \
               test_zeroize_covers_unaligned_prefix 2>&1 | tee "$work/miri-neon.log"
@@ -201,7 +201,7 @@ jobs:
           work="${RUNNER_TEMP:-${TMPDIR:-/tmp}}"
           cargo +nightly miri setup --target s390x-unknown-linux-gnu >/dev/null
           MIRIFLAGS="-Zmiri-disable-isolation -Zmiri-strict-provenance" \
-            cargo +nightly miri test --release --features pure --target s390x-unknown-linux-gnu --lib -- \
+            cargo +nightly miri test --locked --release --features pure --target s390x-unknown-linux-gnu --lib -- \
               test_all_accelerated_paths_agree_on_a_boundary_corpus 2>&1 | tee "$work/miri-s390x.log"
           # Same count guard: one filter, one test.
           count="$(grep -E 'test result:' "$work/miri-s390x.log" | tail -1 \
@@ -421,9 +421,9 @@ jobs:
       # root `deny.toml` (found by walking up).
       - name: cargo deny check
         run: |
-          cargo deny check
-          ( cd fuzz && cargo deny check )
-          ( cd blake3 && cargo deny check )
+          cargo deny --locked check
+          ( cd fuzz && cargo deny --locked check )
+          ( cd blake3 && cargo deny --locked check )
 
   # The checks above can be silently vacuous, and one of them was: the ctgrind
   # negative control was compiled into a branchless `setcc` that memcheck does not
@@ -678,7 +678,7 @@ jobs:
           # so it must not gate the coverage number; `tests/timing.rs` is not in the
           # report either (the lcov has `src/lib.rs` and `src/witness.rs` only), so
           # skipping the target does not move the denominator.
-          cargo llvm-cov --all-features --release --lcov --output-path lcov.info \
+          cargo llvm-cov --locked --all-features --release --lcov --output-path lcov.info \
             --fail-under-lines 95 -- --skip timing
 
       # `--lcov` writes the file but prints no summary -- verified: neither a pass nor a
@@ -703,8 +703,8 @@ jobs:
         run: |
           set -euo pipefail
           cargo metadata --locked --format-version 1 > dependencies.json
-          cargo tree --edges normal > dependencies.txt
-          cargo tree --edges normal | sort -u | wc -l
+          cargo tree --locked --edges normal > dependencies.txt
+          cargo tree --locked --edges normal | sort -u | wc -l
 
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         # Upload even when the coverage step failed: the lcov is the evidence for the
@@ -781,7 +781,7 @@ jobs:
         run: |
           set -euo pipefail
           rustup toolchain install nightly --profile minimal
-          RUSTFLAGS="-Zsanitizer=address" cargo +nightly test --release --features pure \
+          RUSTFLAGS="-Zsanitizer=address" cargo +nightly test --locked --release --features pure \
             --target x86_64-unknown-linux-gnu --tests
 
       # Instruction-level faults: bytes of the compiled code are NOPed in turn, in all three
@@ -982,7 +982,7 @@ jobs:
             exit 1
           fi
           MIRIFLAGS="-Zmiri-disable-isolation -Zmiri-strict-provenance -Zmiri-tree-borrows" \
-            cargo +nightly miri test --release --features pure --lib 2>&1 | tee "$work/miri-full-lib.log"
+            cargo +nightly miri test --locked --release --features pure --lib 2>&1 | tee "$work/miri-full-lib.log"
           count="$(grep -E 'test result:' "$work/miri-full-lib.log" | tail -1 \
             | sed -n 's/.* \([0-9][0-9]*\) passed.*/\1/p' || true)"
           if [ -z "$count" ] || [ "$count" -lt "$expected" ]; then
@@ -1068,11 +1068,11 @@ jobs:
       - name: round trip against XChaCha20-Poly1305, in one process
         run: |
           for size in 64 256 1024 4096 16384 65536 1048576; do
-            cargo run --release --quiet --example profile_probe "$size" 2000
+            cargo run --locked --release --quiet --example profile_probe "$size" 2000
           done
 
       - name: the head-to-head criterion table as well
-        run: cargo bench --bench compare -- --noplot
+        run: cargo bench --locked --bench compare -- --noplot
 
   fuzz:
     name: fuzzing (libFuzzer + ASAN)

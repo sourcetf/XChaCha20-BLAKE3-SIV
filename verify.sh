@@ -324,6 +324,12 @@ if [ "$KANI_ONLY" -eq 0 ]; then
   # its C kernels and changes what the build.rs cfgs see -- the union below is the
   # Rust-feature set CI lints, minus that interaction.
   cargo clippy --locked --all-targets --features ultra,locked -- -D warnings
+  # The two `--no-default-features` feature pairs the CI test matrix also compiles
+  # (`--features pure` and `--features locked` with the defaults off), so every
+  # combination that matrix names is compiled here too -- a `-D warnings` violation
+  # in either pair would otherwise pass a `--deep` run and fail only in CI.
+  cargo clippy --locked --all-targets --no-default-features --features pure -- -D warnings
+  cargo clippy --locked --all-targets --no-default-features --features locked -- -D warnings
 
   # The tools' contract with this script: a gate that could not run answers exit 3,
   # and this script reports that as a skipped stage. Both halves are checked here
@@ -529,6 +535,22 @@ plaintext_wipe security threads variable_latency"
   else
     skip "riscv64gc-unknown-linux-musl type-check" "target not installed"
     echo "         (rustup target add riscv64gc-unknown-linux-musl)"
+  fi
+  # The bare-metal `no_std` target the README names. The `--no-default-features` form is
+  # stage 3d's host check (`cargo check --no-default-features --all-targets`); this is the
+  # *default-features* form -- the `hardened` decision compiled for a target that has no
+  # std at all -- and it is a `build`, not a `check`, so the target's rlib is actually
+  # linked. `ultra`/`rng` cannot build here (`getrandom` has no bare-metal backend) and
+  # `locked` needs `prctl`, so the default set and `pure` are the configurations to
+  # compile. `Cargo.toml`'s note beside the `blake3` dependency points here and at
+  # ci.yml's `no-std` job; check.sh provisions this target so a `--deep`/`--all` run
+  # does not fail on the skip below.
+  if grep -qx 'thumbv7em-none-eabihf' <<< "$installed_targets"; then
+    cargo build --locked --target thumbv7em-none-eabihf
+    cargo build --locked --target thumbv7em-none-eabihf --features pure
+  else
+    skip "thumbv7em-none-eabihf build" "target not installed"
+    echo "         (rustup target add thumbv7em-none-eabihf)"
   fi
 fi
 

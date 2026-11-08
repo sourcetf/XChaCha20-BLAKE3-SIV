@@ -70,7 +70,7 @@ const LIB: &str = include_str!("../src/lib.rs");
 /// `include_str!` text makes a `matches`/`contains` satisfiable without the code: replace a
 /// real statement with a comment carrying the same words and the count is unchanged. An
 /// audit demonstrated exactly that for `scrub_stack();` — replaced by
-/// `// scrub_stack(); (planted)` at `src/lib.rs:2495`,
+/// `// scrub_stack(); (planted)` at a real call site (now `src/lib.rs:3234`),
 /// `scrub_stack_is_called_at_every_entry_point` stayed green — and `scrub_stack` has no
 /// behavioural signature, so that count is its only existence witness. The scanner is the
 /// one `tests/decision_scope.rs` and `tests/counter_range.rs` use; it is copied rather than
@@ -361,6 +361,13 @@ fn strip_comments(text: &str) -> String {
             }
             Mode::Str => {
                 if c == b'\\' {
+                    // A newline escaped this way still ends a source line, so it is
+                    // emitted: dropping it makes this output have fewer lines than its
+                    // input, and every scan's failure message reports a source line
+                    // number from this text (an audit measured a 14-line drift).
+                    if b.get(i + 1) == Some(&b'\n') {
+                        out.push('\n');
+                    }
                     i += 2; // skip the escaped byte (including `\"`)
                 } else if c == b'"' {
                     out.push('"');
@@ -368,6 +375,9 @@ fn strip_comments(text: &str) -> String {
                     i += 1;
                 } else {
                     // Drop the contents so no byte inside a literal is scanned.
+                    if c == b'\n' {
+                        out.push('\n');
+                    }
                     i += 1;
                 }
             }

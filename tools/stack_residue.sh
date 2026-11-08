@@ -807,6 +807,12 @@ offline_flag=""
 if cargo fetch --offline >/dev/null 2>&1; then
   offline_flag=--offline
 fi
+# `--locked` is deliberately NOT passed here: this is a throwaway project whose
+# `Cargo.toml` the block above has just written, so there is no lock file for cargo to
+# check against -- `--locked` makes cargo refuse to create one at all ("cannot create the
+# lock file ... because --locked was passed"), which turned every run into exit 3. The
+# reproducibility that matters is the parent crate's, and that is what every other cargo
+# call in this repository passes `--locked` for.
 # shellcheck disable=SC2086
 cargo run --release --quiet $offline_flag $FEATURES || rc=$?
 # The program exits 0 (clean), 1 (residue found), 4 (measurement void: one of the

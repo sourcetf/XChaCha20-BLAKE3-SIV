@@ -270,8 +270,10 @@
 //!
 //! Construction properties (buffer wiping, counter sequencing, length limits, the
 //! tag's input layout and its MAC argument shapes) are proved with Kani bounded
-//! model checking; the harnesses live in the `proofs` module and are compiled only
-//! under `cfg(kani)`.
+//! model checking over the concrete instantiations the harnesses name -- CBMC proves
+//! per instantiation, not over a symbolic length, and the `proofs` module lists which
+//! lengths it does and does not cover; the harnesses are compiled only under
+//! `cfg(kani)`.
 //!
 //! ```text
 //! cargo kani -Z stubbing
@@ -6331,6 +6333,38 @@ mod tests {
         assert!(shorter != pt);
     }
 
+    /// `Plaintext`'s `Drop` wipes the *unused capacity* as well as the bytes in use.
+    ///
+    /// The `cap > len` branch in `Drop` is defensive: the only constructor is
+    /// `decrypt`/`decrypt_bounded`, which builds the buffer with `alloc_zeroed` and
+    /// `len == cap`, so no other test reaches it. It is reached here by constructing a
+    /// `Plaintext` over a `Vec` with real spare capacity — whose tail is written with a
+    /// sentinel first, so the wipe has defined data to clear rather than uninitialized
+    /// memory. That also makes this a check and not only a coverage exercise: under Miri,
+    /// which runs this test module, the raw `zeroize_raw` call on `ptr.add(len)` is
+    /// validated for bounds and for the alignment its `usize` stores assume, and a
+    /// `cap - len` underflow or a wipe running past the allocation would be reported.
+    #[test]
+    fn test_plaintext_drop_wipes_a_spare_capacity_tail() {
+        let mut backing: Vec<u8> = Vec::with_capacity(4096);
+        backing.extend_from_slice(&[0xA7u8; 16]);
+        let spare = backing.capacity() - backing.len();
+        assert!(spare > 0, "the branch under test needs real spare capacity");
+        // SAFETY: `backing` owns `capacity()` allocated bytes; `len()` bytes are
+        // initialised and the rest are inside the same allocation, so writing the spare
+        // bytes through the raw pointer is in bounds and gives the wipe defined input.
+        unsafe {
+            core::ptr::write_bytes(backing.as_mut_ptr().add(backing.len()), 0xA7, spare);
+        }
+        let plaintext = Plaintext(backing);
+        assert_eq!(plaintext.as_slice(), &[0xA7u8; 16]);
+        assert_eq!(plaintext.len(), 16);
+        // The drop must wipe both regions and must not panic: the pointer it hands to
+        // `zeroize_raw` is deliberately unaligned (`len` is 16, the base is 16-aligned at
+        // best), which is the case the leading-byte loop in that function exists for.
+        drop(plaintext);
+    }
+
     /// A thread sized for [`stack_requirement_bytes`] survives a round trip.
     ///
     /// The constant exists because "size your threads for the scrub frame" was advice in a
@@ -6763,7 +6797,12 @@ mod tests {
     ///
     /// BLAKE3 is not vulnerable to length extension, but `A || M` on its own is
     /// ambiguous: `("ab", "c")` and `("a", "bc")` concatenate identically. The
-    /// two `u64` length fields are what prevent that, and this pins them.
+    /// two `u64` length fields are what separate them, and this test pins that the
+    /// framing is present at all: the pair below changes *both* fields together, so
+    /// it catches dropping the whole length framing, not either field on its own.
+    /// The individual fields are pinned exactly by
+    /// [`test_tag_matches_blake3_over_the_documented_input`] (all 65 tag bytes
+    /// against an independent rebuild of the documented input) and by the KATs.
     #[test]
     fn test_aad_message_split_is_unambiguous() {
         let key = [0x11u8; 32];
@@ -6790,8 +6829,8 @@ mod tests {
         assert_eq!(decrypt(&key, &nonce, b"a", &ct_b, &tag_b).unwrap(), b"bc");
         // ...and neither may authenticate under the other's split. This pair changes
         // both length fields together, so it detects dropping the whole length framing,
-        // not either field alone; the exact encoded-head test below and the KAT pin the
-        // individual fields.
+        // not either field alone; `test_tag_matches_blake3_over_the_documented_input`
+        // and the KATs pin the individual fields.
         assert!(
             decrypt(&key, &nonce, b"ab", &ct_b, &tag_b).is_err(),
             "the (\"a\", \"bc\") ciphertext authenticated under the (\"ab\", \"c\") split"

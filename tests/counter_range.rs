@@ -862,6 +862,13 @@ fn strip_comments(text: &str) -> String {
             }
             Mode::Str => {
                 if c == b'\\' {
+                    // A newline escaped this way still ends a source line, so it is
+                    // emitted: dropping it makes this output have fewer lines than its
+                    // input, and every scan's failure message reports a source line
+                    // number from this text (an audit measured a 14-line drift).
+                    if b.get(i + 1) == Some(&b'\n') {
+                        out.push('\n');
+                    }
                     i += 2; // skip the escaped byte (including `\"`)
                 } else if c == b'"' {
                     out.push('"');
@@ -869,6 +876,9 @@ fn strip_comments(text: &str) -> String {
                     i += 1;
                 } else {
                     // Replace the contents so no byte inside a literal is scanned.
+                    if c == b'\n' {
+                        out.push('\n');
+                    }
                     i += 1;
                 }
             }

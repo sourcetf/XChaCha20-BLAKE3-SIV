@@ -208,10 +208,15 @@ def main():
         return
     unknown = [arg for arg in args if arg != "--check"]
     if unknown:
-        raise SystemExit(
-            f"error: unknown argument(s) {unknown}; usage: "
-            "python3 tools/gen_test_vectors.py [--check]"
+        # "could not run" (3), not 1: a mistyped invocation is an environment/usage
+        # gap, and 1 is the code the convention reserves for a finding. `raise
+        # SystemExit(str)` printed the message but exited 1.
+        print(
+            f"could not run: unknown argument(s) {unknown}; usage: "
+            "python3 tools/gen_test_vectors.py [--check]",
+            file=sys.stderr,
         )
+        sys.exit(3)
     check = "--check" in args
     for path, text, count in ((OUT, build(), len(PAIRS)),
                               (OUT_LARGE, build_digests(), len(DIGEST_PAIRS))):

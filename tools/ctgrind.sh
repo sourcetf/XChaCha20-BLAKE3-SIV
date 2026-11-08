@@ -251,7 +251,7 @@ echo "building a static test binary..."
 rm -f "$DEPS_DIR"/ctgrind-*
 build_log="$(mktemp)"
 if ! BIN="$(RUSTFLAGS="-C target-feature=+crt-static -C strip=none -C debuginfo=2" \
-  cargo test --release --target "$TARGET" --test ctgrind --no-run --message-format=json \
+  cargo test --locked --release --target "$TARGET" --test ctgrind --no-run --message-format=json \
     "${CARGO_ARGS[@]+"${CARGO_ARGS[@]}"}" 2>"$build_log" | cargo_ctgrind_executable)"; then
   # Under `set -euo pipefail` the bare assignment used to exit with cargo's status
   # inside the command substitution, so this message never printed and cargo's
@@ -497,7 +497,7 @@ PLANT
     # binary is located by asking cargo now, so sharing a directory is not needed.
     export CARGO_TARGET_DIR="$WORK/tree/target"
     RUSTFLAGS="-C target-feature=+crt-static -C strip=none -C debuginfo=2" \
-      cargo test --release --target "$TARGET" --test ctgrind --no-run --message-format=json \
+      cargo test --locked --release --target "$TARGET" --test ctgrind --no-run --message-format=json \
       "${CARGO_ARGS[@]+"${CARGO_ARGS[@]}"}" >"$WORK/planted-build.json" 2>/dev/null )
   planted_bin="$(cargo_ctgrind_executable < "$WORK/planted-build.json")"
   [ -n "$planted_bin" ] || { echo "FAIL: no planted test binary" >&2; exit 1; }

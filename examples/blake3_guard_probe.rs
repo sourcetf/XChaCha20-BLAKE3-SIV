@@ -1,9 +1,14 @@
 //! Temporary probe for the BLAKE3 1.8.7 `hash_many` tail over-read.
 //!
 //! Place a 64-byte block at the last 64 bytes of a readable page, make the next page
-//! inaccessible, and call the public `Platform::hash_many` with 2/3/4 inputs. The
-//! reported AVX2/AVX-512 2/4-wide tail loads from `inputs[0]` at +16/+32/+48, so the
-//! guarded input should fault before the fix and run clean after it.
+//! inaccessible, and call the public `Platform::hash_many` with 2/3/4/8 inputs (the
+//! widths the AVX2/AVX-512 kernels take). The reported tail loads from `inputs[0]` at
+//! +16/+32/+48, so the guarded input faults before the fix and runs clean after it.
+//!
+//! The verdict is the process reaching its last print: a missing zero-block guard makes
+//! the load fault, which kills the process, so there is no assertion to read -- a zero
+//! exit status *is* the pass, and a crash is the failure. On a platform with no guard
+//! page the probe says so and is a smoke test only.
 
 use blake3::platform::Platform;
 use blake3::IncrementCounter;

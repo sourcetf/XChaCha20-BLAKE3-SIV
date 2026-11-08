@@ -122,7 +122,7 @@ baseline_passes() {  # <features> <test target>
       # shellcheck disable=SC2206
       args+=($1)
     fi
-    if ( cd "$dir" && CARGO_TARGET_DIR="$dir/target" cargo test "${args[@]}" ) > "$log" 2>&1; then
+    if ( cd "$dir" && CARGO_TARGET_DIR="$dir/target" cargo test --locked "${args[@]}" ) > "$log" 2>&1; then
       assert_tests_ran "$log" "baseline($key)"
       BASELINE_PASSES[$key]=yes
     else
@@ -160,7 +160,7 @@ run_row() {
   # apart by what the log says, and the environmental one is exit 3 ("could not run") -- the
   # convention the rest of this repository uses for a stage that did not happen, which
   # `verify.sh` records as a skipped stage instead of a failure.
-  if ! ( cd "$dir" && CARGO_TARGET_DIR="$dir/target" cargo test --no-run "${args[@]}" ) > "$WORK/$name.build.log" 2>&1; then
+  if ! ( cd "$dir" && CARGO_TARGET_DIR="$dir/target" cargo test --locked --no-run "${args[@]}" ) > "$WORK/$name.build.log" 2>&1; then
     if grep -qE 'No space left on device|error: could not write|ENOSPC|fatal signal 7|SIGBUS|signal: 9|SIGKILL|out of memory|Killed' "$WORK/$name.build.log"; then
       printf 'SKIPPED %-19s the build ran out of disk or was killed by the kernel, so this\n' "$name" >&2
       printf '                        row did not run -- see %s\n' "$LOG_KEEP/$name.build.log" >&2
@@ -192,7 +192,7 @@ run_row() {
   fi
 
   local got=pass
-  if ! ( cd "$dir" && CARGO_TARGET_DIR="$dir/target" cargo test "${args[@]}" ) > "$WORK/$name.log" 2>&1; then
+  if ! ( cd "$dir" && CARGO_TARGET_DIR="$dir/target" cargo test --locked "${args[@]}" ) > "$WORK/$name.log" 2>&1; then
     got=fail
   fi
   assert_tests_ran "$WORK/$name.log" "$name"

@@ -260,7 +260,7 @@ PY
   # and cargo's stderr (sent to /dev/null) was the only account of what went wrong.
   # shellcheck disable=SC2086
   if ! bin="$(cd "$dir" && CARGO_TARGET_DIR="$WORK/sensitivity/target" \
-           cargo test --release --test decision --no-run \
+           cargo test --locked --release --test decision --no-run \
              --config 'profile.release.strip=false' --message-format=json 2>"$build_log" \
          | cargo_decision_executable)"; then
     echo "FAIL: the detector sensitivity control could not build the forced-accept copy" >&2
@@ -498,7 +498,7 @@ scan() {  # label, features
   # inside the substitution, so the exit-3 classification below would be dead code and
   # cargo's exit status would leak out as the script's -- a build failure reading as a
   # verdict rather than as "could not run".
-  if ! bin="$(cargo test --release --test decision --no-run \
+  if ! bin="$(cargo test --locked --release --test decision --no-run \
            --config 'profile.release.strip=false' --message-format=json $features 2>/dev/null \
          | cargo_decision_executable)"; then
     echo "FAIL: no decision binary (cargo could not build the decision test)" >&2

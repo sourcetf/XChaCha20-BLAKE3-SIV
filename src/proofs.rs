@@ -165,9 +165,13 @@ fn zeroize_slice_clears_all_bytes() {
 /// `zeroize_array` must clear every byte of every production array type.
 ///
 /// The functional harnesses stub `zeroize_array` out so a proof does not pay for volatile
-/// stores it never reads. This harness supplies the proof of the wrapper itself, over the
-/// shapes the crate actually instantiates: 12 bytes (`enc_nonce`), 32 (`Key`), 44
-/// (`derive_enc`'s material), 65 (`TAG_LEN`) and `[u32; 16]` (the ChaCha20 state). A
+/// stores it never reads. This harness supplies the proof of the wrapper itself, but only
+/// over the concrete lengths it constructs: `[u8; 12]` (`enc_nonce`), `[u8; 32]` (`Key`),
+/// `[u8; 44]` (`derive_enc`'s material), `[u8; 65]` (`TAG_LEN`) and `[u32; 16]` (the
+/// ChaCha20 state). CBMC proves per concrete instantiation, so the crate's other
+/// instantiations are **not** covered here: `[u8; 40]` (`derive_tag`'s outer, five `usize`
+/// chunks), `[u8; 73]` (`derive_enc`'s input, nine chunks plus a byte) and `[u8; 64]`
+/// (`derive_material`'s `block0`/`block1`, and `chacha20_apply`'s scalar-tail `ks`). A
 /// proof over `[u8; 32]` alone would not say anything about the 44/65-byte tail stores.
 /// It does not and cannot prove that a call site is present -- `tests/security.rs`'s exact
 /// source-shape counts are the device for that.
@@ -315,12 +319,13 @@ fn stub_chacha20_block_into(key: &[u8; 32], counter: u32, nonce: &[u8; 12], out:
 ///
 /// Zeroization is *not* left unverified: `zeroize_slice_clears_all_bytes`,
 /// `zeroize_array_clears_all_bytes` and `zeroize_slice_clears_unaligned_window` below
-/// exercise the real implementation directly. The array harness covers five
-/// production-representative sizes (`[u8; 12]`, `[u8; 32]`, `[u8; 44]`, `[u8; 65]`,
-/// `[u32; 16]`); the crate also instantiates `[u8; 64]` (`chacha20_block_into`'s
-/// `blocks`) and `[u8; 73]` (`derive_enc`'s input), which those five sizes cover
-/// size-wise -- the harness is a proof over *lengths*, so 65 plus the tail stores
-/// already says what 73 would. The slice harness covers lengths 0..=25, including
+/// exercise the real implementation directly. The array harness covers exactly five
+/// concrete lengths (`[u8; 12]`, `[u8; 32]`, `[u8; 44]`, `[u8; 65]`, `[u32; 16]`). CBMC
+/// proves per concrete instantiation, so the crate's other instantiations are **not**
+/// covered by it: `[u8; 40]` (`derive_tag`'s outer, five `usize` chunks), `[u8; 73]`
+/// (`derive_enc`'s input, nine chunks plus a byte -- the shape no harness reaches) and
+/// `[u8; 64]` (`derive_material`'s `block0`/`block1`, and `chacha20_apply`'s scalar-tail
+/// `ks`). The slice harness covers lengths 0..=25, including
 /// multi-chunk and tail stores. What none of them prove is that a *call site* is present -- `tests/security.rs`'s
 /// exact source-shape counts are the device for that.
 fn noop_zeroize_array<T>(_value: &mut T) {}
@@ -706,8 +711,11 @@ static MODEL_BLAKE3_CALLS: AtomicUsize = AtomicUsize::new(0);
 ///     that ignored its key arguments.  What folding does *not* establish is that
 ///     the right secret reaches each internal call — the symbolic keys are
 ///     interchangeable, so a swapped `k_in`/`k_out` passes the symbolic
-///     harnesses, and `derive_enc`'s key choice is never compared with a model
-///     evaluation here.  See the shard's "two further limits" note above.
+///     harnesses.  `derive_enc`'s key choice *is* compared, at one call site: the
+///     concrete `derive_enc_matches_the_model_on_a_concrete_input` below folds
+///     `DOM_ENC || tag` under `enc_seed` with the model and requires all 44 output
+///     bytes to match, so a `derive_enc` keyed with `tag` or `k_out` instead fails
+///     it.  See the shard's "two further limits" note above.
 ///   * **Any single-byte edit to the input is visible.**  Each input byte is
 ///     mixed with its position and XORed into one accumulator slot; for a fixed
 ///     position the mix is a bijection in the byte, so changing one byte by a
@@ -738,7 +746,7 @@ static MODEL_BLAKE3_CALLS: AtomicUsize = AtomicUsize::new(0);
 /// is position-sensitive at the same cost class as the XOR it replaces.
 ///
 /// It is still not injective over *simultaneous* edits -- a 65-byte output cannot
-/// distinguish arbitrary 80-byte inputs -- and it is not BLAKE3; those limits stay
+/// distinguish arbitrary inputs longer than 65 bytes -- and it is not BLAKE3; those limits stay
 /// in the paragraph above and are why the real function is anchored to BLAKE3's
 /// official vectors.
 fn fold_byte(b: u8, position: usize) -> u8 {
@@ -748,7 +756,7 @@ fn fold_byte(b: u8, position: usize) -> u8 {
 
 /// What it deliberately does *not* model: collisions between *simultaneous*
 /// compensating edits (two different bytes landing in the same slot can still
-/// cancel, since a 65-byte output cannot distinguish 80 folded bytes injectively),
+/// cancel, since a 65-byte output cannot distinguish more than 65 folded bytes injectively),
 /// and BLAKE3's actual cryptographic strength. The fold is position-sensitive
 /// (`fold_byte`), so a plain swap of two bytes is visible; the harnesses themselves
 /// perturb one byte at a time. The second limit is the reason the real function is

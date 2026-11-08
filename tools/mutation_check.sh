@@ -145,9 +145,9 @@ PY
 run_security() {
   local dir="$1"
   ( cd "$dir" && CARGO_TARGET_DIR="$dir/target-sec" \
-      cargo test --release --test security --no-run >/dev/null 2>&1 ) || return 2
+      cargo test --locked --release --test security --no-run >/dev/null 2>&1 ) || return 2
   local status=0
-  ( cd "$dir" && CARGO_TARGET_DIR="$dir/target-sec" cargo test --release --test security >/dev/null 2>&1 ) || status=$?
+  ( cd "$dir" && CARGO_TARGET_DIR="$dir/target-sec" cargo test --locked --release --test security >/dev/null 2>&1 ) || status=$?
   if [ "$status" -eq 0 ]; then return 0; fi
   if [ "$status" -eq 101 ]; then return 1; fi
   return 2
@@ -245,9 +245,9 @@ find_valgrind() {
 run_kat() {
   local dir="$1"
   ( cd "$dir" && CARGO_TARGET_DIR="$dir/target-kat" \
-      cargo test --release --lib --no-run >/dev/null 2>&1 ) || return 2
+      cargo test --locked --release --lib --no-run >/dev/null 2>&1 ) || return 2
   local status=0
-  ( cd "$dir" && CARGO_TARGET_DIR="$dir/target-kat" cargo test --release --lib >/dev/null 2>&1 ) || status=$?
+  ( cd "$dir" && CARGO_TARGET_DIR="$dir/target-kat" cargo test --locked --release --lib >/dev/null 2>&1 ) || status=$?
   if [ "$status" -eq 0 ]; then return 0; fi
   # 101 is `cargo test`'s "a test failed". Anything else (a panic outside a test, a
   # build-step failure after `--no-run` succeeded, SIGKILL) is not evidence that the

@@ -112,7 +112,7 @@ def example_binary():
 
 def build_example(features):
     """Build the example separately, so a build failure is exit 3 and only a run failure is 1."""
-    cmd = ["cargo", "build", "--release", "--quiet", "--example", "xsiv_stdin"]
+    cmd = ["cargo", "build", "--locked", "--release", "--quiet", "--example", "xsiv_stdin"]
     if features:
         cmd += ["--features", features]
     try:

@@ -44,7 +44,7 @@ declare -A seen_hash=()   # configuration -> sha256 of the bench binary it resol
 # JSON stream rather than a glob over the deps directory: that directory holds one
 # binary per feature set, and a glob would name whichever came last.
 bench_executable() {  # extra cargo args...
-  cargo bench --offline --bench compare "$@" --no-run \
+  cargo bench --locked --offline --bench compare "$@" --no-run \
     --config 'profile.bench.strip=false' --message-format=json 2>/dev/null \
   | python3 -c '
 import json, sys
@@ -116,7 +116,7 @@ run_one() { # $1 = config name, $2 = pass, $3.. = extra cargo args
   # what was actually built and run rather than only what was intended.
   {
     echo "# configuration: $name (pass $pass)"
-    echo "# cargo bench --offline --bench compare $* -- --warm-up-time 2 --measurement-time 4"
+    echo "# cargo bench --locked --offline --bench compare $* -- --warm-up-time 2 --measurement-time 4"
     echo "# bench binary: $bin"
     echo "# sha256: $hash"
     echo "# witness:: symbols under nm -C: $witness"
@@ -124,7 +124,7 @@ run_one() { # $1 = config name, $2 = pass, $3.. = extra cargo args
     echo "#  they share one artefact; strip does not affect codegen or timing.)"
   } > "$dest"
   echo "=== $name pass $pass -> $dest (witness:: $witness symbols, sha256 ${hash:0:12}) ==="
-  taskset -c 3 cargo bench --offline --bench compare "$@" \
+  taskset -c 3 cargo bench --locked --offline --bench compare "$@" \
     --config 'profile.bench.strip=false' -- \
     --warm-up-time 2 --measurement-time 4 >> "$dest" 2>&1
   local times

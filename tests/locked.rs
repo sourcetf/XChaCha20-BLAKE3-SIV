@@ -373,6 +373,50 @@ fn fd_count() -> Option<usize> {
     std::fs::read_dir("/proc/self/fd").ok().map(|d| d.count())
 }
 
+/// A file-descriptor reading that two consecutive samples agreed on, reported as the
+/// **quietest** reading seen while waiting for them.
+///
+/// `/proc/self/fd` is process-wide, and four tests in this file (`*_by_hand`, the two
+/// `deny_debugging` cases and the drop-order case) do not take `SERIAL`, so libtest runs
+/// them on other threads while the fd assertion below is live. A single reading taken
+/// while a sibling holds a temporary descriptor reads one too high, which is why
+/// comparing one reading before against one reading after flaked (measured: about once
+/// in twenty-one parallel runs). Two things make the sample robust against that:
+///
+///   * it does not stop at one reading -- it waits (bounded) for two consecutive
+///     readings to agree, which is the quiet state rather than a moment mid-open; and
+///   * it reports the *minimum* of every reading taken, not the agreeing pair itself.
+///     A sibling's descriptor only ever adds to the count while it is held and is gone
+///     by the next quiet sample, so it cannot pull the minimum up; a descriptor this
+///     test's own code leaked is present in **every** sample and pushes the minimum to
+///     `baseline + 1`, which the caller's `assert_eq!` still catches. (Minima rather
+///     than the pair means even a sibling that churns without pause cannot raise the
+///     reported value.)
+///
+/// The retry is bounded so a stuck caller cannot hang: after `SAMPLES` attempts without
+/// two agreeing readings the minimum of what was seen is returned. A count that instead
+/// keeps *growing* (a leak per iteration) is never settled, but its first post-leak
+/// reading already exceeds the baseline, so the minimum still fails the assertion --
+/// the fail-closed side.
+fn steady_fd_count() -> Option<usize> {
+    const SAMPLES: usize = 200;
+    const DELAY: std::time::Duration = std::time::Duration::from_millis(5);
+    let mut min = fd_count()?;
+    let mut last = min;
+    for _ in 0..SAMPLES {
+        std::thread::sleep(DELAY);
+        let next = fd_count()?;
+        if next < min {
+            min = next;
+        }
+        if next == last {
+            return Some(min);
+        }
+        last = next;
+    }
+    Some(min)
+}
+
 /// The soft `RLIMIT_MEMLOCK` in **bytes**, from `/proc/self/limits`, or `None` when the file
 /// cannot be read or the limit is `unlimited`.
 ///
@@ -540,7 +584,8 @@ fn a_refused_lock_is_reported_and_returns_the_allowance() {
     };
 
     let baseline = LockedKey::locked_bytes().expect("VmLck is readable on Linux");
-    let fds_before = fd_count();
+    // A settled reading, not a single sample: see `steady_fd_count`.
+    let fds_before = steady_fd_count();
 
     if limit_bytes == 0 {
         // The other shape of the refusal, and the one the audit measured by setting the
@@ -557,7 +602,7 @@ fn a_refused_lock_is_reported_and_returns_the_allowance() {
             baseline,
             "a refused lock charged VmLck"
         );
-        if let (Some(before), Some(after)) = (fds_before, fd_count()) {
+        if let (Some(before), Some(after)) = (fds_before, steady_fd_count()) {
             assert_eq!(after, before, "a refused lock leaked a file descriptor");
         }
         eprintln!(
@@ -706,7 +751,7 @@ fn a_refused_lock_is_reported_and_returns_the_allowance() {
         LockedKey::locked_bytes().expect("VmLck is readable on Linux"),
         baseline
     );
-    if let (Some(before), Some(after)) = (fds_before, fd_count()) {
+    if let (Some(before), Some(after)) = (fds_before, steady_fd_count()) {
         assert_eq!(
             after, before,
             "the refusal path leaked a file descriptor ({before} -> {after})"
@@ -1169,6 +1214,13 @@ fn strip_comments(text: &str) -> String {
             }
             Mode::Str => {
                 if c == b'\\' {
+                    // A newline escaped this way still ends a source line, so it is
+                    // emitted: dropping it makes this output have fewer lines than its
+                    // input, and every scan's failure message reports a source line
+                    // number from this text (an audit measured a 14-line drift).
+                    if b.get(i + 1) == Some(&b'\n') {
+                        out.push('\n');
+                    }
                     i += 2; // skip the escaped byte (including `\"`)
                 } else if c == b'"' {
                     out.push('"');
@@ -1176,6 +1228,9 @@ fn strip_comments(text: &str) -> String {
                     i += 1;
                 } else {
                     // Drop the contents so no byte inside a literal is scanned.
+                    if c == b'\n' {
+                        out.push('\n');
+                    }
                     i += 1;
                 }
             }

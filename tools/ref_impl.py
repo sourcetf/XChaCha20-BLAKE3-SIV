@@ -33,6 +33,14 @@ without an external check the tag vectors below would only be validated against
 this same file. None of these three anchors is the construction glue, for the
 reason above.
 
+There is no published full (key, nonce, aad, msg, ct, tag) vector for *this*
+construction to replay: the c2sp.org ChaCha20-Poly1305-SIV vectors in `standard.txt`
+are a 32-byte-Poly1305-tag scheme this crate is deliberately not interoperable with
+(see `README.md`), and the crate's own KATs are generated from this file. So the
+composition gets a property check instead -- `self_check_composition` asserts the
+two-level NMAC is not reducible to a single keyed BLAKE3 call, which is the least a
+faithful transcription of the two-level design must satisfy.
+
 Usage:
     python3 tools/ref_impl.py           # self-checks + prints all vectors
     python3 tools/ref_impl.py --kat     # Rust-ready constants for lib.rs
@@ -256,6 +264,51 @@ def _official_input(n):
     return bytes(i % 251 for i in range(n))
 
 
+#: One fixed (key, nonce, aad, msg) for the composition property check. There is no
+#: published vector for this 65-byte-tag construction to replay (see the module
+#: docstring), so this is a property the construction must have, not a KAT.
+COMPOSITION_KEY = bytes(range(0x20))
+COMPOSITION_NONCE = bytes(range(0x20, 0x38))
+COMPOSITION_AAD = b"composition-anchor"
+COMPOSITION_MSG = b"the two levels are not one"
+
+
+def self_check_composition():
+    """The two-level NMAC is not reducible to one keyed BLAKE3 call.
+
+    The inner (message-absorbing) hash has its own key, and the outer hash turns the
+    inner *digest* -- not the raw message -- into the tag. A transcription that dropped
+    a level (absorbed the message under `k_out` directly, or keyed the whole thing with
+    `k_in`) would still produce 65 bytes, but would fail every assertion here. No
+    published vector exists to replay for this construction, so this property is the
+    composition anchor.
+    """
+    k_in, k_out, _ = derive_material(COMPOSITION_KEY, COMPOSITION_NONCE)
+    inner_msg = (
+        DOM_PRE
+        + COMPOSITION_NONCE
+        + struct.pack("<QQ", len(COMPOSITION_AAD), len(COMPOSITION_MSG))
+        + COMPOSITION_AAD
+        + COMPOSITION_MSG
+    )
+    tag = compute_tag(k_in, k_out, COMPOSITION_NONCE, COMPOSITION_AAD, COMPOSITION_MSG)
+    # A single-level reduction: absorb the whole message under k_out, prefixed by the
+    # outer domain and inner domain as one hash would.
+    flat_outer = blake3_keyed_xof(k_out, DOM_TAG + inner_msg, TAG_LEN)
+    # ... or key the single call with k_in instead of splitting the two keys.
+    flat_inner = blake3_keyed_xof(k_in, inner_msg, TAG_LEN)
+    assert tag != flat_outer, "the tag collapsed to one keyed BLAKE3 call under k_out"
+    assert tag != flat_inner, "the tag collapsed to one keyed BLAKE3 call under k_in"
+    # The inner key must reach the tag: the single-level reduction keyed only by k_out
+    # above would ignore k_in entirely, so flipping one byte of k_in must move the tag.
+    k_in_flipped = bytes([k_in[0] ^ 1]) + k_in[1:]
+    assert (
+        compute_tag(k_in_flipped, k_out, COMPOSITION_NONCE, COMPOSITION_AAD, COMPOSITION_MSG)
+        != tag
+    ), "the inner key does not reach the tag"
+    print("two-level composition: not reducible to one keyed BLAKE3 call (not a KAT)")
+
+
 def self_check():
     # Everything below is an `assert`, and `python -O` (or PYTHONOPTIMIZE) removes asserts
     # entirely: the script would then print PASS having compared nothing. `__debug__` is
@@ -290,6 +343,10 @@ def self_check():
         if got != want:
             failures.append((n, got, want))
     assert not failures, f"BLAKE3 official keyed vectors failed: {failures[:2]}"
+
+    # The construction layer has no external anchor (see the module docstring), so
+    # assert the one property a faithful two-level transcription must have.
+    self_check_composition()
 
     print("RFC 8439 / draft-irtf-cfrg-xchacha-03 / BLAKE3-official sanity checks: PASS")
     print(f"  ({len(BLAKE3_OFFICIAL_KEYED)} official BLAKE3 keyed vectors matched)\n")

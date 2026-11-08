@@ -69,7 +69,7 @@ args=(-Zbuild-std --target x86_64-unknown-linux-gnu --release --features pure)
 
 echo "=== 1/2 negative control: a deliberate race must be reported ==="
 control_rc=0
-cargo +nightly test "${args[@]}" --test threads -- --ignored deliberate_race_is_detected \
+cargo +nightly test --locked "${args[@]}" --test threads -- --ignored deliberate_race_is_detected \
   > "$out" 2>&1 || control_rc=$?
 if grep -q "WARNING: ThreadSanitizer: data race" "$out"; then
   echo "OK: the control's race was reported (the sanitizer is in the binary)"
@@ -92,7 +92,7 @@ echo "=== 2/2 the crate's own concurrent test must be clean ==="
 # "reported a race" diagnosis was dead code (measured with a fake cargo that emits a
 # warning and exits 66: the tool exited 66 with no message).
 run_rc=0
-cargo +nightly test "${args[@]}" --test threads > "$out" 2>&1 || run_rc=$?
+cargo +nightly test --locked "${args[@]}" --test threads > "$out" 2>&1 || run_rc=$?
 if grep -q "WARNING: ThreadSanitizer" "$out"; then
   echo "FAIL: ThreadSanitizer reported a race in this crate:" >&2
   grep -A20 "WARNING: ThreadSanitizer" "$out" >&2

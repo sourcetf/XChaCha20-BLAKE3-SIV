@@ -1534,9 +1534,12 @@ weight of the claims is visible:
    on.)
 
 Everything else in this document has been attacked with the tools that exist here, and the
-record shows the programme is not vacuous: three implementation defects were found and fixed by
-exactly this kind of reading (the 28-byte tag truncation, the `madvise` argument count, the
-missing `MADV_DODUMP`), one *claim* was falsified and corrected (the `2^260` collision bound,
+record shows the programme is not vacuous: four implementation defects were found and fixed by
+exactly this kind of reading (the 28-byte tag truncation in `derive_enc`, and in the `locked`
+module the wrong `madvise` arity, the wrong `MADV_DONTDUMP` value and the unaligned `madvise`
+range -- the three `locked` defects are the list the `cfg(test)` instrumentation's own doc
+records), one *claim* was
+falsified and corrected (the `2^260` collision bound,
 §4.5), and one assumption was added to the list as a result of an audit rather than being found
 missing later (L3.6, §2.1).
 

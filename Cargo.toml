@@ -48,10 +48,10 @@ getrandom = { version = "0.4", optional = true, default-features = false }
 # backends when no compiler is available for the target (`support == NoCompiler`).
 # `cargo check --no-default-features --target thumbv7em-none-eabihf` -- the way a
 # `no_std` caller consumes the crate -- is run on every push by ci.yml's `no-std`
-# job. Its default-features form, which this comment used to name, still has no
-# runner outside the author's machine. `CC=/nonexistent` (the fallback-to-Rust
-# claim) was checked by hand and also has no committed entry point: an audit
-# re-ran it (builds, identical wire output).
+# job, and its default-features form (the `hardened` decision compiled with no std)
+# and its `pure` form are built there too and by verify.sh's cross-compilation stage.
+# `CC=/nonexistent` (the fallback-to-Rust claim) was checked by hand and also has no
+# committed entry point: an audit re-ran it (builds, identical wire output).
 #
 # Two cases still need `--features pure`, and both are in the scripts/CI:
 #

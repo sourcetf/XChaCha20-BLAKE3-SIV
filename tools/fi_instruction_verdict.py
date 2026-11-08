@@ -39,10 +39,21 @@ ORDER = ["plain (no hardened)", "hardened (default)", "ultra"]
 def load(path):
     try:
         with open(path, encoding="utf-8") as fh:
-            return json.load(fh)
+            data = json.load(fh)
     except (OSError, ValueError) as exc:
         print(f"FAIL: could not read a shard report ({path}): {exc}", file=sys.stderr)
         sys.exit(3)
+    if not isinstance(data, dict):
+        # Parseable JSON in a shape this tool does not know is "could not be read" (3),
+        # not a traceback (rc 1): `r.get(...)` on a list or string raised AttributeError
+        # and replaced the diagnosis with Python internals.
+        print(
+            f"FAIL: could not read a shard report ({path}): its top level is "
+            f"{type(data).__name__}, not a JSON object",
+            file=sys.stderr,
+        )
+        sys.exit(3)
+    return data
 
 
 def main(argv=None):
@@ -81,7 +92,17 @@ def main(argv=None):
     # three labels, and every report must carry all of them.
     labels = sorted(ORDER)
     for r in reports:
-        got = sorted(r.get("configs", {}))
+        configs = r.get("configs", {})
+        if not isinstance(configs, dict):
+            # A non-object `configs` used to reach `configs.items()` below and die with
+            # AttributeError (rc 1); a shape the tool cannot read is "could not run" (3).
+            print(
+                f"FAIL: could not read a shard report: shard {r.get('shard')!r} carries "
+                f"'configs' as {type(configs).__name__}, not an object",
+                file=sys.stderr,
+            )
+            sys.exit(3)
+        got = sorted(configs)
         if got != labels:
             problems.append(
                 f"shard {r.get('shard')} reports configurations {got}; the sweep must "
@@ -95,7 +116,7 @@ def main(argv=None):
             problems.append(
                 f"shard {r.get('shard')} was written for {r.get('n')} shards, not {args.shards}"
             )
-        for label, cfg in r.get("configs", {}).items():
+        for label, cfg in configs.items():
             # Every count is a count of things that happened. A negative one cannot come
             # from the tool, and it used to be printed as-is (an audit passed
             # `accepting_total = -100` on all six shards and got `-600 accepting total`

@@ -33,9 +33,27 @@ TIME_RE = re.compile(r"^\s+time:\s+\[(\S+ \S+) (\S+ \S+) (\S+ \S+)\]")
 UNIT = {"ns": 1e-9, "µs": 1e-6, "us": 1e-6, "ms": 1e-3, "s": 1.0}
 
 
-def to_seconds(text):
-    num, unit = text.split()
-    return float(num) * UNIT[unit]
+def to_seconds(text, where=""):
+    parts = text.split()
+    if len(parts) != 2:
+        print(f"could not run: malformed time value {text!r}{where} "
+              "(want '<number> <unit>')", file=sys.stderr)
+        sys.exit(3)
+    num, unit = parts
+    if unit not in UNIT:
+        # An unknown unit used to raise a bare KeyError out of `parse` (rc 1), and a
+        # missing one a ValueError from the unpack. Either way this is a "could not run"
+        # (3), and it must never fall through to a number scaled by the wrong unit.
+        print(f"could not run: unknown time unit {unit!r} in {text!r}{where}; "
+              f"known units: {', '.join(sorted(UNIT))}", file=sys.stderr)
+        sys.exit(3)
+    try:
+        value = float(num)
+    except ValueError:
+        print(f"could not run: malformed time number {num!r} in {text!r}{where}",
+              file=sys.stderr)
+        sys.exit(3)
+    return value * UNIT[unit]
 
 
 def parse(path):
@@ -50,7 +68,9 @@ def parse(path):
         for j in range(i + 1, min(i + 4, len(lines))):
             t = TIME_RE.match(lines[j])
             if t and "%" not in lines[j]:
-                out[(m.group(1), m.group(2), int(m.group(3)))] = to_seconds(t.group(2))
+                out[(m.group(1), m.group(2), int(m.group(3)))] = to_seconds(
+                    t.group(2), f" in {path}:{j + 1}"
+                )
                 break
     return out
 

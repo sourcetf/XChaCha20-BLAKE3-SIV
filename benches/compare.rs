@@ -89,43 +89,59 @@ fn bench_encrypt(c: &mut Criterion) {
             BenchmarkId::new("xchacha20-blake3-siv", size),
             &size,
             |b, _| {
-                let mut buf = pt.clone();
-                b.iter(|| {
-                    std::hint::black_box(
-                        encrypt_in_place_detached(&key, &nonce24, aad, &mut buf).unwrap(),
-                    )
-                })
+                // `iter_batched` with a per-iteration clone, like the decrypt group below:
+                // a single `pt.clone()` outside the loop would encrypt the previous
+                // iteration's ciphertext from the second iteration on, so the timed input
+                // would stop being the plaintext the round-trip check above validated.
+                // The clone is setup, not measurement.
+                b.iter_batched(
+                    || pt.clone(),
+                    |mut buf| {
+                        std::hint::black_box(
+                            encrypt_in_place_detached(&key, &nonce24, aad, &mut buf).unwrap(),
+                        )
+                    },
+                    BatchSize::SmallInput,
+                )
             },
         );
         group.bench_with_input(
             BenchmarkId::new("xchacha20-poly1305", size),
             &size,
             |b, _| {
-                let mut buf = pt.clone();
-                b.iter(|| {
-                    // `.unwrap()` like the crate's own arm and the whole decrypt
-                    // group: without it an implementation that returned `Err`
-                    // would be timed as the error path and read as a win.
-                    std::hint::black_box(
-                        xcp.encrypt_in_place_detached(&nonce24.into(), aad, &mut buf)
-                            .unwrap(),
-                    )
-                })
+                // Per-iteration input, as in the crate's arm above.
+                b.iter_batched(
+                    || pt.clone(),
+                    |mut buf| {
+                        // `.unwrap()` like the crate's own arm and the whole decrypt
+                        // group: without it an implementation that returned `Err`
+                        // would be timed as the error path and read as a win.
+                        std::hint::black_box(
+                            xcp.encrypt_in_place_detached(&nonce24.into(), aad, &mut buf)
+                                .unwrap(),
+                        )
+                    },
+                    BatchSize::SmallInput,
+                )
             },
         );
         group.bench_with_input(
             BenchmarkId::new("chacha20-poly1305", size),
             &size,
             |b, _| {
-                let mut buf = pt.clone();
-                b.iter(|| {
-                    // `.unwrap()` for the same reason as the `xchacha20-poly1305`
-                    // arm above.
-                    std::hint::black_box(
-                        cp.encrypt_in_place_detached(&nonce12.into(), aad, &mut buf)
-                            .unwrap(),
-                    )
-                })
+                // Per-iteration input, as in the crate's arm above.
+                b.iter_batched(
+                    || pt.clone(),
+                    |mut buf| {
+                        // `.unwrap()` for the same reason as the `xchacha20-poly1305`
+                        // arm above.
+                        std::hint::black_box(
+                            cp.encrypt_in_place_detached(&nonce12.into(), aad, &mut buf)
+                                .unwrap(),
+                        )
+                    },
+                    BatchSize::SmallInput,
+                )
             },
         );
     }

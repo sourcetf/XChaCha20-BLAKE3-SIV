@@ -31,11 +31,13 @@ name: Retry a run the runner shut down
 # verdict job still requires all twenty reports per model, so coverage is unchanged: the
 # re-run replaces work an evicted runner took with it, nothing else.
 #
-# A job the runner stopped may be reported as `cancelled`, not `failure`.
-# `rerun-failed-jobs` is documented for *failed* jobs; whether it also re-runs cancelled
-# ones is not guaranteed. When a classified job is cancelled, this workflow therefore
-# uses `runs/{id}/rerun` (all jobs) instead, which definitely restores every stopped job.
-# All-jobs is more expensive, but it is only chosen for the runner-shutdown case.
+# A job the runner stopped may be reported as `cancelled` or `timed_out`, not `failure`,
+# so the job-level `if` admits all three conclusions and the job filter below classifies
+# all three. `rerun-failed-jobs` is documented for *failed* jobs; whether it also re-runs
+# cancelled or timed-out ones is not guaranteed. When a classified job has one of those
+# two conclusions, this workflow therefore uses `runs/{id}/rerun` (all jobs) instead,
+# which definitely restores every stopped job. All-jobs is more expensive, but it is only
+# chosen for the runner-shutdown case.
 #
 # The attempt bound (`run_attempt < 5`) is what keeps this from looping: GitHub increments
 # it on every re-run, so a fleet that keeps evicting runners gives up after four retries
@@ -52,8 +54,21 @@ permissions:
 
 jobs:
   rerun:
+    # `workflow_run` fires on `completed` for every conclusion, but this gate used to
+    # admit only `failure`. A run in which the evicted jobs are reported `cancelled`
+    # (the case the header above and the classifier below are both written for) then
+    # never reached the classifier at all, so the retry this workflow exists for did
+    # not fire. `timed_out` is admitted for the same reason. This does not loosen the
+    # verdict: the annotation test further down still retries only a job carrying the
+    # runner's own "received a shutdown signal" / "lost communication with the server"
+    # wording. A concurrency cancellation (a newer push supersedes the weekly run) and
+    # a `timeout-minutes`/OOM kill also conclude `cancelled`/`timed_out`, but their
+    # annotations are a bare "The operation was canceled", which is classified `other`
+    # and left red -- the fail-closed direction, unchanged.
     if: >-
-      github.event.workflow_run.conclusion == 'failure' &&
+      (github.event.workflow_run.conclusion == 'failure' ||
+       github.event.workflow_run.conclusion == 'timed_out' ||
+       github.event.workflow_run.conclusion == 'cancelled') &&
       github.event.workflow_run.run_attempt < 5 &&
       (github.event.workflow_run.event == 'schedule' ||
        github.event.workflow_run.event == 'workflow_dispatch' ||
@@ -71,9 +86,15 @@ jobs:
           set -euo pipefail
           jobs="$(mktemp)"
           # Keep the name and conclusion as well as the id. Forks are excluded by the
-          # job-level `if`; only explicit runner-shutdown wording is infra.
+          # job-level `if`; only explicit runner-shutdown wording is infra. Every
+          # conclusion that gate admits is classified here, `timed_out` included: a
+          # `timed_out` job carrying the runner's shutdown wording is infra and is
+          # retried, and one that does not (a `timeout-minutes` hit) is counted `other`
+          # below and leaves the run red -- so a budget hit is never greened by
+          # repetition, and the "every failed job carries a shutdown annotation"
+          # invariant holds for `timed_out` as it does for `failure`/`cancelled`.
           gh api --paginate "repos/$REPO/actions/runs/$RUN_ID/jobs?per_page=100" \
-            --jq '.jobs[] | select(.conclusion == "failure" or .conclusion == "cancelled") | "\(.id)\t\(.name)\t\(.conclusion)"' > "$jobs"
+            --jq '.jobs[] | select(.conclusion == "failure" or .conclusion == "cancelled" or .conclusion == "timed_out") | "\(.id)\t\(.name)\t\(.conclusion)"' > "$jobs"
           if [ ! -s "$jobs" ]; then
             echo "No failed jobs to consider."
             exit 0
@@ -117,7 +138,10 @@ jobs:
             case "$notes" in
               *"received a shutdown signal"*|*"lost communication with the server"*)
                 infra=$((infra + 1))
-                if [ "$conclusion" = "cancelled" ]; then
+                # `rerun-failed-jobs` is documented for *failed* jobs; a stopped job
+                # reported `cancelled` or `timed_out` is not a failure, so it may not be
+                # restored by that endpoint and the run needs the all-jobs `/rerun`.
+                if [ "$conclusion" = "cancelled" ] || [ "$conclusion" = "timed_out" ]; then
                   cancelled_infra=$((cancelled_infra + 1))
                 fi
                 ;;
@@ -140,9 +164,10 @@ jobs:
           fi
           if [ "$cancelled_infra" -gt 0 ]; then
             # `rerun-failed-jobs` is documented for failed jobs; a runner-stopped job
-            # can be reported as cancelled, and that endpoint is not guaranteed to
-            # restore it. `/rerun` re-runs every job, so no stopped shard is left out.
-            echo "Re-running all jobs because $cancelled_infra of $infra runner-stopped job(s) are cancelled, plus $derived derived verdict job(s) (attempt $((RUN_ATTEMPT)))."
+            # can be reported as cancelled or timed_out, and that endpoint is not
+            # guaranteed to restore either. `/rerun` re-runs every job, so no stopped
+            # shard is left out.
+            echo "Re-running all jobs because $cancelled_infra of $infra runner-stopped job(s) are cancelled/timed out, plus $derived derived verdict job(s) (attempt $((RUN_ATTEMPT)))."
             gh api -X POST "repos/$REPO/actions/runs/$RUN_ID/rerun"
           else
             echo "Re-running $infra failed job(s) stopped by the runner plus $derived derived verdict job(s) (attempt $((RUN_ATTEMPT)))."

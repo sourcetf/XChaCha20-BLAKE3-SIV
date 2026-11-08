@@ -116,7 +116,8 @@ narrow arguments, and the C library's own tests run in CI (`make test` and
 `make test_asm`). Scope of those C tests, stated rather than implied: they run the
 intrinsics and assembly kernels against the reference per input length under
 ASan/UBSan, which catches an out-of-bounds *store* or an ASan-poisoned access, but
-`test.py` allocates its inputs inside one large `malloc` with no redzone and calls
+the C harness (`c/main.c`) allocates its input and output buffers inside one large
+`malloc` with no redzone (`c/main.c:116`, `c/main.c:151`) and calls
 only a couple of `xof_many` tails, so it does **not** exercise the D-01 over-read
 boundary (the 2/4-wide tail loads that cross the last 64-byte block). That boundary
 is covered by the parent's Rust tests in `tests/blake3_fork_equivalence.rs`, whose

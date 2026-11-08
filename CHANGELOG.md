@@ -8,6 +8,128 @@ green push to `main` — which are build artefacts of that job, not construction
 
 ## Unreleased
 
+### Whole-tree re-audit (after `127d789`)
+
+No wire-format bytes changed and the AEAD behaviour is identical; every change is to the
+verification device, the tools, or documentation. Four of the findings are guards that could
+be satisfied while the property they protect was broken — each was measured that way before
+being closed.
+
+- **A documented wipe could be deadened by moving it into an expression.** A syn walk over the
+  non-test source now requires every counted wipe call to be a statement (or a statement of an
+  `if`/`match`/`loop`/`unsafe` block). Measured: replacing `derive_material`'s
+  `crate::zeroize_array(&mut subkey);` with
+  `let dead = core::hint::black_box(false); let _ = dead && { crate::zeroize_array(&mut subkey); true };`
+  — and with a plain `false`, and with `||`, a closure, a call argument or a `?`-propagated
+  value — left every other guard in `tests/security.rs` satisfied, the whole `cargo test
+  --all-features` run green and `cargo clippy -D warnings` clean, while the wipe never ran. The
+  texts those guards read (the counts, the `crate::` qualifier requirement, the
+  enclosing-attribute scans, the constant-false block scan, the closure scan) do not move when
+  a wipe becomes an operand. `the_statement_position_guard_sees_every_expression_operand_shape`
+  drives the new rule with six hostile and seven clean synthetic shapes.
+- **Constant-time equality had no guard.** `Plaintext`, `Key` and `locked::LockedKey` hand-write
+  `PartialEq` so that `==` on decrypted bytes cannot fall back to the short-circuiting slice
+  comparison — the docs say so explicitly — and nothing measured it. Measured: rewriting one body
+  as `self.0.as_slice() == other` left `tests/` (security, decision_scope, variable_latency,
+  plaintext_wipe) and `--lib` green, because `test_plaintext_eq_semantics` asserts the *answer*
+  and no timing screen here can see a few nanoseconds.
+  `every_hand_written_partial_eq_compares_in_constant_time` now requires each of the eleven
+  hand-written impls to compare through `ct_eq` and never through `==`/`!=`. It also sees the two
+  `LockedKey` impls, which no default build type-checks.
+- **Volatility had no guard.** Every wipe is `write_volatile`, which is what keeps the optimizer
+  from deleting a dead store. Measured: changing `zeroize_raw`'s leading-loop store to
+  `core::ptr::write(ptr.add(i), 0)` left `tests/` and `--lib` green (Kani proves only that the
+  bytes are zero afterwards, which a plain store also satisfies).
+  `every_wipe_store_is_volatile` now scans the ten wipe primitives — including the aarch64 NEON
+  wipe and the `witness` helpers, which no build on this host compiles — and rejects fifteen
+  non-volatile store spellings.
+- **`scrub_stack`'s entry-point count lived only in `tests/ultra.rs`**, which compiles only under
+  `--features ultra`, although `scrub_stack` runs in every build. Measured: deleting
+  `decrypt_in_place_detached`'s call left the default `cargo test` green. The count is now also
+  asserted in `tests/security.rs`, which always compiles.
+- **The guards' own bypasses closed.** A hostile review of the verification device itself found
+  three ways to satisfy it while the property was broken. (i) `constant_cfg_value` decided a
+  predicate by enumerating its atoms under a 16-atom bound, so a **17-atom** contradiction
+  (`all(feature = "p0", ..., feature = "p16", not(feature = "p0"))`) placed on `decrypt`'s
+  `check_lengths(...)?` left the blanket scan silent — measured green across the whole suite. The
+  decision now runs a three-valued (Kleene) pass with a direct polarity-conflict rule *before* the
+  enumeration, so a contradiction is decided at any length, and a predicate that is still undecided
+  is reported rather than passed: "cannot decide" fails closed, which is what the bound always
+  claimed. (ii) The statement rule now also reports a wipe that a *nested item* defines: deleting
+  `derive_material`'s `crate::zeroize_array(&mut subkey);` and leaving
+  `fn _never_called() { let mut subkey = [0u8; 32]; crate::zeroize_array(&mut subkey); }` in the same
+  body kept every count in the file at the same number, measured green, while the derived subkey was
+  never cleared. (iii) The `Choice` guard now reads `macro_rules!` token streams: a macro body is a
+  token stream rather than an expression tree, and a macro expanding to
+  `u8::conditional_select(a, b, c)` with its `use subtle::ConditionallySelectable as _;` inside the
+  same body was measured invisible to all three AST rules and to the pinned `from` count. The same
+  review's `include!`/`#[path]` evasions are already rejected by `tests/counter_range.rs`, which
+  reports both by name, so no second guard was added for them.
+- **The six other `strip_comments` copies are pinned.** Five of them had silently lost the
+  newline-preserving arm, so every scan's failure message named a source line ~14 lines early
+  (measured: a call at `src/lib.rs:3253` reported as `3239`).
+  `the_strip_comments_copies_are_one_implementation_or_a_declared_variant` compares the copies as
+  normalised text and requires the arm in all of them.
+- **Coverage floor kept green with margin.** `Plaintext`'s `Drop` wipes the bytes past `len` as
+  well as the bytes in use, a defensive branch no test reached (17 uncovered lines, because the
+  only constructor builds `len == cap`). `test_plaintext_drop_wipes_a_spare_capacity_tail`
+  executes it over a `Vec` with real spare capacity, writing a sentinel into the tail first; under
+  Miri the same test validates the deliberately unaligned raw wipe. Local line coverage over
+  `src/lib.rs`/`src/witness.rs` went from 95.14% to 95.67% on the Deep command
+  (`cargo llvm-cov --all-features --release --fail-under-lines 95 -- --skip timing`).
+- **Tools.** `--locked` was added to fifteen `cargo` invocations across seven tools
+  (`cache_profile.sh`, `ctgrind.sh`, `fi_check.sh`, `fi_instruction.sh`, `mutation_check.sh`,
+  `stack_residue.sh`, `tsan.sh`, plus the three already in `broad_differential.py`/`bench_3pass.sh`),
+  and the two sites where it is deliberately absent now say why (`check_kani_cfg.sh` injects a
+  `kani` path dependency into a copy of the manifest, `sync_blake3_upstream.sh` exists to rewrite
+  the lock). `tools/kani_shards.py`'s comment stripper is now string- and char-literal aware, and
+  the committed-harness cross-check is a hard error (exit 3) when the count cannot be read, rather
+  than a silent skip (`--no-committed-check` is the explicit opt-out the sandbox parser controls
+  use). `tools/gen_test_vectors.py`, `fi_instruction_verdict.py`, `bench_summarise.py`,
+  `sync_blake3_upstream.sh` and `build.sh` now report malformed input as "could not run" (exit 3)
+  or bad usage (exit 2) instead of a traceback or a silently ignored argument.
+- **CI.** `retry-runner-shutdown.yml` admitted only `failure` at the job level while its
+  classifier was written for `cancelled`; the job gate now also admits `timed_out`/`cancelled`,
+  and `timed_out` jobs are classified too (a `timeout-minutes` hit previously entered no
+  classifier at all, so a re-run could green it by repetition) with the cancelled/timed-out
+  infrastructure jobs routed through the all-jobs re-run. `cargo deny check` runs with `--locked`
+  in all three graphs. The `no-std` job now also *builds* `thumbv7em-none-eabihf` with default
+  features and with `--features pure` (it only checked `--no-default-features` before), and the
+  test matrix gained `--no-default-features --features pure` and `--features locked`, both also
+  compiled by `verify.sh`.
+- **Two tools that were failing for the wrong reason, both found by the re-run.** `--locked` was
+  added to `tools/stack_residue.sh`'s `cargo run` in this round, but that tool builds a throwaway
+  project whose `Cargo.toml` it has just written, so there is no lock file to check against and
+  cargo refused to create one: every run became exit 3 ("could not run"), and `verify.sh --tools`
+  then failed the stage it had been asked to perform. The flag is removed there, with the reason
+  recorded. `tools/cache_profile.sh`'s counts mode compared cachegrind counters between two runs
+  whose stack layout was left to ASLR; glibc's loader reads one byte past the initial stack's
+  string terminator when the layout puts the terminator against the `AT_RANDOM` block and indexes
+  a 256-byte class table with that random byte, which showed up as a `D1mr`/`DLmr` difference
+  (3019 vs 3004) and failed the tool on unchanged source. Counts mode now runs under
+  `setarch --addr-no-randomize` like the trace mode already did, and answers exit 3 when the host
+  cannot pin the layout. Its self-test runs the planted-leak copy with the layout left free, so
+  the verdict it requires is the planted table's and not the loader's.
+- **A test that could not fail.** `tests/locked.rs` compared the `/proc/self/fd` count before and
+  after with `assert_eq!`, which flakes (~1 run in 21) because four tests in the same file open
+  descriptors concurrently; it now samples until two consecutive readings agree and compares the
+  window's minimum, which still fails on a real leak.
+- **Docs corrected.** Stale line references: the two `Choice::from(1)` sites (`src/lib.rs:3598` in
+  `decrypt`, `:3882` in `decrypt_in_place_detached`), the keyed-seam `zeroize` sites
+  (`2267-2268`, `2879-2880`), the planted `scrub_stack` line, `deep.yml`'s deny step, the four
+  `cpufeatures::new!` sites, the AVX2 detection range; README's fork counts (46 default-feature
+  tests, 47 with `zeroize`) and its "seven third-party reports"; SECURITY.md's name for the third
+  tolerated secret-dependent branch (the `witness` module's `Choice`/`Result` handling, not a
+  "fold"); `proofs.rs`'s leftover "80-byte" figures; the crate header's Kani sentence, now scoped
+  to per-instantiation coverage; and SECURITY-ANALYSIS's "three implementation defects" list, now
+  the four `lib.rs` records (three of them in `locked`). `blake3/PATCHES.md` attributes the C
+  harness's `malloc` calls to `c/main.c` rather than to `test.py`.
+- **Benchmarks.** `benches/compare.rs`'s three in-place arms now use `iter_batched` with a fresh
+  plaintext per iteration; they previously encrypted the previous iteration's ciphertext from the
+  second iteration on, so the timed input was not the one the round-trip check validates.
+  `examples/blake3_guard_probe.rs` documents that its verdict is the process surviving (a missing
+  zero-block guard faults and kills it) and lists the widths it actually calls (2/3/4/8).
+
 ### AUDIT-REPORT-4 follow-up (full re-scan after `5bec10a`)
 
 No wire-format bytes changed and the AEAD behaviour is identical; the production changes are
@@ -112,8 +234,8 @@ or their documentation, not in the construction.
   `guts::ChunkState::new(k).finalize(true)` at `k != 0`.
   `blake3/src/test.rs::test_root_hash_ignores_the_chunk_counter` pins
   `ChunkState::new(k).finalize(true) == hash(input)` for `k ∈ {0,1,2,7,2^32,u64::MAX}`. The
-  fork's own suite is therefore 45 default-feature tests + 13 doctests (46 + 13 with
-  `zeroize`), one more than the 44/45 quoted in the earlier entries below.
+  fork's own suite is therefore 46 default-feature tests + 13 doctests (47 + 13 with
+  `zeroize`), two more than the 44/45 quoted in the earlier entries below.
 
 ### AUDIT-REPORT-6 follow-up (after `a45c0d3`)
 
@@ -323,7 +445,7 @@ commands; the dispositions are in `AUDIT-RESPONSE.md` §6. Two items were action
   `licenses` (the fuzz crate unlicensed; `libfuzzer-sys`'s `(MIT OR Apache-2.0) AND NCSA` not
   allowed). `ci.yml` and `verify.sh --deny` were fixed for this in `8ba999e`; **`deep.yml` was not**,
   and its run is the one the release job polls, so the two graphs' policy failures had nowhere left
-  to surface. Both jobs now cover all three graphs (`deep.yml:375-405`), mirroring `ci.yml`; all
+  to surface. Both jobs now cover all three graphs (`deep.yml:422-426`), mirroring `ci.yml`; all
   three answer `advisories ok, bans ok, licenses ok, sources ok`.
 - **`subtle` is the report's only item in the shipped closure, so its premise is now guarded**
   (F-03). `Choice`'s 0/1 invariant is a `debug_assert!`: in a release build `Choice::from(x)` accepts
@@ -363,7 +485,7 @@ commands; the dispositions are in `AUDIT-RESPONSE.md` §6. Two items were action
   `XCR0` bits) — gates no CPU without leaf 7 can satisfy, since XSAVE and AVX both postdate it. The
   five features `cpufeatures` *could* mis-detect from an out-of-range leaf (`bmi1`, `bmi2`, `adx`,
   `sha`, `sgx`) are queried nowhere in the graphs. An unconditional `cpuid(7)` is architecturally
-  defined, not UB, and this crate's own AVX2 detection (`src/lib.rs:4399-4490`) checks the maximum
+  defined, not UB, and this crate's own AVX2 detection (`src/lib.rs:4447-4501`) checks the maximum
   basic leaf itself.
 - **No new fork.** Each candidate fails for a reason the `blake3/` fork's own history makes explicit:
   that fork exists because *shipped* code needed patches. `cipher` is benchmark-only and unreachable;
@@ -408,7 +530,7 @@ its three negative controls for the `Choice` guard matched the ones this round r
   deleting the alias rule and watching it go red.
 - **The guard's failure message named a site that does not exist** (F-02): it called the
   second literal-`1` construction "the witness's `ultra`-off operand", but `src/witness.rs` has
-  no `Choice::from` at all. Both are in `src/lib.rs` (`:3550`, `:3834`); the message now names
+  no `Choice::from` at all. Both are in `src/lib.rs` (`:3598`, `:3882`); the message now names
   them, and the count it pins is per file (2 and 0).
 - **`tests/common/mod.rs` now exists** (F-03). This file's previous entry said the six copies
   "call the robust scanner"; they were seven byte-identical copies with no shared function —
@@ -471,9 +593,10 @@ committed differential vectors and all **9** large-fixture digests, byte for byt
   rlib — so a healthy tree failed "expected host artifact missing, stale, or not an rlib"
   (measured: one `blake3/c/blake3_sse2.o` was enough). The scan now excludes those paths.
 - **`tools/fi_check.sh` copied the tree twice per row and carried `blake3/target`** (553 MiB of the
-  fork's build cache): ~17 rows × 2 × 553 MiB of I/O, and a full disk turned the *copy* into "the
-  mutated tree does not build" — an environment failure reported as a verdict. One copy now, with
-  the target directory removed, as `tools/mutation_check.sh` already did.
+  fork's build cache): 14 rows plus five cached baselines, each copying that 553 MiB *twice* per
+  row — and a full disk turned the *copy* into "the mutated tree does not build", an environment
+  failure reported as a verdict. One copy now, with the target directory removed, as
+  `tools/mutation_check.sh` already did.
 - **`tools/tsan.sh` answered `exit 1` for a missing toolchain** where the repository's convention is
   `3` ("could not run": `ctgrind.sh`, `cache_profile.sh`, `fi_check.sh`, `stack_residue.sh`), so
   `verify.sh` reported a missing nightly as a failure rather than a skip. It answers 3 now — and an

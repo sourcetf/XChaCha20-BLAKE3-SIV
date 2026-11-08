@@ -14,7 +14,7 @@ decision it describes has changed shape.
 This script is the enforcement. It compares two evidence directories — the committed one
 and the one the current run just produced — on the only fields that carry meaning:
 
-    (function name, mutation genre, replacement, occurrence within that function)
+    (function name, mutation genre, replacement, occurrence within that triple)
         -> outcome (CaughtMutant / Unviable / MissedMutant / Timeout)
 
 and deliberately not on the fields that move every run: line and column numbers,
@@ -23,6 +23,12 @@ whenever a line is added anywhere above a mutant, so comparing them would fail o
 unrelated edit and the gate would be deleted within a week. The consequence is stated
 rather than hidden: the committed directory's coordinates are the run's, not HEAD's,
 and a reader following them lands in the wrong place.
+
+The key above is exactly what `load` builds, so where this text and the code could
+disagree the *code* is authoritative. The occurrence is a 1-based count of earlier
+mutants sharing the same (function, genre, replacement), numbered in the order the run
+reports them (`outcomes.json`'s list order, which cargo-mutants emits in name order) --
+not re-sorted here.
 
 Usage:
     tools/mutation_evidence.py COMMITTED_DIR FRESH_DIR
@@ -120,10 +126,12 @@ def load(directory):
             sys.exit(EXIT_COULD_NOT_RUN)
 
         function = (mutant.get("function") or {}).get("function_name", "?")
-        # Occurrence index within (function, genre, replacement), ordered by line: this is
-        # what disambiguates two mutations that produce identical descriptions in one
+        # Occurrence index within (function, genre, replacement): this is what
+        # disambiguates two mutations that produce identical descriptions in one
         # function (two `&` -> `^` on different lines), without depending on the line
-        # number itself.
+        # number itself. The index counts earlier mutants with the same triple in the
+        # order `outcomes.json` reports them -- this code does not re-sort by line, so
+        # the report's order is what the key encodes (the docstring above follows this).
         base = (function, mutant.get("genre", "?"), mutant.get("replacement", "?"))
         index = seen.get(base, 0)
         seen[base] = index + 1

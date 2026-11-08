@@ -1202,8 +1202,8 @@ dependent crate:
   rejects more than one chunk; `Output::root_hash` drives a root compression from the
   output-block counter (0 for the first block), not the node's chunk counter; and
   `copy_wide`'s stack buffer is 16 KiB instead of 64 KiB. The fork also vendors upstream's
-  `reference_impl` and test vectors, so its own 45 default-feature tests and 13 doctests
-  run in CI (46 unit tests with `zeroize`; the source also has feature-gated tests).
+  `reference_impl` and test vectors, so its own 46 default-feature tests and 13 doctests
+  run in CI (47 unit tests with `zeroize`; the source also has feature-gated tests).
 
 The C library is patched too: `blake3/c/blake3_dispatch.c` keeps only complete SIMD
 groups on the AVX2/AVX-512 kernels and sends tails to SSE/portable, the unix compress
@@ -1233,7 +1233,7 @@ tests/                      differential vectors and their replay
 tools/ref_impl.py           independent Python reference implementation
 tools/gen_test_vectors.py   fixture generator for the differential vectors
 tools/kani_shards.py        derives the CI proof shards from src/proofs.rs
-AUDIT-RESPONSE.md           the disposition of the five third-party audit reports:
+AUDIT-RESPONSE.md           the disposition of the seven third-party audit reports:
                             what was fixed (with commits) and what was not, and why
 SECURITY-ANALYSIS.md        the security argument: assumptions, reductions, bounds,
                             attack classes, and what would falsify each claim

@@ -162,6 +162,11 @@ echo "no stray #[kani::proof] outside src/proofs.rs"
 # rejection rules get a control of their own. Each shape below once inflated the count
 # while leaving the harness uncompiled: a cfg above or below the marker (including one
 # separated by a comment), and a harness inside a block comment.
+#
+# These controls copy `kani_shards.py` alone into a sandbox, so the gate file this
+# script's own count is cross-checked against is absent there. That is exactly what
+# `--no-committed-check` is for; without it the parser refuses (exit 3) on a missing
+# gate, which is the intended behaviour everywhere else.
 "$PYTHON" - "$ROOT/tools/kani_shards.py" <<'PY'
 import os
 import shutil
@@ -212,7 +217,8 @@ for name, source, ok, expected in cases:
         with open(os.path.join(root, "src", "proofs.rs"), "w", encoding="utf-8", newline="\n") as fh:
             fh.write(source)
         proc = subprocess.run(
-            [sys.executable, os.path.join(root, "tools", "kani_shards.py"), "--count"],
+            [sys.executable, os.path.join(root, "tools", "kani_shards.py"), "--count",
+             "--no-committed-check"],
             capture_output=True,
             text=True,
         )
@@ -236,6 +242,9 @@ echo "type-checking #[cfg(kani)] harnesses against a no-op Kani shim..."
 # so the branch taken was the "no errors" one and the script printed PASS while
 # printing the compile errors directly above it. The control in the commit message
 # (reverting the fix) is what caught that.
+# `--locked` is deliberately absent: this script injects a `kani = { path = ... }`
+# dependency into a copy of Cargo.toml (above), so the copied Cargo.lock is stale by
+# construction and `--locked` would fail every run. Do not add it here.
 set +e
 out="$(RUSTFLAGS="--cfg kani" cargo check --release --quiet 2>&1)"
 status=$?
@@ -277,6 +286,8 @@ fn _kani_compile_control() -> u8 {
 """
 open(p, "w", encoding="utf-8", newline="\n").write(plant)
 PLANTEOF
+# No `--locked` here for the same reason as the check above: the control tree also
+# carries the injected `kani` path dependency, so its lock is stale by construction.
 set +e
 ( cd "$CONTROL" && RUSTFLAGS="--cfg kani" cargo check --release --quiet >/dev/null 2>&1 )
 control_status=$?

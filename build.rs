@@ -85,8 +85,12 @@ fn main() {
 /// specific way" is not what this check is for, and the earlier fix for
 /// `[dependencies."blake3"]` was the same class.
 fn path_is_the_vendored_fork(value: &str) -> bool {
-    let v = unquote(value.trim());
-    let v = v.strip_prefix("./").unwrap_or(v);
+    let mut v = unquote(value.trim());
+    // Every leading `./`, not one: `././blake3` is the same path to cargo (measured; the
+    // first version stripped a single prefix and refused it).
+    while let Some(rest) = v.strip_prefix("./") {
+        v = rest;
+    }
     v.trim_end_matches('/') == "blake3"
 }
 
@@ -320,29 +324,48 @@ fn closing_brackets(s: &str) -> i32 {
 
 /// The string value of `key` in an inline table such as `{ version = "1", path = "blake3" }`.
 /// The key must start at a delimiter, so `apathetic = "x"` cannot answer for `path`.
+/// The value of `key` in an inline table (`{ version = "…", path = "…" }`), if present.
+///
+/// **String-literal aware**: `note = ' path = "blake3"'` carries the *text* of a `path`
+/// key inside a value, and a scan that matched it accepted a manifest whose `blake3` edge
+/// has no `path` at all — measured on a copy, where cargo treats `note` as an unknown key
+/// (a warning) and resolves the registry crate while this check stayed quiet. Both TOML
+/// string forms are recognised, because cargo reads `'…'` and `"…"` as the same path.
 fn inline_value(table: &str, key: &str) -> Option<String> {
-    let mut from = 0usize;
-    while let Some(i) = table[from..].find(key) {
-        let at = from + i;
-        let starts_word =
-            at == 0 || matches!(table.as_bytes()[at - 1], b' ' | b',' | b'{' | b'(' | b'\t');
-        let rest = table[at + key.len()..].trim_start();
-        if starts_word {
-            if let Some(rest) = rest.strip_prefix('=') {
-                let rest = rest.trim_start();
-                // Both string forms: TOML's basic `"…"` and literal `'…'`, which cargo reads
-                // as the same path. Accepting only the first made `path = 'blake3'` look
-                // like a missing `path`.
-                for quote in ['"', '\''] {
-                    if let Some(rest) = rest.strip_prefix(quote) {
-                        if let Some(end) = rest.find(quote) {
-                            return Some(rest[..end].to_string());
+    let b = table.as_bytes();
+    let k = key.as_bytes();
+    let mut i = 0usize;
+    while i < b.len() {
+        // Skip over a string literal (either quote form), escapes included: nothing inside
+        // one is a key.
+        if b[i] == b'"' || b[i] == b'\'' {
+            let quote = b[i];
+            i += 1;
+            while i < b.len() && b[i] != quote {
+                i += if b[i] == b'\\' { 2 } else { 1 };
+            }
+            i = i.saturating_add(1);
+            continue;
+        }
+        if b[i..].starts_with(k) {
+            let starts_word = i == 0 || matches!(b[i - 1], b' ' | b',' | b'{' | b'(' | b'\t');
+            let rest = table[i + k.len()..].trim_start();
+            if starts_word {
+                if let Some(rest) = rest.strip_prefix('=') {
+                    let rest = rest.trim_start();
+                    for quote in ['"', '\''] {
+                        if let Some(rest) = rest.strip_prefix(quote) {
+                            if let Some(end) = rest.find(quote) {
+                                return Some(rest[..end].to_string());
+                            }
                         }
                     }
                 }
             }
+            i += k.len();
+            continue;
         }
-        from = at + key.len();
+        i += 1;
     }
     None
 }

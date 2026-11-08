@@ -25,13 +25,18 @@
 #         3 a required tool is missing
 set -euo pipefail
 
+# Every external command invoked below is checked up front, so a missing one is exit 3
+# ("a required tool is missing") rather than a bare 127 under `set -e`, or a silent
+# `|| true`/`&&` continuation that writes a misleading branch. `python3`/`python` is
+# checked separately after this because of its fallback.
+for tool in curl git cargo tar sed awk sort head tail sha256sum mktemp diff find cp \
+            rm mkdir cat grep cut dirname; do
+  command -v "$tool" >/dev/null || { echo "error: $tool is required" >&2; exit 3; }
+done
+
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
-command -v curl >/dev/null || { echo "error: curl is required" >&2; exit 3; }
-command -v git >/dev/null || { echo "error: git is required" >&2; exit 3; }
-command -v cargo >/dev/null || { echo "error: cargo is required" >&2; exit 3; }
-command -v tar >/dev/null || { echo "error: tar is required" >&2; exit 3; }
 PYTHON="python3"
 if ! "$PYTHON" -c 'print(1)' >/dev/null 2>&1; then
   PYTHON="python"
@@ -241,6 +246,9 @@ EOF
 
 # Keep the path-package locks coherent with the imported version. `cargo metadata`
 # resolves without compiling; the parent and fuzz locks both name the path package.
+# `--locked` is deliberately absent: this branch has just imported a newer blake3 and
+# rewritten the version annotation, so Cargo.lock is *expected* to be stale -- the whole
+# point of this step is to rewrite it, and `--locked` would refuse. Do not add it here.
 cargo metadata --format-version 1 >/dev/null
 cargo metadata --manifest-path fuzz/Cargo.toml --format-version 1 >/dev/null
 
