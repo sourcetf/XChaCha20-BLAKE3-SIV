@@ -454,11 +454,22 @@ fn the_vendored_fork_is_wired_in_by_path() {
     // resolver itself, so it cannot be fooled by a comment, a reformatted inline table or a
     // spelling this file's scanner does not know. A `path` dependency has `source: null`;
     // a registry dependency carries `source: "registry+…"`.
+    //
+    // `--no-deps` is load-bearing, and it is what makes this deterministic. Without it,
+    // `cargo metadata` reads the manifest of *every* package in the resolved graph --
+    // including the bench-only `criterion` tree -- so each of those crates has to be in the
+    // local registry cache, and the same command then passes on a warm cache and fails
+    // offline on a cold one. Measured in CI: a fresh test-matrix leg could not download
+    // `crunchy v0.2.4` (via `criterion` -> `half`), so this assertion failed while every
+    // other target in the same leg passed. With `--no-deps` cargo reads this workspace's
+    // own manifest and nothing else, and both `blake3` edges are still reported -- as
+    // *dependency* objects of this package, which is the form matched below.
     let metadata = std::process::Command::new(env!("CARGO"))
         .args([
             "metadata",
             "--locked",
             "--offline",
+            "--no-deps",
             "--format-version",
             "1",
             "--manifest-path",
@@ -468,20 +479,17 @@ fn the_vendored_fork_is_wired_in_by_path() {
         .expect("`cargo metadata` must be runnable from a test (CARGO is always set)");
     assert!(
         metadata.status.success(),
-        "`cargo metadata --locked --offline` failed: {}",
+        "`cargo metadata --locked --offline --no-deps` failed: {}",
         String::from_utf8_lossy(&metadata.stderr)
     );
     let json = String::from_utf8(metadata.stdout).expect("metadata is UTF-8");
-    // A *package* object opens `{"name":"blake3","version":…}`; a dependency object is
-    // `{"name":"blake3","source":…}`. Matching the former keeps this from reading the
-    // registry `blake3` out of some other package's dependency list.
+    // A dependency object is `{"name":"blake3","source":…}`. The vendored fork is excluded
+    // from the workspace, so a *package* object for it (`"name":"blake3","version"`) does
+    // not appear under `--no-deps` at all: every match below is one of this crate's own
+    // edges, and there are exactly two of them (normal + dev).
     let mut blake3_sources: Vec<String> = Vec::new();
-    for part in json.split("\"name\":\"blake3\",\"version\"").skip(1) {
-        let window = &part[..part.len().min(4096)];
-        let Some(rest) = window.split("\"source\":").nth(1) else {
-            continue;
-        };
-        let value = rest.trim_start();
+    for part in json.split("\"name\":\"blake3\",\"source\":").skip(1) {
+        let value = part.trim_start();
         if value.starts_with("null") {
             blake3_sources.push("<path>".to_string());
         } else {
@@ -489,9 +497,13 @@ fn the_vendored_fork_is_wired_in_by_path() {
             blake3_sources.push(value[..end].trim().trim_matches('"').to_string());
         }
     }
-    assert!(
-        !blake3_sources.is_empty(),
-        "`cargo metadata` reported no `blake3` package at all; the dependency edge is gone"
+    assert_eq!(
+        blake3_sources.len(),
+        2,
+        "`cargo metadata` reported {} `blake3` edge(s) ({blake3_sources:?}), expected the two \
+         this workspace declares (normal + dev). The fork is excluded from the workspace, so \
+         a *registry* `blake3` pulled in by some other package cannot be what is counted here.",
+        blake3_sources.len()
     );
     for src in &blake3_sources {
         assert_eq!(

@@ -97,6 +97,19 @@ being closed.
   features and with `--features pure` (it only checked `--no-default-features` before), and the
   test matrix gained `--no-default-features --features pure` and `--features locked`, both also
   compiled by `verify.sh`.
+- **The two new CI matrix legs failed on their first run — which is what they were for.**
+  `test (release, no default features with pure)` and `... with locked` reported
+  `cargo metadata --locked --offline` failing to download `crunchy v0.2.4`: the wiring check in
+  `tests/blake3_fork_equivalence.rs` asked for the **whole** resolved graph, so it needed every
+  crate in the lock -- including the bench-only `criterion` -> `half` -> `crunchy` tree -- to be
+  present in the local registry cache, and a fresh matrix leg starts with a cold one. The check
+  now runs `cargo metadata --locked --offline --no-deps`, which reads this workspace's own
+  manifest and nothing else; the fork is excluded from the workspace, so the two `blake3`
+  *dependency* objects it matches are necessarily this crate's own edges, and the assertion now
+  requires exactly two path-sourced edges rather than merely that no edge is registry-sourced.
+  Measured: both legs green (all nine feature combinations locally), and removing a `path` key
+  still fails -- cargo itself refuses a manifest whose two `blake3` edges disagree on their
+  source path.
 - **Two tools that were failing for the wrong reason, both found by the re-run.** `--locked` was
   added to `tools/stack_residue.sh`'s `cargo run` in this round, but that tool builds a throwaway
   project whose `Cargo.toml` it has just written, so there is no lock file to check against and
