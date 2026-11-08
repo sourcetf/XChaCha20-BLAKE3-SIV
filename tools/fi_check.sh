@@ -59,8 +59,16 @@ trap 'rc=$?; if [ "$rc" -eq 0 ]; then rm -rf "$WORK"; else echo "fault-campaign 
 # has to come along or the manifest does not resolve at all.
 copy_tree() {
   mkdir -p "$1"
-  cp -r src tests benches blake3 Cargo.toml Cargo.lock build.rs "$1/" 2>/dev/null || true
+  # One copy, and it must succeed: this recipe's exit status is the row's `build failed`
+  # verdict, so a silent `|| true` here would report a half-copied tree as a build failure
+  # instead of an environment one.
   cp -r src tests benches blake3 Cargo.toml Cargo.lock build.rs "$1/"
+  # `blake3/target` is the fork's own build cache (553 MiB here), not a source: without this
+  # every row carries its own copy, ~17 rows × 2 (the second `cp` this recipe used to run)
+  # × 553 MiB of I/O, and a full disk turns the *copy* into "the mutated tree does not
+  # build" -- an environment failure reported as a verdict, which is the one direction this
+  # tool refuses. `tools/mutation_check.sh` deletes the same directory for the same reason.
+  rm -rf "$1/blake3/target"
 }
 
 # Require the run's log to show that tests actually ran.

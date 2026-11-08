@@ -304,7 +304,11 @@ ok "host release (default + rng)"
 record "build: host release x2"
 
 if [ "$FAST" -eq 0 ]; then
-  if rustup target list --installed 2>/dev/null | grep -qx aarch64-unknown-linux-musl; then
+  # A here-string, not a pipe: `grep -q` exits at the first match, which under `pipefail`
+  # closes the pipe on rustup and turns a present target into an absent one (the same trap
+  # `ensure_target` documents above).
+  installed_targets="$(rustup target list --installed 2>/dev/null || true)"
+  if grep -qx aarch64-unknown-linux-musl <<< "$installed_targets"; then
     # The musl target links with the toolchain's own rust-lld against a
     # self-contained libc.a, so no cross C toolchain is needed.
     # `--features pure`: BLAKE3's C kernels would need a cross C toolchain.
@@ -406,7 +410,17 @@ TARGET_DIR="${CARGO_TARGET_DIR:-target}"
 HOST_ARTIFACT="$TARGET_DIR/release/libxchacha20_blake3_siv.rlib"
 stale_input=""
 if [ -f "$HOST_ARTIFACT" ]; then
-  stale_input="$(find src blake3 Cargo.toml Cargo.lock -type f -newer "$HOST_ARTIFACT" -print -quit 2>/dev/null || true)"
+  # `blake3/` holds generated files as well as inputs: the fork's own `target/` and the C
+  # harness's `*.o` and `blake3` binary land there when `verify.sh --tools` (or a manual
+  # `make -f Makefile.testing test`) runs, and `make` writes them *after* the rlib cargo
+  # built, so they are newer without being inputs. Counting them made this check fail on a
+  # healthy tree (measured: one `blake3/c/blake3_sse2.o` was enough). The sources, the
+  # manifests and the locks are what cargo rebuilds on.
+  stale_input="$(find src blake3 Cargo.toml Cargo.lock -type f \
+    -not -path 'blake3/target/*' \
+    -not -path 'blake3/c/*.o' \
+    -not -path 'blake3/c/blake3' \
+    -newer "$HOST_ARTIFACT" -print -quit 2>/dev/null || true)"
 fi
 # ...and it has to *be* an rlib: an existence check alone accepted any file, including the
 # 46-byte text file an audit planted at this path.

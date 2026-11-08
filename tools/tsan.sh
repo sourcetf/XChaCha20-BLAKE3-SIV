@@ -36,23 +36,29 @@ export PATH="$HOME/.cargo/bin:$PATH"
 # `rustup component list --installed` answers for the default toolchain and used to
 # turn "rustup is not on PATH" into "rust-src is not installed" (and would pass on a
 # machine whose default toolchain has rust-src while nightly does not).
+#
+# Exit 3, not 1: a missing toolchain is "could not run", which is the code the repository
+# reserves for that (ctgrind.sh, cache_profile.sh, fi_check.sh, stack_residue.sh all answer
+# 3 for the same reason) and which verify.sh maps to SKIPPED -- a caller that explicitly
+# asked for `--tsan` still gets a failure, because an explicitly named stage that did not
+# run is fatal there.
 if ! command -v rustup >/dev/null 2>&1; then
-  echo "FAIL: rustup is not on PATH, so the nightly toolchain and rust-src cannot be" >&2
-  echo "  checked; run this where rustup is available." >&2
-  exit 1
+  echo "tsan: rustup is not on PATH, so the nightly toolchain and rust-src cannot be" >&2
+  echo "  checked; run this where rustup is available (exit 3: could not run)." >&2
+  exit 3
 fi
 if ! cargo +nightly --version >/dev/null 2>&1; then
-  echo "FAIL: the nightly toolchain is required for -Zbuild-std; run:" >&2
-  echo "  rustup toolchain install nightly" >&2
-  exit 1
+  echo "tsan: the nightly toolchain is required for -Zbuild-std; run `rustup toolchain" >&2
+  echo "  install nightly` (exit 3: could not run)." >&2
+  exit 3
 fi
 # `grep -q` exits at the first match, which used to close the pipe under `pipefail` and
 # make `rustup` die with SIGPIPE (141) -- the same trap verify.sh's tool preflight
 # documents. A here-string lets rustup finish writing.
 if ! grep -q '^rust-src' <<< "$(rustup component list --installed --toolchain nightly 2>/dev/null)"; then
-  echo "FAIL: the nightly toolchain's rust-src component is required for -Zbuild-std; run:" >&2
-  echo "  rustup component add rust-src --toolchain nightly" >&2
-  exit 1
+  echo "tsan: the nightly toolchain's rust-src component is required for -Zbuild-std; run:" >&2
+  echo "  rustup component add rust-src --toolchain nightly (exit 3: could not run)." >&2
+  exit 3
 fi
 
 out="$(mktemp)"

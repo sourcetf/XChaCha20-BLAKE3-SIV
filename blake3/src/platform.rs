@@ -605,11 +605,15 @@ impl Platform {
             // The current assembly implementation always outputs at least 1 block.
             return;
         }
-        // The unix AVX-512 `xof_many` multi-block path does not zero-extend
-        // `block_len`/`flags` before using them, so dirty high bits in those ABI
-        // arguments produce wrong output blocks. The single-block path is correct.
-        // Keep the assembly for the one-block case and use the documented Rust
-        // construction for every multi-block request.
+        // The unix AVX-512 `xof_many` multi-block path used to leave `block_len`/`flags`
+        // un-zero-extended, so dirty high bits in those ABI arguments produced wrong output
+        // blocks; the fork's D-03 work added the `movzx` at exactly those sites
+        // (`c/blake3_avx512_x86-64_unix.S:2696`, `:3631`, `:4517`), so that reason no longer
+        // holds -- this comment kept it after the fix, and PATCHES.md's D-02 row already says
+        // so. The Rust construction is kept deliberately: it is correct either way, it avoids
+        // a second code path, and the C library's `blake3_xof_many` still uses that assembly,
+        // where the `movzx` is what makes it safe. Only the single-block case calls the
+        // assembly here.
         if out.len() > BLOCK_LEN {
             let mut counter = counter;
             for out_block in out.chunks_exact_mut(BLOCK_LEN) {

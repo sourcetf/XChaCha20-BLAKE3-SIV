@@ -1111,8 +1111,11 @@ works unprivileged, and the emulator is extracted into `~/.local/bin`.
   that memcheck does not report, and the guard meant to catch that was satisfied
   by unrelated startup noise.
 - **Fuzzing** — `fuzz/fuzz_targets/roundtrip.rs` under `cargo-fuzz` + libFuzzer +
-  AddressSanitizer, asserting round-trip correctness, rejection of every
-  single-bit corruption, and the wipe-on-failure contract.
+  AddressSanitizer, asserting round-trip correctness, rejection of **a sampled**
+  single-bit corruption (one (position, bit) per input, from the fuzzer's bytes;
+  the exhaustive cover is the property test in `tests/security.rs` -- an earlier
+  revision of this line said "every single-bit corruption", which the sampling
+  cannot claim), and the wipe-on-failure contract.
 - **Dependency hygiene** — `cargo deny check` (advisories, licences, bans,
   sources) over the default non-dev graph, plus `cargo-audit` over the lock
   files (which is what reaches the dev/optional crates `cargo-deny`'s graph

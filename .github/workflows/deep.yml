@@ -1108,7 +1108,10 @@ jobs:
           tool: cargo-fuzz@0.13.2
 
       # Bounded rather than indefinite: the scheduled run is the soak. The target
-      # asserts round-trip correctness, rejection of every single-bit corruption,
+      # asserts round-trip correctness, rejection of **a sampled** single-bit corruption
+      # (one (position, bit) per input, chosen from the fuzzer's bytes -- the exhaustive
+      # cover is the property test in `tests/security.rs`, and this comment used to say
+      # "every single-bit corruption", which is what sampling is not),
       # and the wipe-on-failure contract, so a failure is a defect.
       #
       # `--target` is not optional. cargo-fuzz's default target is

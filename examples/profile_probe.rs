@@ -63,9 +63,19 @@ fn main() {
     let aad = b"aad";
     let pt: Vec<u8> = (0..size).map(|i| (i % 251) as u8).collect();
 
-    // Warm up the AVX2 cache and the allocator, then measure the allocating API.
-    let (warm_ct, _warm_tag) = encrypt(&key, &nonce, aad, &pt).expect("encrypt");
+    // Warm up the AVX2 cache and the allocator, then measure the allocating API. The
+    // warm-up is also the correctness gate: a `decrypt` that returned `Ok` with the wrong
+    // bytes would be timed as a valid probe, and the same argument `examples/bench_aead.rs`
+    // makes for its own pre-timing assertion applies here (`benches/bench.rs` and
+    // `benches/compare.rs` assert the same way).
+    let (warm_ct, warm_tag) = encrypt(&key, &nonce, aad, &pt).expect("encrypt");
+    let warm_back = decrypt(&key, &nonce, aad, &warm_ct, &warm_tag).expect("decrypt");
+    assert!(
+        warm_back == pt.as_slice(),
+        "a timed probe must first show that the round trip returns the plaintext"
+    );
     black_box(&warm_ct);
+    black_box(&warm_back);
 
     let t = Instant::now();
     for _ in 0..iters {
@@ -81,6 +91,14 @@ fn main() {
     // overwrite the ciphertext and authenticate the plaintext -- which fails, as
     // the first version of this probe did.)
     let mut buf = pt.clone();
+    // The in-place pair gets the same pre-timing correctness check.
+    let warm_tag = encrypt_in_place_detached(&key, &nonce, aad, &mut buf).expect("encrypt");
+    decrypt_in_place_detached(&key, &nonce, aad, &mut buf, &warm_tag).expect("decrypt");
+    assert!(
+        buf == pt,
+        "the in-place round trip must restore the plaintext before it is timed"
+    );
+    black_box(&buf);
     let t = Instant::now();
     for _ in 0..iters {
         let tag = encrypt_in_place_detached(&key, &nonce, aad, &mut buf).expect("encrypt");

@@ -843,7 +843,23 @@ fn full_wipe_calls() -> usize {
 /// See [`non_test_source`]: the same cut applied to `text` rather than to `LIB`, for
 /// the two files `no_constant_cfg_attribute_can_deaden_the_crypto_source` scans.
 fn non_test_source_of(text: &str) -> String {
-    let stripped = strip_comments(text);
+    non_test_source_of_impl(text, true)
+}
+
+/// The same cut with **string-literal contents kept**.
+///
+/// `strip_comments` blanks every literal, which is right for the counts (a `zeroize_array(`
+/// inside a string is not a call) and wrong for the `cfg` scan: it erases the feature names
+/// a predicate's atoms are made of, so `all(feature = "a", not(feature = "b"))` reads as one
+/// atom repeated and looks constant. The blanket guard evaluates predicates on this cut and
+/// keeps only the attributes the blanked cut also sees, so a `#[cfg(…)]` written inside a
+/// string literal is still not an attribute.
+fn non_test_source_of_keeping_literals(text: &str) -> String {
+    non_test_source_of_impl(text, false)
+}
+
+fn non_test_source_of_impl(text: &str, blank_literals: bool) -> String {
+    let stripped = strip_comments_impl(text, blank_literals);
     let at = stripped
         .find("mod tests {")
         .expect("the scanned file's test module must exist (`mod tests {`)");
@@ -1000,6 +1016,10 @@ fn cfg_test_item_end(source: &str, close: usize) -> usize {
 /// rustc but counted here — every wipe in the table below could be commented out of the
 /// library a consumer builds while the counts stayed green.
 fn strip_comments(text: &str) -> String {
+    strip_comments_impl(text, true)
+}
+
+fn strip_comments_impl(text: &str, blank_literals: bool) -> String {
     #[derive(PartialEq)]
     enum Mode {
         Code,
@@ -1048,7 +1068,13 @@ fn strip_comments(text: &str) -> String {
                     // `'` as an ordinary byte.
                     let escaped = b.get(i + 1) == Some(&b'\\') && b.get(i + 3) == Some(&b'\'');
                     if escaped || b.get(i + 2) == Some(&b'\'') {
-                        i += if escaped { 4 } else { 3 };
+                        let len = if escaped { 4 } else { 3 };
+                        if !blank_literals {
+                            for k in 0..len {
+                                out.push(b[i + k] as char);
+                            }
+                        }
+                        i += len;
                     } else {
                         out.push('\'');
                         i += 1;
@@ -1099,11 +1125,22 @@ fn strip_comments(text: &str) -> String {
                     // happening — it reads a raw line back by line number.
                     if b.get(i + 1) == Some(&b'\n') {
                         out.push('\n');
+                    } else if !blank_literals {
+                        // Keeping literals means keeping the escape as written.
+                        out.push('\\');
+                        if let Some(&next) = b.get(i + 1) {
+                            out.push(next as char);
+                        }
                     }
                     i += 2;
                 } else if c == b'"' {
                     out.push('"');
                     mode = Mode::Code;
+                    i += 1;
+                } else if !blank_literals {
+                    // Literal-intact mode: the contents are the scanned text (a `cfg`
+                    // predicate's atoms are its feature names).
+                    out.push(c as char);
                     i += 1;
                 } else {
                     // Drop the contents so no byte inside a literal is scanned. A
@@ -1131,6 +1168,9 @@ fn strip_comments(text: &str) -> String {
                     }
                     i += 1 + h;
                     mode = Mode::Code;
+                } else if !blank_literals {
+                    out.push(c as char);
+                    i += 1;
                 } else {
                     if c == b'\n' {
                         out.push('\n');
@@ -1206,6 +1246,56 @@ fn raw_string_prefix(b: &[u8]) -> Option<(usize, u8)> {
 /// gate — it compiles its scope in or out everywhere. Whitespace is normalised away first,
 /// because `#[ cfg ( any ( ) ) ]` is the same attribute written to evade a byte scan.
 fn constant_cfg_value(pred: &str) -> Option<bool> {
+    // A predicate that names a configuration atom *twice* can still be definite:
+    // `all(feature = "x", not(feature = "x"))` is false under every assignment of
+    // `feature = "x"`, and `not(any(feature = "x", not(feature = "x")))` is true. The
+    // literal rules below only fold constants, so both came back `None` -- "unknown atom"
+    // -- and the blanket guard let them through: a dependency report measured
+    // `#[cfg(all(feature = "ultra", not(feature = "ultra")))]` on `decrypt`'s
+    // `check_lengths(...)?` compiling the input-length bound out of every build with the
+    // whole suite green.
+    //
+    // A `cfg` predicate is a Boolean formula over its distinct atoms, so with few enough of
+    // them it can be decided exactly by evaluating it under every assignment. The bound (12
+    // atoms) keeps this cheap -- the crate's predicates name one to three -- and a
+    // predicate that varies under *some* assignment is not a gate that is constant, which
+    // is the only thing this function is asked.
+    //
+    // The atom text has to be real for this: a source put through `strip_comments` has
+    // every string literal blanked, so `feature = "a"` and `feature = "b"` both read
+    // `feature = ""` and the formula `all(feature = "a", not(feature = "b"))` would be
+    // "decided" false. A predicate naming a blanked literal is therefore left to the
+    // literal rules (no enumeration) -- conservative -- and the callers that want this
+    // class detected pass the literal-intact cut.
+    let atoms = cfg_atoms(pred);
+    if !atoms.is_empty() && atoms.len() <= 12 && !atoms.iter().any(|a| a.contains("\"\"")) {
+        let mut seen_true = false;
+        let mut seen_false = false;
+        let mut malformed = false;
+        for mask in 0u32..(1u32 << atoms.len()) {
+            match eval_cfg_under(pred, &atoms, mask) {
+                Some(true) => seen_true = true,
+                Some(false) => seen_false = true,
+                None => {
+                    malformed = true;
+                    break;
+                }
+            }
+            if seen_true && seen_false {
+                break;
+            }
+        }
+        if !malformed && !(seen_true && seen_false) {
+            return Some(seen_true);
+        }
+    }
+    constant_cfg_value_literal(pred)
+}
+
+/// The literal folding: combinators over constants, and the three predicates this crate
+/// treats as fixed (`test`, `true`, `false`). Anything else is an atom and unknown *here* —
+/// [`constant_cfg_value`] is what decides whether a formula over atoms is still definite.
+fn constant_cfg_value_literal(pred: &str) -> Option<bool> {
     let normalized: String = pred.chars().filter(|c| !c.is_whitespace()).collect();
     // `#[cfg(any(),)]` / `#[cfg(test,)]`: a trailing comma is the same predicate. Strip
     // it at every recursion level before matching, or the recursive calls below receive
@@ -1249,6 +1339,76 @@ fn constant_cfg_value(pred: &str) -> Option<bool> {
         "true" => Some(true),
         "false" => Some(false),
         _ => None,
+    }
+}
+
+/// The distinct atoms of a `cfg` predicate, in first-appearance order.
+///
+/// An atom is a bare identifier (`unix`) or a key/value pair (`feature = "x"`); the
+/// `any`/`all`/`not` combinators are structure, not atoms.
+fn cfg_atoms(pred: &str) -> Vec<String> {
+    let p = pred.trim().trim_end_matches(',');
+    for name in ["any", "all", "not"] {
+        if let Some(inner) = p.strip_prefix(name).and_then(|s| s.strip_prefix('(')) {
+            if let Some(inner) = inner.strip_suffix(')') {
+                let mut out: Vec<String> = Vec::new();
+                for a in split_cfg_args(inner) {
+                    for atom in cfg_atoms(a) {
+                        if !out.contains(&atom) {
+                            out.push(atom);
+                        }
+                    }
+                }
+                return out;
+            }
+        }
+    }
+    if p.is_empty() {
+        Vec::new()
+    } else {
+        vec![p.to_string()]
+    }
+}
+
+/// Evaluate a `cfg` predicate with every atom assigned by `mask` (`None` if the predicate
+/// is malformed, which leaves the caller on its conservative answer).
+fn eval_cfg_under(pred: &str, atoms: &[String], mask: u32) -> Option<bool> {
+    let p = pred.trim().trim_end_matches(',');
+    for name in ["any", "all"] {
+        if let Some(inner) = p.strip_prefix(name).and_then(|s| s.strip_prefix('(')) {
+            if let Some(inner) = inner.strip_suffix(')') {
+                let args = split_cfg_args(inner);
+                if name == "any" {
+                    let mut any_true = false;
+                    for a in &args {
+                        if eval_cfg_under(a, atoms, mask)? {
+                            any_true = true;
+                        }
+                    }
+                    return Some(any_true);
+                }
+                let mut all_true = true;
+                for a in &args {
+                    if !eval_cfg_under(a, atoms, mask)? {
+                        all_true = false;
+                    }
+                }
+                return Some(all_true);
+            }
+        }
+    }
+    if let Some(inner) = p.strip_prefix("not").and_then(|s| s.strip_prefix('(')) {
+        if let Some(inner) = inner.strip_suffix(')') {
+            return Some(!eval_cfg_under(inner, atoms, mask)?);
+        }
+    }
+    match p {
+        "true" => Some(true),
+        "false" => Some(false),
+        atom => {
+            let bit = atoms.iter().position(|a| a == atom)?;
+            Some(mask >> bit & 1 == 1)
+        }
     }
 }
 
@@ -1380,8 +1540,14 @@ fn cfg_predicate_at(source: &str, open: usize) -> (String, usize) {
 /// Every `cfg`-family attribute in `source` whose gating is constant, as
 /// `(line number, attribute text with the reason it is constant)`.
 ///
-/// `source` must be comment-free (and string-blanked) — the callers use
-/// [`strip_comments`] — so a `#[cfg(any())]` written only in prose is not a finding.
+/// `source` must be comment-free — the callers use `strip_comments_impl` through
+/// [`non_test_source_of`] or [`non_test_source_of_keeping_literals`] — so a `#[cfg(any())]`
+/// written only in prose is not a finding. It should **keep string literals**: `strip_comments` blanks them, and a
+/// blanked predicate loses the feature names its atoms are made of, so
+/// `all(feature = "a", not(feature = "b"))` would read as one atom repeated and be called
+/// constant. [`constant_cfg_value`] refuses to enumerate a predicate that names a blanked
+/// literal, so a blanked source is merely conservative; the blanket guard passes the
+/// literal-intact cut.
 fn constant_cfg_attributes(source: &str) -> Vec<(usize, String)> {
     let mut out = Vec::new();
     let mut from = 0usize;
@@ -1394,6 +1560,22 @@ fn constant_cfg_attributes(source: &str) -> Vec<(usize, String)> {
                 .map_or(close + 1, |n| close + n + 1);
             out.push((line, format!("{} {finding}", &source[start..end])));
         }
+        from = close + 1;
+    }
+    out
+}
+
+/// The 1-based lines of every `cfg`-family attribute in `source`, whatever its predicate.
+///
+/// Used to keep the literal-intact scan honest: an attribute text that survives only
+/// because a string literal's contents were kept — `#[cfg(any())]` written *inside* a
+/// string — is not an attribute, and the blanked cut is what removes it.
+fn cfg_attribute_lines(source: &str) -> Vec<usize> {
+    let mut out = Vec::new();
+    let mut from = 0usize;
+    while let Some((start, open, _kind)) = find_cfg_attribute(source, from) {
+        out.push(source[..start].matches('\n').count() + 1);
+        let (_, close) = cfg_predicate_at(source, open);
         from = close + 1;
     }
     out
@@ -2781,7 +2963,18 @@ fn no_constant_cfg_attribute_can_deaden_the_crypto_source() {
             "`{name}` contains a `pure` cfg attribute; the known deadening bypass uses one, \
              and no production code needs it"
         );
-        let found = constant_cfg_attributes(&body);
+        let found = {
+            // The predicate is evaluated on the **literal-intact** cut, so a feature name
+            // is a name and `all(feature = "a", not(feature = "b"))` is the two-atom
+            // formula it is. An attribute text that exists only there — a `#[cfg(…)]`
+            // inside a string literal — is dropped by the line filter, because the blanked
+            // cut is the one that knows what is code.
+            let seen_in_code = cfg_attribute_lines(&body);
+            constant_cfg_attributes(&non_test_source_of_keeping_literals(src))
+                .into_iter()
+                .filter(|(line, _)| seen_in_code.contains(line))
+                .collect::<Vec<_>>()
+        };
         assert!(
             found.is_empty(),
             "{name} carries constant `cfg` attribute(s) {found:?}. `#[cfg(any())]` compiles \
@@ -4463,6 +4656,62 @@ fn the_choice_guard_sees_every_spelling_measured_against_it() {
              one, the guard is back to being satisfiable by a spelling."
         );
     }
+}
+
+/// The constant-`cfg` scan, pointed at synthetic sources.
+///
+/// The blanket guard above is the only thing that catches a constant `cfg` on a statement
+/// no per-site table names (`decrypt`'s `check_lengths(...)?`, say), so its *sensitivity* is
+/// worth a test of its own rather than a comment about a past measurement: a refactor that
+/// made `constant_cfg_attributes` return nothing would leave every other test green. Each
+/// shape here is either a measurement from an audit round or the control for one.
+#[test]
+fn the_constant_cfg_scan_fires_on_constant_predicates_and_only_those() {
+    let finding =
+        |attr: &str| !constant_cfg_attributes(&format!("{attr}\nfn _probe() {{}}")).is_empty();
+
+    // Fires: the shapes a constant gate is written in. The last two carry a configuration
+    // atom *twice*, which the literal folding alone cannot decide — the case a dependency
+    // report measured compiling an input-length check out of every build with the whole
+    // suite green.
+    for constant in [
+        "#[cfg(any())]",
+        "#[cfg(all())]",
+        "#[cfg(not(any()))]",
+        "#[cfg(test)]",
+        "#[cfg(all(feature = \"x\", not(feature = \"x\")))]",
+        "#[cfg(not(any(unix, not(unix))))]",
+    ] {
+        assert!(
+            finding(constant),
+            "`{constant}` is constant and must be reported"
+        );
+    }
+
+    // Does not fire: real gates, including ones whose atoms share a prefix and one that
+    // `strip_comments` would blank into a repeated atom (`feature = ""`), which is why the
+    // caller passes the literal-intact cut.
+    for gate in [
+        "#[cfg(feature = \"hardened\")]",
+        "#[cfg(all(any(feature = \"dual-mac\", feature = \"ultra\"), not(feature = \"hardened\")))]",
+        "#[cfg(all(not(feature = \"ultra\"), feature = \"hardened\"))]",
+        "#[cfg(all(unix, not(feature = \"pure\")))]",
+    ] {
+        assert!(!finding(gate), "`{gate}` is a real gate and must not be reported");
+    }
+
+    // An attribute *inside a string literal* is not an attribute: the guard's line filter
+    // (against the blanked cut) drops it.
+    let body = "const _S: &str = \"#[cfg(any())]\";\nfn _probe() {}";
+    assert!(
+        constant_cfg_attributes(&strip_comments(body)).is_empty(),
+        "a `cfg` attribute inside a string literal must not be reported"
+    );
+    assert_eq!(
+        cfg_attribute_lines(&strip_comments(body)),
+        Vec::<usize>::new(),
+        "the blanked cut is what proves the text is inside a literal"
+    );
 }
 
 /// A source file under `src/` that this scanner does not know about can hold a

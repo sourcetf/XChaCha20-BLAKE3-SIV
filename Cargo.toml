@@ -126,9 +126,6 @@ proc-macro2 = { version = "1", features = ["span-locations"] }
 # test build, and neither benchmark plots or uses rayon. `cargo_bench_support` is the one
 # piece the `harness = false` benchmarks need.
 criterion = { version = "0.5", default-features = false, features = ["cargo_bench_support"] }
-# For the digest-based large-vector fixture: the test hashes `ciphertext || tag`
-# with the same vendored BLAKE3 fork the library uses.
-blake3 = { version = "1.8.7", path = "blake3", default-features = false, features = ["zeroize"] }
 # The head-to-head benchmark in `benches/compare.rs`: RustCrypto's
 # XChaCha20-Poly1305 is the natural reference point (same 24-byte nonce), and
 # `aead` supplies the trait both sides are driven through. Disable their default
@@ -141,9 +138,22 @@ aead = { version = "0.5", default-features = false, features = ["alloc"] }
 # every possible input, which is exactly what a property test is for. `bit-set` is
 # not used (no `bits()` generator in the tests), so it is not enabled.
 proptest = { version = "1", default-features = false, features = ["std"] }
-# Integration tests cannot see the crate's own dependencies, and `tests/ctgrind.rs`
-# compares operands through `subtle::ConstantTimeEq` directly to check the
-# primitive the tag comparison rests on.
+# For the digest-based large-vector fixture: the test hashes `ciphertext || tag`
+# with the same vendored BLAKE3 fork the library uses.
+#
+# These two entries repeat the `[dependencies]` above on purpose, and what they are *not*
+# for is the reason the comment here used to give -- "Integration tests cannot see the
+# crate's own dependencies" is false: a `[dependencies]` edge is in scope for every target
+# of the package, integration tests included (measured with a scratch crate whose
+# `tests/it.rs` used only its `[dependencies]`). They are kept because the dev edge is the
+# one a test author reaches for, and because `tests/blake3_fork_equivalence.rs::
+# the_vendored_fork_is_wired_in_by_path` requires *both* `blake3` entries to carry
+# `path = "blake3"` -- a second declaration of the same edge is where a rewritten one would
+# otherwise slip through. Cargo unifies the two specs, so the duplication costs nothing.
+blake3 = { version = "1.8.7", path = "blake3", default-features = false, features = ["zeroize"] }
+# The same edge as `[dependencies]`, for the reason stated there: `tests/ctgrind.rs`
+# compares operands through `subtle::ConstantTimeEq` directly, and the second declaration is
+# pinned with the first.
 subtle = { version = "2.6.1", default-features = false }
 # The vendored-BLAKE3 guard-page regression test (`hash_many` must not read past a
 # 64-byte block into a PROT_NONE page) needs `mprotect`/`mmap` on Linux.

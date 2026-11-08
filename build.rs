@@ -75,6 +75,34 @@ fn main() {
 /// `tests/blake3_fork_equivalence.rs`, which asserts the same property from the test side;
 /// the duplication is deliberate -- the test needs a test run to fire, and this fires on the
 /// first `cargo build`.
+/// Whether a `path` value names the vendored fork.
+///
+/// Normalised rather than compared byte for byte, because the *legal* spellings of the same
+/// edge were rejected as if they were a missing one: `path = './blake3'` (TOML literal
+/// string), `path = "./blake3"` (cargo resolves a leading `./`) and `path = "blake3/"` (a
+/// trailing separator) all point at the fork, and each panicked this check. A false refusal
+/// is not a security hole -- it fails the build -- but "the manifest must be written one
+/// specific way" is not what this check is for, and the earlier fix for
+/// `[dependencies."blake3"]` was the same class.
+fn path_is_the_vendored_fork(value: &str) -> bool {
+    let v = unquote(value.trim());
+    let v = v.strip_prefix("./").unwrap_or(v);
+    v.trim_end_matches('/') == "blake3"
+}
+
+/// A sentence appended when the entry inherits its `path` from a workspace table this check
+/// cannot see, so the failure names the real problem instead of a missing key that is not
+/// missing in the manifest being read.
+fn workspace_hint(value: &str) -> &'static str {
+    let normalized: String = value.chars().filter(|c| !c.is_whitespace()).collect();
+    if normalized.contains("workspace=true") {
+        " (`workspace = true` moves the edge into a `[workspace.dependencies]` table outside \
+         this manifest, which this check cannot read; keep `path = \"blake3\"` here.)"
+    } else {
+        ""
+    }
+}
+
 fn check_blake3_is_a_path_dependency(manifest: &str) {
     let mut section = String::new();
     let mut checked = 0usize;
@@ -85,12 +113,17 @@ fn check_blake3_is_a_path_dependency(manifest: &str) {
     let finish = |section: &str, key: &str, value: &str, checked: &mut usize| {
         if unquote(key) == "blake3" && is_dependency_section(section) {
             *checked += 1;
-            if inline_value(value, "path").as_deref() != Some("blake3") {
+            if !inline_value(value, "path")
+                .as_deref()
+                .is_some_and(path_is_the_vendored_fork)
+            {
                 panic!(
-                    "the `blake3` entry in [{section}] does not carry `path = \"blake3\"` \
-                     (it is `{value}`). Without the path edge the build resolves crates.io \
-                     BLAKE3 1.8.7 and none of the fixes in blake3/PATCHES.md are present. \
-                     Restore the `path` key (see the distribution policy in PATCHES.md)."
+                    "the `blake3` entry in [{section}] does not carry a `path` pointing at \
+                     the vendored fork (it is `{value}`). Without the path edge the build \
+                     resolves crates.io BLAKE3 1.8.7 and none of the fixes in blake3/PATCHES.md \
+                     are present. Restore the `path` key (see the distribution policy in \
+                     PATCHES.md).{}",
+                    workspace_hint(value)
                 );
             }
         }
@@ -104,12 +137,12 @@ fn check_blake3_is_a_path_dependency(manifest: &str) {
         if let Some((krate, path)) = table_dep.take() {
             if krate == "blake3" {
                 *checked += 1;
-                if path.as_deref() != Some("blake3") {
+                if !path.as_deref().is_some_and(path_is_the_vendored_fork) {
                     panic!(
-                        "the `blake3` dependency table `[*.{krate}]` does not carry \
-                         `path = \"blake3\"` (path is {path:?}). Without the path edge the \
-                         build resolves crates.io BLAKE3 1.8.7 and none of the fixes in \
-                         blake3/PATCHES.md are present. Restore the `path` key (see the \
+                        "the `blake3` dependency table `[*.{krate}]` does not carry a `path` \
+                         pointing at the vendored fork (path is {path:?}). Without the path \
+                         edge the build resolves crates.io BLAKE3 1.8.7 and none of the fixes \
+                         in blake3/PATCHES.md are present. Restore the `path` key (see the \
                          distribution policy in PATCHES.md)."
                     );
                 }
@@ -152,8 +185,10 @@ fn check_blake3_is_a_path_dependency(manifest: &str) {
         if let Some((_, path)) = table_dep.as_mut() {
             // A line inside a `[<dep section>.<crate>]` table. Only `path` matters here;
             // the crate name is already known from the header.
-            if key == "path" {
-                *path = Some(value.trim_matches('"').to_string());
+            // `unquote`, not a bare comparison: `"path" = "blake3"` is the same key with a
+            // quoted spelling, which TOML allows and cargo accepts.
+            if unquote(key) == "path" {
+                *path = Some(value.trim().to_string());
             }
             continue;
         }
@@ -295,9 +330,14 @@ fn inline_value(table: &str, key: &str) -> Option<String> {
         if starts_word {
             if let Some(rest) = rest.strip_prefix('=') {
                 let rest = rest.trim_start();
-                if let Some(rest) = rest.strip_prefix('"') {
-                    if let Some(end) = rest.find('"') {
-                        return Some(rest[..end].to_string());
+                // Both string forms: TOML's basic `"…"` and literal `'…'`, which cargo reads
+                // as the same path. Accepting only the first made `path = 'blake3'` look
+                // like a missing `path`.
+                for quote in ['"', '\''] {
+                    if let Some(rest) = rest.strip_prefix(quote) {
+                        if let Some(end) = rest.find(quote) {
+                            return Some(rest[..end].to_string());
+                        }
                     }
                 }
             }

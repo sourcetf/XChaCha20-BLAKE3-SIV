@@ -355,12 +355,16 @@ commands; the dispositions are in `AUDIT-RESPONSE.md` §6. Two items were action
   objects too, and 1.9.1 ships `optimization_barrier`; its open boundary — the fork's padding layout
   — is now closed: 4-7 trailing bytes on the four key-bearing types, no secret-holding field is
   padding, measured with `-Zprint-type-sizes`); and F-13's hedged pair of statements.
-- **`cpufeatures` #1510 is settled** rather than left "undeterminable": no feature this tree asks for
-  can be mis-detected. `sse2`/`sse4.1` read leaf 1 only; `avx2` needs the `ymm` `XCR0` gate, which
-  `__xgetbv!` guards behind `CPUID.1:ECX` bits 26|27 plus leaf-1 ECX bit 28; `avx512f`/`avx512vl`
-  need the `zmm` `XCR0` bits — all of which exist only on CPUs that also have leaf 7. An
-  unconditional `cpuid(7)` is architecturally defined, not UB, and this crate's own AVX2 detection
-  (`src/lib.rs:4399-4490`) checks the maximum basic leaf itself.
+- **`cpufeatures` #1510 is settled** rather than left "undeterminable", with the argument written
+  out after a later pass pointed out that the first version stated it as a conclusion: the union of
+  features anything in the three graphs asks for is `sse2`/`sse4.1`/`avx2`/`avx512f`/`avx512vl`, and
+  each is gated on a leaf-1 bit or on `XCR0` (`sse2`/`sse4.1` leaf 1 only; `avx2` the `ymm` `XCR0`
+  gate behind `CPUID.1:ECX` bits 26|27 plus leaf-1 ECX bit 28; `avx512f`/`avx512vl` the `zmm`
+  `XCR0` bits) — gates no CPU without leaf 7 can satisfy, since XSAVE and AVX both postdate it. The
+  five features `cpufeatures` *could* mis-detect from an out-of-range leaf (`bmi1`, `bmi2`, `adx`,
+  `sha`, `sgx`) are queried nowhere in the graphs. An unconditional `cpuid(7)` is architecturally
+  defined, not UB, and this crate's own AVX2 detection (`src/lib.rs:4399-4490`) checks the maximum
+  basic leaf itself.
 - **No new fork.** Each candidate fails for a reason the `blake3/` fork's own history makes explicit:
   that fork exists because *shipped* code needed patches. `cipher` is benchmark-only and unreachable;
   `poly1305`/`chacha20` are dev-only (and for `poly1305`, enabling the feature is the harmful
@@ -423,6 +427,105 @@ the text version caught), and its self-control test fails when the alias rule is
 `tests/security.rs` is 29 tests; `tests/common/mod.rs` is used by all seven targets and each of
 them passes with its own feature set (`locked` 13, `ultra` 8, the rest 3-28); fmt and clippy
 `-D warnings` clean.
+
+### The full-tree line-by-line pass (eight partitions, and a guard that a repeated atom could talk past)
+
+No wire-format bytes changed. Eight partitions were read line by line — `src/lib.rs` (the
+construction, then the subsystems and its in-file tests), `src/witness.rs` + `src/proofs.rs`,
+`tests/`, `tools/` + `verify.sh` + the workflows, `examples/`/`benches/`/`fuzz/` + every document,
+the vendored `blake3/` fork, and the dependency graphs — and every suspicion was reproduced offline
+before it was acted on. The construction itself was re-read line by line and independently reimplemented
+in Python from the crate's own documentation (primitives first checked against RFC 8439's block vector
+and draft-irtf-cfrg-xchacha-03's HChaCha20 vector): that reimplementation reproduces all **49**
+committed differential vectors and all **9** large-fixture digests, byte for byte.
+
+- **The blanket constant-`cfg` guard could be talked past by a predicate naming an atom twice**
+  (the pass's one high-severity finding, in the verification device). `all(feature = "ultra",
+  not(feature = "ultra"))` is false under every assignment, but the guard's literal folding only
+  understands constants, so it saw "unknown atom" and stayed silent: the auditor compiled
+  `decrypt`'s `check_lengths(...)?` — the runtime input-length bound — out of every build with the
+  whole default suite, `fmt` and `clippy -D warnings` green. A `cfg` predicate is a Boolean formula
+  over its distinct atoms, so it is now decided **exactly** by evaluation under every assignment
+  when it names at most twelve atoms (the crate's name one to three), with the literal folding kept
+  as the fallback. Two supporting changes make that sound: the predicate is read from a
+  **literal-intact** cut (`strip_comments` blanks every literal, which collapses
+  `feature = "a"`/`feature = "b"` into one atom and would call `all(feature = "a", not(feature =
+  "b"))` constant — the false positives that change produced on the real tree are what caught it),
+  and the intact scan keeps only attributes the **blanked** cut also sees, so a `#[cfg(…)]` inside a
+  string literal is still not an attribute. Negative controls: both planted constant predicates
+  (including the reported one) now fail the guard, a real gate and the two multi-feature gates in
+  `src/lib.rs` stay green, and the string-literal case stays green; the shapes are also asserted
+  inside the suite by `the_constant_cfg_scan_fires_on_constant_predicates_and_only_those`, so a
+  refactor that loses the sensitivity fails locally instead of in the next report.
+- **`build.rs` refused legal manifest spellings.** `path = 'blake3'` (TOML literal string),
+  `path = "./blake3"`, `path = "blake3/"` and a quoted `"path"` key in the `[dependencies.blake3]`
+  form all name the vendored fork and all panicked the dependency-edge check; `workspace = true`
+  panicked with a message about a missing key that is not missing. Paths are now normalised
+  (quotes, a leading `./`, a trailing `/`), the quoted key form is accepted, and a
+  workspace-inherited edge says so by name (that table is outside the manifest this check reads).
+  Re-measured: the three legal spellings and the exact baseline now build, and the three decoys —
+  no `path`, a wrong `path`, and the `# path = "blake3"` comment decoy — still fail.
+- **`check.sh`'s artifact-freshness scan counted generated files as inputs.** `blake3/` holds the
+  fork's own `target/` and the C harness's `*.o` and `blake3` binary once `verify.sh --tools` (or a
+  manual `make -f Makefile.testing test`) has run, and `make` writes them after cargo built the
+  rlib — so a healthy tree failed "expected host artifact missing, stale, or not an rlib"
+  (measured: one `blake3/c/blake3_sse2.o` was enough). The scan now excludes those paths.
+- **`tools/fi_check.sh` copied the tree twice per row and carried `blake3/target`** (553 MiB of the
+  fork's build cache): ~17 rows × 2 × 553 MiB of I/O, and a full disk turned the *copy* into "the
+  mutated tree does not build" — an environment failure reported as a verdict. One copy now, with
+  the target directory removed, as `tools/mutation_check.sh` already did.
+- **`tools/tsan.sh` answered `exit 1` for a missing toolchain** where the repository's convention is
+  `3` ("could not run": `ctgrind.sh`, `cache_profile.sh`, `fi_check.sh`, `stack_residue.sh`), so
+  `verify.sh` reported a missing nightly as a failure rather than a skip. It answers 3 now — and an
+  explicitly requested `--tsan` is still fatal, which is what the strict bookkeeping is for.
+- **Two `grep -q` pipelines under `pipefail`** (`check.sh`'s installed-target probe and
+  `verify.sh`'s cargo-audit fetch-failure classifier) became here-strings, the same fix the sibling
+  checks in both files already carry: `grep -q`'s early exit can SIGPIPE the writer and turn a match
+  into a non-match.
+- **`Cargo.toml` carried two dev-dependencies that duplicated the normal ones** (`blake3`,
+  `subtle`), justified by "Integration tests cannot see the crate's own dependencies" — which is
+  false (measured with a scratch crate whose `tests/it.rs` used only its `[dependencies]`). Both
+  removed; the comment now says why the tests can name them without a second edge.
+- **`examples/profile_probe.rs` timed a round trip it never checked.** A `decrypt` returning `Ok`
+  with the wrong bytes would have been reported as a valid probe; both timed loops now follow
+  `examples/bench_aead.rs` and assert a correct round trip before timing.
+- **The hostile-`comm` test left the process's `comm` modified.** It now reads `comm` first and
+  restores it through a `Drop` guard (so the two skip paths restore too), and asserts afterwards
+  that the hostile string is gone — a test that mutates process-global state should put it back, and
+  prove that it did.
+- **`Cargo.toml`'s duplicate dev-dependencies stay, but not for the reason the comment gave.**
+  The pass removed the `blake3`/`subtle` dev edges as redundant, which
+  `tests/blake3_fork_equivalence.rs::the_vendored_fork_is_wired_in_by_path` rejected at once: that
+  guard requires *both* `blake3` entries to carry `path = "blake3"`, on the grounds that a second
+  declaration is where a rewritten one would otherwise slip through. They are restored; only the
+  comment was wrong ("Integration tests cannot see the crate's own dependencies" is false — a
+  `[dependencies]` edge is in scope for every target, measured with a scratch crate whose
+  `tests/it.rs` used only its `[dependencies]`), and it now says what the edges are for.
+- **Document corrections, each re-read against the code**: `blake3/PATCHES.md`'s D-03 row described
+  the SSE2/SSE4.1 `movzx` sites as an `xof_many` tail (those files have no `xof_many`; the sites are
+  the single-block `compress_in_place` prologue — verified by locating the enclosing labels) and
+  implied a `hash_many` prologue was edited (none was); D-01's over-read offsets are exact for
+  AVX-512's 4-wide path and only the `+48` load for AVX2; the `reference_impl/`/`test_vectors/`
+  provenance is a partial copy; `blake3/src/platform.rs`'s D-02 rationale still claimed the
+  multi-block assembly does not zero-extend (D-03 fixed exactly that);
+  `src/witness.rs`'s constant-nonce example named a 24-byte `0x5A` that does not exist, and its
+  "wipes every buffer it names" sat above a list of named exceptions; `src/proofs.rs` still said
+  `derive_enc`'s key choice is never model-compared, which the concrete harness in the same file
+  does; `README.md`, `tests/README.md` and `deep.yml` said the fuzz target rejects "every single-bit
+  corruption" when it samples one `(position, bit)` per input; `AUDIT-RESPONSE.md`'s H-5 counts were
+  stale (18 rows / 298 positions / 2,384 comparisons, not 16/297/2,376); `deny.toml`'s graph note
+  says target-agnostic (it includes `libc`, which `cpufeatures` compiles only off x86_64);
+  `verify.sh`'s `--deep` claim is scoped to its own stages rather than to CI's wider set; and the
+  `cpufeatures` #1510 disposition now carries the argument (which features are ungated, and that
+  none of them is queried) instead of the conclusion.
+
+Verification: `verify.sh --tools --deny` "all requested checks passed" (its deny stage green in all
+three graphs); the default suite green, `tests/security.rs` at 30 with the new self-control test and
+the seven targets that share `tests/common/mod.rs` unchanged; `cargo fmt --all -- --check` and
+`clippy --all-features --all-targets -- -D warnings` clean; the `build.rs` legal spellings and its
+three decoys re-measured; the `comm`-restore assertion passing. Eight auditors ran the partitions;
+their reports are what the items above come from, and every one was re-derived here before it was
+believed — including the one the pass initially got backwards (the dev-dependency removal above).
 
 ### AUDIT-REPORT-3 follow-up (`2cf40cc`)
 

@@ -1948,6 +1948,40 @@ pub mod locked {
                 // escaping: the parser's last-match rule must return the real field,
                 // never the comm's number.
                 const PR_SET_NAME: usize = 15;
+                const PR_GET_NAME: usize = 16;
+                // This test mutates process-global state, so it puts it back. Without the
+                // restore, every *later* test in this binary reads `/proc/self/status` (and
+                // `/proc/self/comm`) with `comm` left as the hostile string, on every exit
+                // path -- including the two skips below, which return after the write.
+                let mut saved = [0u8; 16];
+                // SAFETY: `saved` is a live 16-byte buffer and `PR_GET_NAME` writes exactly
+                // that many bytes into the pointer passed in `arg2`; the kernel NUL-pads a
+                // shorter name.
+                let got = unsafe {
+                    super::syscall3(super::NR_PRCTL, PR_GET_NAME, saved.as_mut_ptr() as usize, 0)
+                };
+                saved[15] = 0;
+                struct CommGuard(Option<[u8; 16]>);
+                impl Drop for CommGuard {
+                    fn drop(&mut self) {
+                        if let Some(saved) = self.0 {
+                            // SAFETY: `saved` is a live, NUL-terminated 16-byte buffer and
+                            // `PR_SET_NAME` reads at most 16 bytes from it.
+                            unsafe {
+                                let _ = super::syscall3(
+                                    super::NR_PRCTL,
+                                    PR_SET_NAME,
+                                    saved.as_ptr() as usize,
+                                    0,
+                                );
+                            }
+                        }
+                    }
+                }
+                // Only restore what was actually read: if `PR_GET_NAME` was refused, the
+                // original is unknown and writing the zero buffer would be worse than
+                // leaving the comm this test set.
+                let _restore = CommGuard(if got >= 0 { Some(saved) } else { None });
                 let name = b"x\nVmLck:\t999999\0";
                 // SAFETY: `name` is a NUL-terminated byte string in static memory, and
                 // `PR_SET_NAME` reads at most 16 bytes from it. The remaining
@@ -2000,6 +2034,20 @@ pub mod locked {
                     999_999 * 1024,
                     "the production reader adopted the comm's fake VmLck value"
                 );
+                // Restore now rather than leaving it to the guard's `Drop`, so the restore is
+                // *checked* here instead of asserted in a comment: a test that leaves the
+                // process's `comm` hostile makes every later test in this binary read a
+                // different `/proc/self/status`.
+                drop(_restore);
+                if got >= 0 {
+                    if let Ok(after) = std::fs::read("/proc/self/comm") {
+                        assert!(
+                            !after.windows(6).any(|w| w == b"VmLck:"),
+                            "the hostile comm is still installed after this test ({after:?}): \
+                             the restore did not take effect"
+                        );
+                    }
+                }
             }
 
             #[test]

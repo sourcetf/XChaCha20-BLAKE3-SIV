@@ -44,8 +44,11 @@ targets = [
 # is recommended to pass `--all-features` on the cmd line instead
 #
 # Repo note: left `false` deliberately, and the checks in this file are scoped to
-# exactly that graph -- the dependencies the published library builds with, 13
-# crates printed by `cargo deny --offline list` (12 dependencies plus this crate).
+# exactly that graph -- the dependencies the published library resolves, 13 crates
+# printed by `cargo deny --offline list` (12 dependencies plus this crate). The list
+# is target-agnostic: it is collected for all targets, so it includes `libc`, which
+# `cpufeatures` only compiles on aarch64/loongarch64 (on x86_64 `cargo tree -e normal`
+# does not list it).
 # The graph excludes *both* dev-dependencies (always, however this is set: cargo-deny
 # never puts dev edges in the checked graph) and non-default features, so the
 # optional `rng` -> getrandom 0.4 edge is absent too. `--all-features` on the

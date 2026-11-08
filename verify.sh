@@ -44,6 +44,14 @@
 # *fewer* switches than `--deep` (no ctgrind, cargo-deny, fuzzing or TSAN) while
 # the README called it "everything", and neither ran the tool-level gates that CI
 # runs on every push.
+#
+# What "nothing" means is **every stage this script has**, not everything CI runs:
+# CI additionally builds `--all-features` (tests and clippy), cross-builds the no_std
+# target, checks the 1.85 MSRV, enforces a line-coverage floor, rebuilds
+# deterministically, assembles the Windows/MSVC asm, refuses big-endian NEON through
+# CMake, verifies the dependency sources against the locks, and rejects extra test
+# targets. A local `--deep` green is therefore not a CI green -- it is this script's
+# own maximum.
 
 set -euo pipefail
 
@@ -966,7 +974,10 @@ if [ "$RUN_DENY" -eq 1 ]; then
     if [ "$rc" -eq 0 ]; then
       return 0
     fi
-    if printf '%s' "$out" | grep -qiE "couldn't fetch|failed to fetch|no such file|advisory database"; then
+    # A here-string, like the sibling checks: `grep -q` exits at the first match, and under
+    # `set -o pipefail` that can kill the writer with SIGPIPE (141) and turn a hit into a
+    # non-match -- on this branch that would report a real advisory as "could not fetch".
+    if grep -qiE "couldn't fetch|failed to fetch|no such file|advisory database" <<< "$out"; then
       skip "cargo-audit ($label)" "the advisory database could not be fetched and no usable cache is present, so no advisory verdict was produced for $label"
       return 0
     fi
@@ -1264,7 +1275,8 @@ if [ "$RUN_TOOLS" -eq 1 ]; then
       ADVISORIES+=("stack residue ($label): tools/stack_residue.sh reported a finding (exit $rc)")
       if [ "$STRICT" -eq 1 ]; then
         echo "FAILED: tools/stack_residue.sh ($label) reported a finding (exit $rc), and" >&2
-        echo "        this invocation claims to leave nothing out, so it fails here rather" >&2
+        echo "        this invocation claims to leave nothing out of its own stages, so it" >&2
+        echo "        fails here rather" >&2
         echo "        than under a green summary line." >&2
         exit "$rc"
       fi

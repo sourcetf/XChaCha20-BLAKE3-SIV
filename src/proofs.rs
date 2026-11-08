@@ -653,9 +653,13 @@ fn max_msg_size_boundary_matches_counter_capacity() {
 //     ignores a caller-visible key.  It cannot say *which* secret reaches which
 //     internal call — the symbolic keys are interchangeable, so a swapped
 //     `k_in`/`k_out` inside `derive_tag` passes every symbolic harness (the
-//     concrete `tag_matches_the_model_with_*` is the one that catches
-//     it), and `derive_enc`'s key choice is never compared against a model
-//     evaluation at any call site here.
+//     concrete `tag_matches_the_model_with_*` is the one that catches it).
+//     `derive_enc`'s key choice *is* compared, at one call site: the concrete
+//     `derive_enc_matches_the_model_on_a_concrete_input` below folds `DOM_ENC || tag`
+//     under `enc_seed` with the model and requires all 44 output bytes to match, so a
+//     `derive_enc` keyed with `tag` or `k_out` instead fails it. This paragraph said
+//     "never compared ... at any call site here" until a dependency report re-read it
+//     against that harness, which was added later than the paragraph.
 
 /// Fixed width of the inner hash's head: domain word, nonce, and the two
 /// little-endian lengths.  Must match `derive_tag`.
