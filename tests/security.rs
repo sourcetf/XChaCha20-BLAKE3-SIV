@@ -1798,11 +1798,80 @@ fn preceding_attributes(body: &str, at: usize) -> Vec<(usize, &str)> {
             }
             end = start - 1;
             continue;
+        } else if let Some((attr_start, attr, attr_line)) = attribute_ending_at(body, end) {
+            // A **multi-line** attribute: the statement's line begins with `)]` (or the
+            // predicate's last line does), so the line-based test above sees neither a
+            // `#` nor a trailing `]`. Measured: `#[cfg(feature = "pure"\n)]` above
+            // `derive_material`'s `subkey` wipe left this scan with no attribute at all and
+            // the whole suite green, while the single-line spelling was caught -- the
+            // newline was the entire difference.
+            out.push((attr_line, attr));
+            if attr_start == 0 {
+                break;
+            }
+            end = body[..attr_start].trim_end().len();
         } else {
             break;
         }
     }
     out
+}
+
+/// The balanced `#[…]` / `#![…]` group that **ends exactly at `end`**, as
+/// `(byte offset of the `#`, text, 0-based line of the `#`), or `None`.
+///
+/// `end` is an exclusive offset into `body` with no trailing whitespace before it. The scan
+/// walks backwards over `]`/`[` (and `)`/`(` for good measure, though only the outermost
+/// bracket matters) and then requires the `#` that opens the group, so a line that merely
+/// ends in `)` -- the last line of a multi-line attribute -- is recognised as the *end* of
+/// an attribute rather than as the statement's first line.
+fn attribute_ending_at(body: &str, end: usize) -> Option<(usize, &str, usize)> {
+    let bytes = body.as_bytes();
+    if end == 0 || bytes.get(end - 1) != Some(&b']') {
+        return None;
+    }
+    let mut depth = 0i64;
+    let mut i = end;
+    let mut hash_at = None;
+    while i > 0 {
+        i -= 1;
+        match bytes[i] {
+            b']' => depth += 1,
+            b'[' => {
+                depth -= 1;
+                if depth == 0 {
+                    // Skip whitespace backwards, then an optional `!`, then whitespace,
+                    // then require the `#`.
+                    let mut k = i;
+                    while k > 0 && bytes[k - 1].is_ascii_whitespace() {
+                        k -= 1;
+                    }
+                    if k > 0 && bytes[k - 1] == b'!' {
+                        k -= 1;
+                        while k > 0 && bytes[k - 1].is_ascii_whitespace() {
+                            k -= 1;
+                        }
+                    }
+                    if k > 0 && bytes[k - 1] == b'#' {
+                        hash_at = Some(k - 1);
+                    }
+                    break;
+                }
+            }
+            // A `#` inside the group is not the opener; nothing to do.
+            _ => {}
+        }
+    }
+    let hash_at = hash_at?;
+    let text = body[hash_at..end].trim();
+    // Only a real attribute: it must start with `#[` or `#![` after the whitespace the
+    // backwards walk skipped (that whitespace is inside the text only if it was between
+    // `#` and `[`, which the walk already allowed for).
+    if !(text.starts_with("#[") || text.starts_with("#![")) {
+        return None;
+    }
+    let line = body[..hash_at].matches('\n').count();
+    Some((hash_at, text, line))
 }
 
 /// The `#[…]` / `#![…]` attribute that *ends* `line` (`{ #![cfg(any())]` becomes
@@ -1986,15 +2055,26 @@ fn is_cfg_attribute(attr: &str) -> bool {
 /// asserted by the caller before this is reached, see
 /// [`assert_wipes_are_not_deadened`].
 fn raw_cfg_predicate_at(line: usize) -> String {
-    let raw = raw_lib_line(line);
-    let (_, open, _) = find_cfg_attribute(raw, 0).unwrap_or_else(|| {
+    // The attribute may span several lines (`#[cfg(all(\n    feature = "pure",\n))]`), so
+    // the raw read is the *rest of the file from `line`*, not a single line: reading one
+    // line made the multi-line spelling panic with "unbalanced `cfg(`" -- fail-closed, but
+    // a panic on legal Rust, and the panic's line was the attribute's first line rather
+    // than the statement that carries it.
+    static REST: std::sync::OnceLock<Vec<&'static str>> = std::sync::OnceLock::new();
+    let rest = REST.get_or_init(|| LIB.lines().collect());
+    let start = line
+        .checked_sub(1)
+        .unwrap_or_else(|| panic!("`src/lib.rs` line numbers are 1-based, got {line}"));
+    let raw: String = rest[start..].join("\n");
+    let (_, open, _) = find_cfg_attribute(&raw, 0).unwrap_or_else(|| {
         panic!(
             "line {line} of `src/lib.rs` is an attribute in the stripped scan text but \
-             carries no `cfg`-family attribute when read raw (`{raw}`); the predicate \
-             cannot be checked, and passing it would be fail-open"
+             carries no `cfg`-family attribute when read raw (`{}`); the predicate \
+             cannot be checked, and passing it would be fail-open",
+            rest.get(start).copied().unwrap_or("")
         )
     });
-    let (args, _) = cfg_predicate_at(raw, open);
+    let (args, _) = cfg_predicate_at(&raw, open);
     args.chars().filter(|c| !c.is_whitespace()).collect()
 }
 
@@ -5355,6 +5435,97 @@ fn every_counted_wipe_is_a_statement_not_an_expression_operand() {
     );
 }
 
+/// The per-site attribute walk, pointed at the spellings it has to see and at the
+/// statements that carry no attribute.
+///
+/// This walk is what the counted-wipe table consults, and every escape from it was found by
+/// an audit rather than by this suite: a blank line between attribute and statement, an
+/// attribute on the block opener, and -- measured -- a **multi-line** attribute, whose last
+/// line is `)]` and whose first line is `#[cfg(feature = "pure"`, so a line-based scan saw
+/// neither a `#` nor a trailing `]`. The single-line spelling of the same predicate was
+/// caught, so the newline was the entire difference.
+#[test]
+fn the_site_attribute_walk_sees_every_spelling_above_a_statement() {
+    // `body` ends with the statement the walk is pointed at; the return value is the
+    // attribute text it found (whitespace-normalised by the caller, so compare that way).
+    let walk = |body: &str| -> Vec<String> {
+        // `at` is the *start* of the statement the walk is pointed at, which is how the
+        // guard calls it: `body[..at]` then ends with the newline (or `{`) before it.
+        let trimmed = body.trim_end();
+        let at = trimmed.rfind('\n').map_or(0, |nl| nl + 1);
+        assert!(
+            trimmed[at..].ends_with(';'),
+            "the test's body must end with a `;`-terminated statement, got `{}`",
+            &trimmed[at..]
+        );
+        let _ = at;
+        preceding_attributes(body, at)
+            .into_iter()
+            .map(|(_, attr)| attr.split_whitespace().collect::<Vec<_>>().join(" "))
+            .collect()
+    };
+    for (name, body, want) in [
+        (
+            "one line",
+            "#[cfg(feature = \"pure\")]\nwipe;",
+            "feature = \"pure\"",
+        ),
+        (
+            "blank line in between",
+            "#[cfg(feature = \"pure\")]\n\nwipe;",
+            "feature = \"pure\"",
+        ),
+        (
+            "predicate broken across lines",
+            "#[cfg(feature = \"pure\"\n)]\nwipe;",
+            "feature = \"pure\"",
+        ),
+        (
+            "whole attribute spread over lines",
+            "#[cfg(all(\n    feature = \"pure\",\n))]\nwipe;",
+            "feature = \"pure\"",
+        ),
+        // The walk is pointed *inside* the block, so the text before the statement ends
+        // with the `{` the attribute is attached to -- the shape `#[cfg(…)] { wipe }`.
+        (
+            "attribute on the block opener",
+            "#[cfg(feature = \"pure\")] {\nwipe;",
+            "feature = \"pure\"",
+        ),
+        (
+            "whitespace spelling",
+            "# [cfg(feature = \"pure\")]\nwipe;",
+            "feature = \"pure\"",
+        ),
+        ("constant predicate", "#[cfg(any())]\nwipe;", "any()"),
+    ] {
+        let found = walk(body);
+        assert_eq!(
+            found.len(),
+            1,
+            "the walk found {found:?} above the statement in the `{name}` shape, expected one \
+             attribute. Every spelling here is legal Rust and the attribute applies to the \
+             statement; a shape the walk does not see is a `cfg` the wipe table cannot veto."
+        );
+        assert!(
+            found[0].contains(want),
+            "the walk read `{}` above the `{name}` shape, which does not contain `{want}`",
+            found[0]
+        );
+    }
+    for (name, body) in [
+        ("a plain statement", "wipe;"),
+        ("a preceding statement", "let x = 1;\nwipe;"),
+        ("a `let` above it", "let x = 1;\n\nwipe;"),
+    ] {
+        assert!(
+            walk(body).is_empty(),
+            "the walk reported an attribute above the `{name}` shape ({:?}), which would make              every wipe look gated",
+            walk(body)
+        );
+    }
+}
+
 /// The shapes the statement-position guard must and must not report, pointed at synthetic
 /// sources: a guard whose only input is the crate cannot show that it would notice anything,
 /// and this guard's predecessor (every text rule above) was measured missing all of them.
@@ -5504,9 +5675,28 @@ fn type_last_name(ty: &syn::Type) -> String {
 struct EqBodyScan {
     ct_eq_calls: usize,
     comparison_operators: usize,
+    /// `true` when a macro body reachable from the implementation carries `==`/`!=`. A
+    /// macro body is a token stream, so `syn`'s walk never enters it: measured, a `Key::eq`
+    /// that kept a discarded `ct_eq` for the counter and compared through `_same!(a, b)` (a
+    /// macro expanding to `$a == $b`) left this guard green while the comparison it exists
+    /// to prevent was the one being executed.
+    macro_comparison: bool,
+    /// `true` when a macro body carries `ct_eq`, which this scan cannot read either.
+    macro_ct_eq: bool,
 }
 
 impl<'ast> syn::visit::Visit<'ast> for EqBodyScan {
+    fn visit_macro(&mut self, mac: &'ast syn::Macro) {
+        let text = mac.tokens.to_string();
+        if text.contains("==") || text.contains("!=") {
+            self.macro_comparison = true;
+        }
+        if contains_identifier(&text, "ct_eq") {
+            self.macro_ct_eq = true;
+        }
+        syn::visit::visit_macro(self, mac);
+    }
+
     fn visit_expr_method_call(&mut self, call: &'ast syn::ExprMethodCall) {
         if call.method == "ct_eq" {
             self.ct_eq_calls += 1;
@@ -5535,6 +5725,36 @@ impl<'ast> syn::visit::Visit<'ast> for EqBodyScan {
         }
         syn::visit::visit_expr_binary(self, binary);
     }
+}
+
+/// Whether `expr` calls `ct_eq` anywhere inside it.
+fn expr_contains_ct_eq(expr: &syn::Expr) -> bool {
+    #[derive(Default)]
+    struct Finder(bool);
+    impl<'ast> syn::visit::Visit<'ast> for Finder {
+        fn visit_expr_method_call(&mut self, call: &'ast syn::ExprMethodCall) {
+            if call.method == "ct_eq" {
+                self.0 = true;
+            }
+            syn::visit::visit_expr_method_call(self, call);
+        }
+        fn visit_expr_call(&mut self, call: &'ast syn::ExprCall) {
+            if let syn::Expr::Path(path) = &*call.func {
+                if path
+                    .path
+                    .segments
+                    .last()
+                    .is_some_and(|segment| segment.ident == "ct_eq")
+                {
+                    self.0 = true;
+                }
+            }
+            syn::visit::visit_expr_call(self, call);
+        }
+    }
+    let mut finder = Finder(false);
+    syn::visit::Visit::visit_expr(&mut finder, expr);
+    finder.0
 }
 
 /// `(hand-written `PartialEq` impls seen, those whose `eq`/`ne` is not a `ct_eq` comparison)`,
@@ -5566,10 +5786,43 @@ fn partial_eq_impls_without_ct_eq(source: &str) -> (usize, Vec<(usize, String)>)
             }
             let mut scan = EqBodyScan::default();
             syn::visit::Visit::visit_block(&mut scan, &function.block);
-            if scan.ct_eq_calls == 0 || scan.comparison_operators != 0 {
+            // The comparison has to be what the body *returns*. Counting `ct_eq` calls
+            // alone accepted a discarded one (`let _ = bool::from(a.ct_eq(&b)); a == b`),
+            // i.e. a comparison through `==` with a `ct_eq` beside it for the counter.
+            let tail_is_ct_eq =
+                function
+                    .block
+                    .stmts
+                    .last()
+                    .is_some_and(|statement| match statement {
+                        syn::Stmt::Expr(expr, None) => expr_contains_ct_eq(expr),
+                        _ => false,
+                    });
+            if scan.ct_eq_calls == 0
+                || scan.comparison_operators != 0
+                || scan.macro_comparison
+                || scan.macro_ct_eq
+                || !tail_is_ct_eq
+            {
+                let mut why = Vec::new();
+                if scan.ct_eq_calls == 0 {
+                    why.push("no `ct_eq` call");
+                }
+                if scan.comparison_operators != 0 {
+                    why.push("an `==`/`!=` operator");
+                }
+                if scan.macro_comparison {
+                    why.push("a comparison inside a macro body");
+                }
+                if scan.macro_ct_eq {
+                    why.push("a `ct_eq` inside a macro body, which this scan cannot read");
+                }
+                if !tail_is_ct_eq {
+                    why.push("a result that is not the `ct_eq` comparison");
+                }
                 bad.push((
                     function.sig.ident.span().start().line,
-                    format!("{type_name}::{name}"),
+                    format!("{type_name}::{name} ({})", why.join(", ")),
                 ));
             }
         }
@@ -5610,25 +5863,59 @@ const NON_VOLATILE_STORES: [&str; 15] = [
     "write_unaligned",
 ];
 
-/// The calls made by one function body, as `(line, callee name)`.
+/// The calls made by one function body, as `(line, callee name, path text)`.
+///
+/// The path text is what makes the volatility check alias-proof. `use core::ptr::write as
+/// write_volatile;` leaves the callee's *name* `write_volatile` -- measured: a name-only
+/// scan called that a volatile store and the whole suite stayed green -- while the path text
+/// is still `write_volatile`, so the check below requires the path to be exactly
+/// `core::ptr::write_volatile`. An alias, a re-export or a locally defined function of that
+/// name therefore all fail it. An empty path is the method form (`p.write_volatile(0)`),
+/// which resolves to the inherent method on raw pointers and cannot be shadowed.
 #[derive(Default)]
-struct CallScan(Vec<(usize, String)>);
+struct CallScan(Vec<(usize, String, String)>);
 
 impl<'ast> syn::visit::Visit<'ast> for CallScan {
     fn visit_expr_call(&mut self, call: &'ast syn::ExprCall) {
         if let syn::Expr::Path(path) = &*call.func {
             if let Some(last) = path.path.segments.last() {
+                let full = path
+                    .path
+                    .segments
+                    .iter()
+                    .map(|segment| segment.ident.to_string())
+                    .collect::<Vec<_>>()
+                    .join("::");
                 self.0
-                    .push((last.ident.span().start().line, last.ident.to_string()));
+                    .push((last.ident.span().start().line, last.ident.to_string(), full));
             }
         }
         syn::visit::visit_expr_call(self, call);
     }
 
     fn visit_expr_method_call(&mut self, call: &'ast syn::ExprMethodCall) {
-        self.0
-            .push((call.method.span().start().line, call.method.to_string()));
+        self.0.push((
+            call.method.span().start().line,
+            call.method.to_string(),
+            String::new(),
+        ));
         syn::visit::visit_expr_method_call(self, call);
+    }
+
+    /// `*ptr = value` is a store with no call to inspect, and it is *not* volatile. It is
+    /// recorded under its own name so the failure says which spelling was used: measured,
+    /// rewriting `zeroize_raw`'s wide-loop store as `*(ptr.add(i) as *mut usize) = 0;` is
+    /// caught only by the pinned count (`3` -> `2`), and the operator says nothing about
+    /// what the new store is.
+    fn visit_expr_assign(&mut self, assign: &'ast syn::ExprAssign) {
+        use syn::spanned::Spanned;
+
+        self.0.push((
+            assign.left.span().start().line,
+            "assignment".to_string(),
+            String::new(),
+        ));
+        syn::visit::visit_expr_assign(self, assign);
     }
 }
 
@@ -5642,12 +5929,19 @@ struct WipeStoreScan {
     offending: Vec<(usize, String, String)>,
     /// `write_volatile` calls per function name.
     volatile: std::collections::BTreeMap<String, usize>,
+    /// `(line, function, path text)` for each `write_volatile` call whose path is not
+    /// exactly `core::ptr::write_volatile`.
+    aliased: Vec<(usize, String, String)>,
+    /// `(line, spelling)` for every `use` in the file that brings *another* item in under
+    /// the name `write_volatile`; naming the culprit is what makes the failure actionable.
+    aliasing_imports: Vec<(usize, String)>,
 }
 
 fn wipe_store_findings(source: &str) -> WipeStoreScan {
     let file = syn::parse_file(source).expect("the scanned source must parse as a Rust file");
     let mut scan = WipeStoreScan::default();
     scan_wipe_functions(&file.items, &mut scan);
+    scan.aliasing_imports = write_volatile_aliasing_imports(source);
     scan
 }
 
@@ -5692,13 +5986,277 @@ fn note_wipe_body(name: &str, block: &syn::Block, out: &mut WipeStoreScan) {
     out.found.push(name.to_string());
     let mut calls = CallScan::default();
     syn::visit::Visit::visit_block(&mut calls, block);
-    for (line, callee) in calls.0 {
+    for (line, callee, path) in calls.0 {
         if callee == "write_volatile" {
             *out.volatile.entry(name.to_string()).or_default() += 1;
-        } else if NON_VOLATILE_STORES.contains(&callee.as_str()) {
+            if !path.is_empty() && path != "core::ptr::write_volatile" {
+                out.aliased.push((line, name.to_string(), path));
+            }
+        } else if NON_VOLATILE_STORES.contains(&callee.as_str()) || callee == "assignment" {
             out.offending.push((line, name.to_string(), callee));
         }
     }
+}
+
+/// Every `use` that binds the name `write_volatile` to something other than
+/// `core::ptr::write_volatile`, as `(line, spelling)`.
+///
+/// The per-call path check above catches an alias at the point of use; this catches the
+/// import itself, wherever it is written, and names it. Both are needed: a wipe function
+/// might not use the alias at all in the revision under review, and an import that is
+/// merely *present* is the precondition for the next edit to be invisible.
+fn write_volatile_aliasing_imports(source: &str) -> Vec<(usize, String)> {
+    let file = syn::parse_file(source).expect("the scanned source must parse as a Rust file");
+    let mut out = Vec::new();
+    collect_aliasing_imports(&file.items, &mut out);
+    out
+}
+
+fn collect_aliasing_imports(items: &[syn::Item], out: &mut Vec<(usize, String)>) {
+    use syn::spanned::Spanned;
+
+    for item in items {
+        match item {
+            syn::Item::Use(u) => {
+                let text = u.span().source_text().unwrap_or_default();
+                if use_tree_binds_write_volatile(&u.tree) {
+                    out.push((u.span().start().line, text.replace('\n', " ")));
+                }
+            }
+            syn::Item::Mod(module) => {
+                if let Some((_, items)) = &module.content {
+                    collect_aliasing_imports(items, out);
+                }
+            }
+            syn::Item::Fn(function) => {
+                collect_aliasing_imports_in_block(&function.block, out);
+            }
+            syn::Item::Impl(block) => {
+                for item in &block.items {
+                    if let syn::ImplItem::Fn(function) = item {
+                        collect_aliasing_imports_in_block(&function.block, out);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+fn collect_aliasing_imports_in_block(block: &syn::Block, out: &mut Vec<(usize, String)>) {
+    use syn::spanned::Spanned;
+
+    for statement in &block.stmts {
+        if let syn::Stmt::Item(syn::Item::Use(u)) = statement {
+            if use_tree_binds_write_volatile(&u.tree) {
+                let text = u.span().source_text().unwrap_or_default();
+                out.push((u.span().start().line, text.replace('\n', " ")));
+            }
+        }
+    }
+}
+
+/// Whether `tree` binds the name `write_volatile` to anything other than
+/// `core::ptr::write_volatile` (`use core::ptr::write as write_volatile`, `use
+/// core::ptr::{write as write_volatile}`, `use core::ptr::write_volatile as x` is *not*
+/// this: it renames the real intrinsic, which the per-call path check still sees).
+fn use_tree_binds_write_volatile(tree: &syn::UseTree) -> bool {
+    match tree {
+        syn::UseTree::Rename(rename) => {
+            rename.rename == "write_volatile" && rename.ident != "write_volatile"
+        }
+        syn::UseTree::Path(path) => use_tree_binds_write_volatile(&path.tree),
+        syn::UseTree::Group(group) => group.items.iter().any(use_tree_binds_write_volatile),
+        syn::UseTree::Name(_) | syn::UseTree::Glob(_) => false,
+    }
+}
+
+/// Every wipe primitive that performs volatile stores itself also ends with a
+/// `compiler_fence(SeqCst)`.
+///
+/// `write_volatile` orders the stores against each other and against observable side
+/// effects, but it does **not** stop the compiler from sinking or hoisting *ordinary*
+/// accesses across the wipe: the derived key can be copied out of a register into a stack
+/// slot the wipe's range does not cover, after the stores. The fence is the second half of
+/// the guarantee, and nothing measured it -- deleting `zeroize_raw`'s trailing
+/// `compiler_fence` left this file's suite 37/37 green, because the bytes are still zero and
+/// the stores are still volatile.
+///
+/// The rule is per *store site*, not per name: a primitive that delegates (`zeroize_slice`
+/// and `zeroize_array` both end in `zeroize_raw`) is covered by its callee's fence, and a
+/// guard that demanded a fence in every one of them would be asking for a second fence that
+/// protects nothing -- the kind of demand that gets satisfied by copying the line. So the
+/// assertion is: a primitive with volatile stores of its own has a fence, and every
+/// primitive without stores of its own calls one that has.
+#[test]
+fn every_wipe_primitive_that_stores_ends_with_a_compiler_fence() {
+    let mut source = non_test_source();
+    source.push_str(&non_test_source_of(include_str!("../src/witness.rs")));
+    let file = syn::parse_file(&source).expect("the scanned source must parse as a Rust file");
+    let mut found = Vec::new();
+    collect_fence_status(&file.items, &mut found);
+    assert_eq!(
+        found.len(),
+        10,
+        "expected 10 wipe primitives (the same ten `every_wipe_store_is_volatile` scans), \
+         found {:?}. A renamed primitive is no longer covered by this guard.",
+        found
+            .iter()
+            .map(|status| status.name.clone())
+            .collect::<Vec<_>>()
+    );
+    let by_name: std::collections::BTreeMap<String, &WipeFenceStatus> = found
+        .iter()
+        .map(|status| (status.name.clone(), status))
+        .collect();
+    assert!(
+        by_name.contains_key("zeroize_raw"),
+        "`zeroize_raw` is gone from the scanned source; this guard's subject is missing"
+    );
+    for status in &found {
+        // The Kani-only no-ops in `src/witness.rs` are compiled only under `cfg(kani)`,
+        // where the concrete harness compares hash values rather than wipes; they are
+        // listed here so a *third* definition of either name cannot hide behind them.
+        if is_kani_noop(status) {
+            continue;
+        }
+        if status.volatile_stores > 0 {
+            assert!(
+                status.fenced,
+                "`{}` performs {} volatile store(s) and has no `compiler_fence`. \
+                 `write_volatile` does not order ordinary accesses across the wipe, so \
+                 without the fence the compiler may copy the key out of a register into a \
+                 slot the wipe does not cover, after the stores. Measured: deleting \
+                 `zeroize_raw`'s trailing fence left the suite green.",
+                status.name, status.volatile_stores
+            );
+        } else {
+            assert!(
+                status.delegates_to.iter().any(|callee| by_name
+                    .get(callee)
+                    .is_some_and(|callee_status| callee_status.volatile_stores > 0
+                        || !callee_status.delegates_to.is_empty())),
+                "`{}` performs no volatile store of its own and does not call a wipe \
+                 primitive that does (it calls {:?}), so its name promises a wipe that \
+                 nothing performs.",
+                status.name,
+                status.delegates_to
+            );
+        }
+    }
+}
+
+/// The first parameter's pattern text, or `""` when the function takes none.
+fn first_param_pattern(sig: &syn::Signature) -> String {
+    sig.inputs
+        .first()
+        .map(|arg| match arg {
+            syn::FnArg::Typed(pat) => quote_pattern(&pat.pat),
+            syn::FnArg::Receiver(_) => "self".to_string(),
+        })
+        .unwrap_or_default()
+}
+
+/// A pattern rendered as text, for the identifiers this file compares.
+fn quote_pattern(pat: &syn::Pat) -> String {
+    match pat {
+        syn::Pat::Ident(ident) => ident.ident.to_string(),
+        syn::Pat::Wild(_) => "_".to_string(),
+        other => {
+            use syn::spanned::Spanned;
+            other.span().source_text().unwrap_or_default()
+        }
+    }
+}
+
+/// Whether `status` is one of `src/witness.rs`'s `cfg(kani)`-only no-ops.
+///
+/// They are `fn wipe<T>(_value: &mut T) {}` and `fn wipe_words(_words: &mut [u32]) {}`: no
+/// stores, no calls, and a `_`-prefixed parameter. The signature is what distinguishes them
+/// from the real pair, which take `&mut T` / `&mut [u32]` and store.
+fn is_kani_noop(status: &WipeFenceStatus) -> bool {
+    (status.name == "wipe" || status.name == "wipe_words")
+        && status.first_param.starts_with('_')
+        && status.volatile_stores == 0
+        && status.delegates_to.is_empty()
+        && !status.fenced
+}
+
+/// What one wipe primitive does: its name, how many volatile stores it performs itself,
+/// whether it calls `compiler_fence`, and which other wipe primitives it calls.
+struct WipeFenceStatus {
+    name: String,
+    volatile_stores: usize,
+    fenced: bool,
+    delegates_to: Vec<String>,
+    /// The first parameter's pattern text (`_value`, `_words`, `value`, `slice`, ...).
+    first_param: String,
+}
+
+fn collect_fence_status(items: &[syn::Item], out: &mut Vec<WipeFenceStatus>) {
+    for item in items {
+        match item {
+            syn::Item::Fn(function) => note_fence_status(
+                &function.sig.ident.to_string(),
+                &first_param_pattern(&function.sig),
+                &function.block,
+                out,
+            ),
+            syn::Item::Mod(module) => {
+                if let Some((_, items)) = &module.content {
+                    collect_fence_status(items, out);
+                }
+            }
+            syn::Item::Impl(block) => {
+                for item in &block.items {
+                    if let syn::ImplItem::Fn(function) = item {
+                        note_fence_status(
+                            &function.sig.ident.to_string(),
+                            &first_param_pattern(&function.sig),
+                            &function.block,
+                            out,
+                        );
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+fn note_fence_status(
+    name: &str,
+    first_param: &str,
+    block: &syn::Block,
+    out: &mut Vec<WipeFenceStatus>,
+) {
+    if !WIPE_FUNCTIONS.contains(&name) {
+        return;
+    }
+    let mut calls = CallScan::default();
+    syn::visit::Visit::visit_block(&mut calls, block);
+    let fenced = calls
+        .0
+        .iter()
+        .any(|(_, callee, _)| callee == "compiler_fence");
+    let volatile_stores = calls
+        .0
+        .iter()
+        .filter(|(_, callee, _)| callee == "write_volatile")
+        .count();
+    let delegates_to = calls
+        .0
+        .iter()
+        .map(|(_, callee, _)| callee.clone())
+        .filter(|callee| WIPE_FUNCTIONS.contains(&callee.as_str()) && callee != name)
+        .collect();
+    out.push(WipeFenceStatus {
+        name: name.to_string(),
+        volatile_stores,
+        fenced,
+        delegates_to,
+        first_param: first_param.to_string(),
+    });
 }
 
 /// Every hand-written `PartialEq` in the crate compares in constant time.
@@ -5750,6 +6308,24 @@ fn every_wipe_store_is_volatile() {
         scan.found
     );
     assert!(
+        scan.aliased.is_empty(),
+        "wipe primitive(s) call a `write_volatile` whose path is not `core::ptr::write_volatile`: \
+         {:?}. `use core::ptr::write as write_volatile;` leaves the callee's *name* unchanged, so \
+         a name-matching scan reads an ordinary store as a volatile one -- measured: that alias \
+         left this file's suite 37/37 green while every wipe in `zeroize_raw` became elidable. \
+         Call the intrinsic by its full path, or use the inherent method \
+         (`p.write_volatile(0)`), which cannot be shadowed.",
+        scan.aliased
+    );
+    assert!(
+        scan.aliasing_imports.is_empty(),
+        "these `use` statements bind the name `write_volatile` to something else: {:?}. An \
+         alias is the precondition for a wipe store that reads as volatile and is not; the \
+         per-call check above catches its use, this one catches the import wherever it is \
+         written, including in a file whose wipe functions do not use it yet.",
+        scan.aliasing_imports
+    );
+    assert!(
         scan.offending.is_empty(),
         "wipe primitive(s) write through a non-volatile store: {:?}. `write_volatile` is what \
          keeps the optimizer from deleting a dead store, which is the entire reason these \
@@ -5759,18 +6335,26 @@ fn every_wipe_store_is_volatile() {
          green.",
         scan.offending
     );
-    for name in [
-        "wipe",
-        "wipe_words",
-        "zeroize_neon",
-        "zeroize_raw",
-        "zeroize_xmm",
-        "zeroize_ymm",
+    // The count per primitive is pinned, not merely required to be positive. `> 0` was the
+    // first version, and it accepts a wipe whose stores were rewritten as plain ones while a
+    // single volatile store survives somewhere in the body -- or, in `zeroize_raw`, a
+    // rewrite of the wide loop's store (the bulk of the wipe) that leaves the leading and
+    // trailing loops' stores in place.
+    for (name, expected) in [
+        ("wipe", 1),
+        ("wipe_words", 1),
+        ("zeroize_neon", 1),
+        ("zeroize_raw", 3),
+        ("zeroize_xmm", 1),
+        ("zeroize_ymm", 1),
     ] {
-        assert!(
-            scan.volatile.get(name).copied().unwrap_or(0) > 0,
-            "`{name}` performs no `write_volatile` store at all: the wipe it names has no \
-             volatile store left to observe (the volatile counts are {:?}).",
+        assert_eq!(
+            scan.volatile.get(name).copied().unwrap_or(0),
+            expected,
+            "`{name}` has {} `write_volatile` store(s), expected {expected} (all counts: \
+             {:?}). A wipe that lost one of its volatile stores can be partially or wholly \
+             elided by the optimizer, which is what `write_volatile` exists to prevent.",
+            scan.volatile.get(name).copied().unwrap_or(0),
             scan.volatile
         );
     }
@@ -5793,6 +6377,14 @@ fn the_equality_and_wiping_guards_see_the_defects_built_for_them() {
         (
             "an `eq` that calls neither `ct_eq` nor a comparison",
             "impl PartialEq<[u8]> for Plaintext { fn eq(&self, _o: &[u8]) -> bool { true } }",
+        ),
+        (
+            "a discarded `ct_eq` beside a real `==`",
+            "impl PartialEq for Key { fn eq(&self, o: &Key) -> bool { let _ = bool::from(self.0.ct_eq(&o.0)); self.0 == o.0 } }",
+        ),
+        (
+            "a comparison through a macro body",
+            "macro_rules! m { ($a:expr, $b:expr) => { $a == $b }; }\nimpl PartialEq for Key { fn eq(&self, o: &Key) -> bool { let _ = bool::from(self.0.ct_eq(&o.0)); m!(self.0, o.0) } }",
         ),
     ] {
         let (seen, bad) = partial_eq_impls_without_ct_eq(&wrap(body));
@@ -5831,13 +6423,25 @@ fn the_equality_and_wiping_guards_see_the_defects_built_for_them() {
             "a zeroed vector store",
             "unsafe fn zeroize_xmm(v: &mut [__m128i]) { unsafe { _mm_storeu_si128(v.as_mut_ptr(), zero) }; }",
         ),
+        (
+            "a deref assignment (no call to inspect)",
+            "unsafe fn zeroize_raw(p: *mut u8) { unsafe { *p = 0 }; }",
+        ),
+        (
+            "an alias that keeps the callee name",
+            "mod a { pub use core::ptr::write as write_volatile; }\nuse a::write_volatile;\nunsafe fn zeroize_raw(p: *mut u8) { unsafe { write_volatile(p, 0) }; }",
+        ),
     ] {
         let scan = wipe_store_findings(body);
-        assert_eq!(
-            scan.offending.len(),
-            1,
-            "the wipe-store guard missed the shape: {name} ({:?})",
-            scan.offending
+        // An alias import is reported by the import rule rather than as a store, so the
+        // shape counts as caught when *either* rule fires.
+        assert!(
+            scan.offending.len() + scan.aliasing_imports.len() + scan.aliased.len() >= 1,
+            "the wipe-store guard missed the shape: {name} (stores {:?}, aliased calls {:?}, \
+             aliasing imports {:?})",
+            scan.offending,
+            scan.aliased,
+            scan.aliasing_imports
         );
     }
     let clean = wipe_store_findings(

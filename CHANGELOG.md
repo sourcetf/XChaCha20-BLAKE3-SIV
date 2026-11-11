@@ -8,6 +8,61 @@ green push to `main` — which are build artefacts of that job, not construction
 
 ## Unreleased
 
+### Second hostile pass on the guards (after `d55a7d8`)
+
+No wire-format bytes changed and the AEAD behaviour is identical. Five more ways of
+satisfying the verification device without the property holding, each reproduced before it was
+closed and each closed with its negative control.
+
+- **A `use` alias made a plain store read as volatile.** `use core::ptr::write as
+  write_volatile;` leaves the callee's *name* `write_volatile`, so the store scan counted an
+  ordinary `write` as a volatile store, the non-volatile spelling list did not match a name it
+  never sees, and the "at least one volatile store" check was satisfied by the same alias:
+  measured, `tests/security.rs` stayed 37/37 green with every store in `zeroize_raw` elidable.
+  The scan now records each call's **full path** and requires exactly
+  `core::ptr::write_volatile` (the inherent method form `p.write_volatile(0)` has no path and
+  cannot be shadowed, so it stays legal), and a second rule reports any `use` that binds the
+  name to something else, wherever it is written -- reported separately so the failure names
+  the import.
+- **The `compiler_fence` had no guard.** `write_volatile` does not order ordinary accesses
+  across the wipe, so the trailing `compiler_fence(SeqCst)` is the half that stops the
+  compiler sinking a copy of the key into a slot the wipe does not cover. Deleting
+  `zeroize_raw`'s fence left the suite green, because the bytes are still zero and the stores
+  are still volatile. The rule is per store site: a primitive with volatile stores of its own
+  must call `compiler_fence`, and one without must call a primitive that does (`zeroize_slice`
+  and `zeroize_array` delegate), so it cannot be satisfied by copying a fence into a function
+  that needs none.
+- **A multi-line `cfg` walked past the per-site table.** `#[cfg(feature = "pure"\n)]` above
+  `derive_material`'s `zeroize_array(&mut subkey);` was invisible to the line-based attribute
+  walk -- its last line is `)]` and its first begins `#[cfg(feature = "pure"` -- so the wipe
+  table never fired; the single-line spelling of the same predicate is caught, so the newline
+  was the entire difference. The walk now also reads a balanced `#[…]` group that ends exactly
+  where the statement's text begins, so an attribute spread over any number of lines is seen;
+  `raw_cfg_predicate_at` reads the predicate from the rest of the file rather than from one
+  line (the multi-line spelling used to panic with "unbalanced `cfg(`"). Both the
+  single-predicate-per-line and the `all(…
+)` shapes are negative controls.
+- **A macro body hid a comparison from the equality guard.** `macro_rules! m { ($a:expr,
+  $b:expr) => { $a == $b } }` in `Key::eq`, beside a discarded `ct_eq` for the counter, left
+  the guard green while the comparison it exists to prevent was the one executed -- the same
+  token-stream blind spot the `Choice` guard was just given a fix for; this guard had not
+  followed. It now reports any macro body carrying `==`/`!=` or `ct_eq`, and it requires the
+  `ct_eq` comparison to be the body's *result*, so a discarded call beside a real `==` fails
+  too.
+- **Plain stores had spellings the list did not know.** `*(ptr as *mut usize) = 0;` is not a
+  call, so the store list missed it; the pinned count caught it, but the message named nothing
+  the reader could act on. Assignments inside a wipe primitive are now reported as
+  non-volatile stores by name, and the per-primitive volatile counts are pinned (`zeroize_raw`
+  must have three) rather than merely required to be positive -- the earlier `> 0` accepted a
+  rewrite of the wide loop's store, which is the bulk of the wipe, while the leading and
+  trailing loops' stores kept the check green.
+
+The same pass found nothing else: `tools/kani_shards.py`'s committed-harness cross-check, the
+call-count backstop (`full_wipe_calls`, which caught a deleted delegating call 81 -> 80), the
+`choice` guard's macro rule, and the statement-position rule all held under the shapes tried.
+
+## Unreleased
+
 ### Whole-tree re-audit (after `127d789`)
 
 No wire-format bytes changed and the AEAD behaviour is identical; every change is to the
