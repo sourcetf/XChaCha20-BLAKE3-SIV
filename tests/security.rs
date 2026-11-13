@@ -4263,10 +4263,11 @@ fn is_wipe_path(func: &syn::Expr) -> bool {
     })
 }
 
-/// Whether a method call is a wipe: `.zeroize()` on the BLAKE3 `Hasher`/`XofReader` at the
-/// keyed seam (`src/lib.rs:2267-2268` in `blake3_keyed`, `:2879-2880` in `blake3_keyed_multi`)
-/// is the *only* clearing of the MAC key
-/// state, and a method call is not an `ExprCall`, so the path test above never saw it.
+/// Whether a method call is a wipe: `.zeroize()` on the BLAKE3 `Hasher`/`XofReader` is the
+/// only clearing of BLAKE3's key-carrying state, and a method call is not an `ExprCall`, so
+/// the path test above never saw it. Two sites, each a `reader` and a `hasher` call:
+/// `src/lib.rs:2269-2270` in `integrity_tag` (the unkeyed tag over a locked key) and
+/// `:2881-2882` in `blake3_keyed_multi` (the keyed seam; `blake3_keyed_xof` delegates).
 fn is_wipe_method(m: &syn::ExprMethodCall) -> bool {
     matches!(
         m.method.to_string().as_str(),
@@ -4948,11 +4949,13 @@ fn the_constant_time_selection_api_is_absent_and_choice_constants_are_literal() 
             froms.len(),
             expected,
             "`{name}` has {} `Choice`-naming `from` call(s) at line(s) {:?}, expected \
-             {expected}: every constant `Choice` in this crate is `Choice::from(1)` \
-             (`src/lib.rs:3598` in `decrypt`, `src/lib.rs:3882` in `decrypt_in_place_detached`, the two \
-             `ultra`-off witness-gate operands), and this count is what makes a *new* \
-             site a deliberate change -- the guard's other rules already reject a \
-             non-literal argument at any site it can see.",
+             {expected}: every constant `Choice` in this crate is `Choice::from(1)` -- the two \
+             `ultra`-off witness-gate operands, in `decrypt` and in \
+             `decrypt_in_place_detached` -- and this count is what makes a *new* site a \
+             deliberate change; the guard's other rules already reject a non-literal \
+             argument at any site it can see. The line numbers printed above are read \
+             from the source on every run, because this message used to hard-code them and \
+             they went stale twice.",
             froms.len(),
             froms.iter().map(|(l, _)| *l).collect::<Vec<_>>()
         );

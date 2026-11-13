@@ -195,9 +195,9 @@ being closed.
   after with `assert_eq!`, which flakes (~1 run in 21) because four tests in the same file open
   descriptors concurrently; it now samples until two consecutive readings agree and compares the
   window's minimum, which still fails on a real leak.
-- **Docs corrected.** Stale line references: the two `Choice::from(1)` sites (`src/lib.rs:3598` in
-  `decrypt`, `:3882` in `decrypt_in_place_detached`), the keyed-seam `zeroize` sites
-  (`2267-2268`, `2879-2880`), the planted `scrub_stack` line, `deep.yml`'s deny step, the four
+- **Docs corrected.** Stale line references: the two `Choice::from(1)` sites (`src/lib.rs:3600` in
+  `decrypt`, `:3884` in `decrypt_in_place_detached`), the keyed-seam `zeroize` sites
+  (`2269-2270`, `2881-2882`), the planted `scrub_stack` line, `deep.yml`'s deny step, the four
   `cpufeatures::new!` sites, the AVX2 detection range; README's fork counts (46 default-feature
   tests, 47 with `zeroize`) and its "seven third-party reports"; SECURITY.md's name for the third
   tolerated secret-dependent branch (the `witness` module's `Choice`/`Result` handling, not a
@@ -566,7 +566,7 @@ commands; the dispositions are in `AUDIT-RESPONSE.md` §6. Two items were action
   `XCR0` bits) — gates no CPU without leaf 7 can satisfy, since XSAVE and AVX both postdate it. The
   five features `cpufeatures` *could* mis-detect from an out-of-range leaf (`bmi1`, `bmi2`, `adx`,
   `sha`, `sgx`) are queried nowhere in the graphs. An unconditional `cpuid(7)` is architecturally
-  defined, not UB, and this crate's own AVX2 detection (`src/lib.rs:4447-4501`) checks the maximum
+  defined, not UB, and this crate's own AVX2 detection (`src/lib.rs:4449-4503`) checks the maximum
   basic leaf itself.
 - **No new fork.** Each candidate fails for a reason the `blake3/` fork's own history makes explicit:
   that fork exists because *shipped* code needed patches. `cipher` is benchmark-only and unreachable;
@@ -611,7 +611,7 @@ its three negative controls for the `Choice` guard matched the ones this round r
   deleting the alias rule and watching it go red.
 - **The guard's failure message named a site that does not exist** (F-02): it called the
   second literal-`1` construction "the witness's `ultra`-off operand", but `src/witness.rs` has
-  no `Choice::from` at all. Both are in `src/lib.rs` (`:3598`, `:3882`); the message now names
+  no `Choice::from` at all. Both are in `src/lib.rs` (`:3600`, `:3884`); the message now names
   them, and the count it pins is per file (2 and 0).
 - **`tests/common/mod.rs` now exists** (F-03). This file's previous entry said the six copies
   "call the robust scanner"; they were seven byte-identical copies with no shared function —
