@@ -54,7 +54,16 @@ control.
   whether the body contained *any* `compiler_fence` call, so moving `zeroize_raw`'s fence into
   `let _unused = || …;` left the volatile stores unordered and the suite green. The fence must
   now be the last statement of the primitive's body. Negative control: the closure form fails.
-- **`accept_or_reject`'s `#[inline(never)]` was pinned nowhere in the default build.**
+- **The wipe counts could not see which binding a wipe targets.** Rebinding a
+  just-derived buffer to a zeroed decoy immediately before the unchanged wipe statement
+  (`let mut subkey = [0u8; 32];` ahead of `crate::zeroize_array(&mut subkey);`) left 182
+  tests, clippy, fmt and `tools/stack_residue.sh --ultra` green while the real bytes were
+  never overwritten. `each_wiped_binding_is_declared_once_in_the_block_that_wipes_it` now
+  counts `let`s per *block* (the crate legitimately binds `ks` once in each of several
+  `#[cfg]`-selected arms of `chacha20_apply`, and only one compiles) and fails when a name
+  is bound twice before it is wiped. Negative control: the decoy rebinding fails naming the
+  binding.
+- **`accept_or_reject`'s `#[inline(never)]` was pinned nowhere in the default build.**- **`accept_or_reject`'s `#[inline(never)]` was pinned nowhere in the default build.**
   Deleting it left the suite and clippy green; only `tools/ctgrind.sh`, on a host with
   valgrind, could have noticed — and the suppression file's whole argument rests on the
   decision being a function of its own. `tests/decision_scope.rs` pins it beside the existing

@@ -5348,6 +5348,122 @@ fn arm_guard_condition(head: &str) -> Option<&str> {
     Some(guard.trim())
 }
 
+/// A wipe's target is bound exactly once in the block that wipes it.
+///
+/// The wipe counts are text: they see `crate::zeroize_array(&mut subkey);` and cannot tell
+/// which allocation `subkey` refers to. So a rebinding immediately before the wipe satisfies
+/// every count while the derived bytes are never overwritten -- measured by inserting `let
+/// mut subkey = [0u8; 32];` (a zeroed decoy) ahead of `derive_material`'s four unchanged
+/// wipe statements: 182 tests, clippy, `cargo fmt --check` and
+/// `tools/stack_residue.sh --ultra` all passed.
+///
+/// The judgement is **per block**, not per function, because that is what the crate's own
+/// code needs: `chacha20_apply` binds `ks` once in each of several `#[cfg]`-selected blocks
+/// (`x86_simd::blocks8`, `blocks4`, the aarch64 arm, and the scalar tail), and only one of
+/// them compiles into any given build, so a per-function count would fail on legitimate
+/// code. Within one block the shape the attack needs -- two `let`s of one name, the second
+/// a decoy, with the wipe after the second -- is what is counted, and a second `let` in a
+/// *nested* block is that block's business.
+#[test]
+fn each_wiped_binding_is_declared_once_in_the_block_that_wipes_it() {
+    fn walked(block: &syn::Block, name: &str, findings: &mut Vec<String>) {
+        let mut bound: Vec<String> = Vec::new();
+        for stmt in &block.stmts {
+            // The wipes and bindings *directly* in this block, in source order: a wipe of a
+            // name bound more than once before it is the shape this rejects.
+            let mut wipes: Vec<String> = Vec::new();
+            match stmt {
+                syn::Stmt::Local(local) => {
+                    if let syn::Pat::Ident(pat) = &local.pat {
+                        bound.push(pat.ident.to_string());
+                    }
+                }
+                syn::Stmt::Expr(expr, _) => {
+                    let mut scan = CallScan::default();
+                    syn::visit::Visit::visit_expr(&mut scan, expr);
+                    let is_wipe = scan
+                        .0
+                        .iter()
+                        .any(|(_, callee, _)| WIPE_FUNCTIONS.contains(&callee.as_str()));
+                    if is_wipe {
+                        if let syn::Expr::Call(call) = expr {
+                            for arg in &call.args {
+                                if let syn::Expr::Reference(reference) = arg {
+                                    if let syn::Expr::Path(path) = reference.expr.as_ref() {
+                                        if let Some(ident) = path.path.get_ident() {
+                                            wipes.push(ident.to_string());
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                _ => {}
+            }
+            for wiped in &wipes {
+                let count = bound.iter().filter(|b| *b == wiped).count();
+                if count > 1 {
+                    findings.push(format!(
+                        "`{name}`: `{wiped}` is bound {count} times in one block and then \
+                         wiped, so the wipe may clear a rebound decoy rather than the buffer \
+                         that was derived into"
+                    ));
+                }
+            }
+        }
+        // Descend into every nested block, each with its own binding list.
+        struct Descend<'a, 'b> {
+            name: &'a str,
+            findings: &'b mut Vec<String>,
+        }
+        impl<'ast, 'a, 'b> syn::visit::Visit<'ast> for Descend<'a, 'b> {
+            fn visit_block(&mut self, b: &'ast syn::Block) {
+                walked(b, self.name, self.findings);
+            }
+        }
+        let mut descend = Descend { name, findings };
+        for stmt in &block.stmts {
+            syn::visit::Visit::visit_stmt(&mut descend, stmt);
+        }
+    }
+
+    for (name, source) in [
+        ("src/lib.rs", non_test_source()),
+        (
+            "src/witness.rs",
+            non_test_source_of(include_str!("../src/witness.rs")),
+        ),
+    ] {
+        let file = syn::parse_file(&source).expect("the scanned source must parse as a Rust file");
+        struct Bodies<'a> {
+            out: Vec<&'a syn::Block>,
+        }
+        impl<'ast: 'a, 'a> syn::visit::Visit<'ast> for Bodies<'a> {
+            fn visit_item_fn(&mut self, f: &'ast syn::ItemFn) {
+                self.out.push(&f.block);
+            }
+            fn visit_impl_item_fn(&mut self, f: &'ast syn::ImplItemFn) {
+                self.out.push(&f.block);
+            }
+        }
+        let mut collector = Bodies { out: Vec::new() };
+        syn::visit::Visit::visit_file(&mut collector, &file);
+        for block in &collector.out {
+            let mut findings = Vec::new();
+            walked(block, name, &mut findings);
+            assert!(
+                findings.is_empty(),
+                "{findings:?}. The wipe counts are text: they cannot tell which allocation \
+                 the name refers to, so rebinding it to a zeroed decoy immediately before the \
+                 unchanged wipe statement satisfies every count while the derived bytes are \
+                 never overwritten (measured green, including under \
+                 `tools/stack_residue.sh --ultra`). Derive into one binding and wipe it."
+            );
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Expression-position wipes
 //
