@@ -8,6 +8,19 @@ green push to `main` — which are build artefacts of that job, not construction
 
 ## Unreleased
 
+### CI: the fork's lock carried one advisory that appeared after the last scan
+
+`RUSTSEC-2026-0486` (`rustix` `< 1.1.6`, informational/unsound) landed in the advisory
+database on 2026-10-27, after the previous green run. The fork reaches `rustix` through
+`tempfile` -- a dev-dependency -- and the advisory is function-specific (`getxattr` and its
+five siblings mark bytes the kernel never wrote as initialized when handed a zero-length
+buffer), so the fence never called the affected code; the audit nonetheless failed, which is
+the intended behaviour for `--deny warnings` on a dev-dependency tree, since a lockfile is not
+a call graph. `blake3/Cargo.lock` moves `rustix` 1.1.5 -> 1.1.6 (the patched release; the
+0.38 series has no `Buffer` API and is unaffected). Nothing outside the fork's dev-dependency
+graph changed: the root and `fuzz/` locks do not contain `rustix`, and the fork's own suite is
+46 unit tests plus 13 doctests green on the new lock.
+
 ### Second hostile pass on the guards (after `d55a7d8`)
 
 No wire-format bytes changed and the AEAD behaviour is identical. Five more ways of
