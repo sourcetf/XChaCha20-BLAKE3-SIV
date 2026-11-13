@@ -21,6 +21,148 @@ a call graph. `blake3/Cargo.lock` moves `rustix` 1.1.5 -> 1.1.6 (the patched rel
 graph changed: the root and `fuzz/` locks do not contain `rustix`, and the fork's own suite is
 46 unit tests plus 13 doctests green on the new lock.
 
+### A hostile pass over the guards, part three (same base)
+
+Eight more ways to satisfy the verification device without the property holding, found by
+attacking it rather than by reading it. Each was reproduced first and closed with a negative
+control.
+
+- **An escaped feature name defeats the constant-`cfg` guard.** `#[cfg(all(feature =
+  "hardened", not(feature = "\x68ardened")))]` is the same atom twice to rustc, so the arm
+  is dead in *every* build — and to the atom comparison it is two different spellings, so the
+  cancellation rule did not fire and both cuts read it as a genuine configuration. Measured:
+  wrapping `decrypt`'s `check_lengths(...)?` in it compiled the input-length bound out of
+  every build with 182 tests, clippy and fmt green. A predicate that spells a name with a
+  backslash escape, or as a raw string, is now a finding outright: no legitimate predicate in
+  this crate needs one. Both spellings are negative controls, in the tree and in the guard's
+  own self-test.
+- **A constant *constructor* deadened a wipe as well as a literal.** `if let Ok(()) =
+  Err::<(), usize>(total) { … }` around `Plaintext::drop`'s capacity-tail wipe and around
+  `derive_tag`'s `zeroize_slice` left the suite green, and the control-flow table unchanged
+  because `if let` counts as one `if`. `dead_if_let_rhs` rejected literals and `None…` only;
+  it now rejects `Err…`, `Ok…` and `false`, matched on a constructor boundary so a binding
+  named `Errno` is not caught. Negative control: the planted `if let` fails naming the wipe.
+- **`stringify!` hid four wipes from every rule.** `let _ = core::stringify!(crate::zeroize_array(&mut
+  subkey););` in `derive_material` is never executed, and `no_wipe_is_hidden_in_an_unexpanded_macro`
+  only walked macros the file *declares*, so a std macro that turns code into data was
+  invisible — measured green under the whole suite, clippy, fmt and
+  `tools/stack_residue.sh --ultra`. The guard now also scans the arguments of
+  `stringify!`/`concat!`/`format_args!`/`write!`/`writeln!`/`env!`. The first version excluded
+  `core::`-qualified names from the match and therefore missed the very plant it was written
+  for; the negative control caught that.
+- **A `compiler_fence` in a never-called closure satisfied the fence rule.** The rule asked
+  whether the body contained *any* `compiler_fence` call, so moving `zeroize_raw`'s fence into
+  `let _unused = || …;` left the volatile stores unordered and the suite green. The fence must
+  now be the last statement of the primitive's body. Negative control: the closure form fails.
+- **`accept_or_reject`'s `#[inline(never)]` was pinned nowhere in the default build.**
+  Deleting it left the suite and clippy green; only `tools/ctgrind.sh`, on a host with
+  valgrind, could have noticed — and the suppression file's whole argument rests on the
+  decision being a function of its own. `tests/decision_scope.rs` pins it beside the existing
+  `ct_eq_independent` pin. Negative control: deleting the attribute fails that test.
+
+### The verification device's own claims, measured (after `21204e4`)
+
+Eleven claims that the tools were said to support, checked against the tools. Two were false
+(the ctgrind index class, and `verify.sh`'s offline note printed before the check that would
+justify it), one was true but untested (`per_key` against the page size), two were a missing
+`--locked` in a stage CI already locked, and the rest were prose or tools that could have been
+deleted, widened or truncated without a red run.
+
+- **ctgrind does report a secret-derived memory index, and the docs said it does not.** The
+  header of `tests/ctgrind.rs` and the doc of `secret_dependent_branch` both stated that
+  memcheck "tolerates undefined values flowing into address arithmetic", so
+  `TABLE[poisoned as usize]` is not reported -- attributing that to a measurement in
+  `secret_dependent_branch`, which only ever branched. There was no `TABLE` anywhere in the
+  file. Measured with this file's own client-request code, in a standalone binary built from
+  it, on valgrind 3.26.0 at `-C opt-level=2` and `=3`: a byte load at an address computed
+  from a poisoned byte is reported as `Use of uninitialised value of size 8`, attributed to
+  the loading function, with `COUNT_ERRORS` delta 1. Both shapes are now controls in
+  `deliberate_leak_is_detected`, asserted separately, and a *third* measured fact is recorded
+  with them: the same shape read without `black_box` on the reference is folded away and
+  reports nothing (delta 0), which is why the control reads the table through `black_box`.
+  Negative controls run: de-tainting the index makes the control fail with its own message;
+  planting the same index leak inside `decrypt` makes `tools/ctgrind.sh` report 2 in-crate
+  findings. README's "what no tool here detects" paragraph and the historical `CHANGELOG`
+  entry that repeated the claim are corrected, the latter annotated rather than rewritten.
+- **`per_key` was never compared with the page size.** `tests/locked.rs` computed the VmLck
+  delta of one key, asserted it was `> 0`, and compared totals against it -- with a comment
+  saying the value "is the kernel's page size (measured rather than assumed)". A two-page
+  charge per key satisfied every assertion. It is now compared with `AT_PAGESZ` from
+  `/proc/self/auxv` (the same source `locked::page_size` reads; a hard-coded 4096 would fail
+  on a 16/64 KiB-page kernel). Negative control: doubling the value the assertion sees fails
+  with the measured page size in the message.
+- **`verify.sh`'s offline note was printed before the offline check ran.** `deny_check` and
+  `audit_with_fallback` both announced "offline: re-checked ... against the cached advisory
+  database" *before* the retry, so a run whose retry then failed printed a claim of a verdict
+  next to the evidence that none existed. Measured: holding `$CARGO_HOME/advisory-dbs/db.lock`
+  for 75 s made `--deep` print exactly that pair and exit 1. Both now print the note only
+  when the offline attempt returned 0, `deny_check` retries once after a lock collision, and
+  a lock that stays held is reported as "could not read the advisory database ... so no
+  advisory verdict exists for that graph" rather than as a cargo-deny failure. A unit test
+  with a stubbed `cargo` drives all three outcomes (lock held, offline succeeds, real
+  advisory) and asserts the note's presence and absence.
+- **`verify.sh`'s deny and Miri stages ran without `--locked`.** CI passes it in both places
+  (`ci.yml:1027-1029`, `deep.yml:424-426`, and all six `miri test` invocations in `deep.yml`). Measured on a copy of the
+  tree with `cfg-if` pinned to an older version: `cargo deny check` without `--locked` rewrote
+  `Cargo.lock`, exited 0 and printed "advisories ok, bans ok, licenses ok, sources ok" — a
+  verdict about a graph the repository does not contain, with the evidence CI's `--locked`
+  would have flagged destroyed in the process. With `--locked` it refuses
+  (`cannot update the lock file ... because --locked was passed`) and leaves the lock alone.
+  The same measurement on `cargo +nightly miri test`: the unlocked form rewrote the lock and
+  exited 0, the locked form refused with rc 101. Both stages now pass `--locked`.
+- **`tools/ctgrind.sh`'s suppression validator accepted valgrind's `...` wildcard.** Its
+  comment claimed the general rule rejected a bare `...`; the block-name alternative in that
+  rule was `[A-Za-z0-9_.-]+`, which matches three dots. Measured by appending `...` to the real
+  `tests/ctgrind.supp`: the validator printed "1 entry/entries, all naming accept_or_reject"
+  and went on to build — and put *before* the `fun:` line, the widening direction, it printed
+  2 and also went on. A bare `...` is rejected by name now, `tools/gate_selftest.sh` pins both
+  placements, and the real file plus a renamed block name are still accepted (so the rule is
+  not over-broad).
+- **The stray-Kani-harness gate and the harness parser used different grammars.**
+  `tools/check_kani_cfg.sh` scanned with `grep '#\[kani::proof\]'`, which missed the legal
+  spaced spelling `# [ kani :: proof ]` (so a stray written that way was invisible to the gate
+  that exists to find strays *and* to the parser, which reads only `src/proofs.rs`) and
+  matched the attribute inside a comment (so a comment made the gate fail on a file with no
+  harness). The scan moved into `tools/kani_shards.py --stray`, sharing that file's regex and
+  its comment/string blanking. Three controls: a real stray and a spaced spelling are reported
+  as `path:line`, a comment spelling it is not.
+- **`tools/tsan.sh`'s "run `rustup toolchain install nightly`" message executed rustup.** The
+  sentence was a double-quoted string split across two `echo`s, so the backticks were command
+  substitution: measured with a stub `rustup` first on `PATH`, the message ran it with the
+  arguments `toolchain` and `install nightly` and printed its output instead of the
+  instruction. Single-quoted now.
+- **Two tools crashed with rc 1 on a shape they document as "could not run" (3).**
+  `tools/mutation_evidence.py` reached `scenario["Mutant"]["name"]` on a non-object and raised
+  `TypeError`; `tools/fi_instruction_verdict.py` checked that `configs` is an object but not
+  that each value is, so an integer config raised `AttributeError`. Both report exit 3 with the
+  offending shape named, which is what `verify.sh`'s `run_tool` maps to a skip rather than to
+  "FAILED: <tool>". Measured on crafted reports.
+- **`tools/bench_summarise.py` reported a designed campaign as if it were a measured one.** Its
+  headline printed `len(CONFIGS)*3*len(GROUPS)*len(SIZES)` — a constant 189 — regardless of
+  what the run files contained, and the tables below take a median of whichever passes are
+  present, so a campaign missing a pass, half its sizes, or with three header-only pass files
+  still printed "(median of 3 passes)" over real numbers. Measured on synthetic run
+  directories: all three truncations now print "parsed from the run files: N distinct cells,
+  M cell-readings (K if every cell had all 3x3)" and an `INCOMPLETE <config>` line; a complete
+  campaign prints no such line.
+- **Four wrong claims about the witness module, one of them impossible.** `src/lib.rs`'s header
+  (item 3 of the tolerated secret-dependent branches) and `SECURITY.md` both named "the
+  `witness` module's `Choice`/`Result` handling": `src/witness.rs` contains no `Choice`, no
+  `subtle` and no `Result` at all — it computes a tag and returns it, and `src/lib.rs` compares
+  it — and `tests/ultra.rs::the_witness_shares_only_the_specification_with_the_crate` exists to
+  keep `subtle` out of that file. `README.md`'s "the primitives both call (`subtle`,
+  `core::ptr::read_volatile`)" is wrong for the same reason. `tests/security.rs` said
+  `src/witness.rs` has no wipe calls (it has 42, pinned by
+  `witness_wipe_sites_are_pinned`) and that `src/proofs.rs` has two `zeroize_*` harnesses (it
+  has three, now named). `src/witness.rs`'s own `wipe` doc had a correction spliced into the
+  middle of the sentence it corrected; rewritten.
+
+- **`tests/locked.rs`'s skip count was wrong in the direction that matters.** Its
+  `lock_or_skip` doc said "six tests reach a return through this function or the identical
+  branch in `unlocking_restores_core_dump_inclusion`" -- there are six call sites of
+  `lock_or_skip`, plus three tests with their own `!SUPPORTED`/refusal branches, nine in
+  total. Corrected, with the three named.
+
 ### Second hostile pass on the guards (after `d55a7d8`)
 
 No wire-format bytes changed and the AEAD behaviour is identical. Five more ways of
@@ -1558,7 +1700,7 @@ the same comment-stripping scanner `tests/decision_scope.rs` and `tests/counter_
 use:**
 
 - **`tests/ultra.rs`'s `scrub_stack` count could be satisfied by a comment.** `body_of` sliced the
-  raw `include_str!` text, so replacing the real call at `src/lib.rs:2495` with
+  raw `include_str!` text, so replacing one real call site with
   `// scrub_stack(); (planted)` left `scrub_stack_is_called_at_every_entry_point` green — and
   `scrub_stack` has no behavioural signature, so that count is its only existence witness. Every
   source-shape assertion in the file now reads a comment-stripped, string-blanked view (five
@@ -2579,8 +2721,10 @@ hygiene defect. **No wire-format change.**
   agreement left `cargo test --features ultra` green (both reproduced). A `dual-mac-isolated`
   row now runs on `hardened,dual-mac`, and the shape tests require the wiring tokens, not just
   the calls — each evasion was re-run and now fails.
-- **Claims the tools did not support, corrected**: ctgrind reports secret-dependent
-  *branches*, not memory indices (memcheck does not report an address from a poisoned byte);
+- **Claims the tools did not support, corrected**: ctgrind's coverage was described as
+  secret-dependent *branches* only, with the assertion that memcheck does not report an address
+  from a poisoned byte -- **that assertion was wrong, and it had never been measured** (see the
+  later entry below, which measured both classes and added the control for the second);
   Kani does not read the nonce back, and reaches neither the contiguous hash shape nor the
   counter wrap; `variable_latency.rs` inventories literal `/`/`%` in `src/lib.rs` only;
   the differential position sweeps now floor their row count so a regenerated fixture cannot

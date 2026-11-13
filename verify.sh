@@ -824,19 +824,24 @@ if [ "$RUN_MIRI" -eq 1 ]; then
     # Borrows pass is a second opinion, because the two aliasing models do not
     # accept the same programs.
     # One test per filter, so the expected count is the number of filters.
+    # `--locked`, like every stage's `cargo test` (see `cargo_test`'s `lock=()` dance) and
+    # like `deep.yml`'s own miri steps: without it a stale `Cargo.lock` is silently
+    # re-resolved, so the run verifies a graph the repository does not commit -- measured by
+    # corrupting a copy's lock, where the unlocked form rewrote it and exited 0 while the
+    # locked form refused with rc 101.
     miri_run "${#MIRI_TESTS[@]}" "the five unsafe-path tests (stacked borrows)" \
       env MIRIFLAGS="-Zmiri-disable-isolation -Zmiri-strict-provenance" \
-      cargo +nightly miri test --release --features pure --lib -- "${MIRI_TESTS[@]}"
+      cargo +nightly miri test --locked --release --features pure --lib -- "${MIRI_TESTS[@]}"
     miri_run "${#MIRI_TESTS[@]}" "the five unsafe-path tests (tree borrows)" \
       env MIRIFLAGS="-Zmiri-disable-isolation -Zmiri-strict-provenance -Zmiri-tree-borrows" \
-      cargo +nightly miri test --release --features pure --lib -- "${MIRI_TESTS[@]}"
+      cargo +nightly miri test --locked --release --features pure --lib -- "${MIRI_TESTS[@]}"
 
     echo
     echo "--- Miri, AVX2 kernel (x86_64) ---"
     miri_run 3 "the three AVX2-kernel tests" \
       env MIRIFLAGS="-Zmiri-disable-isolation -Zmiri-strict-provenance" \
       RUSTFLAGS="-C target-feature=+avx2" \
-      cargo +nightly miri test --release --features pure --lib -- \
+      cargo +nightly miri test --locked --release --features pure --lib -- \
         test_x86_simd_kernels_match_scalar \
         test_simd_xor_matches_scalar_and_raw \
         test_simd_matches_scalar_all_lengths
@@ -846,7 +851,7 @@ if [ "$RUN_MIRI" -eq 1 ]; then
     cargo +nightly miri setup --target aarch64-unknown-linux-gnu >/dev/null
     miri_run 3 "the three aarch64-kernel tests" \
       env MIRIFLAGS="-Zmiri-disable-isolation -Zmiri-strict-provenance" \
-      cargo +nightly miri test --release --features pure --target aarch64-unknown-linux-gnu --lib -- \
+      cargo +nightly miri test --locked --release --features pure --target aarch64-unknown-linux-gnu --lib -- \
         test_aarch64_neon_kernel_matches_scalar \
         test_simd_xor_matches_scalar_and_raw \
         test_zeroize_covers_unaligned_prefix
@@ -862,7 +867,7 @@ if [ "$RUN_MIRI" -eq 1 ]; then
     cargo +nightly miri setup --target s390x-unknown-linux-gnu >/dev/null
     miri_run 1 "the big-endian boundary-corpus test" \
       env MIRIFLAGS="-Zmiri-disable-isolation -Zmiri-strict-provenance" \
-      cargo +nightly miri test --release --features pure --target s390x-unknown-linux-gnu --lib -- \
+      cargo +nightly miri test --locked --release --features pure --target s390x-unknown-linux-gnu --lib -- \
         test_all_accelerated_paths_agree_on_a_boundary_corpus
   else
     skip "Miri" "the miri component is not installed (rustup +nightly component add miri)"
@@ -934,18 +939,55 @@ if [ "$RUN_DENY" -eq 1 ]; then
     # uses the on-disk database the tool already downloaded, so it is the *fallback* rather
     # than the rare case -- mirroring `audit_with_fallback` below. A cold cache is still a
     # failure, not a silent pass: `--offline` cannot invent database content.
+    #
+    # `--locked` on both attempts, matching `ci.yml:1027-1029` and `deep.yml:424-426`. Without
+    # it the check resolves the graph itself and *rewrites* `Cargo.lock` when the committed one
+    # disagrees with the manifest, then reports a licence/ban/advisory verdict for a graph the
+    # repository does not contain -- and destroys the evidence CI's `--locked` would have
+    # flagged. Measured on a copy of this tree with `cfg-if` pinned to an old version: without
+    # `--locked`, exit 0, "advisories ok, bans ok, licenses ok, sources ok", lock rewritten;
+    # with it, exit 1 and `cannot update the lock file ... because --locked was passed`, lock
+    # unchanged.
     deny_check() {  # <dir>
-      local dir="$1"
-      ( cd "$dir" && {
-        if ! cargo deny check; then
+      local dir="$1" online offline
+      # Both the online attempt and the offline retry are captured rather than streamed:
+      # the note that says which database produced the verdict has to be printed *after*
+      # that verdict exists. This function used to print "offline: re-checked $dir against
+      # the cached advisory database" before running the offline check, and a run whose
+      # offline retry then died on the advisory-database lock printed that sentence, one
+      # `failed to acquire advisory database lock` line, and exit 1 -- a claim of a
+      # verdict next to the proof that none was produced (measured by holding
+      # `$CARGO_HOME/advisory-dbs/db.lock` for 75 s and running `--deep`).
+      if online="$( cd "$dir" && cargo deny --locked check 2>&1 )"; then
+        printf '%s\n' "$online"
+        return 0
+      fi
+      printf '%s\n' "$online"
+      # The lock is held by another cargo-deny (or by a stale process) for a bounded
+      # time, and the tool says so in its own words; retrying costs a second and turns
+      # a transient local collision back into a verdict.
+      local attempt
+      for attempt in 1 2; do
+        if offline="$( cd "$dir" && cargo deny --locked --offline check 2>&1 )"; then
+          printf '%s\n' "$offline"
           # Same caveat as `audit_with_fallback` below: a cached advisory database can be
-          # stale, so say which one produced a clean verdict rather than reading it as an
-          # online one.
-          echo "         (offline: re-checked $dir against the cached advisory database; a" >&2
+          # stale, so say which one produced this clean verdict rather than reading it as
+          # an online one.
+          echo "         (offline: $dir was re-checked against the cached advisory database; a" >&2
           echo "          stale cache can miss a new advisory -- see ${CARGO_HOME:-$HOME/.cargo}/advisory-db)" >&2
-          cargo deny --offline check
+          return 0
         fi
-      } )
+        grep -qi "failed to acquire advisory database lock" <<< "$offline" || break
+        [ "$attempt" -eq 2 ] && break
+        sleep 5
+      done
+      printf '%s\n' "$offline" >&2
+      if grep -qi "failed to acquire advisory database lock" <<< "$offline"; then
+        echo "FAILED: cargo-deny in $dir could not read the advisory database (its lock stayed held), so no advisory verdict exists for that graph" >&2
+      else
+        echo "FAILED: cargo-deny in $dir" >&2
+      fi
+      return 1
     }
     deny_check .
     deny_check fuzz
@@ -980,15 +1022,22 @@ if [ "$RUN_DENY" -eq 1 ]; then
       out="$(cargo audit --deny warnings --file "$file" 2>&1)"; rc=$?
       if [ "$rc" -ne 0 ]; then
         out="$(cargo audit --no-fetch --deny warnings --file "$file" 2>&1)"; rc=$?
-        echo "         (offline: scanned $label against the cached advisory database; a" >&2
-        echo "          stale cache can miss a new advisory -- see ${CARGO_HOME:-$HOME/.cargo}/advisory-db)" >&2
+        # The note is printed only for the outcome it describes. It used to be printed
+        # before `rc` was examined, so a retry that itself failed said "scanned ... against
+        # the cached advisory database" and then, two lines later, that no cache was usable.
+        if [ "$rc" -eq 0 ]; then
+          echo "         (offline: scanned $label against the cached advisory database; a" >&2
+          echo "          stale cache can miss a new advisory -- see ${CARGO_HOME:-$HOME/.cargo}/advisory-db)" >&2
+        fi
       fi
     else
       out="$(cargo audit --deny warnings 2>&1)"; rc=$?
       if [ "$rc" -ne 0 ]; then
         out="$(cargo audit --no-fetch --deny warnings 2>&1)"; rc=$?
-        echo "         (offline: scanned $label against the cached advisory database; a" >&2
-        echo "          stale cache can miss a new advisory -- see ${CARGO_HOME:-$HOME/.cargo}/advisory-db)" >&2
+        if [ "$rc" -eq 0 ]; then
+          echo "         (offline: scanned $label against the cached advisory database; a" >&2
+          echo "          stale cache can miss a new advisory -- see ${CARGO_HOME:-$HOME/.cargo}/advisory-db)" >&2
+        fi
       fi
     fi
     set -e

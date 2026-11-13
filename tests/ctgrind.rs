@@ -4,16 +4,32 @@
 //!
 //! `ctgrind` is an *approach*, not a tool: mark secret bytes as **undefined**
 //! (poisoned) in valgrind's shadow memory, run the code, and let memcheck report
-//! any conditional jump or syscall argument that depends on them.
-//! Secret-derived *memory indices* are not in that list, and this is measured
-//! rather than assumed: `secret_dependent_branch` below records that memcheck
-//! tolerates undefined values flowing into address arithmetic, so
-//! `TABLE[poisoned as usize]` is not reported. That half of the constant-time
-//! argument rests on the source inventory in `tests/variable_latency.rs` and on
-//! `tools/cache_profile.sh --trace`, not on this file. What remains is still a
-//! mechanical answer to "does this branch on secret data?" — stronger than
-//! reading the source, because it does not depend on the reader spotting every
-//! path.
+//! any conditional jump, memory access or syscall argument that depends on them.
+//! Both classes are measured here rather than assumed, by the negative control
+//! below: `secret_dependent_branch` (a branch on a poisoned byte) and
+//! `secret_dependent_index` (a load whose *address* comes from one) each produce a
+//! `COUNT_ERRORS` delta of 1 under valgrind. An earlier revision of this header,
+//! and of `secret_dependent_branch`'s doc, said the opposite for the index case --
+//! that memcheck "tolerates undefined values flowing into address arithmetic" and
+//! that `TABLE[poisoned as usize]` is not reported, attributing that to a
+//! measurement in `secret_dependent_branch`, which only ever branched. Measured
+//! with this file's own client-request code on valgrind 3.26.0, at
+//! `-C opt-level=2/3`: the load is reported as `Use of uninitialised value of size
+//! 8`, attributed to the function doing the load, with delta 1. The two shapes
+//! differ in one respect worth knowing, and it is why the control asserts on each
+//! separately: a *narrow* load the compiler can constant-fold away (a table of one
+//! repeated value) reports nothing, while the same load with the value discarded
+//! still reports -- the report is about the address, not about where the loaded
+//! value goes.
+//!
+//! What remains outside memcheck's reach is arithmetic whose latency varies with
+//! the operand but which touches neither control flow nor memory: division,
+//! remainder, and the float unit. That half of the constant-time argument rests on
+//! the source inventory in `tests/variable_latency.rs` and on
+//! `tools/cache_profile.sh --trace`, not on this file. What this file does answer
+//! is still mechanical -- "does this branch on, or index by, secret data?" --
+//! which is stronger than reading the source, because it does not depend on the
+//! reader spotting every path.
 //!
 //! The `ctgrind` crate is not available in this environment, and neither is
 //! `ctgrind`'s C macro. But the machinery underneath is just a documented
@@ -241,10 +257,12 @@ pub fn count_errors() -> usize {
 ///   this control vacuous;
 /// * one sink shared by both arms is compiled to `cmov` plus a single store,
 ///   which is branchless too, so it is not reported either (measured: a poisoned
-///   branch with one sink produced `COUNT_ERRORS` delta 0);
-/// * an address derived from a poisoned *byte* -- `TABLE[poisoned as usize]` --
-///   is not reported either: memcheck tolerates undefined values flowing into
-///   address arithmetic and only complains when the pointer itself is undefined.
+///   branch with one sink produced `COUNT_ERRORS` delta 0).
+///
+/// A third formulation used to be listed here -- an address derived from a
+/// poisoned byte, `TABLE[poisoned as usize]`, "not reported either". That was
+/// never measured; `secret_dependent_index` below is the measurement, and it
+/// contradicts it (delta 1, reported as `Use of uninitialised value`).
 ///
 /// Two distinct store targets cannot be expressed without a branch, because x86
 /// has no conditional store. Measured on the same build: delta 1.
@@ -259,6 +277,36 @@ fn secret_dependent_branch(byte: u8, threshold: u8) -> u8 {
         SINK_LO.store(1, core::sync::atomic::Ordering::Relaxed);
         2
     }
+}
+
+/// The second leak class: a load whose **address** is derived from a poisoned byte.
+///
+/// What keeps the load real is the `black_box` on the *reference*: it hides the address
+/// from the optimizer, so the load cannot be folded away. (The table itself is a `static`
+/// initializer, i.e. evaluated at compile time and placed in `.rodata` -- an earlier
+/// revision of this doc said "built at run time", which is not what the code does and is
+/// not what makes the control work.) Measured: the same shape read without `black_box`
+/// reported nothing at all (`COUNT_ERRORS` delta 0), and a control built that way would be
+/// vacuous. The loaded byte is stored *and* returned, so it cannot be eliminated as dead.
+///
+/// Measured on valgrind 3.26.0 at `-C opt-level=2` and `=3`: memcheck reports
+/// `Use of uninitialised value of size 8` attributed to this function, with
+/// `COUNT_ERRORS` delta 1.
+#[inline(never)]
+fn secret_dependent_index(byte: u8) -> u8 {
+    static TABLE: [u8; 256] = {
+        let mut t = [0u8; 256];
+        let mut i = 0;
+        while i < 256 {
+            t[i] = (i as u8).wrapping_mul(7);
+            i += 1;
+        }
+        t
+    };
+    static SINK: core::sync::atomic::AtomicU8 = core::sync::atomic::AtomicU8::new(0);
+    let v = core::hint::black_box(&TABLE)[byte as usize];
+    SINK.store(v, core::sync::atomic::Ordering::Relaxed);
+    v
 }
 
 /// Fails unless valgrind is running this process *and* the memory-poisoning
@@ -562,9 +610,28 @@ fn deliberate_leak_is_detected() {
          was optimized away, so this control proves nothing"
     );
 
+    // The second class: the same poisoned byte used as an *index*. This is the
+    // measurement the header and `secret_dependent_branch`'s doc used to state
+    // without having taken, and they stated the wrong answer; asserting it here is
+    // what keeps the prose tied to the tool.
+    let index_before = count_errors();
+    let indexed = core::hint::black_box(secret_dependent_index(byte));
+    core::hint::black_box(indexed);
+    let index_after = count_errors();
+    assert!(
+        index_after > index_before,
+        "memcheck recorded no error for a secret-dependent *index* \
+         (`TABLE[poisoned as usize]`). The constant-time claim in this file's \
+         header covers address-derived leaks because this measurement says \
+         memcheck reports them; if that stops being true for a valgrind or \
+         toolchain change, the header has to say what is actually covered \
+         instead of this test silently passing."
+    );
+
     unpoison(secret.as_ptr(), secret.len());
     eprintln!(
-        "CONTROL_LEAK_OBSERVED ({} new memcheck error(s))",
-        after - before
+        "CONTROL_LEAK_OBSERVED ({} new memcheck error(s) for the branch, {} for the index)",
+        after - before,
+        index_after - index_before
     );
 }

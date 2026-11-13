@@ -36,7 +36,8 @@
 //!    ~29 s per 64-byte wipe under that same older tool — so `chacha20_apply`'s
 //!    per-block wipe dominates any harness that reaches it. Hence the
 //!    `zeroize_array` stub, with the real implementation verified directly by the
-//!    two `zeroize_*` harnesses below.
+//!    three `zeroize_*` harnesses below (`zeroize_slice_clears_all_bytes`,
+//!    `zeroize_array_clears_all_bytes`, `zeroize_slice_clears_unaligned_window`).
 //!
 //! 3. **`memcmp` inflates the unwind bound.** `assert_eq!` on slices lowers to
 //!    `memcmp`, whose internal loop needs an unwind bound proportional to the

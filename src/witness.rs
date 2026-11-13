@@ -72,19 +72,17 @@ use crate::{DOM_ENC, DOM_PRE, DOM_TAG, NONCE_LEN, SUBKEY_DOMAIN, TAG_LEN};
 /// Volatile-zero a slice.
 ///
 /// The witness wipes the key-derived buffers it names, and `ultra` does not count cost, so
-/// this is applied liberally. Two groups are *named* and still not wiped -- the by-value
-/// temporaries (argument slots and the like) and a few short-lived locals -- and both are
-/// enumerated with what is done about each in the block below; "every buffer it names" was
-/// what this line said, and the list below is the correction. That includes the primitive-internal state: `block`'s and
-/// `hchacha20`'s `s`/`v` (the key words and the permutation state), `compress`'s
-/// `state`/`m`, the compression outputs in `Output::chaining_value`/`root_output_bytes`, and
-/// the streaming locals in `ChunkState::update`/`Hasher::update`/`add_chunk_cv`/
-/// `finalize_xof`. `Output` has a `Drop` that wipes its key CV and its message block, so the
-/// node built by `parent_output(..).chaining_value()` — which no caller names — is zeroed on
-/// the way out.
+/// this is applied liberally. What that covers: `block`'s and `hchacha20`'s `s`/`v` (the key
+/// words and the permutation state), `compress`'s `state`/`m`, the compression outputs in
+/// `Output::chaining_value`/`root_output_bytes`, and the streaming locals in
+/// `ChunkState::update`/`Hasher::update`/`add_chunk_cv`/`finalize_xof`. `Output` has a
+/// `Drop` that wipes its key CV and its message block, so the node built by
+/// `parent_output(..).chaining_value()` — which no caller names — is zeroed on the way out.
 ///
-/// What is still *not* covered, honestly — two classes, and an earlier revision of this
-/// comment claimed the first of them was:
+/// Two groups are *named* and still not wiped, enumerated with what is done about each in
+/// the two bullets below. (An earlier revision of this doc said "every buffer it names",
+/// then a later one spliced the correction into the middle of that sentence; the list is
+/// what matters and both wrong versions are gone.)
 ///
 ///   * **By-value return temporaries**, which no wipe in the callee can name: a `[u32; 8]`
 ///     CV, the `[u8; 32]` from `hchacha20`, and the 65-byte tags `tag`/`decrypt`/
@@ -100,9 +98,8 @@ use crate::{DOM_ENC, DOM_PRE, DOM_TAG, NONCE_LEN, SUBKEY_DOMAIN, TAG_LEN};
 ///     used to stand here said these were wiped; they are not — the inline array expressions
 ///     have no local to name, and the named locals
 ///     (`Hasher::new_keyed`'s and `words_from_le_bytes`'s `b`, `block`'s `x`) go unwiped for
-///     the same cost reason as the
-///     inline ones. They are left rather than paid
-///     for with a volatile store per word — four bytes of a 32-byte key is not a key, and
+///     the same cost reason as the inline ones. They are left rather than paid for with a
+///     volatile store per word — four bytes of a 32-byte key is not a key, and
 ///     `tools/stack_residue.sh` searches for the whole value — and `scrub_stack` covers the
 ///     region afterwards under `ultra`.
 ///

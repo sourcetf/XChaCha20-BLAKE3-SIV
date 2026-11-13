@@ -183,8 +183,19 @@ SUPP_OTHER="$(grep -v '^[[:space:]]*#' "$SUPP" | grep -v '^[[:space:]]*$' \
   | grep -vE '^[[:space:]]*(\{|\}|Memcheck:[A-Za-z0-9_:.-]+|[A-Za-z0-9_.-]+)[[:space:]]*$' \
   | grep -vE '^[[:space:]]*fun:(accept_or_reject|[A-Za-z0-9_$.*?]*16accept_or_reject)[[:space:]]*$' || true)"
 # A bare `...` is valgrind's any-frames wildcard and would widen the single
-# suppression to every call made by accept_or_reject. The general rule above rejects
-# it (it is neither a block marker nor a `fun:` line), so no exception is needed.
+# suppression to every call made by accept_or_reject. The rule above used to allow it:
+# the block-name alternative was `[A-Za-z0-9_.-]+`, which matches three dots, so `...`
+# was read as a block name -- measured, by appending `...` to the real file: the
+# validator printed "1 entry/entries, all naming accept_or_reject" and went on to build
+# (and put before the `fun:` line, it printed 2 and also went on). It is now rejected by
+# name, independently of the general rule, and no alternative accepts a dots-only line.
+if grep -qE '^[[:space:]]*\.\.\.[[:space:]]*$' "$SUPP"; then
+  echo "FAIL: tests/ctgrind.supp contains a bare '...' frame wildcard." >&2
+  echo "      Valgrind reads it as \"any frames\", which widens the one permitted" >&2
+  echo "      decision to every call site of it -- the whole point of naming" >&2
+  echo "      accept_or_reject in the entry." >&2
+  exit 1
+fi
 if [ "$SUPP_COUNT" -lt 1 ] || [ -n "$SUPP_BAD" ] || [ -n "$SUPP_OTHER" ]; then
   echo "FAIL: tests/ctgrind.supp must suppress accept_or_reject and nothing else." >&2
   echo "      A frame naming anything else permits every branch in that function" >&2

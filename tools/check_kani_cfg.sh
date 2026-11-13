@@ -147,14 +147,24 @@ echo "harness count: $harness_count (== the $COMMITTED_HARNESSES committed)"
 # scratch copy: `#[cfg(kani)] #[kani::proof] fn stray() {}` appended to `src/lib.rs` left
 # every one of those gates green. Harnesses live in `src/proofs.rs` by convention; this keeps
 # that true instead of assuming it.
-stray="$(cd "$ROOT" && find src -name '*.rs' ! -name proofs.rs \
-           -exec grep -Hn '#\[kani::proof\]' {} + 2>/dev/null || true)"
-if [ -n "$stray" ]; then
+# The scan goes through `tools/kani_shards.py --stray`, which uses the same regex and the
+# same comment/string blanking as the harness parser. It used to be
+# `grep -Hn '#\[kani::proof\]'`, which was narrower -- `# [ kani :: proof ]` is legal Rust
+# and the grep missed it, so a stray written that way was invisible to the gate that exists
+# to find strays and to the parser, which reads only `src/proofs.rs` -- and wider, because
+# a *comment* spelling the attribute made the gate fail on a file with no harness in it.
+stray_rc=0
+stray="$(cd "$ROOT" && "$PYTHON" tools/kani_shards.py --stray 2>&1)" || stray_rc=$?
+if [ "$stray_rc" -eq 1 ]; then
   echo "FAIL: a Kani harness appears outside src/proofs.rs:" >&2
   printf '%s\n' "$stray" | sed 's/^/      /' >&2
   echo "      The count, the shard plan and this gate all read src/proofs.rs, so a harness" >&2
   echo "      elsewhere is neither counted nor planned and may never be verified. Move it" >&2
   echo "      into src/proofs.rs (or extend every one of those readers deliberately)." >&2
+  exit 1
+elif [ "$stray_rc" -ne 0 ]; then
+  echo "FAIL: could not scan for stray Kani harnesses (exit $stray_rc):" >&2
+  printf '%s\n' "$stray" | sed 's/^/      /' >&2
   exit 1
 fi
 echo "no stray #[kani::proof] outside src/proofs.rs"

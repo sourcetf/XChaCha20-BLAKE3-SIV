@@ -117,6 +117,17 @@ def main(argv=None):
                 f"shard {r.get('shard')} was written for {r.get('n')} shards, not {args.shards}"
             )
         for label, cfg in configs.items():
+            # `configs` is checked to be an object above, but each *value* was not: a
+            # config value of `5` reached `cfg.get(key)` and raised AttributeError -- exit
+            # 1, which verify.sh's `run_tool` reports as "FAILED: <tool>", not the
+            # could-not-run (3) this file documents. Same rule one level down.
+            if not isinstance(cfg, dict):
+                print(
+                    f"FAIL: could not read a shard report: shard {r.get('shard')!r} carries "
+                    f"configuration {label!r} as {type(cfg).__name__}, not an object",
+                    file=sys.stderr,
+                )
+                sys.exit(3)
             # Every count is a count of things that happened. A negative one cannot come
             # from the tool, and it used to be printed as-is (an audit passed
             # `accepting_total = -100` on all six shards and got `-600 accepting total`

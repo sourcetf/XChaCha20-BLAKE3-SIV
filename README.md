@@ -410,8 +410,10 @@ which a keystream derived from `(key, nonce)` alone would fail while every other
 the suite still passed) and `the_key_material_block_is_not_the_message_keystream`.
 
 **What no tool here detects: variable-latency operations on secrets.** ctgrind
-reports branches that depend on poisoned data (memcheck does not report an *address*
-derived from a poisoned byte, see `tests/ctgrind.rs`); a division, a
+reports both a branch on poisoned data and an *address* derived from a poisoned byte —
+the negative control in `tests/ctgrind.rs` measures each class separately, since an
+earlier revision of these docs claimed memcheck ignored the second and that was never
+true; a division, a
 remainder or a float operation has neither a branch nor a secret-dependent index, and its latency varies inside the ALU with
 the operand. Measured, not assumed: with a division by a secret-derived byte planted
 inside `decrypt`, ctgrind passes and the release timing screen reports t = 0.22 / 0.48
@@ -723,8 +725,9 @@ writes down no limits is worse than one that states its boundaries:
   requires a second *implementation* to produce the same answer, so a corruption in the
   arithmetic both derivations share is caught too. What is left is a fault that corrupts
   both answers — two independent faults, or one aimed at the code both implementations use,
-  which is now only the gate, the caller and the primitives both call (`subtle`,
-  `core::ptr::read_volatile`) rather than the cipher. That is a laboratory bench with
+  which is now only the gate and the caller -- `src/witness.rs` uses neither `subtle` nor
+  `read_volatile` (it wipes with `write_volatile` and returns a plain tag), so the
+  comparison both sides reach is the caller's `ct_eq` -- rather than the cipher. That is a laboratory bench with
   synchronization, and the answer is a secure element, not software.
 - **A debugger, `ptrace`, or `/proc/<pid>/mem`** from a process with the same uid, and a
   hypervisor reading guest memory. `locked` asks the kernel to keep pages out of swap and

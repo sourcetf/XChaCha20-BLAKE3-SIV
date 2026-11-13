@@ -70,7 +70,7 @@ const LIB: &str = include_str!("../src/lib.rs");
 /// `include_str!` text makes a `matches`/`contains` satisfiable without the code: replace a
 /// real statement with a comment carrying the same words and the count is unchanged. An
 /// audit demonstrated exactly that for `scrub_stack();` — replaced by
-/// `// scrub_stack(); (planted)` at a real call site (now `src/lib.rs:3234`),
+/// `// scrub_stack(); (planted)` at a real call site,
 /// `scrub_stack_is_called_at_every_entry_point` stayed green — and `scrub_stack` has no
 /// behavioural signature, so that count is its only existence witness. The scanner is the
 /// one `tests/decision_scope.rs` and `tests/counter_range.rs` use; it is copied rather than

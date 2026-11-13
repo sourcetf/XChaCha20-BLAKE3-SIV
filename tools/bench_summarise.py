@@ -187,6 +187,32 @@ def main():
         return 3
     print(f"  {len(CONFIGS)*3*len(GROUPS)*len(SIZES)} reference measurements; "
           f"{n} pass-to-pass cells")
+    # The figure above is the campaign *as designed*; this is what the files actually
+    # contain. They used to be the same sentence, so a run that lost a pass or half its
+    # sizes printed "189 reference measurements" over 21 cells and every table below still
+    # read as a complete campaign, because `cell()` takes a median of whichever passes are
+    # present. Both counts here are derived from the files: a cell is
+    # `(group, impl, size)` and it should carry one reading per configuration per pass.
+    readings = {}
+    for cfg, runs in passes.items():
+        for p in runs:
+            for key, value in p.items():
+                readings.setdefault(key, []).append(value)
+    wanted = len(CONFIGS) * 3  # one reading per configuration per pass
+    expected_cells = len(GROUPS) * len(SIZES)
+    print(f"  parsed from the run files: {len(readings)} distinct cells, "
+          f"{sum(len(v) for v in readings.values())} cell-readings "
+          f"({len(readings)*wanted} if every cell had all {len(CONFIGS)}x3)")
+    for cfg, runs in passes.items():
+        # Counted as *readings*, not as distinct cells: a pass file that exists but is
+        # header-only parses to an empty dict, so `len(runs) == 3` and every size is
+        # present from the other two passes, while "(median of 3 passes)" is a median of
+        # two. Measured: three empty pass-3 files produced a full table with no warning.
+        ref_readings = sum(1 for p in runs for c in p if c[1] == REF)
+        if ref_readings < 3 * expected_cells:
+            print(f"  INCOMPLETE {cfg}: {ref_readings}/{3 * expected_cells} reference "
+                  f"readings -- a missing or header-only pass reads as a median of fewer "
+                  f"than the three this table claims")
     print(f"  median spread {statistics.median(pass_spreads)*100:.1f}%   "
           f"p90 {pass_spreads[min(n-1, int(0.9*n))]*100:.1f}%   "
           f"worst {pass_spreads[-1]*100:.1f}%")

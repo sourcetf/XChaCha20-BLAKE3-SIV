@@ -213,8 +213,16 @@
 //!    corruption was detected, never a bit of the key, and it is the crate's
 //!    deliberate fail-stop (`LockedKey::as_bytes` documents why).  It carries no
 //!    data-dependent *comparison*: the `ct_eq` feeding it is constant-time.
-//! 3. **`witness`'s `Choice`/`Result` handling under `ultra`** reduces to the same
-//!    decision as (1), through an independent implementation.
+//! 3. **The `ultra` witness's agreement check** reduces to the same decision as (1),
+//!    through an independent implementation. The comparison itself is in this file, at the
+//!    three entry points that run the witness — `encrypt`, `decrypt` and
+//!    `decrypt_in_place_detached` — not in `src/witness.rs`, which contains no `Choice` and
+//!    no `Result` at all: it computes a tag and hands it back, and this module compares it.
+//!    (`encrypt_in_place_detached` has no witness code; an earlier revision of this sentence
+//!    named it and cited a `ct_eq` that is not there.) An earlier revision of this list said
+//!    "`witness`'s `Choice`/`Result` handling", which described code that does not exist
+//!    (`tests/ultra.rs::the_witness_shares_only_the_specification_with_the_crate` forbids
+//!    `subtle::` in that file, which is what keeps the two implementations independent).
 //!
 //! Three caveats, stated plainly:
 //!

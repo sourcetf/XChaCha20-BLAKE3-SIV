@@ -1130,6 +1130,18 @@ fn the_second_gate_uses_two_comparison_shapes_wherever_the_gates_are_built() {
          single-gate baseline, and `#[inline(never)]` is what stops the compiler from \
          merging the fold back into `subtle`'s loop -- the two shapes are the defence"
     );
+    // The decision's own `#[inline(never)]` gets the same pin, and for the same reason it
+    // is pinned on `ct_eq_independent`: the suppression in `tests/ctgrind.supp` and the
+    // header's argument both rest on the decision being a function of its own. Deleting the
+    // attribute left the whole suite and clippy green (measured); only
+    // `tools/ctgrind.sh`, and only where valgrind is installed, could have noticed.
+    assert!(
+        non_test_source().contains("#[inline(never)]\nfn accept_or_reject("),
+        "`accept_or_reject` must keep `#[inline(never)]`: merging the decision into its two \
+         callers would put a secret-dependent branch inside `decrypt` and \
+         `decrypt_in_place_detached`, which is exactly what `tests/ctgrind.supp` permits \
+         nowhere and what the single-entry suppression depends on"
+    );
     assert!(
         !fold_code.contains("#[cfg"),
         "`ct_eq_independent` must not be gated by a cfg attribute:\n{}",

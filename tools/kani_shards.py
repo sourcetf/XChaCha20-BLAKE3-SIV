@@ -305,6 +305,41 @@ def join_multi_line_attributes(text):
     return "".join(out)
 
 
+def stray_harnesses():
+    """Every `#[kani::proof]` in `src/*.rs` other than `src/proofs.rs`.
+
+    Returns a list of `(path, line, text)`; empty means the convention holds.
+
+    This exists because `tools/check_kani_cfg.sh` used to look for strays with
+    `grep -Hn '#\\[kani::proof\\]'`, which is both narrower and wider than this
+    file's `PROOF_ATTR`: narrower because `# [ kani :: proof ]` is legal Rust and
+    the grep missed it (a stray written that way was invisible to the gate that
+    exists to find strays, and to this parser, which only reads `src/proofs.rs`);
+    wider because a *comment* spelling the attribute made the grep fail on a file
+    that contains no harness. Reading the same regex and the same comment/string
+    blanking as `harnesses()` keeps the two readers on one grammar.
+    """
+    found = []
+    for dirpath, _dirnames, filenames in os.walk(os.path.join(ROOT, "src")):
+        for name in sorted(filenames):
+            if not name.endswith(".rs"):
+                continue
+            path = os.path.join(dirpath, name)
+            if os.path.abspath(path) == os.path.abspath(PROOFS):
+                continue
+            with open(path, encoding="utf-8") as fh:
+                text = strip_block_comments(fh.read())
+            for lineno, line in enumerate(text.splitlines(), 1):
+                # A line comment ends the code on that line; the block/string blanking
+                # above leaves `//` intact and blanks string contents, so the cut is safe.
+                code = line.split("//", 1)[0]
+                if PROOF_ATTR.search(code):
+                    found.append(
+                        (os.path.relpath(path, ROOT), lineno, line.strip())
+                    )
+    return found
+
+
 def harnesses():
     """Return the names of every `#[kani::proof]` harness in src/proofs.rs.
 
@@ -571,6 +606,12 @@ def main():
     ap.add_argument("--plan", action="store_true", help="emit the JSON matrix")
     ap.add_argument("--count", action="store_true", help="emit the harness count")
     ap.add_argument(
+        "--stray",
+        action="store_true",
+        help="list any #[kani::proof] outside src/proofs.rs (empty output = none); "
+        "exit 1 if any is found, so a caller can gate on the status",
+    )
+    ap.add_argument(
         "--no-committed-check",
         action="store_true",
         help="skip the cross-check against check_kani_cfg.sh's COMMITTED_HARNESSES; "
@@ -578,6 +619,12 @@ def main():
         "sandbox parser controls)",
     )
     args = ap.parse_args()
+
+    if args.stray:
+        strays = stray_harnesses()
+        for path, lineno, text in strays:
+            print(f"{path}:{lineno}: {text}")
+        return 1 if strays else 0
 
     names = harnesses()
     if not args.no_committed_check:

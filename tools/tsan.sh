@@ -48,8 +48,13 @@ if ! command -v rustup >/dev/null 2>&1; then
   exit 3
 fi
 if ! cargo +nightly --version >/dev/null 2>&1; then
-  echo "tsan: the nightly toolchain is required for -Zbuild-std; run `rustup toolchain" >&2
-  echo "  install nightly` (exit 3: could not run)." >&2
+  # Single quotes: this message used to be a double-quoted string split across two
+  # `echo`s, so the backticks around `rustup toolchain install nightly` were command
+  # substitution -- measured with a stub `rustup` first on PATH: the message ran it with
+  # the arguments `toolchain` and `install nightly` and printed the stub's output
+  # instead of the instruction.
+  echo 'tsan: the nightly toolchain is required for -Zbuild-std; run' >&2
+  echo '  rustup toolchain install nightly   (exit 3: could not run).' >&2
   exit 3
 fi
 # `grep -q` exits at the first match, which used to close the pipe under `pipefail` and

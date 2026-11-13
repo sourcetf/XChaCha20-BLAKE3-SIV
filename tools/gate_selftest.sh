@@ -520,6 +520,128 @@ elif ! printf '%s\n' "$supp_out" | grep -q 'must suppress accept_or_reject and n
 else
   echo "  ok: tools/ctgrind.sh -> exit $supp_rc on a suppression entry naming decrypt"
 fi
+# 7b. The same validator must reject valgrind's any-frames wildcard. It did not: the
+#     block-name alternative in its allow-list was `[A-Za-z0-9_.-]+`, which matches
+#     `...`, so a bare `...` line was read as a block name and accepted (measured: the
+#     validator printed "1 entry/entries, all naming accept_or_reject" and went on to
+#     build). One `...` inside the block widens the permission to every call site of
+#     the decision, which is precisely what naming the function is for.
+for wildcard_place in after before; do
+  WCOPY="$WORK/ctgrind-wildcard-$wildcard_place"
+  mkdir -p "$WCOPY/tools" "$WCOPY/tests"
+  cp tools/ctgrind.sh "$WCOPY/tools/"
+  if [ "$wildcard_place" = after ]; then
+    cat tests/ctgrind.supp > "$WCOPY/tests/ctgrind.supp"
+    printf '\n%s\n' '...' >> "$WCOPY/tests/ctgrind.supp"
+  else
+    # The widening form: any caller of the frame below it, i.e. every branch in the
+    # decrypt entry points.
+    awk 'BEGIN{done=0} /^\{$/ && !done {print; print "   ..."; done=1; next} {print}' \
+      tests/ctgrind.supp > "$WCOPY/tests/ctgrind.supp"
+  fi
+  set +e
+  wc_out="$(HOME="$HOME_OK" PATH="$FAKEVG:$HOME_OK/.cargo/bin:$PYTHON_BIN_DIR:/usr/bin:/bin" \
+            VALGRIND="$FAKEVG/valgrind" timeout 300 bash "$WCOPY/tools/ctgrind.sh" 2>&1)"
+  wc_rc=$?
+  set -e
+  if [ "$wc_rc" -eq 0 ] || [ "$wc_rc" -eq 124 ]; then
+    echo "FAIL: tools/ctgrind.sh exited $wc_rc with a bare '...' ($wildcard_place" >&2
+    echo "      the frame line). Valgrind reads it as \"any frames\", so the single" >&2
+    echo "      permitted decision becomes every branch at every call site." >&2
+    printf '%s\n' "$wc_out" | tail -5 | sed 's/^/      | /' >&2
+    fail=1
+  elif ! printf '%s\n' "$wc_out" | grep -q "bare '\.\.\.' frame wildcard"; then
+    echo "FAIL: tools/ctgrind.sh exited $wc_rc for a '...' entry ($wildcard_place the" >&2
+    echo "      frame line), but not with the wildcard check's message, so it may" >&2
+    echo "      have failed for another reason." >&2
+    printf '%s\n' "$wc_out" | tail -5 | sed 's/^/      | /' >&2
+    fail=1
+  else
+    echo "  ok: tools/ctgrind.sh -> exit $wc_rc on a '...' wildcard ($wildcard_place the frame)"
+  fi
+done
+
+# 7c. `verify.sh`'s `deny_check` must print its "which database answered" note only when
+#     that database actually produced a verdict, and must name what went wrong when nothing
+#     did. Both halves were broken: the note was printed *before* the offline retry, so a
+#     retry that died on the advisory-database lock printed a claim of a verdict next to the
+#     proof that none existed (measured by holding `db.lock` and running `--deep`).
+#
+#     The function is *extracted* from verify.sh and driven with a stub `cargo`, rather than
+#     reached through a whole `--deny` run: the stage also invokes `cargo audit`, and a stub
+#     that has to satisfy both would test the stub. Extraction keeps the code under test the
+#     shipped code -- and the last `ok:` below says so, because a stale extractor would
+#     otherwise pass silently.
+DENY_FN="$WORK/deny_check.sh"
+"$PYTHON" - "$PWD/verify.sh" "$DENY_FN" <<'PY'
+import sys
+src = open(sys.argv[1], encoding="utf-8").read()
+i = src.index("    deny_check() {  # <dir>")
+j = src.index("\n    deny_check .\n", i)
+body = src[i:j]
+# Dedent the four-space block indent so the file can be sourced on its own.
+lines = [l[4:] if l.startswith("    ") else l for l in body.split("\n")]
+open(sys.argv[2], "w", encoding="utf-8").write("\n".join(lines) + "\n")
+PY
+deny_case() {  # <mode>; prints the function's output and RESULT=<rc>
+  (
+    cargo() {
+      # Scan the whole argument list: the real calls are `cargo deny --locked check` and
+      # `cargo deny --locked --offline check`, so a stub keyed on `$2` sees `--locked` and
+      # misclassifies every retry as an online attempt (which is what a first draft did --
+      # and it "failed" the offline-ok case, so the control noticed).
+      local a offline=0
+      for a in "$@"; do [ "$a" = "--offline" ] && offline=1; done
+      if [ "$offline" -eq 1 ]; then
+        case "$mode" in
+          lock)       echo "failed to acquire advisory database lock" >&2; return 1 ;;
+          offline-ok) echo "advisories ok, bans ok, licenses ok, sources ok"; return 0 ;;
+          *)          echo "error: 1 denied warning found!"; return 1 ;;
+        esac
+      fi
+      case "$mode" in
+        lock|offline-ok) echo "failed to fetch advisory database" >&2; return 1 ;;
+        *)               echo "error: 1 denied warning found!"; return 1 ;;
+      esac
+    }
+    sleep() { :; }
+    . "$DENY_FN"
+    deny_check .
+    echo "RESULT=$?"
+  ) 2>&1
+}
+for mode in lock offline-ok finding; do
+  set +e
+  dc_out="$(mode="$mode" deny_case "$mode")"
+  set -e
+  note=absent; grep -q 'was re-checked against the cached' <<< "$dc_out" && note=present
+  case "$mode:$note" in
+    lock:absent)       echo "  ok: deny_check on a held advisory lock -> no verdict claimed" ;;
+    offline-ok:present) echo "  ok: deny_check on a successful offline retry -> note printed" ;;
+    finding:absent)    echo "  ok: deny_check on a real advisory -> no offline note" ;;
+    *) echo "FAIL: deny_check's offline note is $note in the '$mode' case, which is the" >&2
+       echo "      wrong side: it claims a cached-database verdict exactly when none was" >&2
+       echo "      produced, or hides one when it was." >&2
+       printf '%s\n' "$dc_out" | tail -4 | sed 's/^/      | /' >&2
+       fail=1 ;;
+  esac
+  case "$mode" in
+    lock)       if ! grep -q 'could not read the advisory database' <<< "$dc_out"; then
+                  echo "FAIL: deny_check on a held advisory lock did not name the lock as" >&2
+                  echo "      the reason, so a reader sees a bare 'FAILED: cargo-deny'." >&2
+                  printf '%s\n' "$dc_out" | tail -4 | sed 's/^/      | /' >&2
+                  fail=1
+                fi ;;
+    finding)    if ! grep -q 'RESULT=1' <<< "$dc_out"; then
+                  echo "FAIL: deny_check did not fail on a real advisory (rc=$?)." >&2
+                  fail=1
+                fi ;;
+    offline-ok) if ! grep -q 'RESULT=0' <<< "$dc_out"; then
+                  echo "FAIL: deny_check failed a clean offline verdict." >&2
+                  fail=1
+                fi ;;
+  esac
+done
 
 # 8. The main test stages' zero-test guard must fire. `cargo test` exits 0 when every
 #    test target is empty or filtered out, printing "test result: ok. 0 passed" -- a

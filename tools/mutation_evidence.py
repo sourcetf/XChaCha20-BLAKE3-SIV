@@ -115,7 +115,22 @@ def load(directory):
         scenario = outcome.get("scenario")
         if not isinstance(scenario, dict) or "Mutant" not in scenario:
             continue  # the Baseline entry
-        name = scenario["Mutant"]["name"]
+        # `Mutant` is an object in every cargo-mutants schema this tool has seen, but a
+        # *string* there used to reach `["name"]` and raise `TypeError: string indices
+        # must be integers` -- exit 1, which verify.sh's `run_tool` reports as "FAILED:
+        # <tool>", i.e. a finding about the crate rather than the could-not-run this file
+        # documents. The checks around it (`outcomes` is a list, each entry a dict) set the
+        # pattern; this is the same check one level down.
+        mutant_ref = scenario["Mutant"]
+        if not isinstance(mutant_ref, dict) or "name" not in mutant_ref:
+            print(
+                f"FAIL: {directory}/outcomes.json has a scenario.Mutant that is not an "
+                f"object with a 'name' -- schema changed? (got "
+                f"{type(mutant_ref).__name__})",
+                file=sys.stderr,
+            )
+            sys.exit(EXIT_COULD_NOT_RUN)
+        name = mutant_ref["name"]
         mutant = by_name.get(name)
         if mutant is None:
             print(

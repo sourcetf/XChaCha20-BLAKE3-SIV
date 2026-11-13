@@ -130,10 +130,15 @@ fn allow_unlocked() -> bool {
 /// test report, from having verified the lock — both print `ok`. So a refusal is a
 /// *failure* unless `XSIV_ALLOW_UNLOCKED=1` says this host knowingly runs a `locked`
 /// build with nothing locked (the same convention `tests/ultra.rs` uses). When the
-/// escape hatch is used the skip is *printed*, with the test's own name: six tests reach
-/// a return through this function or the identical branch in
-/// `unlocking_restores_core_dump_inclusion`, and a silent `ok` for all six was a measured
-/// finding.
+/// escape hatch is used the skip is *printed*, with the test's own name.
+///
+/// Six tests reach a return through this function. Three more return early through their
+/// own `!SUPPORTED` / refusal branches (`a_refused_lock_is_reported_and_returns_the_
+/// allowance`, `unlocking_restores_core_dump_inclusion`,
+/// `deny_debugging_is_enforced_by_the_kernel_and_reversible`), and each of those prints
+/// its own `SKIPPED [<name>]` line. An earlier revision of this comment counted "six
+/// tests" for all the silent `ok`s there are, which undercounted the surface the printed
+/// skip has to cover.
 fn lock_or_skip(test: &str) -> Option<LockedKey> {
     let allowed = allow_unlocked();
     if !SUPPORTED {
@@ -417,6 +422,47 @@ fn steady_fd_count() -> Option<usize> {
     Some(min)
 }
 
+/// The kernel's page size, from `/proc/self/auxv`'s `AT_PAGESZ` -- the same source
+/// `locked::page_size` reads, and read the same way: native-endian words, and the value has
+/// to be at least 4096 and a power of two. Both details matter. The module's reader uses
+/// `from_ne_bytes`, so a little-endian-only reader here would compute nonsense on a
+/// big-endian target -- and `SUPPORTED`'s gate is `target_arch = "aarch64"`, which
+/// `aarch64_be` also satisfies. The module also *rejects* a page size below 4096 or not a
+/// power of two (failing closed), so accepting any non-zero value here would compare
+/// against a number `locked::page_size` would have refused.
+///
+/// `None` when auxv is unreadable or carries no usable `AT_PAGESZ`, in which case the caller
+/// skips the comparison rather than asserting against a guessed 4096.
+fn at_pagesz() -> Option<usize> {
+    const AT_PAGESZ: usize = 6;
+    let raw = std::fs::read("/proc/self/auxv").ok()?;
+    // The array is `(a_type, a_val)` pairs of pointer-sized words, terminated by a zero
+    // `a_type`.
+    let word = core::mem::size_of::<usize>();
+    let read = |at: usize| -> Option<usize> {
+        let bytes = raw.get(at..at + word)?;
+        let mut buf = [0u8; core::mem::size_of::<usize>()];
+        buf.copy_from_slice(bytes);
+        Some(usize::from_ne_bytes(buf))
+    };
+    let mut at = 0;
+    loop {
+        let ty = read(at)?;
+        let val = read(at + word)?;
+        if ty == 0 {
+            return None;
+        }
+        if ty == AT_PAGESZ {
+            return if val >= 4096 && val.is_power_of_two() {
+                Some(val)
+            } else {
+                None
+            };
+        }
+        at += 2 * word;
+    }
+}
+
 /// The soft `RLIMIT_MEMLOCK` in **bytes**, from `/proc/self/limits`, or `None` when the file
 /// cannot be read or the limit is `unlimited`.
 ///
@@ -648,6 +694,21 @@ fn a_refused_lock_is_reported_and_returns_the_allowance() {
         "locking one key did not move VmLck, so this test cannot tell a charged page from \
          an uncharged one"
     );
+    // `per_key` is the kernel's page size, and the source comment said so ("measured rather
+    // than assumed: it is the kernel's page size") while nothing checked it: a two-page
+    // charge per key satisfied every assertion below, because they only require the total to
+    // be self-consistent with `per_key`. `AT_PAGESZ` from `/proc/self/auxv` is what
+    // `locked::page_size` reads, so comparing against it is comparing against the same
+    // number rather than against a hard-coded 4096 (which would fail on a 16/64 KiB-page
+    // kernel, the case the crate's own doc calls out).
+    if let Some(page_size) = at_pagesz() {
+        assert_eq!(
+            per_key, page_size as u64,
+            "one key charged {per_key} bytes of VmLck but the kernel's page is {page_size} \
+             bytes: `LockedKey` locks one page per key, and a charge that is a multiple of \
+             the page size means the allocation or the lock range covers more than one page"
+        );
+    }
 
     let mut held: Vec<LockedKey> = Vec::new();
     let mut refusal: Option<isize> = None;

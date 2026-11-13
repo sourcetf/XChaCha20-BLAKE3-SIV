@@ -1398,6 +1398,42 @@ fn constant_cfg_value(pred: &str) -> Option<bool> {
 /// `all(p0 ... p16, not(p0))` that walked past the sixteen-atom enumeration was measured
 /// deadening `check_lengths(...)?` in every consumer build with the whole suite green.
 fn constant_cfg_finding(pred: &str) -> Option<String> {
+    // An *escaped* or *raw* spelling of a feature name defeats every comparison below,
+    // because rustc resolves `"\\x68ardened"` and `r#"hardened"#` to the same atom as
+    // `"hardened"` while the text differs. Measured: `#[cfg(all(feature = "hardened",
+    // not(feature = "\\x68ardened")))]` above `decrypt`'s `check_lengths(...)?` compiled the
+    // length bound out of every build with the whole suite green -- the atom set saw two
+    // spellings of one name, so the cancellation rule did not fire, and both the
+    // literal-intact and blanked cuts read it as a genuine configuration. No legitimate
+    // predicate in this crate needs an escape in a name, so their presence is a finding
+    // rather than something to resolve.
+    let mut in_string = false;
+    let mut escaped = false;
+    for c in pred.chars() {
+        if in_string {
+            if escaped {
+                return Some(
+                    "it spells a name with a backslash escape, which rustc resolves to the \
+                     plain name while text comparison cannot"
+                        .into(),
+                );
+            }
+            match c {
+                '\\' => escaped = true,
+                '"' => in_string = false,
+                _ => {}
+            }
+        } else if c == '"' {
+            in_string = true;
+        }
+    }
+    if pred.contains("r#\"") || pred.contains("r\"") {
+        return Some(
+            "it spells a name as a raw string, which rustc resolves to the plain name while \
+             text comparison cannot"
+                .into(),
+        );
+    }
     if let Some(value) = constant_cfg_value(pred) {
         return Some(format!("its predicate is constant ({value})"));
     }
@@ -2913,7 +2949,28 @@ fn dead_if_let_rhs(rhs: &str) -> bool {
     if literal_value(rhs).is_some() {
         return true;
     }
-    rhs == "None" || rhs.starts_with("None::") || rhs.starts_with("None.")
+    // A *constructor* result is as constant as a literal, and the literal rule alone let a
+    // wipe be deadened with the whole suite green: measured, `if let Ok(()) =
+    // Err::<(), usize>(total) { … }` around `derive_tag`'s wipe and around
+    // `Plaintext::drop`'s capacity-tail wipe left 182 tests, clippy and fmt clean, and the
+    // control-flow table unchanged because `if let` counts as one `if`. The three arms that
+    // cannot be live with a non-`None`/non-`Ok` pattern are `None…`, `Err…` and `false`;
+    // their presence in the RHS text is what this rejects. A live `if let` matches a
+    // binding, a field access or a call whose result is not one of those, so the rule stays
+    // narrow: it does not reject `if let Some(x) = opt`.
+    // The prefix has to be followed by `(`, `::`, `{` or the end of the text, so a binding
+    // whose *name* merely starts with `None`/`Err`/`Ok` (`Nonexistent`, `Errno`) is not
+    // mistaken for the constructor.
+    let is_ctor = |name: &str| {
+        rhs.strip_prefix(name)
+            .is_some_and(|rest| rest.is_empty() || rest.starts_with(['(', ':', '{']))
+    };
+    if rhs == "false" || is_ctor("None") {
+        return true;
+    }
+    // `Err::<(), usize>(total)` / `Err(e)`: dead under an `Ok(..)` pattern, and `Ok(())` /
+    // `Ok::<(), E>(())` is the mirror, dead under an `Err(..)` one.
+    is_ctor("Err") || is_ctor("Ok")
 }
 
 /// The pattern of a `match` arm head (`5 =>`, `_ =>`, `Some(x) if c =>`), with any
@@ -3971,10 +4028,13 @@ fn every_documented_wipe_has_a_witness() {
     // a helper added later, a call moved out of a site's body -- so a bare `zeroize_array(`
     // anywhere in non-test source fails here regardless of which function it is in.
     //
-    // It scans all three source files, not just `lib.rs`: `src/witness.rs` has no wipe
-    // calls today, and `src/proofs.rs`'s two (inside Kani harnesses) are qualified below,
-    // but a comment claiming "the whole crate" while reading one file is exactly the kind
-    // of scope mismatch this file exists to catch (a later pass pointed that out).
+    // It scans all three source files, not just `lib.rs`: `src/witness.rs` calls its own
+    // `wipe`/`wipe_words` helpers (42 sites, pinned by `witness_wipe_sites_are_pinned`
+    // below) and `src/proofs.rs` calls seven `crate::zeroize_*` functions inside Kani
+    // harnesses, but a comment claiming "the whole crate" while reading one file is
+    // exactly the kind of scope mismatch this file exists to catch (a later pass pointed
+    // that out). An earlier revision of this comment said the witness had no wipe calls
+    // and that `proofs.rs` had two; both numbers were wrong.
     let stripped_witness = strip_comments(include_str!("../src/witness.rs"));
     let witness_source = {
         // Cut the module body if there is one; `witness.rs` has one, but stay robust.
@@ -4265,9 +4325,11 @@ fn is_wipe_path(func: &syn::Expr) -> bool {
 
 /// Whether a method call is a wipe: `.zeroize()` on the BLAKE3 `Hasher`/`XofReader` is the
 /// only clearing of BLAKE3's key-carrying state, and a method call is not an `ExprCall`, so
-/// the path test above never saw it. Two sites, each a `reader` and a `hasher` call:
-/// `src/lib.rs:2269-2270` in `integrity_tag` (the unkeyed tag over a locked key) and
-/// `:2881-2882` in `blake3_keyed_multi` (the keyed seam; `blake3_keyed_xof` delegates).
+/// the path test above never saw it. Two sites, each a `reader` and a `hasher` call: in
+/// `integrity_tag` (the unkeyed tag over a locked key) and in `blake3_keyed_multi` (the
+/// keyed seam; `blake3_keyed_xof` delegates). Named, not cited by line: these comments used
+/// to carry `src/lib.rs:NNNN` and every one of them went stale on the next edit above them,
+/// which is why the line numbers this file reports at run time are read from the source.
 fn is_wipe_method(m: &syn::ExprMethodCall) -> bool {
     matches!(
         m.method.to_string().as_str(),
@@ -4429,8 +4491,9 @@ fn choice_guard_findings(src: &str) -> ChoiceFindings {
 /// payloads because its counts match on them — and until this guard existed nothing kept
 /// them in step: five of the six had silently lost the two newline pushes that keep a
 /// literal's newlines in the output, so every failure message those scans print named a
-/// source line *earlier* than the code it described (measured: `src/lib.rs:3239` for a call
-/// at `3253`). Behaviour is the thing being pinned, and behaviour here is text: the five
+/// source line *earlier* than the code it described (measured: a call fourteen lines below
+/// the top of a scanned region was reported fourteen lines early). Behaviour is the thing
+/// being pinned, and behaviour here is text: the five
 /// copies must be identical, `decision_scope`'s must carry the same line-preserving arm,
 /// and all six must keep the pushes. A future edit to one copy fails this test rather than
 /// half of the diagnostics.
@@ -4667,6 +4730,68 @@ fn no_counted_wipe_is_inside_a_closure() {
     }
 }
 
+/// Text macros that turn code into data instead of running it.
+///
+/// `stringify!` is the wipe-hiding spelling of the class [`no_wipe_is_hidden_in_an_unexpanded_macro`]
+/// exists for: the calls inside it are never executed, and it is a std macro, so the
+/// `macro_rules!` walk — which only looks at macros this file declares — never sees it.
+/// Measured: replacing `derive_material`'s four wipes with `let _ =
+/// core::stringify!(crate::zeroize_array(&mut subkey););` left the whole suite, clippy,
+/// `cargo fmt --check` and `tools/stack_residue.sh --ultra` green.
+const TEXT_MACROS: [&str; 6] = [
+    "stringify!",
+    "concat!",
+    "format_args!",
+    "write!",
+    "writeln!",
+    "env!",
+];
+
+/// Every argument span of every [`TEXT_MACROS`] invocation in `source`.
+///
+/// Delimiter matching only (no lexing): the sequences being searched for are inside a
+/// macro argument by construction, so a `)` or `}` inside a string literal within the
+/// argument would end the span early — which loses nothing, because a wipe call inside the
+/// part that *is* returned is still reported, and a wipe call after an early close is
+/// still inside the source text this guard scans.
+fn text_macro_arguments(source: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    for name in TEXT_MACROS {
+        let mut from = 0usize;
+        while let Some(rel) = source[from..].find(name) {
+            let at = from + rel;
+            from = at + name.len();
+            let after_word = &source[at + name.len()..];
+            // `write!` must not match `overwrite!`: require a non-identifier character
+            // before the name. `:` *is* allowed, because the qualified spellings
+            // (`core::stringify!`, `std::concat!`) are the ones this crate would write --
+            // excluding it made the first version of this scan miss exactly the plant it
+            // was written for (measured).
+            let before_ok = at == 0
+                || !source[..at]
+                    .chars()
+                    .next_back()
+                    .is_some_and(|c| c.is_alphanumeric() || c == '_');
+            if !before_ok {
+                continue;
+            }
+            let Some(open_rel) = after_word.find(['(', '[', '{']) else {
+                continue;
+            };
+            let open = at + name.len() + open_rel;
+            let (open_ch, close_ch) = match source.as_bytes()[open] {
+                b'(' => ('(', ')'),
+                b'[' => ('[', ']'),
+                _ => ('{', '}'),
+            };
+            if let Some(end) = matching_delim(source, open, open_ch, close_ch) {
+                out.push(source[open..=end].to_string());
+            }
+        }
+    }
+    out
+}
+
 #[test]
 fn no_wipe_is_hidden_in_an_unexpanded_macro() {
     for (name, source) in [
@@ -4687,6 +4812,10 @@ fn no_wipe_is_hidden_in_an_unexpanded_macro() {
         for body in macro_bodies(&source)
             .into_iter()
             .chain(macro_invocations(&source))
+            // Standard-library macros that take *tokens* and turn them into data without
+            // running them. `stringify!` is the spelling that hid four wipes from every
+            // other rule here (see `TEXT_MACROS`).
+            .chain(text_macro_arguments(&source))
         {
             for marker in [
                 "zeroize_array(",
@@ -5075,6 +5204,14 @@ fn the_constant_cfg_scan_fires_on_constant_predicates_and_only_those() {
         // atom, and the first version of this enumeration saw two (measured by a report).
         "#[cfg(all(feature=\"x\", not(feature = \"x\")))]",
         "#[cfg(not(any(unix, not(unix))))]",
+        // The same one-name-twice predicate with the second occurrence *escaped*. rustc
+        // resolves `"\\x68ardened"` to `"hardened"`, so this is the identical gate -- but the
+        // atom set sees two spellings, so the cancellation rule does not fire on the text
+        // alone. Measured: this compiled `decrypt`'s length bound out of every build with
+        // the whole suite green before the escape check existed.
+        "#[cfg(all(feature = \"hardened\", not(feature = \"\\x68ardened\")))]",
+        // The raw-string spelling of the same idea.
+        "#[cfg(all(feature = \"hardened\", not(feature = r\"hardened\")))]",
     ] {
         assert!(
             finding(constant),
@@ -6227,6 +6364,25 @@ fn collect_fence_status(items: &[syn::Item], out: &mut Vec<WipeFenceStatus>) {
     }
 }
 
+/// Whether `stmt` is a bare `compiler_fence(..)` expression statement.
+///
+/// Deliberately strict: the statement must *be* the call (a semicolon-terminated expression
+/// whose value is the call), not a `let` binding, not a closure body, not an `if` arm. That
+/// is the shape `zeroize_slice`'s and `zeroize_raw`'s wipes end with, and the only shape
+/// that orders the stores before the function returns.
+fn last_stmt_is_fence(stmt: &syn::Stmt) -> bool {
+    let syn::Stmt::Expr(expr, _) = stmt else {
+        return false;
+    };
+    let mut path_calls = CallScan::default();
+    syn::visit::Visit::visit_expr(&mut path_calls, expr);
+    matches!(expr, syn::Expr::Call(_))
+        && path_calls
+            .0
+            .iter()
+            .any(|(_, callee, _)| callee == "compiler_fence")
+}
+
 fn note_fence_status(
     name: &str,
     first_param: &str,
@@ -6238,10 +6394,14 @@ fn note_fence_status(
     }
     let mut calls = CallScan::default();
     syn::visit::Visit::visit_block(&mut calls, block);
-    let fenced = calls
-        .0
-        .iter()
-        .any(|(_, callee, _)| callee == "compiler_fence");
+    // The fence has to be a statement of this function's body, and the *last* one: a
+    // `compiler_fence` anywhere in the body satisfied the earlier `any(...)` form, so
+    // moving it into a never-called closure (`let _unused = || compiler_fence(..);`) left
+    // the `write_volatile` stores with no ordering barrier after them and the whole suite
+    // green (measured). A nested item's copy is not in this body's flow either, which the
+    // same rule covers because the visit is over `block`'s statements, not its nested
+    // items -- `CallScan` walks expressions, and a closure's body is one.
+    let fenced = block.stmts.last().is_some_and(last_stmt_is_fence);
     let volatile_stores = calls
         .0
         .iter()
