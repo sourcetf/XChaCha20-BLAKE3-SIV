@@ -5649,8 +5649,14 @@ fn scan_expr_for_expression_wipes(expr: &syn::Expr, out: &mut Vec<(usize, String
         syn::Expr::Match(match_expr) => {
             out.extend(operand_wipes(&match_expr.expr));
             for arm in &match_expr.arms {
-                if let Some((_, guard)) = &arm.guard {
-                    out.extend(operand_wipes(guard));
+                // A wipe in a guard is an operand: `_ if crate::zeroize_slice(&mut
+                // x).is_some() => {}` clears only when the guard is evaluated. `syn` 3
+                // folds the guard into the pattern (`Pat::Guard`), so this is where it is
+                // found; `syn` 2 had `Arm::guard` and no such variant, which is why
+                // `Cargo.toml` pins `syn = "3"` rather than tracking a major that no longer
+                // exists upstream.
+                if let syn::Pat::Guard(guarded) = &arm.pat {
+                    out.extend(operand_wipes(&guarded.guard));
                 }
                 scan_expr_for_expression_wipes(&arm.body, out);
             }
@@ -6025,7 +6031,11 @@ fn partial_eq_impls_without_ct_eq(source: &str) -> (usize, Vec<(usize, String)>)
         let is_partial_eq = block
             .trait_
             .as_ref()
-            .and_then(|(_, path, _)| path.segments.last())
+            // syn 3's `ItemImpl::trait_` is `Option<(Path, Token![for])>`; through syn 2 it
+            // was a triple whose first element was the optional `!` of a negative impl.
+            // `ImplItem`'s trait path is what names `PartialEq` here, so the port drops
+            // that element.
+            .and_then(|(path, _)| path.segments.last())
             .is_some_and(|segment| segment.ident == "PartialEq");
         if !is_partial_eq {
             continue;

@@ -118,7 +118,12 @@ zeroize = { version = "1.5", default-features = false }
 # braced/brace-less, `move`, parameterised, nested-in-a-block). Parsing is the fix the
 # audits kept recommending; it is a **dev**-dependency only, so the shipped crate and its
 # runtime dependency graph are unchanged.
-syn = { version = "2", features = ["full", "visit"] }
+# Pinned to the major whose AST this file compiles against: `syn` 3 folded the match-arm
+# guard into `Pat::Guard` and dropped `Arm::guard`, and `ImplItem`'s trait path lost its
+# `Option<Token![!]>`. Dependabot opened the 2 -> 3 bump and CI failed on both sites (they
+# are ported now); pinning the major means the next major has to be ported deliberately
+# rather than by resolving a lock.
+syn = { version = "3", features = ["full", "visit"] }
 # `syn`'s `Expr::span().start().line` needs proc-macro2's `span-locations`; without it the
 # guard can say a closure contains a wipe but not where. Dev-only, like `syn`.
 proc-macro2 = { version = "1", features = ["span-locations"] }

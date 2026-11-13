@@ -21,6 +21,29 @@ a call graph. `blake3/Cargo.lock` moves `rustix` 1.1.5 -> 1.1.6 (the patched rel
 graph changed: the root and `fuzz/` locks do not contain `rustix`, and the fork's own suite is
 46 unit tests plus 13 doctests green on the new lock.
 
+### The `syn` major bump dependabot opened, ported instead of ignored
+
+`dependabot/cargo/syn-3.0.6` (PR #19, against `d55a7d8`) failed CI on **21 of 29 jobs** — every
+test leg, the cross builds, the MSRV leg and clippy — because `syn` 3 changed two shapes
+`tests/security.rs` reads and the manifest still said `version = "2"`, so nothing local ever
+compiled the bump:
+
+  * `Arm::guard` is gone; the guard is a `Pat::Guard` wrapper around the pattern now.
+  * `ItemImpl::trait_` is `Option<(Path, Token![for])>` rather than
+    `Option<(Option<Token![!]>, Path, Token![for])>`.
+
+Both sites are ported, and the manifest is pinned to `"3"` with the reason written beside it:
+this file is compiled *against* the AST one major defines, so tracking a major it has not been
+ported to is what made the PR red. `Cargo.lock` still carries `syn 2.0.119` as well —
+`zerocopy-derive`'s proc-macro needs `^2.0.46` — so both versions coexist and the dev
+dependency's entry moved to 3.0.6, which is what the one-line lock diff shows.
+
+Verified after the port: `tests/security.rs` 40/40 and `tests/decision_scope.rs` 7/7, which
+are the two targets that parse with `syn`; the five-configuration test matrix green; fmt and
+clippy `-D warnings` clean. The two guards the port touches are the match-guard wipe walk and
+the `PartialEq`-impl inventory, so the port is covered by the tests that use them rather than
+by a compile check alone.
+
 ### A hostile pass over the guards, part three (same base)
 
 Eight more ways to satisfy the verification device without the property holding, found by
