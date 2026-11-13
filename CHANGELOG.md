@@ -21,6 +21,22 @@ a call graph. `blake3/Cargo.lock` moves `rustix` 1.1.5 -> 1.1.6 (the patched rel
 graph changed: the root and `fuzz/` locks do not contain `rustix`, and the fork's own suite is
 46 unit tests plus 13 doctests green on the new lock.
 
+### The two `cc` bumps dependabot opened, taken
+
+PR #18 (root group) and PR #20 (`/blake3` group) both ask for `cc` 1.10.0 -> 1.11.1. Neither
+is a code change: `cc` is the fork's C *build* dependency, its manifest requirement is
+`1.1.12`, and 1.11.1 satisfies it. `blake3/Cargo.lock` is moved, and the whole chain was
+re-measured on the new version: the fork's own suite (46 unit tests plus 13 doctests), the
+root crate's `blake3_fork_equivalence` target that compiles against the fork, and
+`cargo audit --deny warnings --file blake3/Cargo.lock` (clean). The C kernels are compiled by
+`cc`, so a build-dependency bump is exercised by every test that links them -- including the
+NEON/AVX2 suites the fork builds for the host.
+
+PR #17 (`taiki-e/install-action` 2.87.31 -> 2.90.2) is a workflow-tool bump and needs no
+change here; the workflows pin the action by commit SHA with the version in a comment, so the
+bump is a dependabot edit to those two lines, and its effect is exactly "the same installer,
+newer". Nothing in this repository constrains the action's version.
+
 ### The `syn` major bump dependabot opened, ported instead of ignored
 
 `dependabot/cargo/syn-3.0.6` (PR #19, against `d55a7d8`) failed CI on **21 of 29 jobs** — every
