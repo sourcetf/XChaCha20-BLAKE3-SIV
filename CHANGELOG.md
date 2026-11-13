@@ -37,6 +37,21 @@ change here; the workflows pin the action by commit SHA with the version in a co
 bump is a dependabot edit to those two lines, and its effect is exactly "the same installer,
 newer". Nothing in this repository constrains the action's version.
 
+### A whitespace spelling that hid a wipe from the text-macro scan
+
+`no_wipe_is_hidden_in_an_unexpanded_macro` looks for `stringify!`, `concat!`,
+`format_args!`, `write!`, `writeln!` and `env!` by literal name, so the legal Rust spellings
+`core::stringify !(…)`, `stringify! (…)` and `core:: stringify ! (…)` were invisible to it
+while `cargo check` compiled them. Measured: replacing `derive_material`'s wipe with `let _ =
+core::stringify !(crate::zeroize_array(&mut subkey););` left the guard green.
+
+The table now holds bare names and the scanner reads the `!` and the delimiter with
+whitespace allowed on both sides (rejecting anything non-whitespace between them, which is
+not an invocation shape). Four spellings are negative controls — `stringify !(`,
+`stringify! (`, `stringify!(` and `core:: stringify ! (` — and all four fail the guard now.
+A name that continues into an identifier (`write_str`, `overwrite`) is skipped before the
+`!` test so the scan does not walk every `write` in the file.
+
 ### The `syn` major bump dependabot opened, ported instead of ignored
 
 `dependabot/cargo/syn-3.0.6` (PR #19, against `d55a7d8`) failed CI on **21 of 29 jobs** — every

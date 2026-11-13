@@ -4738,13 +4738,18 @@ fn no_counted_wipe_is_inside_a_closure() {
 /// Measured: replacing `derive_material`'s four wipes with `let _ =
 /// core::stringify!(crate::zeroize_array(&mut subkey););` left the whole suite, clippy,
 /// `cargo fmt --check` and `tools/stack_residue.sh --ultra` green.
+/// Bare names, without the `!`: Rust allows whitespace between a macro's name and its
+/// `!` (`core::stringify !(…)` is the same invocation as `core::stringify!(…)`), so a
+/// table of `"stringify!"` made those spellings unfindable -- measured, with the four
+/// wipes replaced by `core::stringify !(crate::zeroize_array(&mut subkey););`: the guard
+/// stayed green while `cargo check` compiled it.
 const TEXT_MACROS: [&str; 6] = [
-    "stringify!",
-    "concat!",
-    "format_args!",
-    "write!",
-    "writeln!",
-    "env!",
+    "stringify",
+    "concat",
+    "format_args",
+    "write",
+    "writeln",
+    "env",
 ];
 
 /// Every argument span of every [`TEXT_MACROS`] invocation in `source`.
@@ -4762,6 +4767,16 @@ fn text_macro_arguments(source: &str) -> Vec<String> {
             let at = from + rel;
             from = at + name.len();
             let after_word = &source[at + name.len()..];
+            // A name that continues into an identifier is not this macro: `write_str`,
+            // `overwrite`, `concat_map`. The `!` test below would reject them anyway, but
+            // skipping here keeps the scan from walking every `write` in the file.
+            if after_word
+                .chars()
+                .next()
+                .is_some_and(|c| c.is_alphanumeric() || c == '_')
+            {
+                continue;
+            }
             // `write!` must not match `overwrite!`: require a non-identifier character
             // before the name. `:` *is* allowed, because the qualified spellings
             // (`core::stringify!`, `std::concat!`) are the ones this crate would write --
@@ -4775,10 +4790,27 @@ fn text_macro_arguments(source: &str) -> Vec<String> {
             if !before_ok {
                 continue;
             }
-            let Some(open_rel) = after_word.find(['(', '[', '{']) else {
+            // Rust allows whitespace between a macro's name, its `!` and its delimiter:
+            // `core::stringify !(…)` and `stringify ! (…)` are the same invocation. The
+            // literal `"stringify!"` lookup above cannot see either, so a plant spelled
+            // that way was invisible to this scan while `cargo check` compiled it and the
+            // wipe inside it never ran (measured: the same four wipes replaced by
+            // `core::stringify !(crate::zeroize_array(&mut subkey););` left this guard
+            // green). Read the `!` with whitespace allowed on both sides.
+            let after_name = after_word.trim_start();
+            let Some(after_bang) = after_name.strip_prefix('!') else {
                 continue;
             };
-            let open = at + name.len() + open_rel;
+            let args = after_bang.trim_start();
+            let Some(open_rel) = args.find(['(', '[', '{']) else {
+                continue;
+            };
+            if !args[..open_rel].trim().is_empty() {
+                // Something between the `!` and the delimiter that is not whitespace: this
+                // is not the invocation shape, so it cannot hide a wipe in an argument.
+                continue;
+            }
+            let open = source.len() - args.len() + open_rel;
             let (open_ch, close_ch) = match source.as_bytes()[open] {
                 b'(' => ('(', ')'),
                 b'[' => ('[', ']'),
