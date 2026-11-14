@@ -66,9 +66,15 @@ use xchacha20_blake3_siv::MAX_MSG_SIZE;
 const BLOCK: u64 = 64;
 
 /// The keystream call sites the scan below looks for, and the exact number of
-/// hits each name must have in the non-test source. `(name, expected)`: the sum is
-/// asserted too, so a name added to or removed from the source without this table
-/// following fails here.
+/// hits each name must have in the non-test source. `(name, expected)`.
+///
+/// **The table's own length is pinned too.** This doc used to say "the sum is asserted",
+/// and nothing summed it: deleting a row made that name's call sites invisible to the scan
+/// while every remaining assertion stayed green — measured, deleting
+/// `("chacha20_keystream(", 2)` left all five tests passing, and a new
+/// `chacha20_keystream(key, 5, nonce, input, out)` (counter 5, exactly the reuse this file
+/// exists to prevent) then compiled and passed every test here. `ENUMERATED_NAMES` below is
+/// that sum, written out as a count, and the test compares it with the table's length.
 ///
 /// The list used to be the first two names only, so a call routed through
 /// `chacha20_keystream_raw`, a SIMD kernel or the scalar `chacha20_block` was
@@ -91,6 +97,10 @@ const CALL_SITES: &[(&str, usize)] = &[
     // temporary; the test-only wrapper still carries the old name.
     ("chacha20_block_into(", 2),
 ];
+/// How many names [`CALL_SITES`] must enumerate. Deleting a row is otherwise invisible:
+/// the scan simply stops looking for that name, and every assertion about the rows that
+/// remain still holds (measured — see the table's doc).
+const ENUMERATED_NAMES: usize = 8;
 
 /// The counter *arithmetic* inside the keystream paths, which the call-site census
 /// above cannot see: how far each kernel's caller advances `ctr`, and which counter
@@ -257,7 +267,12 @@ fn every_keystream_call_site_starts_the_counter_at_zero() {
             let open = at + bare.len() + after.find(|c: char| !c.is_whitespace()).unwrap_or(0);
             let line_start = body[..at].rfind('\n').map_or(0, |i| i + 1);
             let line = body[line_start..].lines().next().unwrap_or("");
-            let line_no = body[..at].matches('\n').count() + 1;
+            // Minus the `// ===== src/lib.rs =====` banner `non_test_source` puts above
+            // each file: without that, every reported `src/lib.rs:<n>` was one line too
+            // far (measured: a call at 3107 was named as 3108). These messages are what a
+            // reader follows to the code.
+            let banner_lines = 1;
+            let line_no = body[..at].matches('\n').count() + 1 - banner_lines;
             // A standalone mention is an evasion, not a line to skip. Taking the name's
             // address (`let f = chacha20_keystream;`, `&chacha20_keystream`) routes the
             // call through something this text scan cannot follow: the census stays at its
@@ -338,6 +353,15 @@ fn every_keystream_call_site_starts_the_counter_at_zero() {
         }
     }
 
+    assert_eq!(
+        CALL_SITES.len(),
+        ENUMERATED_NAMES,
+        "CALL_SITES enumerates {} name(s), not the {ENUMERATED_NAMES} this file is written \
+         against: a row was removed, and the name it carried is now invisible to the scan \
+         (its call sites could start the counter anywhere and nothing here would notice). \
+         Update ENUMERATED_NAMES deliberately with the table.",
+        CALL_SITES.len()
+    );
     let observed: Vec<(&str, usize, usize)> = CALL_SITES
         .iter()
         .enumerate()

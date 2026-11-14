@@ -21,8 +21,11 @@
 //!
 //! `ultra` = `hardened` + `rng` + `dual-mac` + `locked`. (`pure` is deliberately *not*
 //! part of it — it is a cross-compile/perf switch that forces BLAKE3's portable backends,
-//! costs 24-32% and buys no security — and `Cargo.toml` and `README.md` both say so; this
-//! line used to list it, which contradicted them.) This file is compiled only when
+//! costs about 19-21% of throughput at 4 KiB and 1 MiB (native is 24-26% faster the other
+//! way) and buys no security — and `Cargo.toml` and `README.md` both say so; this line used
+//! to list it, which contradicted them. This sentence then contradicted *them* with a
+//! "24-32%" that nothing measured; the figures above are the ones in `Cargo.toml:33` and
+//! `README.md`.) This file is compiled only when
 //! `ultra` is on, and the assertions below are about the *combination*, which nothing
 //! else in the suite can check.
 

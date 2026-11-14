@@ -130,7 +130,9 @@ const DIVISION_METHODS: &[&str] = &[
 /// * `random::fill` (branches on whether the OS entropy source succeeded, a public fact
 ///   about the environment, and its arms are what zero the buffer on the error path);
 /// * the `derive_tag` window `match`, on the public message/AAD lengths;
-/// * `soft_impl`/`x86_simd` CPU-feature detection: a CPU fact, and `usize` width;
+/// * `x86_simd`/`aarch64_simd` CPU-feature detection and the scalar fallback: a CPU fact,
+///   and `usize` width (there is no `soft_impl` module in `src/`; an earlier revision of
+///   this list named one);
 /// * the fallible-allocation and slice-copy helpers, on lengths.
 ///
 /// History, because this tripwire has moved repeatedly and been right each time. The

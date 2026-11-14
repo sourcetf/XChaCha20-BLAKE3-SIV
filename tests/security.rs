@@ -4752,6 +4752,43 @@ const TEXT_MACROS: [&str; 6] = [
     "env",
 ];
 
+/// Every `use` that binds one of [`TEXT_MACROS`] under another name.
+///
+/// `use core::stringify as s2;` then `s2!(crate::zeroize_array(&mut subkey););` hides the
+/// same wipe the scan above looks for, and the scan cannot see it: the invocation's name is
+/// `s2`. Measured — a module-level alias plus one aliased invocation left the security
+/// target, the default suite, the `ultra` suite and clippy green. Renaming a text macro has
+/// no legitimate use in this crate, so any alias is a finding.
+fn text_macro_aliases(source: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    for line in source.lines() {
+        let line = line.trim();
+        let Some(rest) = line.strip_prefix("use ") else {
+            continue;
+        };
+        // `use core::stringify as s2;` and `use core::{stringify as s2, concat};`.
+        for name in TEXT_MACROS {
+            let mut from = 0usize;
+            while let Some(rel) = rest[from..].find(name) {
+                let at = from + rel;
+                from = at + name.len();
+                let after = rest[at + name.len()..].trim_start();
+                if !after.starts_with("as ") {
+                    continue;
+                }
+                let alias: String = after[3..]
+                    .chars()
+                    .take_while(|c| c.is_alphanumeric() || *c == '_')
+                    .collect();
+                if !alias.is_empty() {
+                    out.push(format!("`{name}` is imported as `{alias}` (line: {line})"));
+                }
+            }
+        }
+    }
+    out
+}
+
 /// Every argument span of every [`TEXT_MACROS`] invocation in `source`.
 ///
 /// Delimiter matching only (no lexing): the sequences being searched for are inside a
@@ -4824,6 +4861,85 @@ fn text_macro_arguments(source: &str) -> Vec<String> {
     out
 }
 
+/// The text-macro scan, pointed at synthetic sources: every spelling it must see, and the
+/// shapes it must leave alone.
+///
+/// The guard's only other input is the crate itself, and the crate contains one
+/// `stringify!`-free body, so nothing in the tree exercises the scanner's regex paths: a
+/// regression in it would leave every test green. Measured, both against this test and
+/// against the tree: with the whitespace handling reverted the whole security target stayed
+/// 40/40, and with the table put back to `"stringify!"` the spaced spellings stopped being
+/// found. Both regressions fail this test. (A third — deleting the identifier-continuation
+/// guard — does *not* fail it, because the `!` test after it rejects the same shapes; that
+/// guard is redundant belt-and-braces, kept because it also stops the scan walking every
+/// `write` in the file.)
+#[test]
+fn the_text_macro_scan_sees_every_spelling_and_only_those() {
+    let scan = |src: &str| text_macro_arguments(src);
+
+    // Fires: every legal spelling of an invocation whose argument carries a wipe.
+    for spelling in [
+        "stringify!(crate::zeroize_array(&mut x);)",
+        "stringify!( crate::zeroize_array(&mut x); )",
+        "core::stringify!(crate::zeroize_array(&mut x);)",
+        "core::stringify !(crate::zeroize_array(&mut x);)",
+        "core::stringify! (crate::zeroize_array(&mut x);)",
+        "core:: stringify ! (crate::zeroize_array(&mut x);)",
+        "concat!(crate::zeroize_array(&mut x);)",
+        "format_args!(crate::zeroize_array(&mut x);)",
+        "write!(f, crate::zeroize_array(&mut x);)",
+        "writeln!(f, crate::zeroize_array(&mut x);)",
+        "env!(crate::zeroize_array(&mut x);)",
+    ] {
+        let body = format!("let _ = {spelling};\n");
+        let found = scan(&body);
+        assert_eq!(
+            found.len(),
+            1,
+            "the scan found {found:?} in `{spelling}`, expected one span. Every spelling \
+             here is legal Rust and the call inside it never runs; a span the scan misses \
+             is a wipe this guard cannot see."
+        );
+        assert!(
+            found[0].contains("zeroize_array"),
+            "the scan returned `{}` for `{spelling}`, which does not contain the call",
+            found[0]
+        );
+    }
+
+    // Does not fire: identifiers that merely start with a macro name, and plain calls.
+    for quiet in [
+        "write_str!(crate::zeroize_array(&mut x);)",
+        "overwrite!(crate::zeroize_array(&mut x);)",
+        "concat_map!(crate::zeroize_array(&mut x);)",
+        "crate::zeroize_array(&mut x);",
+        "let x = 1;",
+    ] {
+        let body = format!("let _ = {quiet};\n");
+        assert!(
+            scan(&body).is_empty(),
+            "the scan reported {:?} for `{quiet}`, which is not one of the text macros",
+            scan(&body)
+        );
+    }
+
+    // The alias rule.
+    assert_eq!(
+        text_macro_aliases("use core::stringify as s2;\n").len(),
+        1,
+        "an aliased text macro must be reported"
+    );
+    assert_eq!(
+        text_macro_aliases("use core::{stringify as s2, concat};\n").len(),
+        1,
+        "an alias inside a use-tree must be reported"
+    );
+    assert!(
+        text_macro_aliases("use core::fmt::Write as _;\nuse std::env;\n").is_empty(),
+        "imports that do not rename a text macro must not be reported"
+    );
+}
+
 #[test]
 fn no_wipe_is_hidden_in_an_unexpanded_macro() {
     for (name, source) in [
@@ -4841,6 +4957,14 @@ fn no_wipe_is_hidden_in_an_unexpanded_macro() {
             strip_comments(include_str!("../src/proofs.rs")),
         ),
     ] {
+        let aliases = text_macro_aliases(&source);
+        assert!(
+            aliases.is_empty(),
+            "`{name}` imports a text macro under another name: {aliases:?}. That renames the \
+             very invocation this guard looks for, so the wipe inside it is invisible here \
+             while `cargo check` still compiles it and it still never runs (measured). Use \
+             the macro's own name or delete the import."
+        );
         for body in macro_bodies(&source)
             .into_iter()
             .chain(macro_invocations(&source))

@@ -609,9 +609,10 @@ struct SampledSweepCounts {
 /// Tamper-sweep one **already-anchored** row over the sampled positions of the requested
 /// fields: every bit of every sampled message and AAD position must be rejected.
 /// `counts` accumulates what ran, so a caller counting a sweep counts what actually
-/// happened. `sweep_message` applies [`sampled_positions`] to `ct`;
-/// `sweep_aad` applies it to `aad`; a row may need either, both, or (the full sweeps
-/// having taken it) neither.
+/// happened. [`sampled_positions`] is applied to `ct` for [`RowFields::Message`] and to
+/// `aad` for [`RowFields::Aad`]; a row may need either, both, or (the full sweeps having
+/// taken it) neither. (The two `sweep_message`/`sweep_aad` functions this comment used to
+/// name are gone — the enum replaced them, which is what the paragraph below says.)
 ///
 /// The caller anchors the row against the reference first (the fixture tag for the
 /// differential fixture's rows, the digest for the large-size fixture's). The untampered

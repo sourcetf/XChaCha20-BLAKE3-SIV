@@ -123,6 +123,41 @@ control.
   decision being a function of its own. `tests/decision_scope.rs` pins it beside the existing
   `ct_eq_independent` pin. Negative control: deleting the attribute fails that test.
 
+### Three more guard gaps and four stale claims, from a line-by-line pass over `tests/`
+
+- **A `use` alias hid a text macro, and so the wipe inside it.** `no_wipe_is_hidden_in_an_unexpanded_macro`
+  looks for `stringify`/`concat`/… by name; `use core::stringify as s2;` then
+  `s2!(crate::zeroize_array(&mut subkey););` is the same hiding one rename away. Measured: the
+  security target, the default suite, the `ultra` suite and clippy all stayed green with
+  `derive_material`'s subkey wipe replaced that way. A `use` that renames any text macro is a
+  finding now (there is no legitimate use for one here). Negative control: the alias plant
+  fails naming the import.
+- **The text-macro scanner had no synthetic self-test, though the CHANGELOG claimed four
+  negative controls.** The only caller read the crate, which contains no text macro at all,
+  so a regression in the scanner was invisible: putting the table back to `"stringify!"`, or
+  dropping the whitespace-before-`!` handling, left the security target 40/40. Both
+  regressions now fail `the_text_macro_scan_sees_every_spelling_and_only_those`, which drives
+  eleven legal spellings and five shapes that must stay quiet. (A third "control" I first
+  claimed — deleting the identifier-continuation guard — does *not* fail it, because the `!`
+  test rejects the same shapes; the doc now says so rather than over-claiming.)
+- **`tests/counter_range.rs` said its table's sum was asserted, and it was not.** Deleting a
+  row made that name's call sites invisible while every remaining assertion held — measured:
+  without `("chacha20_keystream(", 2)` a new `chacha20_keystream(key, 5, nonce, input, out)`
+  (counter 5, the reuse the file exists to prevent) compiled and passed all five tests.
+  `ENUMERATED_NAMES = 8` pins the table's length; removing a row fails the census naming the
+  count. Negative control run.
+- **Every `src/lib.rs:<n>` in that file's failure messages was one line too far**, because
+  the scan prepends a `// ===== src/lib.rs =====` banner. Measured both ways: a planted call
+  at 2814 is now reported as 2814 (it was 2815).
+- **Three stale claims corrected**: `tests/ultra.rs` said `pure` "costs 24-32%" while
+  `Cargo.toml:33` and `README.md` say 19-21% (native 24-26% the other way) — and the same
+  sentence claimed those two files agreed with it; `tests/variable_latency.rs` justified a
+  count with a `soft_impl` module that does not exist; and
+  `tests/differential_reference.rs` described `sweep_message`/`sweep_aad`, both replaced by
+  `sweep_sampled_positions` + `RowFields`. `tests/README.md`'s "32 `from_le_bytes` sites
+  (counted in the non-test source)" now says the count is by hand and nothing pins it, which
+  is what it is.
+
 ### Tool defects from a line-by-line pass over `tools/` and `verify.sh`
 
 Seven, each reproduced before it was fixed.
