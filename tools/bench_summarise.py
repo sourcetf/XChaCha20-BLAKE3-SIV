@@ -208,11 +208,21 @@ def main():
         # header-only parses to an empty dict, so `len(runs) == 3` and every size is
         # present from the other two passes, while "(median of 3 passes)" is a median of
         # two. Measured: three empty pass-3 files produced a full table with no warning.
+        #
+        # Both implementations are counted. The check used to look at the reference only,
+        # so a run directory whose nine files carried every `xchacha20-poly1305` row and no
+        # `xchacha20-blake3-siv` row at all printed the full ratio table filled with `?`
+        # and exited 0 -- the tool reporting success on a campaign it had not measured.
         ref_readings = sum(1 for p in runs for c in p if c[1] == REF)
         if ref_readings < 3 * expected_cells:
             print(f"  INCOMPLETE {cfg}: {ref_readings}/{3 * expected_cells} reference "
                   f"readings -- a missing or header-only pass reads as a median of fewer "
                   f"than the three this table claims")
+        ours_readings = sum(1 for p in runs for c in p if c[1] == OURS)
+        if ours_readings < 3 * expected_cells:
+            print(f"  INCOMPLETE {cfg}: {ours_readings}/{3 * expected_cells} "
+                  f"`{OURS}` readings -- the ratio tables are built from these, so `?` in "
+                  f"a cell here means the campaign did not measure this crate")
     print(f"  median spread {statistics.median(pass_spreads)*100:.1f}%   "
           f"p90 {pass_spreads[min(n-1, int(0.9*n))]*100:.1f}%   "
           f"worst {pass_spreads[-1]*100:.1f}%")

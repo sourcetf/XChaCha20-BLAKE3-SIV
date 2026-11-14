@@ -221,10 +221,23 @@ def main():
     for path, text, count in ((OUT, build(), len(PAIRS)),
                               (OUT_LARGE, build_digests(), len(DIGEST_PAIRS))):
         if check:
-            with open(path, encoding="utf-8") as fh:
-                if fh.read() == text:
-                    print(f"{path} is current ({count} vectors)")
-                    continue
+            # A missing fixture is an environment gap (a fresh or partial checkout), not a
+            # finding: an unguarded `open` gave a FileNotFoundError traceback and exit 1,
+            # the code this file reserves for "the fixture is stale". Measured.
+            try:
+                with open(path, encoding="utf-8") as fh:
+                    current = fh.read()
+            except OSError as exc:
+                print(
+                    f"could not run: {path} is unreadable ({exc.strerror or exc}); the "
+                    "fixture has not been generated in this tree, so there is nothing to "
+                    "compare against. Run without --check first.",
+                    file=sys.stderr,
+                )
+                sys.exit(3)
+            if current == text:
+                print(f"{path} is current ({count} vectors)")
+                continue
             print(f"{path} is STALE -- re-run without --check")
             sys.exit(1)
         os.makedirs(os.path.dirname(path), exist_ok=True)

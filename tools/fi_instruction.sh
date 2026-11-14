@@ -147,6 +147,10 @@ if [ -z "$JOBS" ]; then
 fi
 case "$JOBS" in (*[!0-9]*|"") echo "FAIL: --jobs wants a number, got '$JOBS'" >&2; exit 1 ;; esac
 [ "$JOBS" -ge 1 ] || { echo "FAIL: --jobs wants a positive number" >&2; exit 1; }
+# Normalised, like `verify.sh` does for FUZZ_SECONDS: a leading zero passes the digit
+# screen above and then dies in `$((JOBS - 1))` under `set -e` with "08: value too great
+# for base", which is exit 1 -- a usage error reported as a finding. Measured.
+JOBS=$((10#$JOBS))
 
 # `--shard I/N` splits the sweep across *jobs* instead of across cores. The work of all
 # three configurations is partitioned into `JOBS * N` slices and this invocation runs the

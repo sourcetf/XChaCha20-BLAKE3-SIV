@@ -185,6 +185,53 @@ run_tool() {  # name, tool-path, args...
   esac
 }
 
+# A lock digest guard for the three stages that cannot pass `--locked`.
+#
+# `cargo kani`, `cargo +nightly fuzz` and `cargo mutants` are cargo *plugins*: none of them
+# accepts `--locked` (measured: all three answer "unexpected argument '--locked' found"), so
+# each resolves the graph itself. On a tree whose committed lock disagrees with its manifest
+# that means the stage rewrites `Cargo.lock` / `fuzz/Cargo.lock` mid-run and reports success
+# for a graph the repository does not contain -- and, because these stages run late, it also
+# leaves every *earlier* `--locked` stage's evidence stale. Measured on a scratch crate with
+# a stale lock: `cargo kani --only-codegen` added the package back to `Cargo.lock` and exited
+# 0.
+#
+# So the digest is taken before the stage and compared after. A change is a failure that
+# names the file, because the alternative -- silently accepting it -- is the exact
+# "green run against an uncommitted graph" this script's `--locked` calls exist to prevent.
+# The digest is `cksum`, which is in POSIX and needs no Python.
+LOCK_GUARD_FILES="Cargo.lock fuzz/Cargo.lock blake3/Cargo.lock"
+LOCK_GUARD_BEFORE=""
+lock_guard_begin() {
+  # `|| true` inside the loop body's list: the loop's exit status is its last command's, and
+  # a last file that does not exist would make the assignment itself fail under `set -e`
+  # before the guard could ever compare anything.
+  LOCK_GUARD_BEFORE="$(for f in $LOCK_GUARD_FILES; do
+    if [ -f "$f" ]; then cksum "$f"; fi || true
+  done)"
+  LOCK_GUARD_BEFORE="${LOCK_GUARD_BEFORE:-none}"
+}
+lock_guard_end() {  # <stage name>
+  local stage="$1" after changed=""
+  after="$(for f in $LOCK_GUARD_FILES; do
+    if [ -f "$f" ]; then cksum "$f"; fi || true
+  done)"
+  after="${after:-none}"
+  if [ "$after" != "$LOCK_GUARD_BEFORE" ]; then
+    # `|| true`: `diff` exits 1 when the files differ, which is the branch this is in, and
+    # under `set -e`+`pipefail` that aborted the assignment -- so the guard fired with exit
+    # 1 and printed *nothing* (measured). The message is the whole value of the guard.
+    changed="$( { diff <(printf '%s\n' "$LOCK_GUARD_BEFORE") <(printf '%s\n' "$after") || true; } \
+      | sed -n 's/^> *[0-9]* [0-9]* //p' | tr '\n' ' ' )"
+    changed="${changed% }"
+    echo "FAILED: $stage rewrote a committed lock file (${changed:-unknown}), and a stage" >&2
+    echo "        that re-resolves the graph reports on a tree the repository does not" >&2
+    echo "        contain. That plugin does not accept --locked, so the lock has to be" >&2
+    echo "        consistent before the stage runs: regenerate it deliberately and commit it." >&2
+    exit 1
+  fi
+}
+
 # Findings from an advisory tool that did not fail the run (`tools/stack_residue.sh`
 # measures residue in frames the *compiler* chose, so a narrow run reports instead of
 # blocking). The closing summary has to mention them; a run that prints "FAIL: ...
@@ -692,9 +739,17 @@ if [ "$RUN_CROSS_EXEC" -eq 1 ]; then
     # neither and reported "cargo reported no executables" on every cross target for two
     # commits, while this copy worked because the variable is unset locally and the redirect
     # was already here.
-    exes="$(CARGO_TERM_COLOR=never cargo test --locked --target "$target" --release --no-run \
+    # `if ! ...`, not a bare assignment: under `set -euo pipefail` a cargo failure aborts
+    # the script *inside* the command substitution, so the diagnostic below was dead code
+    # and the caller saw cargo's 101 -- measured: `exes="$( (echo error >&2; exit 101) |
+    # sed ... )"` exits 101 with no message. Same fix as the tool preflights.
+    if ! exes="$(CARGO_TERM_COLOR=never cargo test --locked --target "$target" --release --no-run \
             --features ultra,pure 2>&1 \
-            | sed -n 's/^ *Executable .*(\(.*\))$/\1/p')"
+            | sed -n 's/^ *Executable .*(\(.*\))$/\1/p')"; then
+      echo "FAILED: cargo could not build the $target test binaries (exit $?), so there is" >&2
+      echo "        nothing to execute under qemu for that target." >&2
+      exit 1
+    fi
     [ -n "$exes" ] || { echo "cargo reported no $target executables" >&2; exit 1; }
     # The same two sanity greps CI's cross-exec step carries: a non-empty parse can
     # still be a *partial* one, and a partial list would execute and count a subset of
@@ -1016,45 +1071,56 @@ if [ "$RUN_DENY" -eq 1 ]; then
       skip "cargo-audit ($label)" "$label is missing from this tree, so there is nothing to audit"
       return 0
     fi
-    local out rc=0
+    # Both attempts' output is kept. The retry used to *overwrite* the online attempt's,
+    # so an advisory the online scan found was reclassified as "could not run" whenever the
+    # cache retry then failed to reach the database -- and the classifier's
+    # `advisory database` alternative also matches cargo-audit's ordinary
+    # "Fetching advisory database from ..." banner, which the online attempt always prints.
+    # Measured with a stub cargo: online found RUSTSEC-2020-0071, the retry said
+    # "couldn't fetch", and the function returned a skip instead of a failure.
+    local online offline rc_online rc_offline
     set +e
     if [ -n "$file" ]; then
-      out="$(cargo audit --deny warnings --file "$file" 2>&1)"; rc=$?
-      if [ "$rc" -ne 0 ]; then
-        out="$(cargo audit --no-fetch --deny warnings --file "$file" 2>&1)"; rc=$?
-        # The note is printed only for the outcome it describes. It used to be printed
-        # before `rc` was examined, so a retry that itself failed said "scanned ... against
-        # the cached advisory database" and then, two lines later, that no cache was usable.
-        if [ "$rc" -eq 0 ]; then
-          echo "         (offline: scanned $label against the cached advisory database; a" >&2
-          echo "          stale cache can miss a new advisory -- see ${CARGO_HOME:-$HOME/.cargo}/advisory-db)" >&2
-        fi
+      online="$(cargo audit --deny warnings --file "$file" 2>&1)"; rc_online=$?
+      offline=""
+      rc_offline=$rc_online
+      if [ "$rc_online" -ne 0 ]; then
+        offline="$(cargo audit --no-fetch --deny warnings --file "$file" 2>&1)"; rc_offline=$?
       fi
     else
-      out="$(cargo audit --deny warnings 2>&1)"; rc=$?
-      if [ "$rc" -ne 0 ]; then
-        out="$(cargo audit --no-fetch --deny warnings 2>&1)"; rc=$?
-        if [ "$rc" -eq 0 ]; then
-          echo "         (offline: scanned $label against the cached advisory database; a" >&2
-          echo "          stale cache can miss a new advisory -- see ${CARGO_HOME:-$HOME/.cargo}/advisory-db)" >&2
-        fi
+      online="$(cargo audit --deny warnings 2>&1)"; rc_online=$?
+      offline=""
+      rc_offline=$rc_online
+      if [ "$rc_online" -ne 0 ]; then
+        offline="$(cargo audit --no-fetch --deny warnings 2>&1)"; rc_offline=$?
       fi
     fi
     set -e
-    printf '%s\n' "$out"
-    if [ "$rc" -eq 0 ]; then
+    printf '%s\n' "$online"
+    [ -n "$offline" ] && printf '%s\n' "$offline"
+    if [ "$rc_online" -eq 0 ]; then
       return 0
     fi
+    if [ "$rc_offline" -eq 0 ]; then
+      # The cache answered. The note is printed only for the outcome it describes.
+      echo "         (offline: scanned $label against the cached advisory database; a" >&2
+      echo "          stale cache can miss a new advisory -- see ${CARGO_HOME:-$HOME/.cargo}/advisory-db)" >&2
+      return 0
+    fi
+    # Neither attempt produced a verdict. Only now may this be a "could not run", and the
+    # test is on the two *attempts'* output with the fetch-failure wording, not on the word
+    # "advisory database" (which every successful scan's banner carries).
     # A here-string, like the sibling checks: `grep -q` exits at the first match, and under
-    # `set -o pipefail` that can kill the writer with SIGPIPE (141) and turn a hit into a
-    # non-match -- on this branch that would report a real advisory as "could not fetch".
-    if grep -qiE "couldn't fetch|failed to fetch|no such file|advisory database" <<< "$out"; then
+    # `set -o pipefail` that can kill the writer with SIGPIPE (141).
+    if ! grep -qiE "RUSTSEC-[0-9]{4}-[0-9]{4}|denied warning" <<< "$online$offline" \
+       && grep -qiE "couldn't fetch|failed to fetch|could not be completed|no such file|failed to (load|open|clone) .*advisory" <<< "$online$offline"; then
       skip "cargo-audit ($label)" "the advisory database could not be fetched and no usable cache is present, so no advisory verdict was produced for $label"
       return 0
     fi
     echo "FAILED: cargo-audit found advisories in $label" >&2
     return 1
   }
+
   if cargo audit --version >/dev/null 2>&1; then
     audit_with_fallback ""
     audit_with_fallback fuzz/Cargo.lock
@@ -1130,6 +1196,8 @@ if [ "$RUN_FUZZ" -eq 1 ]; then
     else
       FUZZ_TARGET_DIR="$PWD/fuzz/target"
     fi
+    # `cargo fuzz` is a plugin and takes no `--locked`; guard the lock instead.
+    lock_guard_begin
     cargo +nightly fuzz run roundtrip --target-dir "$FUZZ_TARGET_DIR" \
       -- -max_total_time="$FUZZ_SECONDS" -max_len=8192
     # The same target with `ultra`, which is the only configuration that runs the second
@@ -1162,6 +1230,7 @@ if [ "$RUN_FUZZ" -eq 1 ]; then
       [ "$fuzz_half" -ge 1 ] || fuzz_half=1
       cargo +nightly fuzz run roundtrip --target-dir "$FUZZ_TARGET_DIR" \
         --features xchacha20-blake3-siv/ultra -- -max_total_time="$fuzz_half" -max_len=8192
+      lock_guard_end "cargo fuzz"
     else
       echo "FAILED: no witness symbols in $fuzz_bin -- the ultra feature did not apply," >&2
       echo "        so this run would test the default configuration twice" >&2
@@ -1253,12 +1322,15 @@ if [ "$RUN_TOOLS" -eq 1 ]; then
     work_mut="$(mktemp -d)"
     if [ -d mutants.out ]; then
       cp -r mutants.out "$work_mut/committed"
+      # `cargo mutants` is a plugin and takes no `--locked`; guard the lock instead.
+      lock_guard_begin
       set +e
       cargo mutants --features ultra -f src/lib.rs \
         -F 'decrypt|accept_or_reject' -E 'replace & with \|' \
         -- --test decision --test security > "$work_mut/campaign.log" 2>&1
       mut_rc=$?
       set -e
+      lock_guard_end "cargo mutants"
       tail -2 "$work_mut/campaign.log"
       if [ "$mut_rc" -ne 0 ]; then
         echo "FAILED: the mutation campaign reported an uncaught mutant (exit $mut_rc)" >&2
@@ -1428,7 +1500,10 @@ if [ "$RUN_KANI" -eq 1 ]; then
   # own documented rule. An unreadable file or a parser error leaves the variable empty,
   # which is reported as unparseable below rather than read as a count of zero.
   kani_harnesses="$("$PYTHON" tools/kani_shards.py --count 2>/dev/null || true)"
-  kani_required="$(sed -n 's/^COMMITTED_HARNESSES=\([0-9][0-9]*\)$/\1/p' tools/check_kani_cfg.sh 2>/dev/null)"
+  # `|| true`: `sed` exits 2 on a missing file, and under `set -e` that aborted the script
+  # before the `case` below could report it -- so a deleted gate killed the run with an
+  # exit code outside the 0/1/3/4 contract and no message (measured).
+  kani_required="$(sed -n 's/^COMMITTED_HARNESSES=\([0-9][0-9]*\)$/\1/p' tools/check_kani_cfg.sh 2>/dev/null || true)"
   echo "harness count: ${kani_harnesses:-?} #[kani::proof] attribute(s) in src/proofs.rs;" \
        "requirement: ${kani_required:-?} (tools/check_kani_cfg.sh)"
   case "$kani_harnesses" in
@@ -1459,11 +1534,19 @@ if [ "$RUN_KANI" -eq 1 ]; then
     # 0.68.0's internal `No exit code?` panic after 11/19; `-j 2` completed
     # 19/19. The per-shard job counts in `tools/kani_shards.py` are bounded for
     # the same memory reason. `--output-format=terse` is required by `-j > 1`.
+    # `cargo kani` is a plugin and takes no `--locked` (measured: "unexpected argument
+    # '--locked' found"), so it resolves the graph itself and would rewrite `Cargo.lock` on
+    # a tree whose lock is stale -- reporting success for a graph the repository does not
+    # contain, and leaving every earlier `--locked` stage's evidence stale. The digest guard
+    # fails the stage instead.
+    lock_guard_begin
     if ! cargo kani -j 2 --output-format=terse --features pure -Z stubbing -Z unstable-options \
          --extra-pointer-checks 2>&1 | tee "$kani_log"; then
+      lock_guard_end "cargo kani"
       echo "FAILED: cargo kani exited non-zero" >&2
       exit 1
     fi
+    lock_guard_end "cargo kani"
     # The count above says the source contains harnesses; this says Kani *saw* them.
     # Kani exits 0 with "No proof harnesses ... were found to verify", and the count
     # cannot rule out every way the harnesses fail to reach the build (the module's

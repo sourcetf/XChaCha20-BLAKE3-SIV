@@ -328,7 +328,13 @@ def stray_harnesses():
             if os.path.abspath(path) == os.path.abspath(PROOFS):
                 continue
             with open(path, encoding="utf-8") as fh:
-                text = strip_block_comments(fh.read())
+                # The same two preprocessing steps `harnesses()` uses, in the same order:
+                # blank comments/strings, then join attributes the grammar lets span lines.
+                # A line scan alone missed the legal multi-line spelling
+                # (`#[\nkani :: proof\n]`, which this file's own `harnesses()` accepts) --
+                # measured: a whole harness written that way outside `src/proofs.rs` left
+                # this scan silent, so the gate that exists to find strays said "none".
+                text = join_multi_line_attributes(strip_block_comments(fh.read()))
             for lineno, line in enumerate(text.splitlines(), 1):
                 # A line comment ends the code on that line; the block/string blanking
                 # above leaves `//` intact and blanks string contents, so the cut is safe.
@@ -336,6 +342,31 @@ def stray_harnesses():
                 if PROOF_ATTR.search(code):
                     found.append(
                         (os.path.relpath(path, ROOT), lineno, line.strip())
+                    )
+            # A raw string with an inner `"` defeats `_string_end`, which then reads the
+            # following text as code: `r#"a " and /*"#` opens a block comment that a later
+            # `"*/"` closes, blanking every harness in between (measured: a harness placed
+            # between the two was invisible). `strip_block_comments` also *errors* on an
+            # unbalanced opener, which would be a crash rather than a skip. So the text is
+            # scanned a second time with only `//` lines removed -- no literal handling at
+            # all -- and a hit there that the first pass did not report is reported as a
+            # possible stray: a false positive on a string that spells the attribute is
+            # loud (and testable), a false negative is the gate silently not existing.
+            with open(path, encoding="utf-8") as fh:
+                raw_lines = fh.read().splitlines()
+            reported = {ln for _, ln, _ in found}
+            for lineno, line in enumerate(raw_lines, 1):
+                if lineno in reported:
+                    continue
+                code = line.split("//", 1)[0]
+                if PROOF_ATTR.search(code) or re.search(r"kani\s*::\s*proof", code):
+                    found.append(
+                        (
+                            os.path.relpath(path, ROOT),
+                            lineno,
+                            "possible stray (inside text this scan cannot fully parse): "
+                            + line.strip(),
+                        )
                     )
     return found
 

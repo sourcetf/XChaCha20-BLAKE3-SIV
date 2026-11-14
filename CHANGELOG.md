@@ -123,6 +123,56 @@ control.
   decision being a function of its own. `tests/decision_scope.rs` pins it beside the existing
   `ct_eq_independent` pin. Negative control: deleting the attribute fails that test.
 
+### Tool defects from a line-by-line pass over `tools/` and `verify.sh`
+
+Seven, each reproduced before it was fixed.
+
+- **The stray-Kani-harness scan was blind to two legal spellings, and its own doc claimed
+  otherwise.** `stray_harnesses()` blanked comments and then scanned *lines*, so (a) the
+  multi-line attribute `#[\nkani :: proof\n]` — which this same file's `harnesses()`
+  accepts — was invisible, and (b) a raw string containing an inner quote and a `/*` began a
+  block comment that a later `"*/"` closed, blanking every harness between them. Measured:
+  a whole harness written either way outside `src/proofs.rs` left the scan printing nothing
+  and exiting 0, so `tools/check_kani_cfg.sh` announced "no stray" about a tree that had
+  one. The scan now joins multi-line attributes first, and runs a second, literal-blind pass
+  over the raw lines so text it cannot fully parse is reported as a *possible* stray (loud,
+  not silent). Five controls: both spellings and a plain stray are reported; a comment and a
+  string naming the attribute are not.
+- **Three stages could rewrite a committed lock and still pass.** `cargo kani`,
+  `cargo +nightly fuzz` and `cargo mutants` are plugins and none accepts `--locked`
+  (measured: all three answer `unexpected argument '--locked' found`), so each re-resolves
+  the graph — and because they run late, a rewritten lock also makes every earlier
+  `--locked` stage's evidence stale. Measured on a scratch crate: `cargo kani --only-codegen`
+  added the package back to `Cargo.lock` and exited 0. `verify.sh` now digests the three
+  locks before and after each of those stages (`lock_guard_begin`/`lock_guard_end`) and
+  fails the stage naming the file. Negative control: appending a line to `Cargo.lock`
+  between the two calls fails with the file named; the clean path passes.
+- **A cross-build failure escaped as cargo's 101, with the diagnostic two lines below it
+  dead.** `exes="$(cargo test ... | sed ...)"` under `set -euo pipefail` aborts inside the
+  command substitution, so `[ -n "$exes" ] || { echo ...; exit 1; }` could never run.
+  Measured with a stub: rc 101, no message, no `AFTER`. Now `if ! exes="$(...)"; then`.
+- **A deleted gate file killed the run with exit 2.** `kani_required="$(sed -n ... )"` —
+  `sed` exits 2 on a missing file, so `set -e` aborted before the `case` that reports
+  "carries no readable COMMITTED_HARNESSES= line". `|| true` added.
+- **A real advisory was reclassified as "could not run".** `audit_with_fallback` kept only
+  the *retry's* output and classified on `advisory database`, which also matches
+  cargo-audit's ordinary "Fetching advisory database from …" banner. Measured with a stub:
+  the online scan found `RUSTSEC-2020-0071`, the cache retry failed to fetch, and the
+  function returned a skip. Both attempts are kept now, the skip test requires fetch-failure
+  wording *and* the absence of any advisory line, and a four-case unit test drives it
+  (clean, real advisory, online finding with a dead cache, both attempts dead).
+- **`tools/gen_test_vectors.py --check` on a tree with no fixture raised a traceback and
+  exit 1** — the code that file reserves for "the fixture is stale". Exit 3 with a message
+  now; the real tree still reports both fixtures current.
+- **`tools/fi_instruction.sh --jobs 08`** passed its digit screen and then died in
+  `$((JOBS - 1))` with "value too great for base", exiting 1 — a usage error reported as a
+  finding. Normalised with `$((10#$JOBS))`, as `verify.sh` already does for `FUZZ_SECONDS`.
+
+`tools/bench_summarise.py` also now reports a missing *crate* row as `INCOMPLETE`: it counted
+only the reference implementation, so a campaign whose nine files carried every
+`xchacha20-poly1305` row and no `xchacha20-blake3-siv` row printed the full ratio table
+filled with `?` and exited 0.
+
 ### The verification device's own claims, measured (after `21204e4`)
 
 Eleven claims that the tools were said to support, checked against the tools. Two were false
