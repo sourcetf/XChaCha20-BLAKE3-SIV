@@ -5620,6 +5620,539 @@ fn each_wiped_binding_is_declared_once_in_the_block_that_wipes_it() {
     }
 }
 
+/// No wiped binding may be re-bound, re-assigned, or laundered between its
+/// initialisation and the wipe that is supposed to clear it.
+///
+/// [`each_wiped_binding_is_declared_once_in_the_block_that_wipes_it`] counts *`let`
+/// statements*. That leaves every other way to change what a name refers to, and each one
+/// satisfies the wipe counts while the derived bytes are never overwritten -- all seven of
+/// these were measured green on this tree (security 41/41, the default suite, `ultra`,
+/// clippy and `cargo fmt`), with only the value on the stack changed:
+///
+/// ```text
+/// macro_rules! rebind_decoy { ($n:ident, $t:ty) => { let mut $n = <$t>::default(); }; }
+/// rebind_decoy!(subkey, [u8; 32]);            // the macro's `let` is invisible to syn
+/// for mut subkey in core::iter::once([0u8; 32]) { wipe(&mut subkey); }   // `for` pattern
+/// subkey = [0u8; 32];                         // plain assignment, no `let` at all
+/// let _ = core::mem::replace(&mut subkey, [0u8; 32]);   // moves the secret into the return
+/// let _ = core::mem::take(&mut subkey);                 // same, via Default
+/// let _ = unsafe { core::ptr::read(&mut subkey) };      // same, via a copy
+/// ```
+///
+/// Three rules, each of which the crate's own code satisfies and each of which is *complete*
+/// for the shape it covers rather than a list of spellings to keep extending:
+///
+/// 1. **No non-`let` pattern binds a wiped name.** `for`/`while let`/`if let`/`match`-arm
+///    and closure-parameter patterns are excluded outright; the crate never needs one for a
+///    name it wipes, and each is a fresh binding the `let` count cannot see.
+/// 2. **No assignment targets a wiped name as a bare identifier.** `n = …` rebinds the
+///    value in place. An *element* store (`x[12] = …`, `s[i] = …`) is allowed and used by the
+///    SIMD kernels; it does not move the binding.
+/// 3. **`&mut <wiped name>` reaches only a pinned set of callees** ([`MUTATING_CALLEES`]):
+///    the derivations that fill a buffer and the wipes themselves. This is a whitelist on
+///    purpose — the report that motivated this guard put it as "a blacklist plus an exact
+///    count waits for spelling N+1" — so `mem::replace`, `mem::take`, `ptr::read`,
+///    `mem::swap` and whatever the next laundering primitive is are all refused by default.
+#[test]
+fn no_wiped_binding_is_rebound_reassigned_or_laundered() {
+    use syn::spanned::Spanned;
+
+    // Rule 3 of the doc above is *not* implemented here, deliberately. The obvious form --
+    // "no macro invocation may mention a wiped name" -- is unsound as a guard and unusable
+    // as a rule: the SIMD kernels pass `x` to `qr128!`/`qr256!` after binding *and* wiping
+    // it, and `qr128!` only indexes `$x`, so the rule would fail on correct code while
+    // still being satisfied by a macro that binds and never indexes. The property that
+    // actually matters is about the macro *definition*, and
+    // `no_macro_in_this_crate_binds_an_identifier_fragment` below is where it is checked.
+    //
+    // Every callee that may receive `&mut <wiped name>`: the primitives that *derive into*
+    // a buffer, and the wipes. Anything else is refused, which is what catches the
+    // laundering family. Adding a genuinely new filler is a deliberate edit here.
+    const MUTATING_CALLEES: &[&str] = &[
+        // The wipes themselves.
+        "crate::zeroize_array",
+        "crate::zeroize_slice",
+        "crate::zeroize_raw",
+        "zeroize_array",
+        "zeroize_slice",
+        "zeroize_raw",
+        "zeroize_neon",
+        "zeroize_xmm",
+        "zeroize_ymm",
+        "wipe",
+        "wipe_words",
+        // The derivations that fill a caller's buffer, in `src/lib.rs`.
+        "derive_material",
+        "derive_enc",
+        "chacha20_rounds",
+        "chacha20_state_words",
+        "chacha20_block_into",
+        "chacha20_keystream",
+        "chacha20_keystream_raw",
+        "hchacha20_into",
+        "blake3_keyed_multi",
+        "blake3_keyed_xof",
+        "integrity_tag",
+        "x86_simd::blocks4",
+        "x86_simd::blocks8",
+        "aarch64_simd::blocks4",
+        // The same in `src/witness.rs`, which has its own spellings.
+        "witness::decrypt",
+        "material",
+        "enc_material",
+        "keystream_xor",
+        "keyed_xof",
+        "quarter",
+        "permute",
+        "round",
+    ];
+
+    /// Whether `expr` mentions `name` anywhere in its path segments.
+    fn mentions_ident(expr: &syn::Expr, name: &str) -> bool {
+        struct M<'a> {
+            name: &'a str,
+            hit: bool,
+        }
+        impl<'ast, 'a> syn::visit::Visit<'ast> for M<'a> {
+            fn visit_expr_path(&mut self, p: &'ast syn::ExprPath) {
+                if p.path.segments.iter().any(|s| s.ident == self.name) {
+                    self.hit = true;
+                }
+                syn::visit::visit_expr_path(self, p);
+            }
+        }
+        let mut m = M { name, hit: false };
+        syn::visit::Visit::visit_expr(&mut m, expr);
+        m.hit
+    }
+
+    /// The bare identifier an assignment's left-hand side resolves to, if it is one.
+    /// `x[12] = …` is an element store and yields None.
+    fn assigned_ident(expr: &syn::Expr) -> Option<String> {
+        match expr {
+            syn::Expr::Path(p) => p.path.get_ident().map(|i| i.to_string()),
+            syn::Expr::Paren(p) => assigned_ident(&p.expr),
+            syn::Expr::Tuple(t) => t.elems.iter().find_map(assigned_ident),
+            _ => None,
+        }
+    }
+
+    fn binding_idents(pat: &syn::Pat, out: &mut Vec<String>) {
+        struct Collect<'a>(&'a mut Vec<String>);
+        impl<'ast, 'a> syn::visit::Visit<'ast> for Collect<'a> {
+            fn visit_pat_ident(&mut self, p: &'ast syn::PatIdent) {
+                self.0.push(p.ident.to_string());
+                syn::visit::visit_pat_ident(self, p);
+            }
+        }
+        let mut c = Collect(out);
+        syn::visit::Visit::visit_pat(&mut c, pat);
+    }
+
+    struct Scan {
+        wiped: Vec<String>,
+        findings: Vec<String>,
+    }
+
+    impl<'ast> syn::visit::Visit<'ast> for Scan {
+        // Rule 1: patterns outside a `let`.
+        fn visit_expr_for_loop(&mut self, l: &'ast syn::ExprForLoop) {
+            let mut names = Vec::new();
+            binding_idents(&l.pat, &mut names);
+            for n in names {
+                if self.wiped.contains(&n) {
+                    self.findings.push(format!(
+                        "`{n}` is bound by a `for` pattern (line {}) and then wiped: that is a second binding the `let` count cannot see, so the wipe may clear the loop's value rather than the derived buffer",
+                        l.pat.span().start().line
+                    ));
+                }
+            }
+            syn::visit::visit_expr_for_loop(self, l);
+        }
+
+        fn visit_expr_let(&mut self, l: &'ast syn::ExprLet) {
+            let mut names = Vec::new();
+            binding_idents(&l.pat, &mut names);
+            for n in names {
+                if self.wiped.contains(&n) {
+                    self.findings.push(format!(
+                        "`{n}` is bound by an `if let`/`while let` pattern (line {}) and then wiped, which is the same second-binding shape as a `for` pattern",
+                        l.pat.span().start().line
+                    ));
+                }
+            }
+            syn::visit::visit_expr_let(self, l);
+        }
+
+        fn visit_arm(&mut self, arm: &'ast syn::Arm) {
+            let mut names = Vec::new();
+            binding_idents(&arm.pat, &mut names);
+            for n in names {
+                if self.wiped.contains(&n) {
+                    self.findings.push(format!(
+                        "`{n}` is bound by a `match` arm (line {}) and then wiped",
+                        arm.pat.span().start().line
+                    ));
+                }
+            }
+            syn::visit::visit_arm(self, arm);
+        }
+
+        fn visit_expr_closure(&mut self, c: &'ast syn::ExprClosure) {
+            for pat in &c.inputs {
+                let mut names = Vec::new();
+                binding_idents(pat, &mut names);
+                for n in names {
+                    if self.wiped.contains(&n) {
+                        self.findings.push(format!(
+                            "`{n}` is a closure parameter (line {}) and is wiped inside: a closure body is a separate scope, so this wipe clears the parameter, not the caller's binding",
+                            pat.span().start().line
+        ));
+                    }
+                }
+            }
+            syn::visit::visit_expr_closure(self, c);
+        }
+
+        // Rule 2: a whole-binding assignment that does not *transform* the binding.
+        //
+        // `m = permute(&m)` in `witness::compress` is the crate's own use: the assigned
+        // value is the same secret through another round, so the wipe still clears the
+        // derivation's output (the *previous* value stays in the frame, which is what
+        // `scrub_stack` covers -- no wipe of `m` could reach it). An assignment whose
+        // right-hand side does not mention the name at all is the decoy shape: the secret
+        // is replaced by unrelated bytes that nothing wipes.
+        fn visit_expr_assign(&mut self, a: &'ast syn::ExprAssign) {
+            if let Some(n) = assigned_ident(&a.left) {
+                if self.wiped.contains(&n) && !mentions_ident(&a.right, &n) {
+                    self.findings.push(format!(
+                        "`{n}` is assigned a value that does not mention it (line {}): `{n} = \u{2026}` replaces the derived bytes with unrelated ones, and the wipe that follows then clears the replacement. Measured: `subkey = [0u8; 32];` ahead of `derive_material`'s unchanged wipe left the whole suite green. An in-place transform (`m = permute(&m)`) is allowed because the value wiped is still the derivation's output.",
+                        a.left.span().start().line
+                    ));
+                }
+            }
+            syn::visit::visit_expr_assign(self, a);
+        }
+
+        // Rule 4: `&mut <wiped name>` may only reach a pinned callee.
+        fn visit_expr_call(&mut self, c: &'ast syn::ExprCall) {
+            let callee = match &*c.func {
+                syn::Expr::Path(p) => p
+                    .path
+                    .segments
+                    .iter()
+                    .map(|s| s.ident.to_string())
+                    .collect::<Vec<_>>()
+                    .join("::"),
+                _ => String::new(),
+            };
+            for (n, line) in mut_args(&c.args, &self.wiped) {
+                if !MUTATING_CALLEES.contains(&callee.as_str()) {
+                    self.findings.push(format!(
+                        "`&mut {n}` (line {line}) is passed to `{callee}`, which is not one of the pinned fillers/wipes: `mem::replace`, `mem::take`, `ptr::read`, `mem::swap` and every future laundering primitive move the derived bytes into a temporary that is then dropped unwiped, leaving the wiped binding holding the decoy. Measured green for all four."
+                    ));
+                }
+            }
+            syn::visit::visit_expr_call(self, c);
+        }
+
+        fn visit_expr_method_call(&mut self, c: &'ast syn::ExprMethodCall) {
+            for (n, line) in mut_args(&c.args, &self.wiped) {
+                self.findings.push(format!(
+                    "`&mut {n}` (line {line}) is passed to the method `{}`, which is not a pinned filler; see the `visit_expr_call` rule",
+                    c.method
+                ));
+            }
+            syn::visit::visit_expr_method_call(self, c);
+        }
+    }
+
+    /// `(name, line)` for every argument of the form `&mut <wiped name>`.
+    fn mut_args(
+        args: &syn::punctuated::Punctuated<syn::Expr, syn::token::Comma>,
+        wiped: &[String],
+    ) -> Vec<(String, usize)> {
+        let mut out = Vec::new();
+        for arg in args {
+            if let syn::Expr::Reference(r) = arg {
+                if r.mutability.is_none() {
+                    continue;
+                }
+                if let syn::Expr::Path(p) = r.expr.as_ref() {
+                    if let Some(i) = p.path.get_ident() {
+                        let name = i.to_string();
+                        if wiped.contains(&name) {
+                            out.push((name, i.span().start().line));
+                        }
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    for (name, source) in [
+        ("src/lib.rs", non_test_source()),
+        (
+            "src/witness.rs",
+            non_test_source_of(include_str!("../src/witness.rs")),
+        ),
+    ] {
+        let file = syn::parse_file(&source).expect("the scanned source must parse as a Rust file");
+        struct Bodies<'a> {
+            out: Vec<(String, &'a syn::Block)>,
+        }
+        impl<'ast: 'a, 'a> syn::visit::Visit<'ast> for Bodies<'a> {
+            fn visit_item_fn(&mut self, f: &'ast syn::ItemFn) {
+                self.out.push((f.sig.ident.to_string(), &f.block));
+            }
+            fn visit_impl_item_fn(&mut self, f: &'ast syn::ImplItemFn) {
+                self.out.push((f.sig.ident.to_string(), &f.block));
+            }
+        }
+        let mut collector = Bodies { out: Vec::new() };
+        syn::visit::Visit::visit_file(&mut collector, &file);
+        for (fname, block) in &collector.out {
+            // The wiped names of this function: bare-identifier targets of a wipe call.
+            struct Wipes(Vec<String>);
+            impl<'ast> syn::visit::Visit<'ast> for Wipes {
+                fn visit_expr_call(&mut self, c: &'ast syn::ExprCall) {
+                    if let syn::Expr::Path(p) = &*c.func {
+                        if let Some(last) = p.path.segments.last() {
+                            if WIPE_FUNCTIONS.contains(&last.ident.to_string().as_str()) {
+                                for arg in &c.args {
+                                    if let syn::Expr::Reference(r) = arg {
+                                        if let syn::Expr::Path(pp) = r.expr.as_ref() {
+                                            if let Some(i) = pp.path.get_ident() {
+                                                self.0.push(i.to_string());
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    syn::visit::visit_expr_call(self, c);
+                }
+            }
+            let mut w = Wipes(Vec::new());
+            syn::visit::Visit::visit_block(&mut w, block);
+            w.0.sort();
+            w.0.dedup();
+            if w.0.is_empty() {
+                continue;
+            }
+            let mut scan = Scan {
+                wiped: w.0,
+                findings: Vec::new(),
+            };
+            syn::visit::Visit::visit_block(&mut scan, block);
+            assert!(
+                scan.findings.is_empty(),
+                "`{name}` `{fname}`: {:#?}",
+                scan.findings
+            );
+        }
+    }
+}
+
+/// Every token of a `macro_rules!` definition, with `$name` kept whole so a fragment is one
+/// token (splitting `$` from `n` would defeat the fragment test).
+fn macro_tokens(text: &str) -> Vec<String> {
+    let b = text.as_bytes();
+    let mut out = Vec::new();
+    let mut i = 0usize;
+    while i < b.len() {
+        let c = b[i] as char;
+        if c.is_whitespace() {
+            i += 1;
+            continue;
+        }
+        if c == '$' {
+            let mut j = i + 1;
+            let mut name = String::from("$");
+            while j < b.len() && ((b[j] as char).is_alphanumeric() || b[j] == b'_') {
+                name.push(b[j] as char);
+                j += 1;
+            }
+            out.push(name);
+            i = j;
+            continue;
+        }
+        if c.is_alphanumeric() || c == '_' {
+            let mut j = i;
+            let mut word = String::new();
+            while j < b.len() && ((b[j] as char).is_alphanumeric() || b[j] == b'_') {
+                word.push(b[j] as char);
+                j += 1;
+            }
+            out.push(word);
+            i = j;
+            continue;
+        }
+        out.push(c.to_string());
+        i += 1;
+    }
+    out
+}
+
+/// The fragment names a definition declares as `:ident`/`:tt`.
+fn declared_ident_fragments(toks: &[String]) -> Vec<String> {
+    let mut out = Vec::new();
+    for w in toks.windows(3) {
+        if w[0].starts_with('$')
+            && w[0].len() > 1
+            && w[1] == ":"
+            && (w[2] == "ident" || w[2] == "tt")
+        {
+            out.push(w[0].clone());
+        }
+    }
+    out
+}
+
+/// Whether `frag` appears in *binding* position, and the surrounding tokens if so.
+///
+/// The shapes that create a binding from a fragment: `let [mut] $n`, `let … @ $n` on the
+/// right of `@`, `mut $n` in a pattern, `for $n in`, and a closure parameter between two
+/// `|`. Merely *indexing* a fragment (`$x[$a] = …`) cannot rebind anything and is what the
+/// crate's SIMD round macros do.
+fn fragment_binding_site(toks: &[String], frag: &str) -> Option<String> {
+    for (i, t) in toks.iter().enumerate() {
+        if t != frag {
+            continue;
+        }
+        let prev = if i == 0 {
+            None
+        } else {
+            Some(toks[i - 1].as_str())
+        };
+        let next = toks.get(i + 1).map(|s| s.as_str());
+        if matches!(prev, Some("let" | "mut" | "ref" | "for"))
+            || next == Some("@")
+            || (prev == Some("|") && next == Some("|"))
+        {
+            return Some(toks[i.saturating_sub(4)..(i + 5).min(toks.len())].join(" "));
+        }
+    }
+    None
+}
+
+/// Findings for every `macro_rules!` body in `source` that binds an identifier fragment.
+fn macro_binding_an_ident_fragment(source: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    for body in macro_bodies(source) {
+        let toks = macro_tokens(&body);
+        for frag in declared_ident_fragments(&toks) {
+            if let Some(window) = fragment_binding_site(&toks, &frag) {
+                out.push(format!("`{frag}` in binding position: `{window}`"));
+            }
+        }
+    }
+    out
+}
+
+/// No `macro_rules!` in this crate puts an `:ident` (or `:tt`) fragment in *binding*
+/// position.
+///
+/// This is the definition-level half of the laundering guard above, and it is the half that
+/// makes the macro shape checkable at all: an AST scan of the call site cannot look inside an
+/// expansion, so "can this macro rebind a caller's binding?" has to be answered from the
+/// definition. Hygiene supplies the answer -- a `macro_rules!` body has its own syntax
+/// context, so the only way it can bind the *caller's* `subkey` is to use a fragment the
+/// caller supplied in binding position: `($n:ident) => { let mut $n = …; }`. Merely indexing
+/// a fragment (`$x[$a] = …`, which is what the SIMD round macros do) cannot rebind anything.
+///
+/// Measured: with `macro_rules! rebind_decoy { ($n:ident, $t:ty) => { let mut $n =
+/// <$t>::default(); }; }` defined in `src/lib.rs` and `rebind_decoy!(subkey, [u8; 32]);`
+/// placed ahead of `derive_material`'s unchanged wipe, the security target stayed 41/41 and
+/// the default and `ultra` suites stayed green while the 256-bit HChaCha20 subkey was left in
+/// the frame for the whole call. Every wipe count, the `let`-count guard, the
+/// statement-position walk and `tools/stack_residue.sh` (which does not scan for `subkey`)
+/// were blind to it, because the second binding exists only after expansion.
+#[test]
+fn no_macro_in_this_crate_binds_an_identifier_fragment() {
+    let mut total = 0usize;
+    for (name, source) in [
+        ("src/lib.rs", non_test_source()),
+        (
+            "src/witness.rs",
+            non_test_source_of(include_str!("../src/witness.rs")),
+        ),
+    ] {
+        for body in macro_bodies(&source) {
+            total += declared_ident_fragments(&macro_tokens(&body)).len();
+        }
+        let findings = macro_binding_an_ident_fragment(&source);
+        assert!(
+            findings.is_empty(),
+            "`{name}` defines a macro that binds a caller-supplied identifier: {findings:?}. \
+             Such a macro produces a second binding no AST scan of the call site can see, so \
+             `rebind_decoy!(subkey, [u8; 32])` ahead of the unchanged wipe satisfies every \
+             count while the derived bytes are never overwritten (measured: the whole suite \
+             green). Take the value as `$x:expr` and index it, or take no identifier at all."
+        );
+    }
+    // Three macros in `src/lib.rs` declare an `:ident` fragment -- `qr128!`, `qr256!` and
+    // `qrq!`, one each, all of them the array they index. (`rotl128!`/`rotl256!`/`rotlq!`
+    // take only `:expr` and `:literal`.) Pinned so a rewrite that removes them -- and with
+    // them this test's subject -- is a deliberate change rather than a silently narrower
+    // check.
+    assert_eq!(
+        total, 3,
+        "expected 3 `:ident`/`:tt` fragments across the crate's macros (`qr128!`, `qr256!`, \
+         `qrq!`), found {total}: update this count deliberately with any macro change"
+    );
+}
+
+/// The fragment-position scan, against synthetic definitions: the two shapes it must report
+/// and the three it must not.
+///
+/// Without this the scanner's only input is the crate, whose three `:ident` fragments are all
+/// indexed rather than bound, so a regression that made `fragment_binding_site` return `None`
+/// unconditionally would leave the assertion above green.
+#[test]
+fn the_macro_fragment_scan_reports_binding_and_ignores_reading() {
+    for (label, def, binds) in [
+        (
+            "a `let` of the fragment",
+            "macro_rules! d { ($n:ident, $t:ty) => { let mut $n = <$t>::default(); }; }",
+            true,
+        ),
+        (
+            "a `let` with a subpattern",
+            "macro_rules! d { ($n:ident) => { let $n @ [0u8; 32] = x; }; }",
+            true,
+        ),
+        (
+            "a `for` over the fragment",
+            "macro_rules! d { ($n:ident) => { for $n in items() {} }; }",
+            true,
+        ),
+        (
+            "an indexed fragment",
+            "macro_rules! d { ($x:ident, $a:expr) => { $x[$a] = 1; }; }",
+            false,
+        ),
+        (
+            "a read of the fragment",
+            "macro_rules! d { ($n:ident) => { $n[0] }; }",
+            false,
+        ),
+        (
+            "only an `:expr` fragment",
+            "macro_rules! d { ($n:expr) => { let mut x = $n; }; }",
+            false,
+        ),
+    ] {
+        let got = !macro_binding_an_ident_fragment(def).is_empty();
+        assert_eq!(
+            got, binds,
+            "the fragment scan read `{def}` as {got} (expected {binds}, {label})"
+        );
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Expression-position wipes
 //
@@ -6343,6 +6876,111 @@ impl<'ast> syn::visit::Visit<'ast> for CallScan {
 
 /// What the wipe primitives in one source file do, as
 /// `(names found, non-volatile stores, volatile stores per function)`.
+///
+/// Every call and function-value binding a wipe primitive may contain.
+///
+/// A whitelist, not a blacklist, and that is the whole point. `NON_VOLATILE_STORES` plus the
+/// exact `write_volatile` count is a blacklist: it names the spellings someone thought of, so
+/// the next one is a store the scan does not recognise and a count that still adds up.
+/// Measured against the blacklist version of this guard: replacing `zeroize_raw`'s wide loop
+/// with
+///
+/// ```text
+/// let w: unsafe fn(*mut u8, u8) = core::ptr::write;
+/// core::ptr::write_volatile(ptr, 0);          // redundant, restores the pinned count of 3
+/// while len - i >= chunk { w(ptr.add(i + k), 0); … }
+/// ```
+///
+/// left `every_wipe_store_is_volatile` green: the callee's *name* is `w`, so it is neither a
+/// `write_volatile` (aliased) nor one of the fifteen blacklisted names (offending) nor an
+/// assignment — and the binding that gives it the value is a `let`, not a `use`, so the
+/// aliasing-import check never fires. That build's optimizer happened to keep the stores, so
+/// only an unrelated behavioural test noticed; a different `opt-level` or `rustc` and the
+/// claim would hold in the source and not in the machine code.
+///
+/// `(callee, allowed)` — path calls by their last segment, method calls by the method name.
+const WIPE_BODY_CALLEES: &[&str] = &[
+    // The volatile store and the ordering barrier: everything these functions exist for.
+    "write_volatile",
+    "compiler_fence",
+    // Layout arithmetic and slice plumbing.
+    "size_of",
+    "align_of",
+    "len",
+    "add",
+    "wrapping_add",
+    "as_mut_ptr",
+    "from_raw_parts_mut",
+    "iter_mut",
+    "black_box",
+    // The delegation to a sibling wipe primitive; `delegates_to` records which.
+    "zeroize_array",
+    "zeroize_slice",
+    "zeroize_raw",
+    "wipe",
+    "wipe_words",
+    // The SIMD zero vectors the vectorised wipes store from.
+    "_mm_setzero_si128",
+    "_mm256_setzero_si256",
+    "vdupq_n_u32",
+];
+
+/// A call or binding in a wipe primitive that the whitelist does not name.
+type WipeBodyFinding = (usize, String);
+
+/// `(line, callee)` for every call in a wipe primitive that [`WIPE_BODY_CALLEES`] does not
+/// name, and `(line, binding)` for every `let` whose initialiser is a bare path.
+///
+/// The second half is the one that closes the family: a path initialiser is how a *function*
+/// gets a new name, and a function under another name is a store this scan cannot classify.
+fn wipe_body_findings(block: &syn::Block) -> (Vec<WipeBodyFinding>, Vec<WipeBodyFinding>) {
+    use syn::spanned::Spanned;
+
+    let mut calls = CallScan::default();
+    syn::visit::Visit::visit_block(&mut calls, block);
+    let unknown_calls: Vec<WipeBodyFinding> = calls
+        .0
+        .iter()
+        .filter(|(_, callee, _)| !WIPE_BODY_CALLEES.contains(&callee.as_str()))
+        .map(|(line, callee, _)| (*line, callee.clone()))
+        .collect();
+
+    struct Lets<'a> {
+        out: &'a mut Vec<WipeBodyFinding>,
+    }
+    impl<'ast, 'a> syn::visit::Visit<'ast> for Lets<'a> {
+        fn visit_local(&mut self, local: &'ast syn::Local) {
+            if let Some(init) = &local.init {
+                if let syn::Expr::Path(p) = &*init.expr {
+                    let name = p
+                        .path
+                        .segments
+                        .last()
+                        .map(|s| s.ident.to_string())
+                        .unwrap_or_default();
+                    let bound = match &local.pat {
+                        syn::Pat::Ident(i) => i.ident.to_string(),
+                        syn::Pat::Type(t) => match &*t.pat {
+                            syn::Pat::Ident(i) => i.ident.to_string(),
+                            _ => "<pattern>".to_string(),
+                        },
+                        _ => "<pattern>".to_string(),
+                    };
+                    self.out.push((
+                        local.span().start().line,
+                        format!("{bound} = {name} (a function value)"),
+                    ));
+                }
+            }
+            syn::visit::visit_local(self, local);
+        }
+    }
+    let mut lets: Vec<WipeBodyFinding> = Vec::new();
+    let mut l = Lets { out: &mut lets };
+    syn::visit::Visit::visit_block(&mut l, block);
+    (unknown_calls, lets)
+}
+
 #[derive(Default)]
 struct WipeStoreScan {
     /// Every `WIPE_FUNCTIONS` definition seen, in source order.
@@ -6357,6 +6995,12 @@ struct WipeStoreScan {
     /// `(line, spelling)` for every `use` in the file that brings *another* item in under
     /// the name `write_volatile`; naming the culprit is what makes the failure actionable.
     aliasing_imports: Vec<(usize, String)>,
+    /// `(function, line, callee)` for every call in a wipe primitive outside
+    /// [`WIPE_BODY_CALLEES`].
+    unknown_calls: Vec<(String, usize, String)>,
+    /// `(function, line, binding)` for every `let` in a wipe primitive whose initialiser is a
+    /// bare path, i.e. a function value under a new name.
+    path_lets: Vec<(String, usize, String)>,
 }
 
 fn wipe_store_findings(source: &str) -> WipeStoreScan {
@@ -6406,6 +7050,13 @@ fn note_wipe_body(name: &str, block: &syn::Block, out: &mut WipeStoreScan) {
         return;
     }
     out.found.push(name.to_string());
+    let (unknown_calls, path_lets) = wipe_body_findings(block);
+    for (line, callee) in unknown_calls {
+        out.unknown_calls.push((name.to_string(), line, callee));
+    }
+    for (line, binding) in path_lets {
+        out.path_lets.push((name.to_string(), line, binding));
+    }
     let mut calls = CallScan::default();
     syn::visit::Visit::visit_block(&mut calls, block);
     for (line, callee, path) in calls.0 {
@@ -6741,6 +7392,8 @@ fn every_wipe_store_is_volatile() {
     for (name, count) in &witness.volatile {
         *scan.volatile.entry(name.clone()).or_default() += count;
     }
+    let witness_unknown = witness.unknown_calls.clone();
+    let witness_path_lets = witness.path_lets.clone();
     // `wipe` and `wipe_words` appear twice each in `src/witness.rs`: the real one and the
     // Kani-only no-op, which must stay visible to this scan. If a wipe primitive is renamed
     // it disappears from the list and stops being checked, so the list is pinned.
@@ -6780,6 +7433,29 @@ fn every_wipe_store_is_volatile() {
          green.",
         scan.offending
     );
+    // The body-level whitelist: every call must be one of `WIPE_BODY_CALLEES`, and no
+    // binding may be initialised from a bare path (a function under a new name).
+    let mut unknown: Vec<(String, usize, String)> = scan.unknown_calls.clone();
+    unknown.extend(witness_unknown);
+    assert!(
+        unknown.is_empty(),
+        "wipe primitive(s) call something outside the pinned set: {unknown:?}. This is a \
+         whitelist rather than a blacklist for a measured reason: a blacklist plus an exact \
+         `write_volatile` count was satisfied by `let w: unsafe fn(*mut u8, u8) = \
+         core::ptr::write;` followed by a wide loop through `w` and one redundant volatile \
+         store to restore the pinned count -- the callee's name is `w`, so it was neither a \
+         volatile call nor a blacklisted one, and the binding is a `let`, not a `use`. Add \
+         the callee to `WIPE_BODY_CALLEES` if it belongs, or do not call it here."
+    );
+    let mut laundered: Vec<(String, usize, String)> = scan.path_lets.clone();
+    laundered.extend(witness_path_lets);
+    assert!(
+        laundered.is_empty(),
+        "wipe primitive(s) bind a function value to a new name: {laundered:?}. A function \
+         under another name is a store this scan cannot classify, which is the whole \
+         `let w = core::ptr::write;` bypass."
+    );
+
     // The count per primitive is pinned, not merely required to be positive. `> 0` was the
     // first version, and it accepts a wipe whose stores were rewritten as plain ones while a
     // single volatile store survives somewhere in the body -- or, in `zeroize_raw`, a

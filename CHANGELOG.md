@@ -123,6 +123,62 @@ control.
   decision being a function of its own. `tests/decision_scope.rs` pins it beside the existing
   `ct_eq_independent` pin. Negative control: deleting the attribute fails that test.
 
+### Two rebinding attacks from the third audit report, and the family behind them
+
+Both reported shapes reproduced on this tree exactly as described (security 41/41, whole suite
+green, clippy and fmt clean), and both were about the same thing: a wipe whose *text* is
+unchanged while the name it refers to was quietly rebound.
+
+- **A macro can bind a caller's identifier, and the AST cannot see the expansion.** With
+  `macro_rules! rebind_decoy { ($n:ident, $t:ty) => { let mut $n = <$t>::default(); }; }`
+  defined in `src/lib.rs` and `rebind_decoy!(subkey, [u8; 32]);` placed ahead of
+  `derive_material`'s unchanged wipes, the 256-bit HChaCha20 subkey stayed live for the whole
+  call. The binding guard counts `Stmt::Local` patterns, and the second binding exists only
+  after expansion; every wipe count, the statement walk and `stack_residue.sh` (which does not
+  scan for `subkey`) were blind to it. Fixed at the *definition*, where it is decidable:
+  `no_macro_in_this_crate_binds_an_identifier_fragment` refuses any `macro_rules!` that puts
+  an `:ident`/`:tt` fragment in binding position (`let [mut] $n`, `$n @`, `for $n in`, a
+  closure parameter). Hygienic macro bodies have their own syntax context, so passing a
+  fragment in binding position is the *only* way a macro can rebind a caller's binding — the
+  rule is complete rather than a list of spellings. The crate's three `:ident` fragments
+  (`qr128!`/`qr256!`/`qrq!`) only *index* their array and stay legal, and the count of
+  fragments is pinned. A self-test drives six synthetic definitions (three binding shapes it
+  must report, three reading shapes it must not); collapsing the test to `if false` and
+  broadening it to `if true` each fail it.
+- **`for`/`while let`/`if let`/`match`-arm/closure patterns bind without a `let`.** Measured:
+  replacing the wipe with `for mut subkey in core::iter::once([0u8; 32]) { crate::zeroize_array(&mut subkey); }`
+  left the suite 41/41 green with the real subkey never cleared. The new
+  `no_wiped_binding_is_rebound_reassigned_or_laundered` rejects a non-`let` pattern that binds
+  a wiped name, and — the rest of the same family — a whole-binding assignment
+  (`subkey = [0u8; 32];`), and any `&mut <wiped name>` passed to a callee outside a pinned
+  whitelist.
+
+That whitelist is the answer to the report's third finding, which is the important one because
+it is a *class*: a blacklist plus an exact store count waits for spelling N+1.
+
+- **A function value under another name defeats the store scanner.** `let w: unsafe fn(*mut u8, u8) =
+  core::ptr::write;` plus a wide loop through `w` and one redundant volatile store to restore
+  the pinned count of three left `every_wipe_store_is_volatile` green: the callee's name is
+  `w`, so it is neither a `write_volatile` (the alias check) nor one of the fifteen
+  blacklisted names (the offending check) nor an assignment — and the binding is a `let`, not
+  a `use`, so the import check never fires. That build's optimizer happened to keep the
+  stores, so only an unrelated behavioural test noticed, which is luck rather than coverage.
+  Two changes, both whitelist-shaped: every call inside a wipe primitive must be in
+  `WIPE_BODY_CALLEES` (the volatile store, the fence, layout arithmetic, slice plumbing, the
+  SIMD zero vectors, and a delegation to a sibling primitive), and no `let` in a wipe
+  primitive may have a bare path as its initialiser. Adding a *legitimate* new call
+  (`spin_loop()`) fails it, which is what a whitelist is supposed to do.
+
+Measured against the new guards: nine plants, all refused — `for` pattern, `while let`,
+`match` arm, closure parameter, plain assignment, `mem::replace`, `mem::take`, `ptr::read`,
+`mem::swap`, plus a hand-written laundering helper; and one legitimate control
+(`subkey = black_box(subkey)`, an in-place transform that still holds the derived bytes)
+stays green. `tests/security.rs` is now 44 tests; coverage is 95.83% with the floor at 95%.
+
+Both reports were right about the mechanism and about why the guards missed it. What I did not
+take from them: the suggestion to widen the existing store *blacklist*. The measurement above
+is the argument — the next spelling is free — so the wipe-body rule is a whitelist instead.
+
 ### The three open dependabot pull requests, resolved rather than ignored
 
 - **`cc` 1.10.0 → 1.11.2**, in all three locks. The fork's manifest asks for `1.1.12`, so its
