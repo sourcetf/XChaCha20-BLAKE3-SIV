@@ -758,8 +758,22 @@ def reopen_for_write(path):
         try:
             return open(path, "r+b")
         except OSError as e:
-            if e.errno != errno.ETXTBSY or attempt == 59:
+            if e.errno != errno.ETXTBSY:
                 raise
+            if attempt == 59:
+                # Three seconds of retries is far past the microseconds a reaped child
+                # needs; anything longer means the file really is held, and that is a
+                # host problem, not a verdict on this crate. Measured on the 2026-11-09
+                # scheduled audit (run 42619346969, bits sweep shard 18/20): this raised
+                # *from inside the `finally:` that restores the byte*, so the traceback
+                # replaced the shard's summary and the driver reported "FAIL: a sweep
+                # shard failed" -- a finding class -- for a temporary file on a loaded
+                # hosted runner. The same shape hit four shards on 2026-11-02.
+                could_not_run(
+                    f"the shard binary {path} stayed busy (ETXTBSY) for 3 s after each "
+                    "child was reaped, so this slice cannot be measured on this host; "
+                    "the fault set is untouched and the shard reports nothing"
+                )
             time.sleep(0.05)
     raise AssertionError("unreachable")
 
@@ -904,13 +918,27 @@ _allocation_probe = (
     "    raise SystemExit(7)\n"
     "raise SystemExit(0)\n"
 )
-_probe = subprocess.run(
-    [sys.executable, "-c", _allocation_probe],
-    stdout=subprocess.DEVNULL,
-    stderr=subprocess.DEVNULL,
-    timeout=60,
-    preexec_fn=child_limits,
-)
+try:
+    _probe = subprocess.run(
+        [sys.executable, "-c", _allocation_probe],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        timeout=60,
+        preexec_fn=child_limits,
+    )
+except subprocess.TimeoutExpired:
+    # A probe that cannot finish is an environment refusal, not a verdict: the child
+    # allocates 320 MiB against a 256 MiB cap, which takes milliseconds. Measured on the
+    # 2026-11-02 scheduled audit (run 41442747831, sweep shard 19/20): a loaded runner
+    # starved the probe past 60 s, `TimeoutExpired` escaped uncaught, the shard exited 1
+    # and the driver reported "FAIL: a sweep shard failed" -- a *finding about the crate*
+    # for a control that never ran. Same class as an exit 1 from a missing tool.
+    could_not_run(
+        "the containment control (a child allocating 320 MiB under "
+        f"RLIMIT_AS={ADDRESS_SPACE_LIMIT}) did not finish within 60 s on this host, so "
+        "whether the per-fault limits are in effect was not established; run the shard "
+        "on an idle host or raise the timeout deliberately"
+    )
 if _probe.returncode != 7:
     could_not_run(
         f"the child limits are not in effect: a process allocating 320 MiB under "
@@ -956,7 +984,14 @@ for off, bit in faults:
     # was ~20 GB of I/O for this scan. The handle cannot stay open across the run --
     # executing a file that is open for writing is ETXTBSY -- so it is written,
     # closed, executed, reopened and restored.
-    with reopen_for_write(binpath) as fh:
+    try:
+        fh = reopen_for_write(binpath)
+    except OSError:
+        could_not_run(
+            f"the shard binary {binpath} could not be opened for writing, so no fault in "
+            "this slice could be applied; nothing was measured"
+        )
+    with fh:
         fh.seek(off)
         was = fh.read(1)[0]
         if model == "nop":
@@ -972,9 +1007,21 @@ for off, bit in faults:
     except subprocess.TimeoutExpired:
         verdict = "crashed"
     finally:
-        with reopen_for_write(binpath) as fh:
-            fh.seek(off)
-            fh.write(bytes([was]))
+        # Restoring the byte is the one step that must not raise: a traceback from here
+        # replaces the shard's summary (measured in the 2026-11-09 run), and an unrestored
+        # byte would leave the same binary faulted for every later offset. `reopen_for_write`
+        # answers ETXTBSY with exit 3 (could-not-run); any other OSError is mapped to the same
+        # class here rather than escaping, because a write that fails says nothing about the
+        # crate's behaviour under the fault.
+        try:
+            with reopen_for_write(binpath) as fh:
+                fh.seek(off)
+                fh.write(bytes([was]))
+        except OSError:
+            could_not_run(
+                f"restoring byte 0x{off:x} of {binpath} failed, so this slice cannot be "
+                "trusted; nothing in it is reported"
+            )
     if verdict == "accepted":
         accepted.append(off)
     elif verdict == "crashed":

@@ -123,6 +123,42 @@ control.
   decision being a function of its own. `tests/decision_scope.rs` pins it beside the existing
   `ct_eq_independent` pin. Negative control: deleting the attribute fails that test.
 
+### Two scheduled-audit failures traced to the tools, not the crate
+
+Both were reproduced from the archived job logs (the API token has admin read, so the logs
+were fetched rather than guessed at), and neither was a defect in the crate.
+
+- **The ASan step was failed by the statistical timing screen.** `wide audit (scheduled)` for
+  run 42619346969 died with `tag-position: t = 15.21, resolution = 5.57 ns/op (means 6429.8
+  vs 6438.3)` — a forgery finding reported against a run whose two class means differ by
+  0.13%, on the same code that passes `t < 0.4` on a quiet host. Every other instrumented run
+  in this repository already passes `-- --skip timing` for exactly this reason (the blocking
+  matrix, the MSRV leg, the coverage run, the cross-exec loops); the ASan step was the one
+  that did not, which made a known-noisy instrument the verdict on every scheduled run. It
+  skips the target now, and the screen still runs on every push (ci.yml's `timing` and
+  `timing-instrument`), under `verify.sh` where the host is quiet, and in the cross-exec
+  loops. Re-measured locally: the same command, whole suite green; and under the sanitizer
+  with 12 spinners on 32 cores the screen read `t = 0.16` — so the failure needs a *biased*
+  runner, not merely a loaded one, which is why it only ever reproduced on CI.
+- **`tools/fi_instruction.sh` reported infrastructure refusals as findings.** Two escape
+  routes, both from real logs:
+  * `reopen_for_write`'s ETXTBSY retry gives up after 3 s and `raise`d — and it is called
+    from the `finally:` that restores the byte, so the traceback replaced the shard's summary
+    and the driver printed "FAIL: a sweep shard failed". Measured on 2026-11-09 (bits shard
+    18/20) and on 2026-11-02 (three shards). It now answers exit 3 ("could not run"), which
+    `verify.sh` records as a skipped stage, and the restore path maps any other `OSError` the
+    same way instead of escaping — an unrestored byte would also leave the same binary
+    faulted for every later offset.
+  * The containment control (a child allocating 320 MiB against a 256 MiB cap) has
+    `timeout=60`, and `TimeoutExpired` escaped uncaught on 2026-11-02 (sweep shard 19/20):
+    the shard exited 1 and read as a finding. The probe takes milliseconds; a runner that
+    starves it past 60 s has not established that the limits are in effect, which is exit 3.
+
+Both are the same class as the tool defects fixed earlier in this round: an environment
+refusal printed as a verdict. Neither changed any number — the archived 18 shard reports,
+replayed through `tools/fi_instruction_verdict.py`, still fail only on "shard 10 and 12 did
+not run", and a hand-made duplicate of shard 1 is rejected by the offset-digest comparison.
+
 ### Three more guard gaps and four stale claims, from a line-by-line pass over `tests/`
 
 - **A `use` alias hid a text macro, and so the wipe inside it.** `no_wipe_is_hidden_in_an_unexpanded_macro`
