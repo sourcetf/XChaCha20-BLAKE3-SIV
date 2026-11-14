@@ -367,7 +367,7 @@ jobs:
       # its own database fetch (only the tool version is pinned; the RustSec database
       # content is the default branch and moves between runs); running both is
       # deliberate rather than redundant -- a miss in one is not a miss in the other.
-      - uses: taiki-e/install-action@1e29709c0ec63babbe8f266397a465f29a825f91 # v2
+      - uses: taiki-e/install-action@4a76afe23f9e08d2d9550fb56e556444e8611d21 # v2
         with:
           # `tool@version` is install-action's pin syntax: an unpinned tool lets a
           # new release change what a scheduled audit ran without a commit here.
@@ -403,7 +403,7 @@ jobs:
       # shorthand: when a ref is not one of install-action's tool tags, the
       # action warns "no tool specified" and exits *successfully*, so the failure
       # only shows up later as `no such command` in the step that needs it.
-      - uses: taiki-e/install-action@1e29709c0ec63babbe8f266397a465f29a825f91 # v2
+      - uses: taiki-e/install-action@4a76afe23f9e08d2d9550fb56e556444e8611d21 # v2
         with:
           tool: cargo-deny@0.20.2
 
@@ -510,7 +510,7 @@ jobs:
       # (the default), and replacing the computed tag outright is accepted by both --
       # pinned there so a change in that known limit is noticed rather than
       # rediscovered.
-      - uses: taiki-e/install-action@1e29709c0ec63babbe8f266397a465f29a825f91 # v2
+      - uses: taiki-e/install-action@4a76afe23f9e08d2d9550fb56e556444e8611d21 # v2
         with:
           tool: cargo-mutants@27.1.0
 
@@ -657,7 +657,7 @@ jobs:
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
           shared-key: coverage
-      - uses: taiki-e/install-action@1e29709c0ec63babbe8f266397a465f29a825f91 # v2
+      - uses: taiki-e/install-action@4a76afe23f9e08d2d9550fb56e556444e8611d21 # v2
         with:
           tool: cargo-llvm-cov@0.9.1
 
@@ -1120,7 +1120,7 @@ jobs:
       # exited 0, and `cargo fuzz` then failed with "no such command: fuzz" --
       # the job never fuzzed anything. Name the tool, and keep a source build as
       # a fallback so the fuzzer runs even if the action cannot provide it.
-      - uses: taiki-e/install-action@1e29709c0ec63babbe8f266397a465f29a825f91 # v2
+      - uses: taiki-e/install-action@4a76afe23f9e08d2d9550fb56e556444e8611d21 # v2
         with:
           tool: cargo-fuzz@0.13.2
 

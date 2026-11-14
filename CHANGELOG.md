@@ -123,6 +123,49 @@ control.
   decision being a function of its own. `tests/decision_scope.rs` pins it beside the existing
   `ct_eq_independent` pin. Negative control: deleting the attribute fails that test.
 
+### The three open dependabot pull requests, resolved rather than ignored
+
+- **`cc` 1.10.0 → 1.11.2**, in all three locks. The fork's manifest asks for `1.1.12`, so its
+  own lock was already at 1.11.1 and needed only the patch; the root crate's lock was at
+  1.10.0 and the fuzz lock at 1.4.7 — dependabot's PR touched the root lock alone, so
+  merging it would have left two of the three graphs behind. All three are at 1.11.2 now
+  (`cargo update -p cc --precise 1.11.2` per manifest), the fork's 46 unit tests and 13
+  doctests pass, the root crate's 18 targets pass in eight configurations, and
+  `cargo audit --deny warnings` is clean on all three locks (`deny check` too).
+- **`syn` 3.0.6 → 3.0.10** in both locks that carry it (the fuzz graph has no `syn`). This
+  one matters for what the crate *is*: `tests/security.rs` parses `src/lib.rs` with `syn`, and
+  the major is pinned in `Cargo.toml` with a comment explaining that it must be a deliberate
+  port. 3.0.10 is a patch inside that major (`rust-version` 1.71, below the crate's MSRV),
+  so the guards keep compiling unchanged — 41/41 in `tests/security.rs`, everything else
+  green.
+- **`taiki-e/install-action` 2.87.31 → 2.90.4**, all seven sites. The PR proposed 2.90.2;
+  the `v2` tag moved to 2.90.4 on the day this was applied, and since every site pins a
+  commit SHA with a `# v2` comment, bumping to 2.90.2 would have been stale on arrival. The
+  reviewer-visible question for this action is whether the tools stay pinned — they do: every
+  `tool:` argument still names an exact version (`cargo-audit@0.22.2`,
+  `cargo-deny@0.20.2`, `cargo-fuzz@0.13.2`, `cargo-llvm-cov@0.9.1`, `cargo-mutants@27.1.0`),
+  and none of them is in 2.90.4's changed list.
+
+All three PRs become merge commits of the same content and are closed by this commit rather
+than left open against a `main` that already contains the change.
+
+**One more guard gap found while doing it.** `build.rs` checked that the `blake3` dependency
+carries a `path` by scanning the entry's text, and `tests/blake3_fork_equivalence.rs` had a
+second copy of that parser. Neither was depth-aware, so
+`blake3 = { version = "1.8.7", note = { path = "blake3" } }` — valid TOML that cargo accepts
+with an `unused manifest key` warning, and then resolves from crates.io — satisfied both
+while the vendored fork was not linked. Measured: with that manifest the build-script check
+stayed silent, and the test-side parser happily reported `Some("blake3")`. Both are
+depth-aware now (a key one inline table down is a *value*, not the dependency's key), and the
+test-side parser gained `the_manifest_parser_sees_a_nested_path_and_only_an_own_level_one`
+with seven cases: the nested decoy is refused, a real `path` after a nested table is still
+found, a brace inside a string does not open a table, and an `xpath` key does not answer for
+`path`. Two negative controls — deleting the depth test, and deleting the delimiter test —
+each fail it. The build-script half was verified end to end on a copy of the tree: the nested
+form is refused with a message naming the entry, the real form builds, and the fixed
+multi-line form (`note = {` … `}`, `path = "blake3"`) is accepted — the case that a
+depth counter which never closes would have falsely refused.
+
 ### Two scheduled-audit failures traced to the tools, not the crate
 
 Both were reproduced from the archived job logs (the API token has admin read, so the logs

@@ -688,16 +688,124 @@ fn closing_brackets(s: &str) -> i32 {
     s.matches(['}', ']']).count() as i32
 }
 
+/// The manifest parser above, pointed at synthetic manifests rather than at the crate.
+///
+/// Its only other input is the real `Cargo.toml`, which contains one inline table with one
+/// `path`, so a regression in the depth or delimiter rules would leave every assertion
+/// green -- measured: with `|| depth == 1` deleted, this file's own assertions still passed
+/// and only the decoy manifest below became invisible again.
+#[test]
+fn the_manifest_parser_sees_a_nested_path_and_only_an_own_level_one() {
+    for (name, table, want) in [
+        // The decoy `build.rs` refuses: cargo accepts it (with an "unused manifest key"
+        // warning) and resolves crates.io BLAKE3, so a parser that reports `Some` here
+        // says the vendored edge exists when it does not.
+        (
+            "a path one table deep",
+            r#"{ version = "1.8.7", note = { path = "blake3" } }"#,
+            None,
+        ),
+        (
+            "a path at the entry's own level",
+            r#"{ version = "1.8.7", path = "blake3", features = ["zeroize"] }"#,
+            Some("blake3"),
+        ),
+        // The depth accounting must return to the entry's level after the nested table
+        // closes, or a *real* `path` is missed -- a false refusal.
+        (
+            "a nested table above a real path",
+            r#"{ version = "1", note = { a = 1 }, path = "blake3" }"#,
+            Some("blake3"),
+        ),
+        // A brace inside a string does not open a table.
+        (
+            "a brace inside a string",
+            r#"{ note = "}", path = "blake3" }"#,
+            Some("blake3"),
+        ),
+        (
+            "an array of scalars",
+            r#"{ version = "1", x = [1, 2], path = "blake3" }"#,
+            Some("blake3"),
+        ),
+        ("no path key", r#"{ version = "1.8.7" }"#, None),
+        // The delimiter rule: a key that merely *ends* in `path`. `xpath = "blake3"`
+        // matches the substring `path` followed by ` = `, so without the
+        // preceding-delimiter test the parser answers for a key that is not `path`.
+        // (`apathetic` does not exercise this: after its `path` comes `etic`, which is not
+        // `=`, so the parser rejects it either way -- measured, and the doc example on
+        // `inline_value` used to name it.)
+        (
+            "an xpath key",
+            r#"{ version = "1", xpath = "blake3" }"#,
+            None,
+        ),
+    ] {
+        assert_eq!(
+            inline_value(table, "path").as_deref(),
+            want,
+            "the manifest parser read {table} as {want:?} for `path` ({name})"
+        );
+    }
+}
+
 /// The string value of `key` in an inline table such as `{ version = "1", path = "blake3" }`.
-/// The key has to start at a delimiter so `apathetic = "x"` cannot answer for `path`.
+/// The key has to start at a delimiter so `apathetic = "x"` cannot answer for `path`, and it
+/// has to be at the entry's own level so a *nested* table's key cannot either.
+///
+/// The depth rule is `build.rs::inline_value`'s, and it is here for the same measured
+/// reason: `blake3 = { version = "1.8.7", note = { path = "blake3" } }` is valid TOML that
+/// cargo accepts with a warning, and cargo resolves the registry crate -- while a scan that
+/// matched `path` anywhere in the value reported the edge as present. `build.rs` refuses that
+/// manifest now; this parser is the *secondary* half of the same assertion (the oracle is
+/// `cargo metadata`), so leaving it blind would mean the two halves of one check disagreed
+/// about what a `path` key is.
 fn inline_value(table: &str, key: &str) -> Option<String> {
     let mut from = 0usize;
-    while let Some(i) = table[from..].find(key) {
-        let at = from + i;
+    // Braces and brackets opened so far. The entry is one inline table, so its own `{` is
+    // depth 1 and only text at that level is a key of the dependency.
+    let mut depth = 0i32;
+    while from < table.len() {
+        let b = table.as_bytes();
+        // A brace inside a quoted string does not open a table.
+        if b[from] == b'"' || b[from] == b'\'' {
+            let quote = b[from];
+            from += 1;
+            while from < b.len() {
+                if quote == b'"' && b[from] == b'\\' {
+                    from += 2;
+                    continue;
+                }
+                if b[from] == quote {
+                    from += 1;
+                    break;
+                }
+                from += 1;
+            }
+            continue;
+        }
+        match b[from] {
+            b'{' | b'[' => {
+                depth += 1;
+                from += 1;
+                continue;
+            }
+            b'}' | b']' => {
+                depth -= 1;
+                from += 1;
+                continue;
+            }
+            _ => {}
+        }
+        if !table[from..].starts_with(key) {
+            from += 1;
+            continue;
+        }
+        let at = from;
         let starts_word =
             at == 0 || matches!(table.as_bytes()[at - 1], b' ' | b',' | b'{' | b'(' | b'\t');
         let rest = table[at + key.len()..].trim_start();
-        if starts_word {
+        if starts_word && depth == 1 {
             if let Some(rest) = rest.strip_prefix('=') {
                 let rest = rest.trim_start();
                 if let Some(rest) = rest.strip_prefix('"') {

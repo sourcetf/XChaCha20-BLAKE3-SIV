@@ -137,6 +137,9 @@ fn check_blake3_is_a_path_dependency(manifest: &str) {
     // above cannot see this form, which is how the decoy-section bypass worked -- the real
     // edges were moved to this form and metadata decoys satisfied the count.
     let mut table_dep: Option<(String, Option<String>)> = None;
+    // How many braces/brackets a value spanning several lines has left open *inside* such a
+    // table, so a `path` line nested inside `note = { … }` is not read as the table's own.
+    let mut table_depth = 0i32;
     let finalize_table = |table_dep: &mut Option<(String, Option<String>)>, checked: &mut usize| {
         if let Some((krate, path)) = table_dep.take() {
             if krate == "blake3" {
@@ -180,22 +183,44 @@ fn check_blake3_is_a_path_dependency(manifest: &str) {
             finalize_table(&mut table_dep, &mut checked);
             section = line.trim_matches(['[', ']']).trim().to_string();
             table_dep = dep_section_crate(&section).map(|c| (c.to_string(), None));
+            table_depth = 0;
+            continue;
+        }
+        if let Some((_, path)) = table_dep.as_mut() {
+            // A line inside a `[<dep section>.<crate>]` table. Only `path` matters here;
+            // the crate name is already known from the header. `unquote`, not a bare
+            // comparison: `"path" = "blake3"` is the same key with a quoted spelling, which
+            // TOML allows and cargo accepts.
+            //
+            // The depth is the same rule as `inline_value`'s, for the same measured decoy:
+            // `note = {` … `path = "blake3"` … `}` is valid TOML and cargo accepts it
+            // (measured: `cargo metadata` reports the *registry* edge), so a `path` line one
+            // table deep is the unknown key's content, not the dependency's key. Only a
+            // `path` at the table's own level counts; anything opened by a multi-line value
+            // is skipped until it closes.
+            //
+            // The depth is tracked for *every* line, including one with no `=`: the closing
+            // `}` of such a value has none, and skipping the accounting on it left the depth
+            // stuck at 1 so that a real `path = "blake3"` after the nested table was
+            // ignored -- a false refusal, measured with
+            // `note = { a = 1 }` spread over three lines above a real `path`.
+            if table_depth == 0 {
+                if let Some((key, value)) = line.split_once('=') {
+                    let (key, value) = (key.trim(), value.trim());
+                    if unquote(key) == "path" {
+                        *path = Some(value.to_string());
+                    }
+                    table_depth += opening_brackets(value) - closing_brackets(value);
+                }
+            } else {
+                table_depth += opening_brackets(line) - closing_brackets(line);
+            }
             continue;
         }
         let Some((key, value)) = line.split_once('=') else {
             continue;
         };
         let (key, value) = (key.trim(), value.trim());
-        if let Some((_, path)) = table_dep.as_mut() {
-            // A line inside a `[<dep section>.<crate>]` table. Only `path` matters here;
-            // the crate name is already known from the header.
-            // `unquote`, not a bare comparison: `"path" = "blake3"` is the same key with a
-            // quoted spelling, which TOML allows and cargo accepts.
-            if unquote(key) == "path" {
-                *path = Some(value.trim().to_string());
-            }
-            continue;
-        }
         depth = opening_brackets(value) - closing_brackets(value);
         if depth <= 0 {
             finish(&section, key, value, &mut checked);
@@ -331,13 +356,27 @@ fn closing_brackets(s: &str) -> i32 {
 /// has no `path` at all — measured on a copy, where cargo treats `note` as an unknown key
 /// (a warning) and resolves the registry crate while this check stayed quiet. Both TOML
 /// string forms are recognised, because cargo reads `'…'` and `"…"` as the same path.
+///
+/// **Depth aware**: only a key at the inline table's own level is a key of the dependency
+/// entry. `blake3 = { note = { path = "blake3" } }` puts the text of a `path =
+/// "blake3"` pair one level down, inside the *value* of an unknown key -- which cargo
+/// ignores with only a warning (`unused manifest key: dependencies.blake3.note`) and then
+/// resolves crates.io BLAKE3 1.8.7. Measured on a copy of this tree: the build linked
+/// the registry crate and passed `--locked` against a regenerated lock, while this check
+/// stayed quiet and only `the_vendored_fork_is_wired_in_by_path` failed -- and that test
+/// needs a test run, which is exactly what this build-script half exists to not need.
+/// The depth is also what keeps a *real* `path` key from being missed: it sits at depth 1,
+/// inside the entry's braces, never at 0.
 fn inline_value(table: &str, key: &str) -> Option<String> {
     let b = table.as_bytes();
     let k = key.as_bytes();
     let mut i = 0usize;
+    // Braces and brackets opened by the value so far. The entry is one inline table, so its
+    // own `{` is depth 1 and its keys are the only text at that level.
+    let mut depth = 0i32;
     while i < b.len() {
         // Skip over a string literal (either quote form), escapes included: nothing inside
-        // one is a key.
+        // one is a key, and a brace inside one does not open a table.
         if b[i] == b'"' || b[i] == b'\'' {
             let quote = b[i];
             i += 1;
@@ -347,7 +386,17 @@ fn inline_value(table: &str, key: &str) -> Option<String> {
             i = i.saturating_add(1);
             continue;
         }
-        if b[i..].starts_with(k) {
+        if b[i] == b'{' || b[i] == b'[' {
+            depth += 1;
+            i += 1;
+            continue;
+        }
+        if b[i] == b'}' || b[i] == b']' {
+            depth -= 1;
+            i += 1;
+            continue;
+        }
+        if depth == 1 && b[i..].starts_with(k) {
             let starts_word = i == 0 || matches!(b[i - 1], b' ' | b',' | b'{' | b'(' | b'\t');
             let rest = table[i + k.len()..].trim_start();
             if starts_word {
