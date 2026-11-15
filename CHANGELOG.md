@@ -123,6 +123,39 @@ control.
   decision being a function of its own. `tests/decision_scope.rs` pins it beside the existing
   `ct_eq_independent` pin. Negative control: deleting the attribute fails that test.
 
+### The residue scanner gains the HChaCha20 subkey — the target for the class the AST rules cannot reach
+
+The guards above judge *names* and *call shapes*. A copy made through a pointer names no wiped
+binding, so no syntax rule can see it: `let stolen: [u8; 32] = unsafe { core::mem::transmute(subkey) };`,
+`ptr::copy_nonoverlapping(subkey.as_ptr(), …)`, and an escaping `as_ptr()` all left
+`tests/security.rs` at 44/44 (measured, one plant each, restored after). The mechanism that
+*does* cover that class is the residue scanner, and its pattern list did not include the value
+those plants copy: it scanned `k_in`/`k_out`/`enc_seed`/`enc_key`/`enc_nonce` and the locked
+tag, but not the HChaCha20 subkey that all of them come from.
+
+Added, with the two controls the tool's own design requires:
+
+* **Positive control.** A materialised 32-byte copy of the subkey in a callee frame with the
+  entry point's `scrub_stack` removed is reported, `DERIVED RESIDUE (subkey): 32-byte run` —
+  so the pattern is not vacuous. (With the scrub in place the same plant is *clean*, which is
+  the mitigation working: the whole point of the scrub is to overwrite the region a callee's
+  frame occupied. That is also why the pointer-copy plants above read clean — I nearly
+  recorded the pattern as broken before checking both directions.)
+* **No false positives.** All three modes are clean on the real tree: default, `--pure`,
+  `--ultra`, zero finding lines. The derivations themselves legitimately hold the subkey in a
+  local, so the scan relies on the wipe and the scrub, and reports only what outlives both.
+
+One fix to the report while doing it: with six derived patterns, `DERIVED RESIDUE: 32-byte
+run` did not say *which* value leaked, and the fix differs (`subkey` and `k_in` are different
+code). The message now carries the pattern's name; verified on the positive control, where the
+report reads `(k_out)`, `(enc_seed)`, `(enc_key)`, `(enc_nonce)` for the blake3-internal
+copies that the scrub does not reach.
+
+The residual gap this closes is the one recorded in the previous entry. What remains outside
+every layer: a copy the optimizer keeps only in a register, or one written outside the 1 MiB
+painted window. Both are stated in the tool's own output, and the second is what
+`stack_requirement_bytes()` and the deep-frame measurement bound.
+
 ### A fourth variant: the decoy on a *field* target
 
 `Key::zeroize` wipes `&mut self.0`, not a local, so the rules that judge bare identifiers did

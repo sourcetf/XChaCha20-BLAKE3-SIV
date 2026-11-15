@@ -368,6 +368,14 @@ fn run() {
             hx("deadbeefcafebabe00112233445566778899aabbccddeeff0011223344556677"),
         ),
         ("locked integrity tag BLAKE3(key)[0..8]", tag8),
+        // The HChaCha20 subkey: the 256-bit value every derived key in the construction
+        // comes from, and the one intermediate this tool did not scan for. It is *the*
+        // target that covers the class the source-shape guards cannot see -- a copy made
+        // through a pointer (`transmute`, `ptr::copy`, an escaping `as_ptr`) names no
+        // wiped binding, so no AST rule can judge it, while a residue scan sees the bytes
+        // wherever they landed. The value is already computed below for the ChaCha20
+        // blocks (`subkey`), so this costs one more comparison.
+        ("subkey (derived, must never appear)", subkey.to_vec()),
         ("k_in (derived, must never appear)", k_in.to_vec()),
         ("k_out (derived, must never appear)", k_out.to_vec()),
         ("enc_seed (derived, must never appear)", enc_seed.to_vec()),
@@ -583,7 +591,8 @@ fn run() {
                 String::new()
             };
             let tag_case = label.starts_with("locked integrity tag");
-            let derived_case = *label == "k_in (derived, must never appear)"
+            let derived_case = *label == "subkey (derived, must never appear)"
+                || *label == "k_in (derived, must never appear)"
                 || *label == "k_out (derived, must never appear)"
                 || *label == "enc_seed (derived, must never appear)"
                 || *label == "enc_key (derived, must never appear)"
@@ -671,9 +680,18 @@ fn run() {
                     ));
                 } else {
                     failures += 1;
+                    // The label is part of the message: with six derived patterns a "32-byte
+                    // run" says nothing about *which* value leaked, and the fix depends on it
+                    // (the HChaCha20 subkey and `k_in` are different code). Measured while
+                    // adding the subkey pattern: the report for a materialised 32-byte copy
+                    // of the subkey in a callee frame read only "DERIVED RESIDUE: 32-byte
+                    // run", indistinguishable from any of the other five.
                     line.push_str(&format!(
-                        " | DERIVED RESIDUE: {}-byte run @{}{}",
-                        best, at, split_note
+                        " | DERIVED RESIDUE ({}): {}-byte run @{}{}",
+                        label.split(' ').next().unwrap(),
+                        best,
+                        at,
+                        split_note
                     ));
                 }
             } else {
