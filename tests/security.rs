@@ -5760,6 +5760,8 @@ fn no_wiped_binding_is_rebound_reassigned_or_laundered() {
 
     struct Scan {
         wiped: Vec<String>,
+        /// The dotted targets (`self.0`) wiped in this function, which rule 2 judges by text.
+        field_targets: Vec<String>,
         findings: Vec<String>,
         /// One frame per enclosing block/loop body, holding the names bound there. Pushed and
         /// popped by the `visit_block` override below, so a wipe can ask how many bindings of
@@ -5851,6 +5853,26 @@ fn no_wiped_binding_is_rebound_reassigned_or_laundered() {
         // right-hand side does not mention the name at all is the decoy shape: the secret
         // is replaced by unrelated bytes that nothing wipes.
         fn visit_expr_assign(&mut self, a: &'ast syn::ExprAssign) {
+            // A dotted target (`self.0 = …`) is judged by its text, because that is how the
+            // wipe names it too (`&mut self.0`). A bare identifier keeps the path rule.
+            if let Some(text) = path_text(&a.left) {
+                if text.contains('.') && self.field_targets.contains(&text) {
+                    // "Derives from it": the same field appears anywhere on the right, not
+                    // only as the whole value. `self.0 = black_box(self.0)` transforms the
+                    // field and is legitimate; `self.0 = [0u8; N]` replaces it. Judging only
+                    // the right-hand *path text* failed the former (measured).
+                    if !mentions_field(&a.right, &text) {
+                        self.findings.push(format!(
+                            "`{text}` is assigned a value that does not derive from it \
+                             (line {}): the wipe that follows clears the replacement, and \
+                             the real field's bytes are never overwritten. Measured: \
+                             `self.0 = [0u8; KEY_LEN];` ahead of `Key::zeroize`'s unchanged \
+                             wipe left every target green.",
+                            a.left.span().start().line
+                        ));
+                    }
+                }
+            }
             if let Some(n) = assigned_ident(&a.left) {
                 if self.wiped.contains(&n) && !mentions_ident(&a.right, &n) {
                     self.findings.push(format!(
@@ -6180,11 +6202,42 @@ fn no_wiped_binding_is_rebound_reassigned_or_laundered() {
             syn::visit::Visit::visit_block(&mut w, block);
             w.0.sort();
             w.0.dedup();
-            if w.0.is_empty() {
+            // The dotted wipe targets of this function, collected the same way `wipe_targets`
+            // collects bare ones.
+            struct Fields(Vec<String>);
+            impl<'ast> syn::visit::Visit<'ast> for Fields {
+                fn visit_expr_call(&mut self, c: &'ast syn::ExprCall) {
+                    if let syn::Expr::Path(p) = &*c.func {
+                        if let Some(last) = p.path.segments.last() {
+                            if WIPE_FUNCTIONS.contains(&last.ident.to_string().as_str()) {
+                                for arg in &c.args {
+                                    if let syn::Expr::Reference(r) = arg {
+                                        if let Some(text) = path_text(&r.expr) {
+                                            if text.contains('.') {
+                                                self.0.push(text);
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    syn::visit::visit_expr_call(self, c);
+                }
+            }
+            let mut fields = Fields(Vec::new());
+            syn::visit::Visit::visit_block(&mut fields, block);
+            fields.0.sort();
+            fields.0.dedup();
+            // A function whose only wipe targets are fields (`Key::zeroize` wipes `self.0`) is
+            // still scanned: the field rule needs it, and skipping it was the reason the
+            // `self.0 = …` decoy stayed green.
+            if w.0.is_empty() && fields.0.is_empty() {
                 continue;
             }
             let mut scan = Scan {
                 wiped: w.0,
+                field_targets: fields.0,
                 findings: Vec::new(),
                 chain: Vec::new(),
             };
@@ -6198,8 +6251,13 @@ fn no_wiped_binding_is_rebound_reassigned_or_laundered() {
     }
 }
 
-/// The bare-identifier targets a block wipes, in source order: `(&mut name)` arguments of
-/// [`WIPE_FUNCTIONS`] calls.
+/// The targets a block wipes, in source order: `(&mut name)` arguments of [`WIPE_FUNCTIONS`]
+/// calls, as written. A bare identifier stays bare; a field path keeps its dotted form
+/// (`self.0`), which is what lets the assignment rule below see `self.0 = …` ahead of
+/// `crate::zeroize_array(&mut self.0)` — the field-target spelling of the decoy, measured
+/// green on every target: `Key::zeroize` with `self.0 = [0u8; KEY_LEN];` inserted ahead of its
+/// unchanged wipe left `tests/security.rs`, `plaintext_wipe`, `plaintext_drop`, `locked` and
+/// `decision` all passing.
 fn wipe_targets(block: &syn::Block) -> Vec<String> {
     struct W(Vec<String>);
     impl<'ast> syn::visit::Visit<'ast> for W {
@@ -6229,6 +6287,47 @@ fn wipe_targets(block: &syn::Block) -> Vec<String> {
     w.0
 }
 
+/// The dotted text of a field path: `self.0`, `self.inner.field`. An index or a call in the
+/// middle (`self.0[0]`, `f().0`) yields None, because that is not a *whole* field.
+///
+/// `self.0` is an [`syn::Expr::Field`], not a [`syn::Expr::Path`]: the first version of this
+/// helper only matched paths, so the field-target rules collected nothing and the
+/// `self.0 = [0u8; KEY_LEN];` decoy stayed green (measured — the whole point of collecting
+/// `self.0` was to judge that shape).
+fn path_text(expr: &syn::Expr) -> Option<String> {
+    match expr {
+        syn::Expr::Field(f) => {
+            let base = path_text(&f.base)?;
+            let member = match &f.member {
+                syn::Member::Named(i) => i.to_string(),
+                syn::Member::Unnamed(i) => i.index.to_string(),
+            };
+            Some(format!("{base}.{member}"))
+        }
+        syn::Expr::Path(p) => {
+            if p.qself.is_none()
+                && p.path
+                    .segments
+                    .iter()
+                    .all(|s| matches!(s.arguments, syn::PathArguments::None))
+            {
+                Some(
+                    p.path
+                        .segments
+                        .iter()
+                        .map(|s| s.ident.to_string())
+                        .collect::<Vec<_>>()
+                        .join("."),
+                )
+            } else {
+                None
+            }
+        }
+        syn::Expr::Paren(p) => path_text(&p.expr),
+        _ => None,
+    }
+}
+
 /// Bindings a pattern introduces, in source order.
 fn pattern_idents(pat: &syn::Pat) -> Vec<String> {
     struct C(Vec<String>);
@@ -6243,6 +6342,31 @@ fn pattern_idents(pat: &syn::Pat) -> Vec<String> {
     let mut c = C(Vec::new());
     syn::visit::Visit::visit_pat(&mut c, pat);
     c.0
+}
+
+/// Whether `expr` mentions the dotted field path `text` anywhere.
+fn mentions_field(expr: &syn::Expr, text: &str) -> bool {
+    struct M<'a> {
+        text: &'a str,
+        hit: bool,
+    }
+    impl<'ast, 'a> syn::visit::Visit<'ast> for M<'a> {
+        fn visit_expr_field(&mut self, f: &'ast syn::ExprField) {
+            if path_text(&syn::Expr::Field(f.clone())).as_deref() == Some(self.text) {
+                self.hit = true;
+            }
+            syn::visit::visit_expr_field(self, f);
+        }
+        fn visit_expr_path(&mut self, p: &'ast syn::ExprPath) {
+            if path_text(&syn::Expr::Path(p.clone())).as_deref() == Some(self.text) {
+                self.hit = true;
+            }
+            syn::visit::visit_expr_path(self, p);
+        }
+    }
+    let mut m = M { text, hit: false };
+    syn::visit::Visit::visit_expr(&mut m, expr);
+    m.hit
 }
 
 /// Whether a `let`'s initialiser is a *whole copy* of `name`: a bare path (`let b = a;`), or a

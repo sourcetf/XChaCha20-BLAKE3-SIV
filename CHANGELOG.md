@@ -123,6 +123,27 @@ control.
   decision being a function of its own. `tests/decision_scope.rs` pins it beside the existing
   `ct_eq_independent` pin. Negative control: deleting the attribute fails that test.
 
+### A fourth variant: the decoy on a *field* target
+
+`Key::zeroize` wipes `&mut self.0`, not a local, so the rules that judge bare identifiers did
+not see `self.0 = [0u8; KEY_LEN];` inserted ahead of its unchanged wipe — measured green on
+every target (`security`, `plaintext_wipe`, `plaintext_drop`, `locked`, `decision`). Two
+separate reasons, both of the same kind: the target collector only accepted a bare identifier,
+and the guard skipped any function whose wipe targets were all non-bare, which is exactly
+`Key::zeroize`. Both are fixed: targets are collected as written (`self.0` keeps its dotted
+form) and a function is scanned if it wipes anything at all. The assignment rule judges the
+right-hand side by *mention* rather than by exact text, so `self.0 = black_box(self.0)` (an
+in-place transform) stays green while `self.0 = [0u8; N]` fails.
+
+This one is worth recording twice over, because it was found twice and the first attempt was
+green for the wrong reason: `path_text` matched only `syn::Expr::Path`, and `self.0` parses as
+`syn::Expr::Field`, so the new field collection returned an empty list and the guard silently
+had nothing to check. The plant confirming it was also green. What exposed it was instrumenting
+the collector and printing what it saw — every wipe-bearing function reported
+`fields=[]` — rather than trusting the negative control, which passed because *nothing* was
+being looked at. Negative controls prove a guard can fire; they do not prove it is looking at
+the right thing, and this is the first place in this audit where those two came apart.
+
 ### Three more variants of the same family, found by attacking the new guards
 
 The third report's mechanism is wider than its three shapes, so I attacked the guards I had
