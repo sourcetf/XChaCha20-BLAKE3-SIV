@@ -123,6 +123,55 @@ control.
   decision being a function of its own. `tests/decision_scope.rs` pins it beside the existing
   `ct_eq_independent` pin. Negative control: deleting the attribute fails that test.
 
+### Three more variants of the same family, found by attacking the new guards
+
+The third report's mechanism is wider than its three shapes, so I attacked the guards I had
+just written. Four more shapes were green on the tree that had them (security 44/44, every
+target, clippy and fmt clean), and three of them are closed now.
+
+- **A nested block that re-binds the wiped name.** Wrapping `derive_material`'s four wipes in
+  `{ let mut subkey = …; … crate::zeroize_array(&mut subkey); }` leaves every text count
+  *identical* — the wipe line is still there, once per name — and the derived buffers survive.
+  Nothing else covers it: `tools/stack_residue.sh` has no `subkey` target, and the
+  `k_in`/`k_out`/`enc_seed` residues it does look for belong to the entry points' copies, not
+  the derivation's. The guard now counts bindings on the wipe's **ancestor chain** (a name
+  bound in two sibling `#[cfg]` blocks is once per chain, which is why neither a per-block
+  nor a per-function count works), and a shadow at any depth is refused. Negative control:
+  the nested-block plant fails; `chacha20_apply`'s five `ks` bindings, one per sibling block,
+  stay green.
+- **A whole copy of the secret that is never wiped.** `let stolen: [u8; 32] = subkey;`
+  (also `subkey.to_vec()`, `Vec::from(subkey)`, `subkey.clone()`) puts a second copy in the
+  frame; wiping `subkey` then clears one of two. Measured green. The rule is that a
+  whole-name copy must itself be wiped — which is what the crate's own `let orig = s;` in
+  `chacha20_block_into` and `let v = s;` in `witness::block` do, so the rule is satisfiable
+  and every one of those is already wiped. Three plants refused, those five legitimate copies
+  stay green.
+- **An exit that skips the wipe.** `if subkey[0] == 0xFF { return; }` ahead of the unchanged
+  wipes leaves every count intact and every path that takes the branch un-wiped. The rule is
+  that each exit lying between a binding and its wipe must itself be inside a block that wipes
+  the same name — which is the shape `encrypt`'s `ultra` rejection path already uses (wipe,
+  then return) and which the plant does not. Two plants refused (early `return`, `break`), and
+  the "wipe all four, then return" control stays green on this rule (it fails only the
+  separate call-count backstop, as an added wipe should).
+
+**One shape is *not* closed, and it is the same limitation the report's own analysis implies:
+a copy made through a pointer rather than by name.** `let stolen: [u8; 32] = unsafe {
+core::mem::transmute(subkey) }`, `ptr::copy` into a `static`, and `let p = subkey.as_ptr()`
+all stay green, because the rules above judge *names* and *call shapes*, and none of those
+three mentions `subkey` in a position the scan classifies. That is a real residual: it needs
+the scan to track pointer provenance, which a syntax walk cannot do. What covers the class is
+`tools/stack_residue.sh` — but its target list is `k_in`/`k_out`/`enc_seed`/`enc_key`/
+`enc_nonce` and the locked tag, so a `subkey` copy is exactly the residue it does not look
+for. Adding the HChaCha20 subkey to that list is the honest fix and is not done here: the tool
+would then need the derivation's subkey recomputed from the documented construction (it
+already computes it for the ChaCha20 blocks, so the value is in hand), and every one of its
+five cases would need a negative control before the extra pattern means anything. Recorded as
+a known gap rather than implied to be covered.
+
+Also corrected while checking: the guard's first version of the exit rule accepted a nested
+`if` whose body wiped nothing, because an empty inner frame fell back to the outer block's
+wipe list — the plant passed. Found by re-running the plant matrix after writing the rule.
+
 ### Two rebinding attacks from the third audit report, and the family behind them
 
 Both reported shapes reproduced on this tree exactly as described (security 41/41, whole suite

@@ -5639,16 +5639,25 @@ fn each_wiped_binding_is_declared_once_in_the_block_that_wipes_it() {
 /// let _ = unsafe { core::ptr::read(&mut subkey) };      // same, via a copy
 /// ```
 ///
-/// Three rules, each of which the crate's own code satisfies and each of which is *complete*
+/// Six rules, each of which the crate's own code satisfies and each of which is *complete*
 /// for the shape it covers rather than a list of spellings to keep extending:
 ///
 /// 1. **No non-`let` pattern binds a wiped name.** `for`/`while let`/`if let`/`match`-arm
 ///    and closure-parameter patterns are excluded outright; the crate never needs one for a
 ///    name it wipes, and each is a fresh binding the `let` count cannot see.
-/// 2. **No assignment targets a wiped name as a bare identifier.** `n = …` rebinds the
-///    value in place. An *element* store (`x[12] = …`, `s[i] = …`) is allowed and used by the
-///    SIMD kernels; it does not move the binding.
-/// 3. **`&mut <wiped name>` reaches only a pinned set of callees** ([`MUTATING_CALLEES`]):
+/// 2. **No assignment targets a wiped name as a bare identifier.** `n = ...` rebinds the
+///    value in place. An *element* store (`x[12] = ...`, `s[i] = ...`) is allowed and used by
+///    the SIMD kernels; it does not move the binding.
+/// 3. **A wiped name is bound exactly once on its ancestor chain**, so wrapping the wipe in a
+///    nested block that re-binds the name is refused. Sibling `#[cfg]` blocks bind the same
+///    name once each, which is why the rule is per chain and not per function.
+/// 4. **A whole copy of a wiped name is itself wiped.** `let stolen = subkey;`,
+///    `subkey.to_vec()` and `Vec::from(subkey)` each leave a second copy in the frame; the
+///    rule that lets the crate's own `let orig = s;` stand is that `orig` is wiped too.
+/// 5. **No exit leaves the function between a binding and its wipe.** An `if … { return; }`
+///    ahead of the wipes makes every path that takes it skip them; the counts still see the
+///    wipe, because it is still there.
+/// 6. **`&mut <wiped name>` reaches only a pinned set of callees** ([`MUTATING_CALLEES`]):
 ///    the derivations that fill a buffer and the wipes themselves. This is a whitelist on
 ///    purpose — the report that motivated this guard put it as "a blacklist plus an exact
 ///    count waits for spelling N+1" — so `mem::replace`, `mem::take`, `ptr::read`,
@@ -5752,11 +5761,27 @@ fn no_wiped_binding_is_rebound_reassigned_or_laundered() {
     struct Scan {
         wiped: Vec<String>,
         findings: Vec<String>,
+        /// One frame per enclosing block/loop body, holding the names bound there. Pushed and
+        /// popped by the `visit_block` override below, so a wipe can ask how many bindings of
+        /// its target are visible where it sits.
+        chain: Vec<Vec<String>>,
+    }
+
+    impl Scan {
+        fn note_binding(&mut self, pat: &syn::Pat) {
+            let names = pattern_idents(pat);
+            // A binding outside any block (a function parameter) is not on any chain this scan
+            // walks; `note_binding` is only called from the per-block visitors below.
+            if let Some(frame) = self.chain.last_mut() {
+                frame.extend(names);
+            }
+        }
     }
 
     impl<'ast> syn::visit::Visit<'ast> for Scan {
         // Rule 1: patterns outside a `let`.
         fn visit_expr_for_loop(&mut self, l: &'ast syn::ExprForLoop) {
+            self.note_binding(&l.pat);
             let mut names = Vec::new();
             binding_idents(&l.pat, &mut names);
             for n in names {
@@ -5771,6 +5796,7 @@ fn no_wiped_binding_is_rebound_reassigned_or_laundered() {
         }
 
         fn visit_expr_let(&mut self, l: &'ast syn::ExprLet) {
+            self.note_binding(&l.pat);
             let mut names = Vec::new();
             binding_idents(&l.pat, &mut names);
             for n in names {
@@ -5785,6 +5811,7 @@ fn no_wiped_binding_is_rebound_reassigned_or_laundered() {
         }
 
         fn visit_arm(&mut self, arm: &'ast syn::Arm) {
+            self.note_binding(&arm.pat);
             let mut names = Vec::new();
             binding_idents(&arm.pat, &mut names);
             for n in names {
@@ -5800,6 +5827,7 @@ fn no_wiped_binding_is_rebound_reassigned_or_laundered() {
 
         fn visit_expr_closure(&mut self, c: &'ast syn::ExprClosure) {
             for pat in &c.inputs {
+                self.note_binding(&pat.clone());
                 let mut names = Vec::new();
                 binding_idents(pat, &mut names);
                 for n in names {
@@ -5834,7 +5862,188 @@ fn no_wiped_binding_is_rebound_reassigned_or_laundered() {
             syn::visit::visit_expr_assign(self, a);
         }
 
-        // Rule 4: `&mut <wiped name>` may only reach a pinned callee.
+        // Rule 3: no wiped name bound twice on its *ancestor chain* (see the doc above).
+        //
+        // Judged at the wipe, not per block: a name bound in one sibling `#[cfg]` block and
+        // again in another is two bindings in the function but one per chain, which is what
+        // `chacha20_apply` does with `ks` and what makes a per-block or per-function count
+        // wrong in both directions.
+        fn visit_local(&mut self, l: &'ast syn::Local) {
+            use syn::spanned::Spanned;
+            self.note_binding(&l.pat);
+            if let Some(init) = &l.init {
+                for name in &self.wiped {
+                    if !copies_from_pattern(&init.expr, name) {
+                        continue;
+                    }
+                    let bound = pattern_idents(&l.pat);
+                    if bound.is_empty() {
+                        self.findings.push(format!(
+                            "a whole copy of `{name}` (line {}) is bound by a pattern with no \
+                             name, so it cannot be wiped by name",
+                            l.span().start().line
+                        ));
+                        continue;
+                    }
+                    for b in &bound {
+                        if !self.wiped.contains(b) {
+                            self.findings.push(format!(
+                                "`{b}` is a whole copy of `{name}` (line {}) and is never \
+                                 wiped: clearing `{name}` leaves this copy of the derived \
+                                 bytes in the frame, which is the same leak as a decoy \
+                                 binding. Measured: `let stolen: [u8; 32] = subkey;` ahead of \
+                                 `derive_material`'s unchanged wipes left every target green.",
+                                l.span().start().line
+                            ));
+                        }
+                    }
+                }
+            }
+            syn::visit::visit_local(self, l);
+        }
+
+        // Rule 5: no control-flow exit skips a wipe it should have reached.
+        //
+        // `if subkey[0] == 0xFF { return; }` ahead of `derive_material`'s unchanged wipes is
+        // the shape: every path that takes it skips the wipes, and the counts still see them
+        // because they are still there. Measured green.
+        //
+        // The judgement is **not** "no exit between a binding and its wipe", which the crate's
+        // own code would fail: `encrypt`'s `ultra` rejection path wipes `k_in`/`k_out`/
+        // `enc_seed`/`tag` and *then* returns, and that is the correct shape. The rule is
+        // therefore that every exit which lies between a binding and the wipe must itself sit
+        // in a block that wipes the same name — which is what "wipe, then return" does and what
+        // "return, and hope" does not.
+        fn visit_block(&mut self, b: &'ast syn::Block) {
+            use syn::spanned::Spanned;
+
+            // Rule 3's chain frame for this block; popped after the walk.
+            self.chain.push(Vec::new());
+            let mut bound: Vec<(String, usize)> = Vec::new();
+            let mut exits: Vec<(usize, Vec<String>)> = Vec::new();
+            for stmt in &b.stmts {
+                match stmt {
+                    syn::Stmt::Local(l) => {
+                        for n in pattern_idents(&l.pat) {
+                            bound.push((n, l.span().start().line));
+                        }
+                    }
+                    syn::Stmt::Expr(expr, _) => {
+                        let line = expr.span().start().line;
+                        // Every exit inside this statement, with the targets wiped by the
+                        // innermost block that contains it.
+                        struct ExitScan {
+                            /// One frame per enclosing block, holding the names that block
+                            /// wipes. Owned rather than borrowed so no lifetime extension is
+                            /// needed; `wipe_targets` is a cheap walk and frames are few.
+                            stack: Vec<Vec<String>>,
+                            out: Vec<(usize, Vec<String>)>,
+                        }
+                        impl ExitScan {
+                            fn note(&mut self, line: usize) {
+                                let wiped = self.stack.last().cloned().unwrap_or_default();
+                                self.out.push((line, wiped));
+                            }
+                        }
+                        impl<'ast> syn::visit::Visit<'ast> for ExitScan {
+                            fn visit_block(&mut self, inner: &'ast syn::Block) {
+                                self.stack.push(wipe_targets(inner));
+                                syn::visit::visit_block(self, inner);
+                                self.stack.pop();
+                            }
+                            fn visit_expr_return(&mut self, e: &'ast syn::ExprReturn) {
+                                self.note(e.span().start().line);
+                            }
+                            fn visit_expr_break(&mut self, e: &'ast syn::ExprBreak) {
+                                self.note(e.span().start().line);
+                            }
+                            fn visit_expr_continue(&mut self, e: &'ast syn::ExprContinue) {
+                                self.note(e.span().start().line);
+                            }
+                            fn visit_expr_try(&mut self, e: &'ast syn::ExprTry) {
+                                self.note(e.span().start().line);
+                            }
+                            fn visit_expr_closure(&mut self, _c: &'ast syn::ExprClosure) {
+                                // A closure body is its own control-flow scope: a `return`
+                                // there leaves the closure, not this function.
+                            }
+                        }
+                        // Seeded with this block's own wipe targets: an exit that is not
+                        // inside any nested block exits from here, and "here wipes this name"
+                        // is then the right question. Every nested block pushes its own frame,
+                        // so the innermost frame at the exit is the block whose statements
+                        // actually run on the way out.
+                        //
+                        // No fallback to the outer frame when an inner one is empty: that
+                        // fallback was the first version, and it made the rule unable to fire
+                        // at all (an `if k { return; }` whose body wipes nothing inherited the
+                        // outer block's wipe list and looked clean -- measured green).
+                        let mut exits_in_stmt = ExitScan {
+                            stack: vec![wipe_targets(b)],
+                            out: Vec::new(),
+                        };
+                        syn::visit::Visit::visit_expr(&mut exits_in_stmt, expr);
+                        for (x, wiped) in exits_in_stmt.out {
+                            exits.push((x, wiped));
+                        }
+                        if let syn::Expr::Call(call) = expr {
+                            if let syn::Expr::Path(path) = &*call.func {
+                                if let Some(last) = path.path.segments.last() {
+                                    if WIPE_FUNCTIONS.contains(&last.ident.to_string().as_str()) {
+                                        for arg in &call.args {
+                                            if let syn::Expr::Reference(r) = arg {
+                                                if let syn::Expr::Path(pp) = r.expr.as_ref() {
+                                                    if let Some(i) = pp.path.get_ident() {
+                                                        let n = i.to_string();
+                                                        if let Some((_, bl)) = bound
+                                                            .iter()
+                                                            .rev()
+                                                            .find(|(b, _)| *b == n)
+                                                        {
+                                                            for (x, wiped) in
+                                                                exits.iter().filter(|(x, _)| {
+                                                                    *x > *bl && *x < line
+                                                                })
+                                                            {
+                                                                if !wiped.contains(&n) {
+                                                                    self.findings.push(format!(
+                                                                        "`{n}` is bound at line \
+                                                                         {bl} and wiped at \
+                                                                         {line}, but an exit at \
+                                                                         {x} leaves the \
+                                                                         function from a block \
+                                                                         that does not wipe \
+                                                                         `{n}`: that path \
+                                                                         keeps the derived \
+                                                                         bytes. Measured: `if \
+                                                                         subkey[0] == 0xFF {{ \
+                                                                         return; }}` ahead of \
+                                                                         the unchanged wipes \
+                                                                         left every target \
+                                                                         green. Wipe before \
+                                                                         the exit, or make the \
+                                                                         exit unreachable."
+                                                                    ));
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            syn::visit::visit_block(self, b);
+            self.chain.pop();
+        }
+
+        // Rule 6: `&mut <wiped name>` may only reach a pinned callee.
         fn visit_expr_call(&mut self, c: &'ast syn::ExprCall) {
             let callee = match &*c.func {
                 syn::Expr::Path(p) => p
@@ -5846,6 +6055,38 @@ fn no_wiped_binding_is_rebound_reassigned_or_laundered() {
                     .join("::"),
                 _ => String::new(),
             };
+            {
+                // Rule 3, at the wipe: how many bindings of each target are visible here?
+                for arg in &c.args {
+                    if let syn::Expr::Reference(r) = arg {
+                        if let syn::Expr::Path(p) = r.expr.as_ref() {
+                            if let Some(i) = p.path.get_ident() {
+                                let n = i.to_string();
+                                if self.wiped.contains(&n) {
+                                    let count: usize = self
+                                        .chain
+                                        .iter()
+                                        .map(|f| f.iter().filter(|b| **b == n).count())
+                                        .sum();
+                                    if count > 1 {
+                                        self.findings.push(format!(
+                                            "`{n}` has {count} bindings visible at the wipe \
+                                             (line {}): an inner binding shadows the derived \
+                                             buffer for its whole block, so the wipe clears the \
+                                             decoy while the real bytes survive. Every text \
+                                             count is unchanged by this -- measured green on \
+                                             every target, including \
+                                             `tools/stack_residue.sh --ultra`. Derive into one \
+                                             binding per scope and wipe that.",
+                                            i.span().start().line
+                                        ));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
             for (n, line) in mut_args(&c.args, &self.wiped) {
                 if !MUTATING_CALLEES.contains(&callee.as_str()) {
                     self.findings.push(format!(
@@ -5945,6 +6186,7 @@ fn no_wiped_binding_is_rebound_reassigned_or_laundered() {
             let mut scan = Scan {
                 wiped: w.0,
                 findings: Vec::new(),
+                chain: Vec::new(),
             };
             syn::visit::Visit::visit_block(&mut scan, block);
             assert!(
@@ -5953,6 +6195,89 @@ fn no_wiped_binding_is_rebound_reassigned_or_laundered() {
                 scan.findings
             );
         }
+    }
+}
+
+/// The bare-identifier targets a block wipes, in source order: `(&mut name)` arguments of
+/// [`WIPE_FUNCTIONS`] calls.
+fn wipe_targets(block: &syn::Block) -> Vec<String> {
+    struct W(Vec<String>);
+    impl<'ast> syn::visit::Visit<'ast> for W {
+        fn visit_expr_call(&mut self, c: &'ast syn::ExprCall) {
+            if let syn::Expr::Path(p) = &*c.func {
+                if let Some(last) = p.path.segments.last() {
+                    if WIPE_FUNCTIONS.contains(&last.ident.to_string().as_str()) {
+                        for arg in &c.args {
+                            if let syn::Expr::Reference(r) = arg {
+                                if let syn::Expr::Path(pp) = r.expr.as_ref() {
+                                    if let Some(i) = pp.path.get_ident() {
+                                        self.0.push(i.to_string());
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            syn::visit::visit_expr_call(self, c);
+        }
+    }
+    let mut w = W(Vec::new());
+    syn::visit::Visit::visit_block(&mut w, block);
+    w.0.sort();
+    w.0.dedup();
+    w.0
+}
+
+/// Bindings a pattern introduces, in source order.
+fn pattern_idents(pat: &syn::Pat) -> Vec<String> {
+    struct C(Vec<String>);
+    impl<'ast> syn::visit::Visit<'ast> for C {
+        fn visit_pat_ident(&mut self, p: &'ast syn::PatIdent) {
+            if p.ident != "_" && p.ident != "self" {
+                self.0.push(p.ident.to_string());
+            }
+            syn::visit::visit_pat_ident(self, p);
+        }
+    }
+    let mut c = C(Vec::new());
+    syn::visit::Visit::visit_pat(&mut c, pat);
+    c.0
+}
+
+/// Whether a `let`'s initialiser is a *whole copy* of `name`: a bare path (`let b = a;`), or a
+/// copying method on it (`a.to_vec()`, `a.clone()`, …). Field and element reads
+/// (`a[0]`, `a.len()`) are not copies of the secret and are not counted.
+fn copies_from_pattern(init: &syn::Expr, name: &str) -> bool {
+    fn root_is(expr: &syn::Expr, name: &str) -> bool {
+        match expr {
+            syn::Expr::Path(p) => p.path.get_ident().is_some_and(|i| i == name),
+            syn::Expr::Paren(p) => root_is(&p.expr, name),
+            _ => false,
+        }
+    }
+
+    match init {
+        syn::Expr::Path(_) | syn::Expr::Paren(_) => root_is(init, name),
+        syn::Expr::MethodCall(m) => {
+            const COPYING: [&str; 5] = ["to_vec", "to_owned", "clone", "to_array", "to_bytes"];
+            COPYING.contains(&m.method.to_string().as_str()) && root_is(&m.receiver, name)
+        }
+        syn::Expr::Call(c) => {
+            // `Vec::from(a)`, `Box::new(a)`, `[u8; N]::from(a)`.
+            const COPYING: [&str; 4] = ["from", "new", "try_from", "into"];
+            let callee = match &*c.func {
+                syn::Expr::Path(p) => p
+                    .path
+                    .segments
+                    .last()
+                    .map(|s| s.ident.to_string())
+                    .unwrap_or_default(),
+                _ => String::new(),
+            };
+            COPYING.contains(&callee.as_str()) && c.args.iter().any(|a| root_is(a, name))
+        }
+        _ => false,
     }
 }
 
